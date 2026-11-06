@@ -40,14 +40,19 @@ pub async fn subagent_options_for(
     .await
 }
 
+/// The catalog's probe. `refresh` probes bypass the process-global cache:
+/// they exist because something outside the profile definition (a home edit
+/// the catalog owner detected, an expired entry) may have changed what the
+/// harness advertises, so a cache row discovered earlier must not answer.
 pub(crate) async fn discover_for(
     config: Config,
     id: String,
     model: Option<String>,
     cancellation: CancellationToken,
+    refresh: bool,
 ) -> Result<ProfileConfig> {
     serialized_until(id.clone(), cancellation, move |cancelled| {
-        discover_from_config(&config, &id, model, false, cancelled)
+        discover_from_config(&config, &id, model, refresh, cancelled)
     })
     .await
 }
@@ -964,46 +969,6 @@ mod tests {
         assert_eq!(options.efforts, catalog.efforts);
         assert!(options.unavailable.is_empty());
         assert!(!Config::load().unwrap().profiles.contains_key("unsaved"));
-    }
-
-    #[test]
-    fn harness_home_files_do_not_invalidate_configured_capabilities() {
-        let home = tempfile::tempdir().unwrap();
-        let profile = HarnessProfile {
-            ..mj_core::config::HarnessProfile::new(
-                mj_core::config::HarnessKind::Codex,
-                home.path().to_path_buf(),
-            )
-        };
-        let key = || fingerprint(&profile);
-
-        let built_in = key();
-        std::fs::write(
-            home.path().join("config.toml"),
-            "model = \"glm-5.3\"\n\
-             model_provider = \"zai\"\n\
-             \n\
-             [model_providers.zai]\n\
-             base_url = \"https://api.z.ai/api/v1\"\n\
-             env_key = \"ZAI_API_KEY\"\n\
-             wire_api = \"responses\"\n",
-        )
-        .unwrap();
-        let provider = key();
-        assert_eq!(
-            built_in, provider,
-            "only configured profile definitions invalidate capabilities"
-        );
-        std::fs::write(
-            home.path().join("models.json"),
-            r#"{"models":[{"slug":"glm-5.3-flash"}]}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            provider,
-            key(),
-            "a home catalog edit does not invalidate capabilities"
-        );
     }
 
     #[test]

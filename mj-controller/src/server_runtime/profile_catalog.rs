@@ -8,7 +8,7 @@ use std::sync::{
     Arc, Mutex, MutexGuard, PoisonError,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use futures::future::{FutureExt, Shared, TryFutureExt, join_all};
@@ -20,6 +20,7 @@ use mj_core::profile_capabilities::{
     CapabilityState, ProfileCapabilities, ProfileCapabilitiesSnapshot,
 };
 use mj_core::worker_launch::ProfileConfig;
+use sha2::{Digest, Sha256};
 
 use crate::quota::ProfileQuota;
 use tokio_util::sync::CancellationToken;
@@ -40,6 +41,44 @@ const QUOTA_REPORT_WAIT: Duration = Duration::from_secs(30);
 /// How often ready entries are checked against the choice lifetime. An
 /// entry is probed again at most this long after it expires.
 const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// How often the owner checks every distinct profile home for catalog-input
+/// edits. A pass stats the three inputs per home and reads a file only when
+/// its stat changed, so the steady state does no file I/O beyond the stats.
+const HOME_WATCH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The files in a profile home that decide what a session advertises: the
+/// harness's own configuration, which names the model provider and the
+/// default model, and the model catalog Mjolnir merges over a provider's
+/// list. Staging copies `home/<name>` verbatim, so the owner watches exactly
+/// what a probe will stage. Reads never touch these; only the home watch
+/// does, from its background task.
+const HOME_CATALOG_INPUTS: [&str; 3] = ["config.toml", "models.json", "settings.json"];
+
+/// One watched input's cheap identity. `None` is an absent file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStat {
+    mtime: Option<SystemTime>,
+    size: u64,
+}
+
+/// One catalog input's observed state: its stat and the hash of its
+/// contents, taken when the stat last changed. Both are `None` for an
+/// absent file.
+#[derive(Clone, PartialEq)]
+struct WatchedInput {
+    stat: Option<FileStat>,
+    hash: Option<[u8; 32]>,
+}
+
+/// The observed catalog-input state of one home. The digest compares content,
+/// not metadata: rewriting a file with identical bytes only refreshes the
+/// stat, so it never registers as an edit.
+#[derive(Clone)]
+struct HomeFiles {
+    inputs: [WatchedInput; 3],
+    digest: [u8; 32],
+}
 
 /// Delays before the owner of a failed entry tries again. Every attempt
 /// stages the profile and launches its harness, so a failure that persists,
@@ -99,6 +138,16 @@ struct Definition {
     config: Arc<Config>,
     cancellation: CancellationToken,
 }
+
+/// One refresh pass launched by a caller that detected out-of-date entries.
+#[derive(Default)]
+struct RefreshLaunch {
+    /// Keys whose probes this pass started.
+    launched: Vec<CacheKey>,
+    /// Selected keys an earlier pass is already re-probing. The caller
+    /// cannot settle their change until those finish.
+    in_flight: Vec<CacheKey>,
+}
 #[derive(Default)]
 struct Inner {
     live: Option<Config>,
@@ -112,6 +161,9 @@ struct Inner {
     /// Probes replacing out-of-date ready entries, which stay served
     /// until a probe succeeds.
     refreshing: BTreeMap<CacheKey, Attempt>,
+    /// The catalog-input state of each watched home, written only by the
+    /// home watch. Presence means the watch has observed the home once.
+    home_watches: BTreeMap<PathBuf, HomeFiles>,
 }
 
 impl Inner {
@@ -333,6 +385,7 @@ impl ProfileCatalog {
         };
         if first {
             self.start_refreshing();
+            self.start_watching_homes();
         }
         if config.review.is_legacy()
             && self.config_path.is_some()
@@ -764,26 +817,155 @@ impl ProfileCatalog {
                 let Some(catalog) = catalog.upgrade() else {
                     return;
                 };
-                catalog.refresh(|choices| !crate::controller::profile_config::is_current(choices));
+                catalog
+                    .refresh(|_, choices| !crate::controller::profile_config::is_current(choices));
             }
         });
     }
 
+    /// Watch every distinct profile home for catalog-input edits until
+    /// shutdown. The watch is the only code that stats or reads home files,
+    /// and it runs here, never on a read path.
+    fn start_watching_homes(self: &Arc<Self>) {
+        let catalog = Arc::downgrade(self);
+        let cancellation = self.cancellation.clone();
+        tokio::spawn(async move {
+            // Startup discovery already reads the homes; the first pass
+            // only baselines them.
+            let mut tick = tokio::time::interval_at(
+                tokio::time::Instant::now() + HOME_WATCH_INTERVAL,
+                HOME_WATCH_INTERVAL,
+            );
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => return,
+                    _ = tick.tick() => {}
+                }
+                let Some(catalog) = catalog.upgrade() else {
+                    return;
+                };
+                catalog.watch_homes();
+            }
+        });
+    }
+
+    /// One pass over every distinct profile home. A home whose catalog
+    /// inputs now hash differently from the pass that last settled it had
+    /// its files edited; re-probe exactly the profiles that use that home,
+    /// through the same keep-serving-the-old-answer path as expiry refresh.
+    fn watch_homes(self: &Arc<Self>) {
+        let (identities_by_home, baselines) = {
+            let inner = self.lock();
+            let mut identities_by_home: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+            for (identity, definition) in &inner.definitions {
+                if definition.cancellation.is_cancelled() {
+                    continue;
+                }
+                let Some(profile) = definition.config.enabled_profile(&definition.id) else {
+                    continue;
+                };
+                let home = mj_core::path_input::expand_local(&profile.home)
+                    .unwrap_or_else(|_| profile.home.clone());
+                identities_by_home
+                    .entry(home)
+                    .or_default()
+                    .insert(identity.clone());
+            }
+            (identities_by_home, inner.home_watches.clone())
+        };
+        let mut polled = BTreeMap::new();
+        for home in identities_by_home.keys() {
+            polled.insert(home.clone(), poll_home_files(home, baselines.get(home)));
+        }
+        let mut changed = BTreeSet::new();
+        let mut updates: Vec<(PathBuf, HomeFiles)> = Vec::new();
+        for (home, current) in &polled {
+            let Some(current) = current else {
+                // A hard read error keeps the previous baseline, so the next
+                // pass compares against the state the last probe saw.
+                continue;
+            };
+            match baselines.get(home) {
+                // First sight: the discovery generation that put these
+                // entries in place already read the home, so observe it
+                // without re-probing. This is also the restart case.
+                None => updates.push((home.clone(), current.clone())),
+                Some(previous) if previous.digest == current.digest => {
+                    // No content change. Store the refreshed stats so the
+                    // next pass stays a stat-only pass.
+                    updates.push((home.clone(), current.clone()));
+                }
+                Some(_) => changed.extend(identities_by_home[home].iter().cloned()),
+            }
+        }
+        let launch = if changed.is_empty() {
+            RefreshLaunch::default()
+        } else {
+            self.refresh(|key, _| changed.contains(&key.0))
+        };
+        // A detected change only settles once re-probes launched for a
+        // profile of that home and nothing selected for the home is still
+        // being re-probed by an earlier pass: an in-flight probe staged the
+        // home as it was before this edit, so its published answer would
+        // re-introduce the old state the next pass compares against. Homes
+        // whose entries were pending or failed keep their previous baseline,
+        // so the next pass detects the edit again instead of losing it to a
+        // probe that was already running.
+        let launched_identities: BTreeSet<&str> =
+            launch.launched.iter().map(|key| key.0.as_str()).collect();
+        let in_flight_identities: BTreeSet<&str> =
+            launch.in_flight.iter().map(|key| key.0.as_str()).collect();
+        for (home, identities) in &identities_by_home {
+            if !identities
+                .iter()
+                .any(|identity| launched_identities.contains(identity.as_str()))
+                || identities
+                    .iter()
+                    .any(|identity| in_flight_identities.contains(identity.as_str()))
+            {
+                continue;
+            }
+            if let Some(Some(current)) = polled.get(home) {
+                updates.push((home.clone(), current.clone()));
+            }
+        }
+        let mut inner = self.lock();
+        for (home, files) in updates {
+            inner.home_watches.insert(home, files);
+        }
+        // Homes no profile uses anymore stop being watched.
+        inner
+            .home_watches
+            .retain(|home, _| identities_by_home.contains_key(home));
+    }
+
     /// Probe again every ready entry that `expired` selects. Readers keep
     /// the entry until a probe succeeds; a failed probe leaves it in place.
-    fn refresh(self: &Arc<Self>, expired: impl Fn(&ProfileConfig) -> bool) {
+    /// The launch outcome lets a caller that detected a change settle it
+    /// only once nothing selected for it is still being re-probed.
+    fn refresh(
+        self: &Arc<Self>,
+        expired: impl Fn(&CacheKey, &ProfileConfig) -> bool,
+    ) -> RefreshLaunch {
         let mut started = Vec::new();
+        let mut launch = RefreshLaunch::default();
+        let mut keys = Vec::new();
         {
             let mut inner = self.lock();
-            let keys = inner
-                .entries
-                .iter()
-                .filter(|(key, entry)| {
-                    matches!(entry, Entry::Ready(choices) if expired(choices))
-                        && !inner.refreshing.contains_key(*key)
-                })
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>();
+            for (key, entry) in &inner.entries {
+                let Entry::Ready(choices) = entry else {
+                    continue;
+                };
+                if !expired(key, choices) {
+                    continue;
+                }
+                if inner.refreshing.contains_key(key) {
+                    launch.in_flight.push(key.clone());
+                } else {
+                    keys.push(key.clone());
+                }
+            }
             for key in keys {
                 let Some(definition) = inner
                     .definitions
@@ -793,14 +975,19 @@ impl ProfileCatalog {
                 else {
                     continue;
                 };
-                let attempt = self.attempt(&definition, key.1.clone());
+                let attempt = self.attempt_refresh(&definition, key.1.clone());
                 inner.refreshing.insert(key.clone(), attempt.clone());
                 started.push((key, attempt, definition.cancellation));
             }
         }
+        launch.launched = started
+            .iter()
+            .map(|(key, _, _)| key.clone())
+            .collect::<Vec<_>>();
         for (key, attempt, cancellation) in started {
             tokio::spawn(self.clone().drive_refresh(key, attempt, cancellation));
         }
+        launch
     }
 
     async fn drive_refresh(
@@ -853,6 +1040,23 @@ impl ProfileCatalog {
     }
 
     fn attempt(&self, definition: &Definition, model: Option<String>) -> Attempt {
+        self.build_attempt(definition, model, false)
+    }
+
+    /// A re-probe the owner launches after detecting a change the cache
+    /// cannot see, such as an edited home: the harness must answer from the
+    /// current files, so the process-global cache is bypassed. Readers that
+    /// join a pending first probe keep the plain attempt above.
+    fn attempt_refresh(&self, definition: &Definition, model: Option<String>) -> Attempt {
+        self.build_attempt(definition, model, true)
+    }
+
+    fn build_attempt(
+        &self,
+        definition: &Definition,
+        model: Option<String>,
+        refresh: bool,
+    ) -> Attempt {
         #[cfg(test)]
         if let Some((probe, model_probe)) = &self.probe {
             let future = match model {
@@ -869,6 +1073,7 @@ impl ProfileCatalog {
             definition.id.clone(),
             model,
             definition.cancellation.clone(),
+            refresh,
         )
         .map_err(|error| AttemptError::new(&error))
         .boxed()
@@ -1347,6 +1552,80 @@ fn upgrade_definitions(config: &Config) -> Vec<UpgradeDefinition> {
         .collect()
 }
 
+/// The current catalog-input state of `home`. `previous` is the state the
+/// last watch pass saw: an input whose stat is unchanged keeps its content
+/// hash, so a pass that no edit touched reads no file. A hard I/O error
+/// (anything but a missing input) returns `None`; the home keeps its
+/// previous baseline and is retried on the next pass rather than being
+/// treated as edited.
+fn poll_home_files(home: &Path, previous: Option<&HomeFiles>) -> Option<HomeFiles> {
+    let mut inputs = Vec::with_capacity(HOME_CATALOG_INPUTS.len());
+    let mut content_changed = previous.is_none();
+    for (index, name) in HOME_CATALOG_INPUTS.iter().enumerate() {
+        let path = home.join(name);
+        let stat = match std::fs::metadata(&path) {
+            Ok(metadata) => Some(FileStat {
+                mtime: metadata.modified().ok(),
+                size: metadata.len(),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                tracing::debug!(home = %home.display(), input = %name, %error, "home catalog watch skipped this pass");
+                return None;
+            }
+        };
+        let previous_input = previous.map(|files| &files.inputs[index]);
+        let input = if previous_input.is_some_and(|input| input.stat == stat) {
+            previous_input.expect("checked above").clone()
+        } else {
+            WatchedInput {
+                hash: hash_home_input(&path, stat.is_some()),
+                stat,
+            }
+        };
+        content_changed |= previous_input.map(|input| input.hash) != Some(input.hash);
+        inputs.push(input);
+    }
+    let inputs: [WatchedInput; 3] = inputs.try_into().ok()?;
+    let digest = if content_changed {
+        home_digest(&inputs)
+    } else {
+        previous?.digest
+    };
+    Some(HomeFiles { inputs, digest })
+}
+
+/// The content hash of one catalog input; `None` when the input is absent.
+/// A file that cannot be read races the directory scan and is observed as
+/// absent for this pass; a spurious re-probe from that is safe, and the next
+/// pass sees the file again.
+fn hash_home_input(path: &Path, present: bool) -> Option<[u8; 32]> {
+    if !present {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Some(hasher.finalize().into())
+}
+
+/// The identity of a home's catalog inputs: every input's name and either an
+/// absent marker or its content hash.
+fn home_digest(inputs: &[WatchedInput; 3]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for (name, input) in HOME_CATALOG_INPUTS.iter().zip(inputs.iter()) {
+        hasher.update(name.as_bytes());
+        match input.hash {
+            Some(hash) => {
+                hasher.update([1]);
+                hasher.update(hash);
+            }
+            None => hasher.update([0]),
+        }
+    }
+    hasher.finalize().into()
+}
+
 /// A configuration with the named profiles enabled.
 #[cfg(test)]
 pub(crate) fn test_config(profiles: &[(&str, HarnessKind)]) -> Config {
@@ -1447,6 +1726,120 @@ mod tests {
 
     fn calls() -> Arc<AtomicUsize> {
         Arc::new(AtomicUsize::new(0))
+    }
+
+    /// A configuration whose profile homes are real directories under
+    /// `root`, so the home watch has files to observe, together with the
+    /// id-to-home map the fixture probe answers from.
+    fn homes_config(
+        root: &Path,
+        profiles: &[(&str, HarnessKind)],
+    ) -> (Config, BTreeMap<String, PathBuf>) {
+        let mut config = Config::default();
+        let mut homes = BTreeMap::new();
+        for (id, kind) in profiles {
+            let home = root.join(id);
+            homes.insert((*id).to_owned(), home.clone());
+            config.profiles.insert(
+                (*id).to_owned(),
+                HarnessProfile {
+                    ..mj_core::config::HarnessProfile::new(*kind, home)
+                },
+            );
+        }
+        (config, homes)
+    }
+
+    fn write_home_model(root: &Path, profile: &str, model: &str) {
+        std::fs::create_dir_all(root.join(profile)).unwrap();
+        std::fs::write(
+            root.join(profile).join("config.toml"),
+            format!("model = \"{model}\"\n"),
+        )
+        .unwrap();
+    }
+
+    /// The choices the profile home's `config.toml` advertises: the `model =`
+    /// line, read the way the real probe reads the staged copy.
+    fn read_home_choices(
+        homes: &BTreeMap<String, PathBuf>,
+        profile: &str,
+    ) -> Result<ProfileConfig> {
+        let home = homes.get(profile).expect("fixture home");
+        let text = std::fs::read_to_string(home.join("config.toml"))
+            .with_context(|| format!("read the {profile} home config.toml"))?;
+        let model = text
+            .trim()
+            .strip_prefix("model = \"")
+            .and_then(|rest| rest.strip_suffix('"'))
+            .context("the home config.toml names a model")?
+            .to_owned();
+        let mut choices = test_choices(profile);
+        choices.model = Some(model.clone());
+        choices.models = vec![mj_core::acp::SessionConfigChoice {
+            value: model.clone(),
+            name: model,
+            description: None,
+        }];
+        Ok(choices)
+    }
+
+    /// A probe that answers from the profile home's `config.toml`.
+    fn home_model_probe(homes: BTreeMap<String, PathBuf>, calls: Arc<AtomicUsize>) -> Arc<Probe> {
+        Arc::new(move |profile: String| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let homes = homes.clone();
+            Box::pin(async move { read_home_choices(&homes, &profile) })
+        })
+    }
+
+    /// A home-reading probe that can be held after it has read the home, so
+    /// a test keeps a re-probe in flight — as an expiry refresh can be when
+    /// a home edit lands — and then releases it. The call count increments
+    /// after the read, so reaching a count proves what the in-flight probes
+    /// answered from.
+    fn held_home_model_probe(
+        homes: BTreeMap<String, PathBuf>,
+        calls: Arc<AtomicUsize>,
+        gate: tokio::sync::watch::Receiver<bool>,
+    ) -> Arc<Probe> {
+        Arc::new(move |profile: String| {
+            let homes = homes.clone();
+            let mut gate = gate.clone();
+            let calls = calls.clone();
+            Box::pin(async move {
+                let choices = read_home_choices(&homes, &profile)?;
+                calls.fetch_add(1, Ordering::SeqCst);
+                if !*gate.borrow_and_update() {
+                    let _ = gate.changed().await;
+                }
+                Ok(choices)
+            })
+        })
+    }
+
+    async fn current_model(catalog: &Arc<ProfileCatalog>, profile: &str) -> Option<String> {
+        catalog
+            .capabilities(&[profile.to_owned()])
+            .await
+            .ok()
+            .and_then(|mut choices| choices.pop())
+            .and_then(|choices| choices.model)
+    }
+
+    /// Wait until the catalog serves `model` as the profile's default, so
+    /// the spawned refresh supervisors have run.
+    async fn converge_on(catalog: &Arc<ProfileCatalog>, profile: &str, model: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if current_model(catalog, profile).await.as_deref() == Some(model) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{profile} did not converge on {model}"));
     }
 
     // Hard-won: 8c88175f7: reads rebuilt the entire unchanged model catalog.
@@ -1813,11 +2206,11 @@ mod tests {
         let config = test_config(&[("parent", HarnessKind::Codex)]);
         catalog.sync_now(&config).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        catalog.refresh(|_| false);
+        catalog.refresh(|_, _| false);
         assert_eq!(calls.load(Ordering::SeqCst), 1, "current entries stay");
 
         failing.store(true, Ordering::SeqCst);
-        catalog.refresh(|_| true);
+        catalog.refresh(|_, _| true);
         while !catalog.lock().refreshing.is_empty() {
             tokio::task::yield_now().await;
         }
@@ -1832,12 +2225,224 @@ mod tests {
         );
 
         failing.store(false, Ordering::SeqCst);
-        catalog.refresh(|_| true);
+        catalog.refresh(|_, _| true);
         while !catalog.lock().refreshing.is_empty() {
             tokio::task::yield_now().await;
         }
         assert_eq!(calls.load(Ordering::SeqCst), 5);
         assert!(catalog.capabilities(&["parent".into()]).await.is_ok());
+    }
+
+    #[test]
+    fn home_watch_digest_tracks_content_not_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let absent = poll_home_files(home, None).unwrap();
+        let unchanged = poll_home_files(home, Some(&absent)).unwrap();
+        assert_eq!(absent.digest, unchanged.digest, "no edit, no change");
+
+        std::fs::write(home.join("config.toml"), "model = \"one\"\n").unwrap();
+        let written = poll_home_files(home, Some(&absent)).unwrap();
+        assert_ne!(
+            absent.digest, written.digest,
+            "a new catalog input is an edit"
+        );
+
+        std::fs::write(home.join("config.toml"), "model = \"one\"\n").unwrap();
+        assert_eq!(
+            written.digest,
+            poll_home_files(home, Some(&written)).unwrap().digest,
+            "rewriting identical content is metadata, not an edit"
+        );
+
+        std::fs::write(home.join("config.toml"), "model = \"two\"\n").unwrap();
+        assert_ne!(
+            written.digest,
+            poll_home_files(home, Some(&written)).unwrap().digest,
+            "changed content is an edit"
+        );
+
+        std::fs::remove_file(home.join("config.toml")).unwrap();
+        assert_ne!(
+            written.digest,
+            poll_home_files(home, Some(&written)).unwrap().digest,
+            "a deleted input is an edit"
+        );
+    }
+
+    // Hard-won: #1337: editing a profile's harness home never reached the catalog.
+    #[tokio::test]
+    async fn an_edited_home_republishes_within_one_watch_pass_and_reprimes_only_that_home() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_home_model(root, "alpha", "alpha-first");
+        write_home_model(root, "beta", "beta-first");
+        let calls = calls();
+        let (config, homes) = homes_config(
+            root,
+            &[("alpha", HarnessKind::Codex), ("beta", HarnessKind::Codex)],
+        );
+        let catalog = ProfileCatalog::with_probe(home_model_probe(homes, calls.clone()));
+        catalog.sync_now(&config).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // The first pass only baselines the homes; nothing is re-probed.
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "baselining launches no probe"
+        );
+
+        // Rewriting identical content (new mtime, same bytes) is not an edit.
+        write_home_model(root, "alpha", "alpha-first");
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a metadata-only rewrite re-probes nothing"
+        );
+
+        write_home_model(root, "alpha", "alpha-second");
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "the edited home's default and current-model entries re-probe; beta stays warm"
+        );
+        converge_on(&catalog, "alpha", "alpha-second").await;
+        assert_eq!(
+            current_model(&catalog, "beta").await.as_deref(),
+            Some("beta-first")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn a_home_shared_by_two_profiles_reprimes_each_of_them_and_no_others() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_home_model(root, "one", "shared-first");
+        write_home_model(root, "other", "other-first");
+        let calls = calls();
+        let (mut config, mut homes) = homes_config(
+            root,
+            &[
+                ("one", HarnessKind::Codex),
+                ("two", HarnessKind::Codex),
+                ("other", HarnessKind::Codex),
+            ],
+        );
+        // Two profiles install the same home; editing it must re-probe both.
+        config.profiles.get_mut("two").unwrap().home = root.join("one").into();
+        homes.insert("two".to_owned(), root.join("one"));
+        let catalog = ProfileCatalog::with_probe(home_model_probe(homes, calls.clone()));
+        catalog.sync_now(&config).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "baselining launches no probe"
+        );
+        write_home_model(root, "one", "shared-second");
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            7,
+            "both profiles of the edited home re-probe, each entry they serve"
+        );
+        converge_on(&catalog, "one", "shared-second").await;
+        converge_on(&catalog, "two", "shared-second").await;
+        assert_eq!(
+            current_model(&catalog, "other").await.as_deref(),
+            Some("other-first")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
+    }
+
+    // Hard-won: #1337: a home edit detected while another re-probe was in
+    // flight settled on the pre-edit answer that probe published.
+    #[tokio::test]
+    async fn a_change_detected_during_an_in_flight_reprobe_is_not_lost() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_home_model(root, "solo", "solo-first");
+        let calls = calls();
+        let (config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
+        let (release, gate) = tokio::sync::watch::channel(true);
+        let catalog = ProfileCatalog::with_probe(held_home_model_probe(homes, calls.clone(), gate));
+        catalog.sync_now(&config).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        catalog.watch_homes();
+
+        // An expiry refresh starts and reads the home before the edit; held
+        // in flight, it will publish the pre-edit answer when released.
+        release.send(false).unwrap();
+        catalog.refresh(|_, _| true);
+        while calls.load(Ordering::SeqCst) < 3 {
+            tokio::task::yield_now().await;
+        }
+        write_home_model(root, "solo", "solo-second");
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "entries already re-probing are joined, not doubled"
+        );
+
+        // The held probes publish the pre-edit answer.
+        release.send(true).unwrap();
+        while !catalog.lock().refreshing.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            current_model(&catalog, "solo").await.as_deref(),
+            Some("solo-first"),
+            "the in-flight probe published what it read"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        // The watch never settled the edit against that probe's answer: the
+        // next pass detects it again and re-probes from the current home.
+        // This pass's probes are spawned, so convergence proves they ran.
+        catalog.watch_homes();
+        converge_on(&catalog, "solo", "solo-second").await;
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+    }
+
+    // Hard-won: #1337: an edit made while the daemon was stopped stayed stale after start.
+    #[tokio::test]
+    async fn a_new_catalog_generation_discovers_the_current_home() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_home_model(root, "solo", "solo-first");
+        let calls = calls();
+        let (config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
+        let first = ProfileCatalog::with_probe(home_model_probe(homes.clone(), calls.clone()));
+        first.sync_now(&config).await;
+        assert_eq!(
+            current_model(&first, "solo").await.as_deref(),
+            Some("solo-first")
+        );
+
+        // Capability entries and the process-global probe cache live only as
+        // long as the daemon process, so a daemon that stopped and started
+        // again discovers fresh. A new catalog over the same configuration
+        // is what such a start looks like from inside one test process.
+        write_home_model(root, "solo", "solo-second");
+        let second = ProfileCatalog::with_probe(home_model_probe(homes, calls.clone()));
+        second.sync_now(&config).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a fresh generation probes instead of serving the previous generation's answer"
+        );
+        assert_eq!(
+            current_model(&second, "solo").await.as_deref(),
+            Some("solo-second")
+        );
     }
 
     #[tokio::test(start_paused = true)]
