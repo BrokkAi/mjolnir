@@ -360,14 +360,18 @@ pub(super) fn append_bounded(notice: &mut String, suffix: &str) {
 
 /// The notice stored while a quota Move runs. It promises only what the stored
 /// record does: with a retry time, the source profile continues then if the
-/// Move does not take over.
+/// Move fails while the session is still running. A Move that fails after it
+/// stopped the source leaves no connected worker to retry, and Resume refuses
+/// that session; its failure message tells the user to retry the Move, so the
+/// notice points there instead of promising a retry.
 pub(super) fn move_notice(reason: &str, destination: &str, fallback: &QuotaRecovery) -> String {
     let mut notice = format!(
         "Subscription quota reached, and {reason}. Switching this session to profile {destination} to continue the interrupted work."
     );
     if let Some(time) = fallback.retry_at_ms.and_then(local_reset) {
         notice.push_str(&format!(
-            " If the switch fails, the session continues on profile {} at {time} (one minute after reset).",
+            " If the switch fails while the session is still running, it continues on profile {} at {time} (one minute after reset). \
+             If the session has already stopped, the failure message says how to retry the Move.",
             fallback.profile_id
         ));
     }
