@@ -24,10 +24,12 @@ fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
     )
 }
 
-/// One owner per `root` string in this daemon. Callers choose the string: the
-/// store gate is never taken for a whole store. An upload takes `{store}/{digest}`
-/// so one build is transferred once, and a session's staging registry takes its
-/// own root. Cached installs of a published build take none of these. Other
+/// One owner per `root` string in this daemon. Callers choose the string. An
+/// upload takes `{store}/{digest}` so one build is transferred once, then the
+/// store itself, which publication and collection share so a collector never
+/// retires a directory an upload is publishing into. A session's staging
+/// registry takes its own root. Cached installs of a published build take none
+/// of these. Other
 /// daemons targeting the same host are protected by the upload's unique name
 /// and its atomic publication. Waiting observes the executor cancellation.
 pub(super) fn store_gate(locator: &targets::TargetLocator, root: &str) -> Arc<Mutex<()>> {
@@ -185,17 +187,37 @@ pub(super) fn forget_collections() {
         .clear();
 }
 
-/// A failed or skipped run is reported and not retried before the next
-/// interval; the next daemon starts with no claim and collects again.
+/// Collect after a cached install, if this interval's run is still unclaimed.
+/// A cached install never waits for the store: while a publication owns it,
+/// the publication collects itself, so this skips without claiming. A failed
+/// run is reported and not retried before the next interval; an upload that
+/// needs space collects regardless, and the next daemon starts unclaimed.
 fn collect_if_due(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     store: &str,
     keep: Option<&str>,
 ) {
-    if executor.cancellation_requested() || !claim_collection(locator, store) {
+    if executor.cancellation_requested() {
         return;
     }
+    let gate = store_gate(locator, store);
+    let _guard = match gate.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    if claim_collection(locator, store) {
+        collect_reporting(executor, locator, store, keep);
+    }
+}
+
+fn collect_reporting(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    store: &str,
+    keep: Option<&str>,
+) {
     if let Err(error) = collect(executor, locator, store, keep) {
         tracing::warn!(%store, error = %format!("{error:#}"), "worker binary store collection failed");
     }
@@ -344,8 +366,10 @@ promote_worker_binary "$temporary" "$destination"
 /// Make `{store}/{digest}/hel` exist with the right bytes. The lock is per
 /// build: the first holder uploads, verifies and publishes, and every later
 /// holder finds it published after acquiring and returns without a transfer.
-/// Builds that are already published never reach this function, and different
-/// builds do not wait for each other.
+/// Builds that are already published never reach this function. Publication
+/// then owns the whole store, shared with collection, so a collector cannot
+/// retire the digest directory between its creation and the publishing link.
+/// Uploads are rare, so different builds waiting for each other here is cheap.
 fn ensure_published(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
@@ -369,8 +393,12 @@ fn ensure_published(
     ) {
         return Ok(());
     }
-    // Reclaim old builds before the capacity check below can refuse the upload.
-    collect_if_due(executor, locator, store, Some(digest));
+    let store_owner = store_gate(locator, store);
+    let _store = lock_gate(executor, &store_owner)?;
+    // Reclaim old builds before the capacity check below can refuse the
+    // upload, even when this interval's collection already ran.
+    claim_collection(locator, store);
+    collect_reporting(executor, locator, store, Some(digest));
     let upload = format!(
         "{store}/.upload-{}",
         crate::session_manager::new_command_id("worker-store")?

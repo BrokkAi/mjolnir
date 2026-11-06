@@ -27,9 +27,10 @@ const COMPLETION_FAILURE_CAP: Duration = Duration::from_secs(300);
 /// A busy child is polled more often: it is working, not failing.
 const COMPLETION_BUSY_CAP: Duration = Duration::from_secs(30);
 
-/// When one child's completion may run again, and how it has been going.
-/// Settling the child forgets it.
+/// When one child outcome's completion may run again, and how it has been
+/// going. Settling the child forgets it; a later outcome starts afresh.
 struct CompletionRetry {
+    ordinal: u64,
     at: Instant,
     failures: u32,
     last_failure: Option<String>,
@@ -40,9 +41,15 @@ impl CompletionRetry {
     /// an attempt that failed, or `None` when the child was only busy. Returns
     /// whether the failure is news (the first, or a different cause), so a
     /// persistent failure is warned about once rather than at every retry.
-    fn schedule(previous: Option<Self>, now: Instant, failure: Option<String>) -> (Self, bool) {
-        let (failures, last_failure) =
-            previous.map_or((0, None), |item| (item.failures, item.last_failure));
+    fn schedule(
+        previous: Option<Self>,
+        ordinal: u64,
+        now: Instant,
+        failure: Option<String>,
+    ) -> (Self, bool) {
+        let (failures, last_failure) = previous
+            .filter(|item| item.ordinal == ordinal)
+            .map_or((0, None), |item| (item.failures, item.last_failure));
         let failures = failures.saturating_add(1);
         let (cap, report, last_failure) = match failure {
             Some(failure) => (
@@ -55,6 +62,7 @@ impl CompletionRetry {
         let delay = crate::recovery::backoff_delay(COMPLETION_RETRY_BASE, cap, failures);
         (
             Self {
+                ordinal,
                 at: now + delay,
                 failures,
                 last_failure,
@@ -172,9 +180,9 @@ async fn run(
                 };
                 if noticed.get(child) == Some(&outcome.completed_ordinal)
                     || completion_ids.values().any(|(id, _)| id == child)
-                    || retry
-                        .get(child)
-                        .is_some_and(|retry| retry.at > Instant::now())
+                    || retry.get(child).is_some_and(|retry| {
+                        retry.ordinal == outcome.completed_ordinal && retry.at > Instant::now()
+                    })
                 {
                     continue;
                 }
@@ -252,12 +260,12 @@ async fn run(
                     match result {
                         Ok(ChildCompletion::Settled) => { noticed.insert(id.clone(), ordinal); retry.remove(&id); }
                         Ok(ChildCompletion::RetryPark) => {
-                            let (next, _) = CompletionRetry::schedule(retry.remove(&id), Instant::now(), None);
+                            let (next, _) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), None);
                             retry.insert(id, next);
                         }
                         Err(error) => {
                             let failure = format!("{error:#}");
-                            let (next, report) = CompletionRetry::schedule(retry.remove(&id), Instant::now(), Some(failure.clone()));
+                            let (next, report) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), Some(failure.clone()));
                             if report {
                                 tracing::warn!(child_session_id = %id, error = %failure, retry_in_seconds = (next.at - Instant::now()).as_secs(), "delegation child completion failed; retrying with backoff");
                             }

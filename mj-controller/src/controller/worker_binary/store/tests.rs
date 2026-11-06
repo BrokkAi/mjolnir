@@ -407,8 +407,8 @@ fn published_builds_install_without_waiting_on_each_other_or_on_an_upload_or_col
         upload.join().unwrap();
     });
     assert_eq!(executor.overlapped.load(Ordering::SeqCst), SESSIONS);
-    // The seed install claimed this interval's collection for the store.
-    assert_eq!(executor.collects.load(Ordering::SeqCst), 0);
+    // Only the upload collects; cached installs skip while it owns the store.
+    assert_eq!(executor.collects.load(Ordering::SeqCst), 1);
 }
 
 // Hard-won: shared-store review: a foreign collector can unlink a fallback source before cp opens it.
