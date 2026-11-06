@@ -66,6 +66,7 @@
 ]
 === live container session with a second workspace (1 session card) ===
 {
+  "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
   "subagents": {
@@ -167,6 +168,7 @@
 === wire detail row for a live session (1 session row and intern table) ===
 {
   "row": {
+    "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
     "subagents": {
@@ -272,6 +274,7 @@
 }
 === only workspace (1 session card) ===
 {
+  "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
   "subagents": {
@@ -360,6 +363,7 @@
   "activity": "Checking response",
   "session": {
     "row": {
+      "oracle": true,
       "review_trigger": "off",
       "review_count": 0,
       "subagents": {
@@ -457,6 +461,7 @@
   "activity": "[idle]",
   "session": {
     "row": {
+      "oracle": true,
       "review_trigger": "off",
       "review_count": 0,
       "subagents": {
@@ -551,6 +556,7 @@
 === turn running in child session (2 session cards) ===
 {
   "parent": {
+    "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
     "subagents": {
@@ -634,6 +640,7 @@
     }
   },
   "child": {
+    "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
     "subagents": {
@@ -721,6 +728,7 @@
 }
 === bare target (1 session card) ===
 {
+  "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
   "subagents": {
@@ -805,6 +813,7 @@
 }
 === stopped session without recovery copy (1 session card) ===
 {
+  "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
   "subagents": {
@@ -953,6 +962,7 @@
 }
 === last top-level message time (1 session card) ===
 {
+  "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
   "subagents": {
@@ -1031,6 +1041,7 @@
 }
 === messages without recorded times (1 session card) ===
 {
+  "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
   "subagents": {
@@ -1107,6 +1118,7 @@
 }
 === conversation not available (1 session card) ===
 {
+  "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
   "subagents": {
@@ -1180,6 +1192,7 @@
 === phone launch before provisioning completes (1 session card and action) ===
 {
   "session": {
+    "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
     "subagents": {

@@ -1367,6 +1367,8 @@ pub(super) fn runtime_test_session(
     state: SessionState,
 ) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -2521,7 +2523,7 @@ fn create_cancellation_and_commit_have_one_winner() {
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                control.request_cancel()
+                control.request_cancel("test cancellation")
             })
         };
         barrier.wait();
@@ -2530,9 +2532,23 @@ fn create_cancellation_and_commit_have_one_winner() {
         assert_ne!(committed, cancelled);
         assert_eq!(control.cancelled.load(Ordering::Acquire), cancelled);
         assert!(!control.is_cancellable());
-        assert!(!control.request_cancel());
+        assert!(!control.request_cancel("test cancellation"));
         assert!(!control.grant_commit());
     }
+}
+
+#[test]
+fn lifecycle_cancel_cause_is_recorded_only_for_accepted_cancel() {
+    let control = LifecycleControl::default();
+    assert!(control.request_cancel("person cancellation"));
+    assert_eq!(control.cancel_cause(), Some("person cancellation"));
+    assert!(!control.request_cancel("shutdown"));
+    assert_eq!(control.cancel_cause(), Some("person cancellation"));
+
+    let committed = LifecycleControl::default();
+    assert!(committed.grant_commit());
+    assert!(!committed.request_cancel("late cancellation"));
+    assert_eq!(committed.cancel_cause(), None);
 }
 
 /// A child launch that an explicit daemon stop cancelled reported only
@@ -2570,7 +2586,7 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
 
     let control = LifecycleControl::default();
     let mut cancelled = operation(LifecycleKind::Create, control.clone());
-    assert!(cancelled.request_cancel());
+    assert!(cancelled.request_cancel("test-session", "person cancellation"));
     assert!(!cancelled.interrupt_for_shutdown());
     assert!(control.cancelled.load(Ordering::Acquire));
     assert!(!control.stopped_for_shutdown());
@@ -5671,6 +5687,8 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
     let shutdown = CancellationToken::new();
     let create = |title: &str| {
         DaemonAction::StartCreateSession(mj_client::daemon::CreateSessionRequest {
+            oracle: None,
+            oracle_choice: None,
             remember_launch_choices: true,
             remember_container_size: true,
             review: None,
@@ -6717,6 +6735,7 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     let parent_id = "0123456789abcdef0123456789abcdef";
     let finished_id = "11111111111111111111111111111111";
     let stuck_id = "22222222222222222222222222222222";
+    let oracle_id = "33333333333333333333333333333333";
     // A parent with nothing to checkpoint yet, so its own suspend settles
     // without a worker to talk to.
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
@@ -6801,6 +6820,19 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     });
     crate::database::save_subagent_session(&stuck, &runtime_test_subagent(stuck_id, parent_id))
         .unwrap();
+    // The primary's oracle, working like the child above. It is stopped with
+    // the rest but never named to the primary.
+    let mut oracle = runtime_test_session(oracle_id, &workspace.id, SessionState::Running);
+    oracle.title = "oracle".into();
+    oracle.target_template_id = "removed-target".into();
+    oracle.target = Some(mj_core::state::TargetLocator::SshBare {
+        host: "builder.invalid".into(),
+        workspace: PathBuf::from(format!(".local/share/hel/workspaces/{oracle_id}")),
+        worker_id: Some(oracle_id.into()),
+    });
+    let mut oracle_relation = runtime_test_subagent(oracle_id, parent_id);
+    oracle_relation.kind = mj_core::subagent::SubagentKind::Oracle;
+    crate::database::save_subagent_session(&oracle, &oracle_relation).unwrap();
     // The index exists but has not seen either child yet.
     sessionwiki::index::open().unwrap();
 
@@ -6815,7 +6847,7 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
 
     let stored = crate::database::load_state().unwrap();
     assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
-    for child in [finished_id, stuck_id] {
+    for child in [finished_id, stuck_id, oracle_id] {
         assert!(
             !stored.sessions.contains_key(child) && !stored.subagents.contains_key(child),
             "sub-agent {child} is removed, not suspended"
@@ -6836,6 +6868,8 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
                 task: Some("do the task".into()),
                 handed_back: false,
             },
+            // The oracle is told to the primary as one line, not by its ID.
+            StoppedSubagent::oracle(),
         ]
     );
     // Child transcripts are deliberately excluded from SessionWiki.
@@ -8812,7 +8846,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
         .lifecycle
         .get_mut("moving")
         .unwrap()
-        .request_cancel();
+        .request_cancel("moving", "test cancellation");
     assert!(state.owner().worker_is_owned("moving"));
     state.owner().lifecycle.get_mut("moving").unwrap().phase =
         LifecyclePhase::Completed(Ok(DaemonLifecycleResult::Done));
@@ -8957,6 +8991,8 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
         in_place: false,
         operation_id: "retained-move".into(),
         selection: MoveSelection {
+            oracle: None,
+            oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
             session_id: session.id.clone(),
@@ -9184,7 +9220,7 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
             error: None,
         })
         .collect();
-    crate::database::register_subagent_with_startup(&child, &relation, rows).unwrap();
+    crate::database::register_subagent_with_startup(&child, &relation, rows, None).unwrap();
     let root = tempfile::tempdir().unwrap();
     let model_id = format!("{group_id}-model");
     let prompt_id = format!("{group_id}-prompt");
@@ -10210,6 +10246,8 @@ fn retained_startup_test_move(
         in_place: false,
         operation_id: "startup-durable-move".into(),
         selection: MoveSelection {
+            oracle: None,
+            oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
             session_id: session.id.clone(),
@@ -10641,7 +10679,7 @@ async fn startup_delivery_reservation_wait_does_not_prevent_move_cancellation() 
         state.active_lifecycles()[0].move_operation_id.as_deref(),
         Some("pre-reservation-origin")
     );
-    assert!(control.request_cancel());
+    assert!(control.request_cancel("test cancellation"));
     tokio::time::timeout(
         Duration::from_secs(2),
         RuntimeState::wait_lifecycle_result(watch),
@@ -11033,9 +11071,166 @@ async fn startup_without_move_origin_ignores_historical_failed_move_after_resume
         "old durable failure overrode the matching current Move owner"
     );
     assert_eq!(session_draft_input(&state), "");
-    assert!(control.request_cancel());
+    assert!(control.request_cancel("test cancellation"));
     release.notify_one();
     assert!(RuntimeState::wait_lifecycle_result(watch).await.is_err());
     assert_eq!(session_draft_input(&state), "matching active retry");
     state.cancel_and_join_startup_prompts().await.unwrap();
+}
+
+/// Makes [`failing_controller_loader`] fail, as a store that cannot be read
+/// after a registration committed would.
+#[cfg(unix)]
+static FAIL_CONTROLLER_RELOAD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+fn failing_controller_loader() -> Result<Controller> {
+    anyhow::ensure!(
+        !FAIL_CONTROLLER_RELOAD.load(std::sync::atomic::Ordering::SeqCst),
+        "injected controller reload failure"
+    );
+    Controller::load()
+}
+
+/// A failure after the registration committed must not leave the child
+/// `Provisioning` with nothing to start it: it becomes `Error`, for an
+/// ordinary child and for the oracle, whose one-live-oracle rule would
+/// otherwise refuse every later question.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
+    const CHILD: &str = "MJ_TEST_SUBAGENT_START_FAILURE";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "a_failure_after_a_sub_agent_registers_moves_it_to_error",
+            ),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "subagent-start-failure")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let project = tempfile::tempdir().unwrap();
+    crate::controller::test_support::test_git(project.path(), &["init", "-b", "main"]);
+    Config::update(|config| {
+        config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::Codex,
+                home: project.path().join("codex-home"),
+                environment: Default::default(),
+                context_window_bytes: None,
+                legacy_subagents: Default::default(),
+                guardian_review_model: None,
+                codex_profile: None,
+                muse_auto_review: None,
+            },
+        );
+        config.targets.insert(
+            "localhost".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+        Ok(())
+    })
+    .unwrap();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let workspace = crate::database::create_workspace("Sub-agent start failure").unwrap();
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
+    parent.target_template_id = "localhost".into();
+    parent.project_directory = Some(project.path().to_path_buf());
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
+    });
+    crate::database::save_session(&parent).unwrap();
+
+    let remote = spawn_remote_session_manager().unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        remote.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new_with_controller_loader(
+        remote.control,
+        Controller::load().unwrap(),
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        failing_controller_loader,
+    ));
+    let request = |kind, request_key: &str| crate::controller::RegisterSubagentRequest {
+        kind,
+        reviewer_launch: None,
+        parent_session_id: parent_id.into(),
+        task_name: "task".into(),
+        profile_id: "codex".into(),
+        model: Some("model".into()),
+        effort: None,
+        fast_mode: false,
+        working_directory: PathBuf::new(),
+        initial_prompt: "Question:\nWhich option?".into(),
+        request_key: request_key.into(),
+        report_root: None,
+    };
+
+    FAIL_CONTROLLER_RELOAD.store(true, std::sync::atomic::Ordering::SeqCst);
+    for (kind, request_key) in [
+        (mj_core::subagent::SubagentKind::Oracle, "first-question"),
+        (mj_core::subagent::SubagentKind::Worker, "first-spawn"),
+    ] {
+        let error = tokio::time::timeout(
+            Duration::from_secs(60),
+            state.start_subagent_session(request(kind, request_key)),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("injected controller reload failure"),
+            "{error:#}"
+        );
+        let stored = crate::database::load_state().unwrap();
+        let child = stored
+            .subagents
+            .values()
+            .find(|relation| relation.kind == kind)
+            .unwrap_or_else(|| panic!("{kind:?} registration committed"));
+        let session = &stored.sessions[&child.child_session_id];
+        assert_eq!(session.state, SessionState::Error, "{kind:?}");
+        assert!(
+            session
+                .last_error
+                .as_deref()
+                .is_some_and(|cause| cause.contains("injected controller reload failure")),
+            "{:?}",
+            session.last_error
+        );
+        // The report directory committed with the registration.
+        assert!(
+            crate::database::load_subagent_report(&child.child_session_id)
+                .unwrap()
+                .report_dir
+                .is_some()
+        );
+    }
+    FAIL_CONTROLLER_RELOAD.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // The failed oracle no longer blocks the next question's oracle.
+    let mut controller = Controller::load().unwrap();
+    controller
+        .register_subagent(request(
+            mj_core::subagent::SubagentKind::Oracle,
+            "second-question",
+        ))
+        .expect("a fresh oracle may register once the failed one is in Error");
 }

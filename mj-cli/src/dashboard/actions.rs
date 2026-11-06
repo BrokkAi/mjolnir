@@ -1679,6 +1679,8 @@ pub(crate) async fn apply_dashboard_action(
 pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: DashboardAction) {
     let DashboardAction::MoveSession {
         subagents,
+        oracle,
+        oracle_choice,
         workspace_selection,
         session_id,
         profile_id,
@@ -1698,6 +1700,8 @@ pub(crate) fn start_move_preparation(context: &mut DashboardContext, action: Das
             let mut daemon = daemon::connect_or_start().await?;
             daemon
                 .prepare_move_session(MoveSelection {
+                    oracle,
+                    oracle_choice,
                     subagents,
                     workspace: workspace_selection,
                     session_id: session_id.clone(),

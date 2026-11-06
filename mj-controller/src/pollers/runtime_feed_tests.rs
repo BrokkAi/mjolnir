@@ -22,6 +22,8 @@ impl Drop for DropFlag {
 
 fn session_record(id: &str) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,

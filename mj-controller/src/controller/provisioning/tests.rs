@@ -343,6 +343,8 @@ fn stale_worker_fails_before_any_container_is_created() {
             "docker",
             "stale worker",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,
@@ -412,6 +414,8 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
             "docker",
             "failed image",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,
@@ -501,6 +505,8 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
             "docker",
             "borrow the parent container",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,
@@ -802,6 +808,8 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             "docker",
             "missing Node",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,
@@ -865,6 +873,8 @@ fn failed_node_preflight_retains_error_before_provisioning() {
 fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: Some((&serde_json::from_str::<TargetTemplate>(
             r#"{"kind":"ssh-bare","host":"builder","user":"original","permissions":"yolo","workspace_prefix":"workspaces"}"#
@@ -1014,6 +1024,8 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
             "remote",
             "cancelled launch",
             SessionLaunchOptions {
+                oracle: None,
+                oracle_choice: None,
                 remember_launch_choices: true,
                 remember_container_size: true,
                 review: None,

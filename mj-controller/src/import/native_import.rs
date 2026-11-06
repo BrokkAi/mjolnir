@@ -132,6 +132,8 @@ pub fn import_native_session(
     state.sessions.insert(
         session_id.clone(),
         SessionRecord {
+            oracle_choice: None,
+            oracle: true,
             project: Some(crate::project_catalog::snapshot(
                 bundle,
                 &mj_core::targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(

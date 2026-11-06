@@ -83,6 +83,7 @@ async fn run(
                                     | SubagentToolAction::SendMessage { .. }
                                     | SubagentToolAction::Spawn { .. }
                                     | SubagentToolAction::RequestReview { .. }
+                                    | SubagentToolAction::AskOracle { .. }
                                     | SubagentToolAction::OverrideReview { .. }
                                     // Its lifecycle persists Closing before yielding
                                     // admission; the next daemon finishes the close.

@@ -674,6 +674,9 @@ copy-on-write
 read-write
 
 Add mount
+Oracle
+enabled
+disabled
 Delegation
 Native
 Mjolnir
@@ -685,7 +688,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-oracle","label":"enabled\ndisabled","value":"disabled","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
@@ -719,6 +722,9 @@ copy-on-write
 read-write
 
 Add mount
+Oracle
+enabled
+disabled
 Delegation
 Native
 Mjolnir
@@ -730,9 +736,9 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-oracle","label":"enabled\ndisabled","value":"disabled","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"no_github_events":false,"oracle":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === review delegation remembered Mjolnir (390x844) ===
@@ -765,6 +771,9 @@ copy-on-write
 read-write
 
 Add mount
+Oracle
+enabled
+disabled
 Delegation
 Native
 Mjolnir
@@ -776,7 +785,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-oracle","label":"enabled\ndisabled","value":"disabled","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
@@ -810,6 +819,9 @@ copy-on-write
 read-write
 
 Add mount
+Oracle
+enabled
+disabled
 Delegation
 Native
 Mjolnir
@@ -821,9 +833,9 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-oracle","label":"enabled\ndisabled","value":"disabled","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"no_github_events":false,"oracle":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === review delegation None without configured models (390x844) ===
@@ -1232,6 +1244,9 @@ copy-on-write
 read-write
 
 Add mount
+Oracle
+enabled
+disabled
 Delegation
 Native
 Mjolnir
@@ -1246,7 +1261,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-oracle","label":"enabled\ndisabled","value":"enabled","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
@@ -1280,6 +1295,9 @@ copy-on-write
 read-write
 
 Add mount
+Oracle
+enabled
+disabled
 Delegation
 Native
 Mjolnir
@@ -1294,9 +1312,9 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-oracle","label":"enabled\ndisabled","value":"enabled","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"no_github_events":false,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"no_github_events":false,"oracle":true,"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":4,"memory_bytes":8589934592},"remember_container_size":false}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === managed worktree unavailable on container (390x844) ===

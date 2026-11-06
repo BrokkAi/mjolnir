@@ -36,9 +36,11 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"archive_after_days":null})
         }
         "subagents" if path.len() == 1 => {
-            json!({"max_concurrent":6,"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null}})
+            json!({"max_concurrent":6,"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null},"oracle":{"model":null,"effort":null}})
         }
-        "subagents" if path.len() == 2 && matches!(key, "straightforward" | "subtle") => {
+        "subagents"
+            if path.len() == 2 && matches!(key, "straightforward" | "subtle" | "oracle") =>
+        {
             json!({"model":null,"effort":null})
         }
         "profiles" if path.len() == 2 => {
@@ -271,6 +273,7 @@ pub fn label(key: &str) -> String {
         "subagents" => "Sub-agents",
         "straightforward" => "Straightforward",
         "subtle" => "Subtle",
+        "oracle" => "Oracle",
         "build_cache" => "Build caches",
         "scheduler" => "Compile scheduling",
         "directory" => "Cache directory",
@@ -336,7 +339,7 @@ pub fn field_label(path: &[String]) -> String {
     {
         ["github"] => "GitHub events".to_owned(),
         ["subagents", task, field]
-            if ["straightforward", "subtle"].contains(task)
+            if ["straightforward", "subtle", "oracle"].contains(task)
                 && ["model", "effort"].contains(field) =>
         {
             format!("{} {}", label(task), field)
@@ -371,7 +374,9 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
             "{} (default)",
             mj_core::config::NotifyConfig::default().delay_seconds
         ),
-        ["subagents", task, "effort"] if matches!(*task, "straightforward" | "subtle") => {
+        ["subagents", task, "effort"]
+            if matches!(*task, "straightforward" | "subtle" | "oracle") =>
+        {
             if draft["_subagent_options"][task][super::discovery::EFFORTS_PENDING] == true {
                 "Discovering efforts…".into()
             } else {
@@ -821,7 +826,7 @@ pub fn page_specific_help(path: &[String], draft: &Value) -> Option<&'static str
     Some(match path {
         [section]
             if section == "subagents"
-                && (["straightforward", "subtle"]
+                && (["straightforward", "subtle", "oracle"]
                     .iter()
                     .any(|task| draft["_subagent_options"][task].is_null())) =>
         {
@@ -990,11 +995,14 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         "archive_after_days" => {
             "After this many days, indexed suspended sessions lose their checkpoint and attachments. Blank keeps all."
         }
-        "subagents" => "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
+        "subagents" => {
+            "Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional."
+        }
         "straightforward" => "Work with a clear method. Choose a model and its effort.",
         "subtle" => {
             "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward."
         }
+        "oracle" => "For read-only tricky questions that the primary agent isn't sure about.",
         "build_cache" => {
             "Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and Bazel."
         }

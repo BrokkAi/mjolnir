@@ -2224,6 +2224,8 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert_eq!(
         request.action,
         ControllerAction::New {
+            oracle: None,
+            oracle_choice: None,
             remember_launch_choices: false,
             remember_container_size: true,
             review: None,
@@ -4855,6 +4857,8 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     let mut session = snapshot.sessions[0].clone();
     session.lifecycle = ViewerLifecycleCategory::Failed;
     session.move_recovery = Some(crate::server::ViewerMoveRecovery {
+        oracle: None,
+        oracle_choice: None,
         operation_id: "move-a".into(),
         source_profile_id: "destination".into(),
         source_target_template_id: "destination".into(),

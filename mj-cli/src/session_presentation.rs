@@ -176,6 +176,8 @@ mod tests {
         state.sessions.insert(
             "session-1".into(),
             SessionRecord {
+                oracle_choice: None,
+                oracle: true,
                 project: None,
                 target_runtime: None,
                 launch_base: None,

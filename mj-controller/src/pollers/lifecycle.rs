@@ -134,6 +134,11 @@ pub fn reserve_recovery_or_cancel(
     session_id: &str,
     cancelled: &AtomicBool,
 ) -> Result<crate::recovery_gate::RecoveryReservation> {
+    // An operation cancelled before it starts must not destroy the copy a
+    // running one would have preempted.
+    if cancelled.load(Ordering::Acquire) {
+        bail!("operation cancelled while waiting for recovery copy");
+    }
     let reservation = observer.reserve(session_id);
     // The reservation stops the next copy; cancelling preempts the one already
     // running so a lifecycle operation never queues behind a long or wedged

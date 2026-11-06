@@ -41,7 +41,7 @@ fn web_restart_and_move_use_the_lifecycle_cancellation_control() {
             &control.cancelled,
             &lifecycle_control.cancelled
         ));
-        assert!(control.request_cancel());
+        assert!(control.request_cancel("test cancellation"));
         assert!(control.cancelled.load(Ordering::Acquire));
         assert!(lifecycle_control.cancelled.load(Ordering::Acquire));
     }
@@ -207,6 +207,8 @@ fn move_recovery_projection_exposes_safe_retry_settings_only() {
         source_checkpoint_only: false,
         operation_id: "move-1".into(),
         selection: mj_core::state::MoveSelection {
+            oracle: None,
+            oracle_choice: None,
             subagents: None,
             workspace: Default::default(),
             clear_resource_allocation: true,
@@ -1768,6 +1770,8 @@ fn prompt_action() -> ControllerAction {
 
 fn new_action() -> ControllerAction {
     ControllerAction::New {
+        oracle: None,
+        oracle_choice: None,
         remember_launch_choices: true,
         remember_container_size: true,
         review: None,
@@ -1793,6 +1797,8 @@ fn new_action() -> ControllerAction {
 
 fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     SessionRecord {
+        oracle_choice: None,
+        oracle: true,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -2299,14 +2305,15 @@ fn phone_new_cancel_and_running_commit_have_one_atomic_winner() {
         let cancelling = control.clone();
         let committing = control.clone();
         let (cancelled, committed) = std::thread::scope(|scope| {
-            let cancel = scope.spawn(move || cancelling.request_cancel());
+            let cancel =
+                scope.spawn(move || cancelling.request_cancel("concurrent test cancellation"));
             let commit = scope.spawn(move || committing.grant_new_commit());
             (cancel.join().unwrap(), commit.join().unwrap())
         });
 
         assert_ne!(cancelled, committed);
         assert_eq!(control.cancelled.load(Ordering::Acquire), cancelled);
-        assert!(!control.request_cancel());
+        assert!(!control.request_cancel("test cancellation"));
         assert!(!control.grant_new_commit());
     }
 }

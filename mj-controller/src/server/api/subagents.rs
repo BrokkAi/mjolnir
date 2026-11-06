@@ -85,6 +85,11 @@ pub(crate) async fn resolve_subagent_policy_selection(
     policy: &mj_core::subagent::SubagentPolicy,
     task_type: mj_core::subagent::SubagentTaskType,
 ) -> Result<SubagentSelection, ApiFailure> {
+    if task_type == mj_core::subagent::SubagentTaskType::Oracle {
+        return Err(ApiFailure::bad_request(
+            "task_type `oracle` is reserved for the read-only oracle and cannot be spawned as a sub-agent",
+        ));
+    }
     if !policy.uses_mjolnir() {
         return Err(ApiFailure::conflict(
             "this session does not allow Mjolnir sub-agents",
@@ -135,6 +140,28 @@ pub(crate) async fn resolve_subagent_policy_selection(
         };
         ApiFailure::conflict(format!("{context}: {}", error.message))
     })
+}
+
+/// The profile and effort for the oracle's model. Like a spawn, it ranks the
+/// enabled profiles that offer the model by quota.
+pub(crate) async fn resolve_oracle_selection(
+    backend: &Arc<dyn SubagentBackend>,
+    parent_profile: &str,
+    choice: &mj_core::config::SubagentChoice,
+) -> Result<SubagentSelection, ApiFailure> {
+    resolve_model_profile_selection_matching(
+        backend,
+        None,
+        &choice.model,
+        choice
+            .effort
+            .as_deref()
+            .map(EffortRequirement::Exact)
+            .unwrap_or(EffortRequirement::Default),
+        None,
+        ModelProfileCandidateSource::Subagents { parent_profile },
+    )
+    .await
 }
 
 /// Choose a profile for a user-created session from all enabled, usable
