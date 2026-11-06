@@ -3770,6 +3770,46 @@ fn a_stop_the_harness_never_answers_ends_the_self_started_turn() {
             .unwrap()
     );
     assert_eq!(relay.operational_state().latest_ordinal, before);
+
+    // Hard-won: #1450 review: a result that beat the cancel's acknowledgement settled the stopped turn as finished
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = claude_relay(temp.path());
+    relay
+        .record_session_update(agent_text_chunk("Summarizing"))
+        .unwrap();
+    submit_relay(&mut relay, "stop-fast", RelayCommand::CancelTurn);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    assert!(
+        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "cancelled")
+    );
+    relay
+        .record_command_completed("stop-fast", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    assert!(relay.harness_turn_stop.is_none());
+    assert!(relay.unanswered_harness_turn_stop().is_none());
+
+    // A stop the runtime could not send leaves the turn to end as it does.
+    relay
+        .record_session_update(agent_text_chunk("Again"))
+        .unwrap();
+    submit_relay(&mut relay, "stop-refused", RelayCommand::CancelTurn);
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_rejected(
+            "stop-refused",
+            mj_core::event_outcome::OutcomeReason::CommandFailed,
+            "cancel ACP prompt: closed",
+        )
+        .unwrap();
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    assert!(
+        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "end_turn")
+    );
 }
 
 // Hard-won: 1389c545: Claude work without a prompt looked idle and allowed a recovery checkpoint mid-cycle.
