@@ -4670,6 +4670,20 @@ async fn an_expired_delivery_leaves_a_busy_child_running_and_is_reported_beside_
         "{rendered}"
     );
 
+    // The child's record ending is news, and reaches the parent although the
+    // failed delivery is still the newest one.
+    exports.set_child_state(SessionState::Error);
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 2, "the child's error was not reported");
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&events[1].event_json).unwrap();
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = &event.body else {
+        panic!("wrong event: {event:?}");
+    };
+    assert_eq!(report.state, "error");
+    exports.set_child_state(SessionState::Running);
+
     // The child can still be given a message, and gets it.
     assert!(exports.child_state().can_receive_child_work());
     let (ready, mut delivered) = parking_backend(exports, &[], Arc::new(|| {}));

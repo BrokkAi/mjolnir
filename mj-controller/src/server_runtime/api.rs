@@ -1923,8 +1923,17 @@ fn report_identity(
     progress: &ChildProgress,
 ) -> Option<mj_core::subagent::SubagentFinishIdentity> {
     match failed_delivery {
+        // The identity names the failure, the child's last turn, and the
+        // child's state only once its record has ended. Any other state
+        // follows its turns, which the ordinal already tracks, or a message
+        // queued after the failure, which turns a finished child "running"
+        // with nothing new to say about the failure.
         Some((request_id, error)) => Some(mj_core::subagent::SubagentFinishIdentity::Terminal {
-            state: state.to_owned(),
+            state: match state {
+                "error" | "lost" | "stopped" => state,
+                _ => "message-failed",
+            }
+            .to_owned(),
             detail: Some(format!("Message {request_id}: {error}")),
             last_completed_ordinal: progress.last_completed_ordinal,
         }),
