@@ -830,7 +830,7 @@ fn armed(_profile: Option<&str>) -> ReviewConfigSource {
 
 fn armed_count(count: usize) -> ReviewConfigSource {
     Arc::new(move |_| ReviewConfig {
-        legacy_auto: false,
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Turn,
         reviewers: vec![
             mj_core::config::SubagentChoice {
@@ -1222,7 +1222,7 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
     let mut manager = FakeManager::new(session).await;
     let environment = FakeEnvironment::new();
     let config: ReviewConfigSource = Arc::new(|_| ReviewConfig {
-        legacy_auto: false,
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Off,
         reviewers: vec![mj_core::config::SubagentChoice {
             model: "test-reviewer".into(),
@@ -2160,7 +2160,7 @@ async fn parallel_findings_keep_launch_order_when_children_finish_out_of_order()
         },
     ];
     let config: ReviewConfigSource = Arc::new(move |_| ReviewConfig {
-        legacy_auto: false,
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Turn,
         reviewers: choices.clone(),
     });
@@ -2879,7 +2879,7 @@ async fn push_trigger_does_not_arm_review_at_the_end_of_a_turn() {
     let session = session_id("pushtrigger");
     let mut manager = FakeManager::new(&session).await;
     let config: ReviewConfigSource = Arc::new(|_| ReviewConfig {
-        legacy_auto: false,
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Push,
         ..Default::default()
     });
@@ -2896,7 +2896,7 @@ async fn push_trigger_does_not_arm_review_at_the_end_of_a_turn() {
 
 fn push_config() -> ReviewConfigSource {
     Arc::new(|_| ReviewConfig {
-        legacy_auto: false,
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Push,
         reviewers: vec![mj_core::config::SubagentChoice {
             model: "test-reviewer".into(),
@@ -2907,7 +2907,7 @@ fn push_config() -> ReviewConfigSource {
 
 fn push_config_count(count: usize) -> ReviewConfigSource {
     Arc::new(move |_| ReviewConfig {
-        legacy_auto: false,
+        legacy: None,
         trigger: mj_core::config::ReviewTrigger::Push,
         reviewers: vec![
             mj_core::config::SubagentChoice {
@@ -3372,7 +3372,7 @@ async fn push_review_delivers_each_verdict_without_holding_or_prompting_the_prim
             _ => mj_core::config::ReviewTrigger::Push,
         };
         let config: ReviewConfigSource = Arc::new(move |_| ReviewConfig {
-            legacy_auto: false,
+            legacy: None,
             trigger,
             reviewers: vec![mj_core::config::SubagentChoice {
                 model: "test-reviewer".into(),

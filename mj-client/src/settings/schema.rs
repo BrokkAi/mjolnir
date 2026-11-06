@@ -20,9 +20,9 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
         "notify" => {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
         }
-        "review" => {
-            json!({"trigger":"off"})
-        }
+        // Only the section itself: its reviewer entries are SubagentChoice
+        // tables, which reject unknown keys.
+        "review" if path.len() == 1 => json!({"trigger":"off"}),
         "continuation" => json!({"enabled":true}),
         "github" if path.len() == 1 => json!({"watch":{}}),
         "github" if key == "watch" => {
@@ -1068,6 +1068,16 @@ pub fn path_kind(path: &[String]) -> Option<PathKind> {
 #[cfg(test)]
 mod review_tests {
     use super::*;
+
+    /// Reviewer entries are SubagentChoice tables, which reject unknown
+    /// keys, so expanding a draft must leave them exactly as stored.
+    #[test]
+    fn expanding_a_draft_leaves_reviewer_entries_unchanged() {
+        let reviewer = json!({"model": "gpt-6-terra", "effort": "xhigh"});
+        let mut draft = json!({"review": {"trigger": "push", "reviewers": [reviewer]}});
+        expand(&mut draft, &mut Vec::new());
+        assert_eq!(draft["review"]["reviewers"], json!([reviewer]));
+    }
 
     #[test]
     fn legacy_review_defaults_do_not_insert_reviewers() {

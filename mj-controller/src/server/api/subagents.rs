@@ -291,6 +291,15 @@ async fn resolve_model_profile_selection_matching(
             }
         }
     }
+    if matches!(
+        source,
+        ModelProfileCandidateSource::Reviewers | ModelProfileCandidateSource::ReviewersReady
+    ) {
+        offered.sort_by_key(|candidate| {
+            !(candidate.choices.model.as_deref() == Some(model)
+                && !candidate.choices.efforts.is_empty())
+        });
+    }
     let all_offered = offered.clone();
     let mut matching_model = false;
     let mut offered_any_effort = false;
@@ -301,7 +310,36 @@ async fn resolve_model_profile_selection_matching(
             continue;
         }
         matching_model = true;
-        let efforts = match model_efforts(backend, &candidate, model).await {
+        let probe = async {
+            if matches!(
+                source,
+                ModelProfileCandidateSource::Reviewers
+                    | ModelProfileCandidateSource::ReviewersReady
+            ) && candidate.choices.model.as_deref() == Some(model)
+                && !candidate.choices.efforts.is_empty()
+            {
+                Ok(candidate.choices.efforts.clone())
+            } else {
+                model_efforts(backend, &candidate, model).await
+            }
+        };
+        let result = if matches!(
+            source,
+            ModelProfileCandidateSource::Reviewers | ModelProfileCandidateSource::ReviewersReady
+        ) {
+            tokio::time::timeout(std::time::Duration::from_secs(20), probe)
+                .await
+                .map_err(|_| {
+                    ApiFailure::unavailable(format!(
+                        "reviewer effort probe timed out for {:?}",
+                        candidate.profile_id
+                    ))
+                })
+                .and_then(|result| result)
+        } else {
+            probe.await
+        };
+        let efforts = match result {
             Ok(efforts) => efforts,
             Err(error) => {
                 selection_errors.push(format!("{}: {error:#}", candidate.profile_id));

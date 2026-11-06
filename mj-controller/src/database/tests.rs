@@ -1343,7 +1343,7 @@ fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inherita
         mj_core::config::ReviewTrigger::Push,
     ] {
         let global = mj_core::config::ReviewConfig {
-            legacy_auto: false,
+            legacy: None,
             trigger,
             ..mj_core::config::ReviewConfig::default()
         };

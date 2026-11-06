@@ -211,6 +211,41 @@ fn reviewer_rows_can_be_added_removed_and_reconfigured() {
 }
 
 #[test]
+fn adding_reviewer_during_legacy_upgrade_serializes_the_edit() {
+    let mut initial = config();
+    initial.review = ReviewConfig::legacy_default();
+    let mut dashboard = DashboardState::new(initial, Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let snapshot = catalog(&dashboard.config, &["gpt-6-terra"]);
+    dashboard.set_profile_capabilities(snapshot);
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    setup
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .form
+        .get_mut()
+        .focus(ReviewSettingsFocus::Add);
+    drawn(&mut dashboard, 100, 30);
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    let review = &setup.review_editor.as_ref().unwrap().review;
+    assert!(!review.is_legacy());
+    assert_eq!(review.reviewers.len(), 1);
+    assert!(
+        serde_json::to_value(review)
+            .unwrap()
+            .get("reviewers")
+            .is_some()
+    );
+}
+
+#[test]
 fn save_validation_requires_rows_only_for_automatic_trigger() {
     let config = config();
     let mut dialog = ReviewSettingsDialog::new(&config);

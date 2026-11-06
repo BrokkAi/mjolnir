@@ -6,6 +6,15 @@ use super::page::is_collection;
 use super::schema;
 use serde_json::{Value, json};
 
+fn clear_review_legacy(draft: &mut Value) {
+    if let Some(review) = draft.get_mut("review").and_then(Value::as_object_mut) {
+        review.remove("count");
+        review.remove("profile");
+        review.remove("effort");
+        review.entry("reviewers").or_insert_with(|| json!([]));
+    }
+}
+
 /// What a person gave a setting: text typed into a field, or one of the
 /// values the setting offers.
 #[derive(Debug, Clone, PartialEq)]
@@ -141,6 +150,9 @@ pub fn apply_value(
     {
         draft["review"]["reviewers"][path[2].parse::<usize>().unwrap()]["effort"] = Value::Null;
     }
+    if changed && path.len() == 4 && path[0] == "review" && path[1] == "reviewers" {
+        clear_review_legacy(draft);
+    }
     Ok(rewritten)
 }
 
@@ -253,6 +265,9 @@ pub fn add_entry(
     collection: &[String],
     name: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    if collection == ["review", "reviewers"] && draft.pointer(&pointer(collection)).is_none() {
+        draft["review"]["reviewers"] = json!([]);
+    }
     let value = draft
         .pointer_mut(&pointer(collection))
         .ok_or_else(|| "This list no longer exists.".to_owned())?;
@@ -269,6 +284,9 @@ pub fn add_entry(
             Value::String(String::new())
         });
         path.push((array.len() - 1).to_string());
+        if collection == ["review", "reviewers"] {
+            clear_review_legacy(draft);
+        }
         return Ok(path);
     }
     let object = value
@@ -370,6 +388,9 @@ pub fn remove_entry(draft: &mut Value, path: &[String]) -> Result<Removal, Strin
                 return Err("This list entry does not exist.".into());
             }
             array.remove(index);
+            if parent == ["review", "reviewers"] {
+                clear_review_legacy(draft);
+            }
             list_index = Some(index);
         }
         _ => {}
@@ -420,5 +441,17 @@ mod review_tests {
             Some("Disabled profile \"codex\".")
         );
         assert_eq!(draft["review"], review);
+    }
+
+    #[test]
+    fn adding_a_reviewer_to_legacy_draft_clears_old_fields() {
+        let mut draft =
+            json!({"review": {"trigger": "turn", "count": 3, "profile": "old", "effort": "high"}});
+        let path = ["review".to_owned(), "reviewers".to_owned()];
+        add_entry(&mut draft, &path, None).unwrap();
+        assert_eq!(draft["review"]["reviewers"].as_array().unwrap().len(), 1);
+        for field in ["count", "profile", "effort"] {
+            assert!(draft["review"].get(field).is_none());
+        }
     }
 }

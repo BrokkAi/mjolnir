@@ -297,7 +297,7 @@ async fn save_draft_settings(
         };
         let updated =
             draft::config_from_draft(draft).map_err(|error| refused(anyhow::Error::new(error)))?;
-        if !updated.review.legacy_auto
+        if !updated.review.is_legacy()
             && updated.review.trigger != mj_core::config::ReviewTrigger::Off
             && updated.review.reviewers.is_empty()
         {

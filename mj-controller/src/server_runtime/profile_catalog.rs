@@ -37,8 +37,6 @@ const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// stages the profile and launches its harness, so a failure that persists,
 /// such as a full disk or a missing login, is retried rarely rather than
 /// every minute. A changed definition or a session's report starts sooner.
-const LEGACY_REVIEW_MAX_ATTEMPTS: usize = 12;
-
 const RETRY_DELAYS: [Duration; 6] = [
     Duration::from_secs(1),
     Duration::from_secs(5),
@@ -232,7 +230,7 @@ impl ProfileCatalog {
         if first {
             self.start_refreshing();
         }
-        if config.review.legacy_auto
+        if config.review.is_legacy()
             && self.config_path.is_some()
             && !self
                 .legacy_review_upgrade_started
@@ -264,7 +262,17 @@ impl ProfileCatalog {
         }
     }
 
-    async fn upgrade_legacy_review(self: &Arc<Self>, attempt: usize) -> Result<()> {
+    async fn upgrade_legacy_review(self: &Arc<Self>, _attempt: usize) -> Result<()> {
+        let discovery_config = self.live()?;
+        let definitions = discovery_config
+            .enabled_profiles()
+            .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
+            .collect::<Vec<_>>();
+        let legacy = discovery_config
+            .review
+            .legacy
+            .clone()
+            .context("review is no longer legacy")?;
         let ids = self
             .candidates()?
             .into_iter()
@@ -293,20 +301,14 @@ impl ProfileCatalog {
                 }
             }
         }).collect::<Vec<_>>();
-        if !omitted.is_empty() && attempt < LEGACY_REVIEW_MAX_ATTEMPTS {
+        if !omitted.is_empty() {
             anyhow::bail!(
                 "legacy review upgrade waiting for profiles: {}",
                 omitted.join(", ")
             );
         }
-        if !omitted.is_empty() && available.is_empty() {
-            anyhow::bail!("legacy review upgrade has no successful profile discovery");
-        }
-        if !omitted.is_empty() {
-            tracing::warn!(profiles = %omitted.join(", "), attempts = attempt,
-                "persisting legacy review preset without unavailable profiles");
-        }
-        let reviewers = crate::review_selection::autoconfigure_with_efforts(
+        let (reviewers, known) = crate::review_selection::upgrade_reviewers(
+            &legacy,
             &available,
             |profile, model| {
                 let catalog = Arc::clone(self);
@@ -315,17 +317,18 @@ impl ProfileCatalog {
             None,
         )
         .await?;
-        if !omitted.is_empty() && reviewers.is_empty() {
-            anyhow::bail!("legacy review upgrade has no matching preset in successful profiles");
+        if !known {
+            anyhow::bail!("reviewer efforts remain unknown");
         }
         let count = reviewers.len();
         let path = self
             .config_path
             .clone()
             .context("catalog has no config path for review upgrade")?;
-        let wrote =
-            tokio::task::spawn_blocking(move || Self::persist_legacy_review_to(&path, reviewers))
-                .await??;
+        let wrote = tokio::task::spawn_blocking(move || {
+            Self::persist_legacy_review_to(&path, reviewers, &definitions, &legacy)
+        })
+        .await??;
         if wrote {
             tracing::info!(
                 count,
@@ -338,13 +341,25 @@ impl ProfileCatalog {
     fn persist_legacy_review_to(
         path: &Path,
         reviewers: Vec<mj_core::config::SubagentChoice>,
+        definitions: &[(String, String)],
+        legacy: &mj_core::config::LegacyReview,
     ) -> Result<bool> {
         let (_, wrote) = Config::update_to(path, |config| {
-            if !config.review.legacy_auto {
+            if !config.review.is_legacy() {
                 return Ok(false);
             }
+            if config.review.legacy.as_ref() != Some(legacy) {
+                anyhow::bail!("legacy review settings changed during reviewer discovery");
+            }
+            let current = config
+                .enabled_profiles()
+                .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
+                .collect::<Vec<_>>();
+            if current != definitions {
+                anyhow::bail!("profile definitions changed during reviewer discovery");
+            }
             config.review.reviewers = reviewers;
-            config.review.legacy_auto = false;
+            config.review.clear_legacy();
             Ok(true)
         })?;
         Ok(wrote)
@@ -1702,22 +1717,23 @@ mod tests {
             Arc::new(move |profile, _| probe(profile)),
         );
         Arc::get_mut(&mut catalog).unwrap().config_path = Some(path);
-        catalog.sync(&test_config(&[
+        let mut config = test_config(&[
             ("codex", HarnessKind::Codex),
             ("haiku", HarnessKind::Claude),
-        ]));
+        ]);
+        config.review = mj_core::config::ReviewConfig::legacy_default();
+        catalog.sync(&config);
         catalog
     }
 
     fn legacy_review_file(path: &Path) {
-        std::fs::write(
-            path,
-            format!(
-                "version = {}\n[review]\ntrigger = \"turn\"\n",
-                mj_core::config::CONFIG_VERSION
-            ),
-        )
-        .unwrap();
+        let mut config = test_config(&[
+            ("codex", HarnessKind::Codex),
+            ("haiku", HarnessKind::Claude),
+        ]);
+        config.review = mj_core::config::ReviewConfig::legacy_default();
+        config.review.trigger = mj_core::config::ReviewTrigger::Turn;
+        config.save_to(path).unwrap();
     }
 
     #[tokio::test]
@@ -1729,12 +1745,12 @@ mod tests {
         let catalog = legacy_upgrade_fixture(path.clone(), offline.clone());
         let error = catalog.upgrade_legacy_review(1).await.unwrap_err();
         assert!(error.to_string().contains("codex"));
-        assert!(Config::load_from(&path).unwrap().review.legacy_auto);
+        assert!(Config::load_from(&path).unwrap().review.is_legacy());
         offline.store(false, Ordering::SeqCst);
         catalog.reread_failed("codex");
         catalog.upgrade_legacy_review(2).await.unwrap();
         let review = Config::load_from(&path).unwrap().review;
-        assert!(!review.legacy_auto);
+        assert!(!review.is_legacy());
         assert_eq!(review.reviewers.len(), 3);
         assert_eq!(review.reviewers[0].model, "gpt-6-terra");
     }
@@ -1767,50 +1783,31 @@ mod tests {
             Arc::new(move |profile, _| probe(profile)),
         );
         Arc::get_mut(&mut catalog).unwrap().config_path = Some(path.clone());
-        catalog.sync(&test_config(&[
+        let mut config = test_config(&[
             ("codex", HarnessKind::Codex),
             ("haiku", HarnessKind::Claude),
-        ]));
-        let task = tokio::spawn(async move {
-            catalog
-                .upgrade_legacy_review(LEGACY_REVIEW_MAX_ATTEMPTS)
-                .await
-        });
+        ]);
+        config.review = mj_core::config::ReviewConfig::legacy_default();
+        catalog.sync(&config);
+        let task = tokio::spawn(async move { catalog.upgrade_legacy_review(12).await });
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
         tokio::time::advance(Duration::from_secs(31)).await;
-        task.await.unwrap().unwrap();
+        task.await.unwrap().unwrap_err();
         let review = Config::load_from(&path).unwrap().review;
-        assert!(!review.legacy_auto);
-        assert_eq!(review.reviewers.len(), 2);
-        assert!(
-            review
-                .reviewers
-                .iter()
-                .all(|choice| choice.model == "claude-haiku-4.5")
-        );
+        assert!(review.is_legacy());
     }
 
     #[tokio::test]
-    async fn exhausted_legacy_discovery_persists_the_successful_subset() {
+    async fn exhausted_legacy_discovery_keeps_retrying() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("custom-config.toml");
         legacy_review_file(&path);
         let catalog = legacy_upgrade_fixture(path.clone(), Arc::new(AtomicBool::new(true)));
-        catalog
-            .upgrade_legacy_review(LEGACY_REVIEW_MAX_ATTEMPTS)
-            .await
-            .unwrap();
+        catalog.upgrade_legacy_review(12).await.unwrap_err();
         let review = Config::load_from(&path).unwrap().review;
-        assert!(!review.legacy_auto);
-        assert_eq!(review.reviewers.len(), 2);
-        assert!(
-            review
-                .reviewers
-                .iter()
-                .all(|choice| choice.model == "claude-haiku-4.5")
-        );
+        assert!(review.is_legacy());
     }
 
     #[tokio::test]
@@ -1826,13 +1823,8 @@ mod tests {
         );
         Arc::get_mut(&mut catalog).unwrap().config_path = Some(path.clone());
         catalog.sync(&test_config(&[("codex", HarnessKind::Codex)]));
-        assert!(
-            catalog
-                .upgrade_legacy_review(LEGACY_REVIEW_MAX_ATTEMPTS)
-                .await
-                .is_err()
-        );
-        assert!(Config::load_from(&path).unwrap().review.legacy_auto);
+        assert!(catalog.upgrade_legacy_review(12).await.is_err());
+        assert!(Config::load_from(&path).unwrap().review.is_legacy());
     }
 
     #[test]
@@ -1847,15 +1839,63 @@ mod tests {
             model: "claude-haiku-4.5".into(),
             effort: None,
         };
-        assert!(ProfileCatalog::persist_legacy_review_to(&path, vec![choice.clone()]).unwrap());
+        assert!(
+            ProfileCatalog::persist_legacy_review_to(
+                &path,
+                vec![choice.clone()],
+                &[],
+                &mj_core::config::LegacyReview::default()
+            )
+            .unwrap()
+        );
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("# keep this comment"));
         assert!(saved.contains("[phone]\nenabled = false"));
         let loaded = Config::load_from(&path).unwrap();
-        assert!(!loaded.review.legacy_auto);
+        assert!(!loaded.review.is_legacy());
         assert_eq!(loaded.review.reviewers, vec![choice]);
-        assert!(!ProfileCatalog::persist_legacy_review_to(&path, Vec::new()).unwrap());
+        assert!(
+            !ProfileCatalog::persist_legacy_review_to(
+                &path,
+                Vec::new(),
+                &[],
+                &mj_core::config::LegacyReview::default()
+            )
+            .unwrap()
+        );
         assert_eq!(Config::load_from(&path).unwrap().review.reviewers.len(), 1);
+    }
+
+    #[test]
+    fn legacy_upgrade_retries_when_profile_definitions_change_before_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        legacy_review_file(&path);
+        let original = Config::load_from(&path).unwrap();
+        let definitions = original
+            .enabled_profiles()
+            .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
+            .collect::<Vec<_>>();
+        let mut changed = original.clone();
+        changed
+            .profiles
+            .get_mut("codex")
+            .unwrap()
+            .home
+            .push("new-home");
+        changed.save_to(&path).unwrap();
+        let error = ProfileCatalog::persist_legacy_review_to(
+            &path,
+            vec![mj_core::config::SubagentChoice {
+                model: "haiku".into(),
+                effort: None,
+            }],
+            &definitions,
+            original.review.legacy.as_ref().unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("profile definitions changed"));
+        assert!(Config::load_from(&path).unwrap().review.is_legacy());
     }
 
     #[test]
@@ -1868,16 +1908,24 @@ mod tests {
         )
         .unwrap();
         let config = Config::load_from(&path).unwrap();
-        assert!(config.review.legacy_auto);
+        assert!(config.review.is_legacy());
         config.save_to(&path).unwrap();
-        assert!(Config::load_from(&path).unwrap().review.legacy_auto);
+        assert!(Config::load_from(&path).unwrap().review.is_legacy());
         assert!(
             !std::fs::read_to_string(&path)
                 .unwrap()
                 .contains("reviewers")
         );
-        assert!(ProfileCatalog::persist_legacy_review_to(&path, Vec::new()).unwrap());
-        assert!(!Config::load_from(&path).unwrap().review.legacy_auto);
+        assert!(
+            ProfileCatalog::persist_legacy_review_to(
+                &path,
+                Vec::new(),
+                &[],
+                &mj_core::config::LegacyReview::default()
+            )
+            .unwrap()
+        );
+        assert!(!Config::load_from(&path).unwrap().review.is_legacy());
         assert!(
             std::fs::read_to_string(&path)
                 .unwrap()

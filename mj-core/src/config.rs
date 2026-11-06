@@ -136,17 +136,24 @@ impl PhoneConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "ReviewConfigInput", into = "ReviewConfigOutput")]
 pub struct ReviewConfig {
-    pub legacy_auto: bool,
+    pub legacy: Option<LegacyReview>,
     pub trigger: ReviewTrigger,
     pub reviewers: Vec<SubagentChoice>,
 }
 
 pub const MAX_REVIEWERS: usize = 3;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LegacyReview {
+    pub count: Option<std::num::NonZeroUsize>,
+    pub profile: Option<String>,
+    pub effort: Option<String>,
+}
+
 impl Default for ReviewConfig {
     fn default() -> Self {
         Self {
-            legacy_auto: false,
+            legacy: None,
             trigger: ReviewTrigger::Off,
             reviewers: Vec::new(),
         }
@@ -154,10 +161,18 @@ impl Default for ReviewConfig {
 }
 
 impl ReviewConfig {
+    pub fn is_legacy(&self) -> bool {
+        self.legacy.is_some()
+    }
+
+    pub fn clear_legacy(&mut self) {
+        self.legacy = None;
+    }
+
     /// The old default represented Auto when the review table was absent.
     pub fn legacy_default() -> Self {
         Self {
-            legacy_auto: true,
+            legacy: Some(LegacyReview::default()),
             ..Self::default()
         }
     }
@@ -168,13 +183,23 @@ struct ReviewConfigOutput {
     trigger: ReviewTrigger,
     #[serde(skip_serializing_if = "Option::is_none")]
     reviewers: Option<Vec<SubagentChoice>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<std::num::NonZeroUsize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
 }
 
 impl From<ReviewConfig> for ReviewConfigOutput {
     fn from(value: ReviewConfig) -> Self {
+        let legacy = value.legacy;
         Self {
             trigger: value.trigger,
-            reviewers: (!value.legacy_auto).then_some(value.reviewers),
+            reviewers: legacy.is_none().then_some(value.reviewers),
+            count: legacy.as_ref().and_then(|old| old.count),
+            profile: legacy.as_ref().and_then(|old| old.profile.clone()),
+            effort: legacy.and_then(|old| old.effort),
         }
     }
 }
@@ -213,7 +238,6 @@ struct ReviewConfigInput {
     #[expect(dead_code, reason = "accepted only so that old files still load")]
     tier: Option<String>,
     #[serde(default)]
-    #[expect(dead_code, reason = "accepted only so that old files still load")]
     profile: Option<String>,
     #[serde(default)]
     model: Option<String>,
@@ -231,13 +255,17 @@ impl From<ReviewConfigInput> for ReviewConfig {
             count,
             enabled,
             tier: _,
-            profile: _,
+            profile,
             model,
             effort,
         } = input;
-        let legacy_auto = reviewers.is_none() && model.is_none();
+        let legacy = (reviewers.is_none() && model.is_none()).then_some(LegacyReview {
+            count,
+            profile,
+            effort: effort.clone(),
+        });
         Self {
-            legacy_auto,
+            legacy,
             trigger: trigger.unwrap_or(if enabled == Some(true) {
                 ReviewTrigger::Turn
             } else {
@@ -497,28 +525,23 @@ impl ReviewConfig {
                 } = choice
                 {
                     if let Some(model) = model {
-                        let count = count.map_or(config.reviewers.len(), |count| count.get());
-                        config.reviewers = vec![
-                            SubagentChoice {
-                                model: model.clone(),
-                                effort: effort.clone(),
-                            };
-                            count.clamp(1, MAX_REVIEWERS)
-                        ];
-                        config.legacy_auto = false;
+                        config.reviewers = apply_legacy_override(
+                            &config.reviewers,
+                            *count,
+                            Some(model),
+                            effort.as_ref(),
+                            self,
+                        );
+                        config.clear_legacy();
                         return config;
                     }
-                    if let Some(effort) = effort {
-                        for reviewer in &mut config.reviewers {
-                            reviewer.effort = Some(effort.clone());
-                        }
-                    }
-                    if let Some(count) = count {
-                        let count = count.get().min(MAX_REVIEWERS);
-                        if let Some(last) = config.reviewers.last().cloned() {
-                            config.reviewers.resize(count, last);
-                        }
-                    }
+                    config.reviewers = apply_legacy_override(
+                        &config.reviewers,
+                        *count,
+                        None,
+                        effort.as_ref(),
+                        self,
+                    );
                     return config;
                 }
                 let reviewers = match choice {
@@ -530,12 +553,61 @@ impl ReviewConfig {
                 };
                 if let Some(reviewers) = reviewers {
                     config.reviewers.clone_from(reviewers);
-                    config.legacy_auto = false;
+                    config.clear_legacy();
                 }
             }
         }
         config
     }
+}
+
+pub fn apply_legacy_override(
+    list: &[SubagentChoice],
+    count: Option<std::num::NonZeroUsize>,
+    model: Option<&String>,
+    effort: Option<&String>,
+    global: &ReviewConfig,
+) -> Vec<SubagentChoice> {
+    if let Some(model) = model {
+        let uniform = global
+            .reviewers
+            .first()
+            .filter(|first| global.reviewers.iter().all(|slot| slot == *first));
+        let n = count
+            .map(|n| n.get())
+            .or_else(|| uniform.map(|_| global.reviewers.len()))
+            .or_else(|| {
+                global
+                    .legacy
+                    .as_ref()
+                    .and_then(|old| old.count.map(|n| n.get()))
+            })
+            .unwrap_or(2)
+            .clamp(1, MAX_REVIEWERS);
+        let inherited_effort = effort
+            .cloned()
+            .or_else(|| uniform.and_then(|slot| slot.effort.clone()))
+            .or_else(|| global.legacy.as_ref().and_then(|old| old.effort.clone()));
+        return vec![
+            SubagentChoice {
+                model: model.clone(),
+                effort: inherited_effort
+            };
+            n
+        ];
+    }
+    let mut result = list.to_vec();
+    if let Some(effort) = effort {
+        for slot in &mut result {
+            slot.effort = Some(effort.clone());
+        }
+    }
+    if let Some(count) = count
+        && let Some(last) = result.last().cloned()
+    {
+        result.resize(count.get().clamp(1, MAX_REVIEWERS), last);
+    }
+    result
 }
 
 /// Indexing every session into the user's SessionWiki index.

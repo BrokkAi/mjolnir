@@ -1483,7 +1483,7 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
     .unwrap();
 
     let review = ReviewConfig {
-        legacy_auto: false,
+        legacy: None,
         trigger: ReviewTrigger::Turn,
         reviewers: vec![
             SubagentChoice {
@@ -2325,13 +2325,36 @@ fn legacy_review_keys_and_session_records_preserve_partial_overrides() {
             .for_session(Some(&model_only))
             .reviewers
             .iter()
-            .all(|reviewer| reviewer.effort.is_none())
+            .all(|reviewer| reviewer.effort.as_deref() == Some("high"))
     );
     let mut auto_config = ReviewConfig::legacy_default();
     auto_config.trigger = ReviewTrigger::Turn;
     let effective = auto_config.for_session(Some(&model_only));
-    assert!(!effective.legacy_auto);
-    assert_eq!(effective.reviewers.len(), 1);
+    assert!(!effective.is_legacy());
+    assert_eq!(effective.reviewers.len(), 2);
+    let pending = vec![
+        SubagentChoice {
+            model: "default".into(),
+            effort: None
+        };
+        2
+    ];
+    assert_eq!(
+        apply_legacy_override(
+            &pending,
+            Some(std::num::NonZeroUsize::new(1).unwrap()),
+            None,
+            None,
+            &auto_config
+        )
+        .len(),
+        1
+    );
+    assert!(
+        apply_legacy_override(&pending, None, None, Some(&"high".into()), &auto_config)
+            .iter()
+            .all(|choice| choice.effort.as_deref() == Some("high"))
+    );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&count_only).unwrap())
             .unwrap(),
@@ -2376,8 +2399,8 @@ fn empty_config_uses_clean_v1_defaults() {
     let path = directory.path().join("config.toml");
     fs::write(&path, "\n\t").unwrap();
     let loaded = Config::load_from(&path).unwrap();
-    assert!(loaded.review.legacy_auto);
-    assert!(!Config::default().review.legacy_auto);
+    assert!(loaded.review.is_legacy());
+    assert!(!Config::default().review.is_legacy());
 }
 
 #[test]
@@ -2390,7 +2413,7 @@ fn legacy_auto_survives_unrelated_saves_and_json_drafts() {
     )
     .unwrap();
     let mut config = Config::load_from(&path).unwrap();
-    assert!(config.review.legacy_auto);
+    assert!(config.review.is_legacy());
     config.phone.enabled = false;
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
@@ -2401,16 +2424,39 @@ fn legacy_auto_survives_unrelated_saves_and_json_drafts() {
         serde_json::from_str::<Config>(&json)
             .unwrap()
             .review
-            .legacy_auto
+            .is_legacy()
     );
-    config.review.legacy_auto = false;
+    config.review.clear_legacy();
     config.save_to(&path).unwrap();
     assert!(
         fs::read_to_string(&path)
             .unwrap()
             .contains("reviewers = []")
     );
-    assert!(!Config::load_from(&path).unwrap().review.legacy_auto);
+    assert!(!Config::load_from(&path).unwrap().review.is_legacy());
+}
+
+#[test]
+fn legacy_profile_count_and_effort_survive_unrelated_save() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[review]\ncount = 3\nprofile = 'claude'\neffort = 'high'\n"
+        ),
+    )
+    .unwrap();
+    let mut config = Config::load_from(&path).unwrap();
+    assert!(config.review.is_legacy());
+    config.phone.enabled = false;
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("count = 3"));
+    assert!(saved.contains("profile = "));
+    assert!(saved.contains("effort = "));
+    assert!(!saved.contains("reviewers"));
+    assert_eq!(Config::load_from(&path).unwrap().review, config.review);
 }
 
 #[test]

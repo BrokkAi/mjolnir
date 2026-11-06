@@ -142,6 +142,7 @@ impl ReviewSettingsDialog {
                     }
                 }
                 self.review.reviewers = resolved;
+                self.review.clear_legacy();
                 self.pending_autoconfigure = None;
             }
         }
@@ -381,12 +382,14 @@ impl ReviewSettingsDialog {
                 if let Some(value) = self.choices(Model(i)).0.get(index).cloned() {
                     self.review.reviewers[i].model = value;
                     self.review.reviewers[i].effort = None;
+                    self.review.clear_legacy();
                     self.update_choices(config, &dashboard.profile_capabilities);
                 }
             }
             Some(Interaction::ComboBoxCommit(Effort(i), index)) => {
                 if let Some(value) = self.choices(Effort(i)).0.get(index) {
                     self.review.reviewers[i].effort = (index != 0).then(|| value.clone());
+                    self.review.clear_legacy();
                 }
             }
             Some(Interaction::Activate(Add)) if self.review.reviewers.len() < MAX_REVIEWERS => {
@@ -395,11 +398,13 @@ impl ReviewSettingsDialog {
                         model: model.value.clone(),
                         effort: None,
                     });
+                    self.review.clear_legacy();
                     self.update_choices(config, &dashboard.profile_capabilities);
                 }
             }
             Some(Interaction::Activate(Remove(i))) if i < self.review.reviewers.len() => {
                 self.review.reviewers.remove(i);
+                self.review.clear_legacy();
                 self.update_choices(config, &dashboard.profile_capabilities);
             }
             Some(Interaction::Activate(Autoconfigure)) => {
@@ -407,7 +412,7 @@ impl ReviewSettingsDialog {
                     self.effort_notice = None;
                     let mut config = config.clone();
                     config.review.reviewers = reviewers.clone();
-                    config.review.legacy_auto = false;
+                    config.review.clear_legacy();
                     let unknown = reviewers.iter().any(|choice| {
                         dashboard
                             .profile_capabilities
@@ -427,6 +432,7 @@ impl ReviewSettingsDialog {
                         self.pending_autoconfigure = Some((reviewers, Instant::now()));
                     } else {
                         self.review.reviewers = reviewers;
+                        self.review.clear_legacy();
                     }
                     self.update_choices(&config, &dashboard.profile_capabilities);
                 }
