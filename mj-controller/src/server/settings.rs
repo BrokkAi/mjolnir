@@ -9,7 +9,10 @@
 //! `mj_client::settings::hidden`.
 use super::*;
 use mj_client::settings::{discovery, draft, hidden, save, view};
+use mj_core::profile_capabilities::CapabilityState;
 use mj_core::profile_capabilities::ProfileCapabilitiesSnapshot;
+use mj_core::review::autoconfigure::{autoconfigure, merged_model_offers};
+use mj_core::worker_launch::ProfileConfig;
 use serde_json::Value;
 
 /// A whole draft and its original travel with every save.
@@ -35,6 +38,7 @@ pub(super) struct SettingsPageResponse {
     /// The draft's discovered sub-agent choices, which the page refreshes
     /// while they are still being discovered.
     subagent_options: Value,
+    reviewer_options: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,11 +142,39 @@ fn discover(
         {
             backend.warm_profile_capabilities(&config);
         }
+        let config = draft::config_from_draft(real.clone()).ok()?;
+        let current = warm.and_then(|backend| backend.profile_capabilities_snapshot());
+        let capabilities = current.as_ref().unwrap_or(capabilities);
+        let action_reason = match capabilities.options(&config, None) {
+            Some(options)
+                if autoconfigure(&merged_model_offers(&options.models), |_| None).is_some() =>
+            {
+                Value::Null
+            }
+            Some(options) if !options.unavailable.is_empty() => {
+                Value::String(options.unavailable.join("; "))
+            }
+            Some(_) => Value::String("Autoconfigure unavailable: no supported models".into()),
+            None => Value::String("Checking reviewer models…".into()),
+        };
         let unreachable = discovery::fill_subagent_options(&mut real, capabilities).ok()?;
-        Some((real["_subagent_options"].take(), unreachable))
+        discovery::fill_reviewer_options(&mut real, capabilities).ok()?;
+        Some((
+            real["_subagent_options"].take(),
+            real["_reviewer_options"].take(),
+            action_reason,
+            unreachable,
+        ))
     })();
-    let (options, unreachable) = discovered.unwrap_or((Value::Null, None));
+    let (options, reviewer_options, action_reason, unreachable) = discovered.unwrap_or((
+        Value::Null,
+        Value::Null,
+        Value::String("Reviewer discovery is unavailable.".into()),
+        None,
+    ));
     draft["_subagent_options"] = options;
+    draft["_reviewer_options"] = reviewer_options;
+    draft["_review_action_reason"] = action_reason;
     unreachable
 }
 
@@ -154,10 +186,31 @@ fn render(
     unreachable: Option<&str>,
 ) -> Result<view::SettingsPage, String> {
     let mut page = view::render_page(draft, path)?;
+    if path == ["review"]
+        && let Some(action) = page.actions.first_mut()
+    {
+        action.disabled_reason = draft["_review_action_reason"].as_str().map(str::to_owned);
+    }
     if let Some(unreachable) = unreachable
         && path.first().is_some_and(|section| section == "subagents")
     {
         page.notices.push(unreachable.to_owned());
+    }
+    if path == ["review"] {
+        let failures = draft["_reviewer_options"]
+            .as_object()
+            .into_iter()
+            .flat_map(|options| options.values())
+            .flat_map(|options| options["unavailable"].as_array().into_iter().flatten())
+            .filter_map(Value::as_str)
+            .filter(|reason| !reason.contains("discovery pending"))
+            .collect::<std::collections::BTreeSet<_>>();
+        if !failures.is_empty() {
+            page.notices.push(format!(
+                "Reviewer effort discovery failed: {}",
+                failures.into_iter().collect::<Vec<_>>().join("; ")
+            ));
+        }
     }
     Ok(page)
 }
@@ -187,6 +240,7 @@ pub(super) async fn render_settings_page(
         Ok(SettingsPageResponse {
             page,
             subagent_options: draft["_subagent_options"].take(),
+            reviewer_options: draft["_reviewer_options"].take(),
         })
     })
     .await
@@ -201,6 +255,12 @@ pub(super) async fn edit_settings(
     check_draft(&request.draft)?;
     let capabilities = capabilities(&state);
     let backend = state.subagent.clone();
+    if let view::SettingsEdit::Action { id } = &request.edit {
+        if id != "review.autoconfigure" || request.page != ["review"] {
+            return Err(ApiError::bad_request("This action is unavailable here."));
+        }
+        return autoconfigure_settings(state, request).await.map(Json);
+    }
     // Discovery reads the configuration file, and an edit may expand `~`
     // against this user's home directory.
     tokio::task::spawn_blocking(move || {
@@ -236,6 +296,173 @@ pub(super) async fn edit_settings(
     .await
     .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
     .map(Json)
+}
+
+async fn autoconfigure_settings(
+    state: ServerState,
+    request: SettingsEditRequest,
+) -> Result<SettingsEditResponse, ApiError> {
+    let backend = state
+        .subagent
+        .clone()
+        .ok_or_else(|| ApiError::bad_request("Reviewer discovery is unavailable."))?;
+    let (mut draft, config, incoming) = tokio::task::spawn_blocking(move || {
+        let incoming = request.draft.clone();
+        let mut draft = request.draft;
+        let stored =
+            serde_json::to_value(Config::load().map_err(unreadable)?).map_err(unreadable)?;
+        hidden::restore(&mut draft, &stored).map_err(ApiError::bad_request)?;
+        let config = draft::config_from_draft(draft.clone())
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        Ok::<_, ApiError>((draft, config, incoming))
+    })
+    .await
+    .map_err(unreadable)??;
+    backend.warm_profile_capabilities(&config);
+    let snapshot = backend
+        .profile_capabilities_snapshot()
+        .unwrap_or_else(|| capabilities(&state));
+    let available = config
+        .enabled_profiles()
+        .filter_map(|(id, profile)| {
+            let entry = snapshot.profiles.get(&profile.capabilities_key(id))?;
+            let CapabilityState::Ready(choices) = &entry.choices else {
+                return None;
+            };
+            Some((
+                id.to_owned(),
+                ProfileConfig {
+                    model: choices.model.clone(),
+                    models: choices.models.clone(),
+                    efforts: choices.efforts.clone(),
+                    observed_at: 0,
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    let profile_keys = config
+        .enabled_profiles()
+        .map(|(id, profile)| (id.to_owned(), profile.capabilities_key(id)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    // Billing comes from the daemon's quota reports by profile id and from
+    // the harness (OpenCode bills per use). A profile the daemon cannot report
+    // on, such as one added in this draft, is classified by its harness alone.
+    let mut usage_priced = backend
+        .reviewer_ready_candidates(String::new())
+        .await
+        .map(|candidates| crate::review_selection::usage_priced_profiles(&candidates))
+        .unwrap_or_default();
+    usage_priced.extend(
+        config
+            .enabled_profiles()
+            .filter(|(_, profile)| {
+                mj_client::quota::harness_billing(profile.kind)
+                    == mj_client::quota::QuotaBilling::Usage
+            })
+            .map(|(id, _)| id.to_owned()),
+    );
+    let (configured, known) = crate::review_selection::autoconfigure_with_efforts(
+        &available,
+        &usage_priced,
+        |profile, model| {
+            let backend = backend.clone();
+            let mut demand = config.clone();
+            demand.review.reviewers = vec![mj_core::config::SubagentChoice {
+                model: model.clone(),
+                effort: None,
+            }];
+            demand.review.clear_legacy();
+            backend.warm_profile_capabilities(&demand);
+            let initial_snapshot = snapshot.clone();
+            let key = profile_keys.get(&profile).cloned();
+            async move {
+                let key =
+                    key.ok_or_else(|| anyhow::anyhow!("draft profile {profile:?} disappeared"))?;
+                loop {
+                    let latest = backend.profile_capabilities_snapshot();
+                    if let Some(entry) = latest
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.profiles.get(&key))
+                        .or_else(|| initial_snapshot.profiles.get(&key))
+                    {
+                        match entry.efforts.get(&model) {
+                            Some(CapabilityState::Ready(efforts)) => {
+                                let CapabilityState::Ready(mut choices) = entry.choices.clone()
+                                else {
+                                    anyhow::bail!(
+                                        "draft profile {profile:?} discovery is unavailable"
+                                    )
+                                };
+                                choices.efforts = efforts.clone();
+                                return Ok(choices);
+                            }
+                            Some(CapabilityState::Failed(error)) => anyhow::bail!("{error}"),
+                            _ => {}
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        },
+        None,
+    )
+    .await
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let mut reviewers = configured.reviewers;
+    if reviewers.is_empty() {
+        return Err(ApiError::bad_request(
+            "Autoconfigure unavailable: no supported models",
+        ));
+    }
+    let unknown = known
+        .iter()
+        .filter_map(|(model, known)| (!known).then_some(model.clone()))
+        .collect::<Vec<_>>();
+    for reviewer in &mut reviewers {
+        if unknown.contains(&reviewer.model) {
+            reviewer.effort = None;
+        }
+    }
+    let mut notices = Vec::new();
+    if !unknown.is_empty() {
+        notices.push(format!("Could not confirm reviewer efforts for {} (discovery failed or timed out); using defaults.", unknown.join(", ")));
+    }
+    if !configured.adjusted.is_empty() {
+        notices.push(format!(
+            "Adjusted reviewer efforts: {}",
+            configured
+                .adjusted
+                .iter()
+                .map(|item| format!(
+                    "{}: {} → {}",
+                    item.model,
+                    item.requested,
+                    item.used.as_deref().unwrap_or("default")
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let notice = (!notices.is_empty()).then(|| notices.join(" "));
+    draft["review"]["reviewers"] = serde_json::to_value(reviewers).map_err(unreadable)?;
+    for key in ["count", "profile", "effort"] {
+        draft["review"].as_object_mut().unwrap().remove(key);
+    }
+    hidden::rehide_restored(&mut draft, &incoming);
+    let snapshot = capabilities(&state);
+    let backend = state.subagent.clone();
+    tokio::task::spawn_blocking(move || {
+        discover(&mut draft, &snapshot, backend.as_deref());
+        let page = render(&draft, &["review".into()], None).map_err(ApiError::not_found)?;
+        Ok(SettingsEditResponse {
+            draft,
+            page,
+            notice,
+            error: None,
+        })
+    })
+    .await
+    .map_err(unreadable)?
 }
 
 pub(super) async fn save_settings(
@@ -288,6 +515,14 @@ async fn save_draft_settings(
         };
         let updated =
             draft::config_from_draft(draft).map_err(|error| refused(anyhow::Error::new(error)))?;
+        if !updated.review.is_legacy()
+            && updated.review.trigger != mj_core::config::ReviewTrigger::Off
+            && updated.review.reviewers.is_empty()
+        {
+            return Err(ApiError::bad_request(
+                "Add reviewer on Settings › Code Review before enabling automatic review.",
+            ));
+        }
         let updated = serde_json::to_string(&updated).map_err(|error| refused(error.into()))?;
         let sessions = crate::database::load_state().map_err(|error| {
             ApiError::new(

@@ -1,855 +1,856 @@
 use super::*;
-use crate::actions::CommandId;
-use crate::test_support::{
-    buffer_lines, chord, config, dashboard_with_session, drawn, key, mouse_at, open_palette, point,
-    running_session,
+use crate::Mode;
+use crate::test_support::{buffer_lines, config, drawn, key};
+use crossterm::event::KeyCode;
+use mj_core::profile_capabilities::{
+    CapabilityState, ProfileCapabilities, ProfileCapabilitiesSnapshot,
 };
-use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
+use mj_core::worker_launch::ProfileConfig;
 use ratatui::{Terminal, backend::TestBackend};
-
-fn open(dashboard: &mut DashboardState) -> DashboardAction {
-    dashboard.begin_review_settings()
-}
-
-fn dialog(dashboard: &DashboardState) -> &ReviewSettingsDialog {
-    let Mode::Setup(setup) = &dashboard.mode else {
-        panic!("expected review settings dialog")
-    };
-    setup.review_editor.as_ref().expect("review child")
-}
 
 fn choice(value: &str) -> SessionConfigChoice {
     SessionConfigChoice {
-        value: value.to_owned(),
-        name: value.to_owned(),
+        value: value.into(),
+        name: value.into(),
         description: None,
     }
 }
 
-fn choose_next(dashboard: &mut DashboardState) -> DashboardAction {
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Down)),
-        DashboardAction::None
-    );
-    dashboard.handle_key(key(KeyCode::Enter))
+fn catalog(config: &Config, models: &[&str]) -> ProfileCapabilitiesSnapshot {
+    ProfileCapabilitiesSnapshot {
+        profiles: config
+            .enabled_profiles()
+            .map(|(id, profile)| {
+                (
+                    profile.capabilities_key(id),
+                    ProfileCapabilities {
+                        choices: CapabilityState::Ready(ProfileConfig {
+                            model: models.first().map(|model| (*model).into()),
+                            models: models.iter().map(|model| choice(model)).collect(),
+                            efforts: vec![],
+                            observed_at: 1,
+                        }),
+                        efforts: models
+                            .iter()
+                            .map(|model| {
+                                (
+                                    (*model).into(),
+                                    CapabilityState::Ready(vec![
+                                        choice("medium"),
+                                        choice("high"),
+                                        choice("xhigh"),
+                                    ]),
+                                )
+                            })
+                            .collect(),
+                    },
+                )
+            })
+            .collect(),
+    }
 }
 
-fn choose_first(dashboard: &mut DashboardState) -> DashboardAction {
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
+#[test]
+fn autoconfigure_button_fills_rows_with_offered_efforts() {
+    let config = config();
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    assert!(
+        !dialog
+            .form
+            .borrow()
+            .is_enabled(ReviewSettingsFocus::Autoconfigure)
     );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Home)),
-        DashboardAction::None
+    dialog.update_choices(
+        &config,
+        &catalog(&config, &["gpt-6-terra", "gpt-6-sol"]),
+        &Default::default(),
     );
-    dashboard.handle_key(key(KeyCode::Enter))
+    assert!(dialog.review.reviewers.is_empty());
+    let suggested = dialog.suggested().unwrap();
+    assert_eq!(suggested[0].model, "gpt-6-terra");
+    assert_eq!(suggested[0].effort.as_deref(), Some("xhigh"));
+    assert!(
+        dialog
+            .form
+            .borrow()
+            .is_enabled(ReviewSettingsFocus::Autoconfigure)
+    );
+    dialog.update_choices(
+        &config,
+        &catalog(&config, &["gpt-6-terra", "gpt-6-sol"]),
+        &Default::default(),
+    );
+    assert!(dialog.review.reviewers.is_empty());
 }
 
-fn available(
-    model_choices: &[&str],
-    effort_choices: &[&str],
-    effort_known: bool,
-) -> ReviewSettingsDiscoveryResult {
-    ReviewSettingsDiscoveryResult::Available {
-        choices: ReviewSettingsChoices {
-            model_choices: model_choices.iter().map(|value| choice(value)).collect(),
-            effort_choices: effort_choices.iter().map(|value| choice(value)).collect(),
-            effort_capabilities_discovered: effort_known,
+#[test]
+fn autoconfigure_skips_models_only_usage_priced_profiles_offer() {
+    let config = config();
+    let subscription = ["gpt-6.1-terra", "gpt-6.1-sol", "claude-haiku-4.5"];
+    let api = [
+        "openrouter/~openai/gpt-terra-latest",
+        "openrouter/~openai/gpt-sol-latest",
+        "openrouter/~anthropic/claude-haiku-latest",
+    ];
+    let mut snapshot = catalog(&config, &subscription);
+    // Two usage-priced profiles outnumber the one subscription, so only the
+    // billing tier keeps the subscription models.
+    let api_entry = catalog(&config, &api)
+        .profiles
+        .into_values()
+        .next()
+        .unwrap();
+    for id in ["codex-1", "codex-2"] {
+        snapshot
+            .profiles
+            .insert(config.profiles[id].capabilities_key(id), api_entry.clone());
+    }
+    let suggested = |usage_priced: &[&str]| {
+        let mut dialog = ReviewSettingsDialog::new(&config);
+        let usage_priced = usage_priced.iter().map(|id| id.to_string()).collect();
+        dialog.update_choices(&config, &snapshot, &usage_priced);
+        dialog
+            .suggested()
+            .unwrap()
+            .iter()
+            .map(|choice| choice.model.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        suggested(&["codex-1", "codex-2"]),
+        ["gpt-6.1-terra", "gpt-6.1-sol", "claude-haiku-4.5"]
+    );
+    // Unknown billing counts as a subscription, so the newer aliases win.
+    assert!(suggested(&[])[0].starts_with("openrouter/"));
+}
+
+const SUBSCRIPTION_MODELS: [&str; 3] = ["gpt-6.1-terra", "gpt-6.1-sol", "claude-haiku-4.5"];
+const API_MODELS: [&str; 3] = [
+    "openrouter/~openai/gpt-terra-latest",
+    "openrouter/~openai/gpt-sol-latest",
+    "openrouter/~anthropic/claude-haiku-latest",
+];
+
+/// Every profile offers the subscription models except `api`, which offers
+/// only newer-looking OpenRouter aliases.
+fn billing_snapshot(config: &Config, api: &[&str]) -> ProfileCapabilitiesSnapshot {
+    let mut snapshot = catalog(config, &SUBSCRIPTION_MODELS);
+    let api_entry = catalog(config, &API_MODELS)
+        .profiles
+        .into_values()
+        .next()
+        .unwrap();
+    for id in api {
+        snapshot
+            .profiles
+            .insert(config.profiles[*id].capabilities_key(id), api_entry.clone());
+    }
+    snapshot
+}
+
+fn api_quota(
+    profile: &str,
+    harness: mj_core::config::HarnessKind,
+) -> mj_client::quota::ProfileQuota {
+    mj_client::quota::ProfileQuota {
+        paid_credits: None,
+        banked_resets: None,
+        profile_id: profile.into(),
+        harness,
+        windows: Vec::new(),
+        extra: Some(mj_client::quota::API_LABEL.into()),
+        error: None,
+        refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
+    }
+}
+
+fn setup_review_models(dashboard: &DashboardState) -> Vec<String> {
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    setup
+        .review_editor
+        .as_ref()
+        .unwrap()
+        .review
+        .reviewers
+        .iter()
+        .map(|choice| choice.model.clone())
+        .collect()
+}
+
+fn press_autoconfigure(dashboard: &mut DashboardState) {
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    setup
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .form
+        .get_mut()
+        .focus(ReviewSettingsFocus::Autoconfigure);
+    dashboard.handle_key(key(KeyCode::Enter));
+}
+
+#[test]
+fn autoconfigure_button_uses_the_quota_reports_present_when_pressed() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    // The suggestion is computed before any quota report: both OpenRouter
+    // profiles count as subscriptions and their newer aliases win.
+    let snapshot = billing_snapshot(&dashboard.config, &["codex-1", "codex-2"]);
+    dashboard.set_profile_capabilities(snapshot);
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    assert!(
+        setup.review_editor.as_ref().unwrap().suggested().unwrap()[0]
+            .model
+            .starts_with("openrouter/")
+    );
+    // The reports arrive without any event that refreshes the dialog.
+    for id in ["codex-1", "codex-2"] {
+        dashboard.quotas.insert(
+            id.into(),
+            api_quota(id, mj_core::config::HarnessKind::Codex),
+        );
+    }
+    press_autoconfigure(&mut dashboard);
+    assert_eq!(setup_review_models(&dashboard), SUBSCRIPTION_MODELS);
+}
+
+#[test]
+fn quota_updates_refresh_the_open_dialogs_suggestion() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let snapshot = billing_snapshot(&dashboard.config, &["codex-1", "codex-2"]);
+    dashboard.set_profile_capabilities(snapshot);
+    let suggested = |dashboard: &DashboardState| {
+        let Mode::Setup(setup) = &dashboard.mode else {
+            panic!("setup")
+        };
+        setup.review_editor.as_ref().unwrap().suggested().unwrap()[0]
+            .model
+            .clone()
+    };
+    assert!(suggested(&dashboard).starts_with("openrouter/"));
+    dashboard.apply_quota(api_quota("codex-1", mj_core::config::HarnessKind::Codex));
+    dashboard.apply_quota(api_quota("codex-2", mj_core::config::HarnessKind::Codex));
+    assert_eq!(suggested(&dashboard), "gpt-6.1-terra");
+}
+
+#[test]
+fn an_opencode_profile_without_a_report_is_usage_priced() {
+    let mut config = config();
+    config.profiles.insert(
+        "openrouter".into(),
+        mj_core::config::HarnessProfile {
+            kind: mj_core::config::HarnessKind::OpenCode,
+            home: "/profiles/openrouter/opencode".into(),
+            ..config.profiles["codex-1"].clone()
         },
-        cleanup_warning: None,
+    );
+    let mut dashboard = DashboardState::new(config, Default::default(), Default::default());
+    assert_eq!(
+        dashboard.usage_priced_profiles(&dashboard.config),
+        std::collections::BTreeSet::from(["openrouter".to_owned()])
+    );
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let snapshot = billing_snapshot(&dashboard.config, &["openrouter"]);
+    dashboard.set_profile_capabilities(snapshot);
+    press_autoconfigure(&mut dashboard);
+    assert_eq!(setup_review_models(&dashboard), SUBSCRIPTION_MODELS);
+}
+
+#[test]
+fn opening_with_reviewers_preserves_them_when_catalog_arrives() {
+    let mut config = config();
+    config.review.reviewers = vec![SubagentChoice {
+        model: "custom-model".into(),
+        effort: Some("high".into()),
+    }];
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    dialog.update_choices(
+        &config,
+        &catalog(&config, &["gpt-6-terra", "gpt-6-sol"]),
+        &Default::default(),
+    );
+    assert_eq!(dialog.review.reviewers, config.review.reviewers);
+}
+
+#[test]
+fn autoconfigure_disabled_without_supported_models() {
+    let config = config();
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    dialog.update_choices(
+        &config,
+        &catalog(&config, &["other-model"]),
+        &Default::default(),
+    );
+    assert!(dialog.review.reviewers.is_empty());
+    assert!(
+        !dialog
+            .form
+            .borrow()
+            .is_enabled(ReviewSettingsFocus::Autoconfigure)
+    );
+    assert!(dialog.can_save()); // Off accepts an empty list.
+    dialog.review.trigger = ReviewTrigger::Turn;
+    assert!(!dialog.can_save());
+}
+
+#[test]
+fn effort_choices_follow_the_selected_model() {
+    let config = config();
+    let mut catalog = catalog(&config, &["gpt-6-terra", "gpt-6-sol"]);
+    for profile in catalog.profiles.values_mut() {
+        profile.efforts.insert(
+            "gpt-6-terra".into(),
+            CapabilityState::Ready(vec![choice("xhigh")]),
+        );
+        profile.efforts.insert(
+            "gpt-6-sol".into(),
+            CapabilityState::Ready(vec![choice("medium")]),
+        );
     }
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    dialog.update_choices(&config, &catalog, &Default::default());
+    dialog.review.reviewers = dialog.suggested().unwrap();
+    dialog.update_choices(&config, &catalog, &Default::default());
+    assert_eq!(
+        dialog.choices(ReviewSettingsFocus::Effort(0)).0,
+        ["Default", "xhigh"]
+    );
+    assert_eq!(
+        dialog.choices(ReviewSettingsFocus::Effort(1)).0,
+        ["Default", "medium"]
+    );
 }
 
-fn rendered(dashboard: &mut DashboardState, width: u16, height: u16) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-    terminal
-        .draw(|frame| crate::render::render(frame, dashboard))
-        .expect("draw review settings");
-    buffer_lines(terminal.backend().buffer()).join("\n")
+#[test]
+fn reviewer_rows_can_be_added_removed_and_reconfigured() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let snapshot = catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]);
+    dashboard.set_profile_capabilities(snapshot.clone());
+    let config = dashboard.config.clone();
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    let editor = setup.review_editor.as_mut().unwrap();
+    editor.review.reviewers = editor.suggested().unwrap();
+    editor.update_choices(&config, &snapshot, &Default::default());
+    assert_eq!(editor.review.reviewers.len(), 2);
+    editor.form.get_mut().focus(ReviewSettingsFocus::Add);
+    dashboard.handle_key(key(KeyCode::Enter));
+    drawn(&mut dashboard, 100, 30);
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    let editor = setup.review_editor.as_mut().unwrap();
+    assert_eq!(editor.review.reviewers.len(), 3);
+    assert!(!editor.form.borrow().is_enabled(ReviewSettingsFocus::Add));
+    dashboard.handle_key(key(KeyCode::Tab));
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    let editor = setup.review_editor.as_mut().unwrap();
+    editor.form.get_mut().focus(ReviewSettingsFocus::Remove(1));
+    drawn(&mut dashboard, 100, 30);
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    assert_eq!(
+        setup
+            .review_editor
+            .as_ref()
+            .unwrap()
+            .form
+            .borrow()
+            .focused(),
+        Some(ReviewSettingsFocus::Remove(1))
+    );
+    dashboard.handle_key(key(KeyCode::Enter));
+    drawn(&mut dashboard, 100, 30);
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    assert_eq!(
+        setup.review_editor.as_ref().unwrap().review.reviewers.len(),
+        2
+    );
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    let editor = setup.review_editor.as_mut().unwrap();
+    editor.review.reviewers[0].model = "manual".into();
+    dashboard.handle_key(key(KeyCode::Tab));
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    let editor = setup.review_editor.as_mut().unwrap();
+    editor
+        .form
+        .get_mut()
+        .focus(ReviewSettingsFocus::Autoconfigure);
+    drawn(&mut dashboard, 100, 30);
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    assert_eq!(
+        setup.review_editor.as_ref().unwrap().review.reviewers[0].model,
+        "gpt-6-terra"
+    );
 }
 
-fn append_golden_state(output: &mut String, label: &str, width: u16, height: u16, surface: &str) {
-    use std::fmt::Write as _;
+#[test]
+fn adding_reviewer_during_legacy_upgrade_serializes_the_edit() {
+    let mut initial = config();
+    initial.review = ReviewConfig::legacy_default();
+    let mut dashboard = DashboardState::new(initial, Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let snapshot = catalog(&dashboard.config, &["gpt-6-terra"]);
+    dashboard.set_profile_capabilities(snapshot);
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    setup
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .form
+        .get_mut()
+        .focus(ReviewSettingsFocus::Add);
+    drawn(&mut dashboard, 100, 30);
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    let review = &setup.review_editor.as_ref().unwrap().review;
+    assert!(!review.is_legacy());
+    assert_eq!(review.reviewers.len(), 1);
+    assert!(
+        serde_json::to_value(review)
+            .unwrap()
+            .get("reviewers")
+            .is_some()
+    );
+}
 
-    if !output.is_empty() {
-        output.push('\n');
+#[test]
+fn save_validation_requires_rows_only_for_automatic_trigger() {
+    let config = config();
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    assert!(dialog.can_save());
+    dialog.review.trigger = ReviewTrigger::Push;
+    assert!(!dialog.can_save());
+    assert!(
+        ReviewSettingsDialog::validation_error(&dialog.validation_snapshot(), &dialog.review)
+            .is_some()
+    );
+    dialog.review.reviewers.push(SubagentChoice {
+        model: "gpt-6-terra".into(),
+        effort: None,
+    });
+    assert!(dialog.can_save());
+}
+
+#[test]
+fn known_effort_choices_gate_save_but_pending_choices_do_not() {
+    let config = config();
+    let mut catalog = catalog(&config, &["gpt-6-terra"]);
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    dialog.review.reviewers.push(SubagentChoice {
+        model: "gpt-6-terra".into(),
+        effort: Some("xhigh".into()),
+    });
+    for profile in catalog.profiles.values_mut() {
+        profile
+            .efforts
+            .insert("gpt-6-terra".into(), CapabilityState::Ready(vec![]));
     }
-    writeln!(output, "=== {label} ({width}x{height}) ===").expect("write state header");
-    output.push_str(surface);
-    output.push('\n');
+    dialog.update_choices(&config, &catalog, &Default::default());
+    assert!(!dialog.can_save());
+    assert_eq!(
+        ReviewSettingsDialog::validation_error(&dialog.validation_snapshot(), &dialog.review)
+            .as_deref(),
+        Some("Reviewer 1 effort is unavailable.")
+    );
+    dialog.review.reviewers[0].effort = None;
+    assert!(dialog.can_save());
+    dialog.review.reviewers[0].effort = Some("xhigh".into());
+    for profile in catalog.profiles.values_mut() {
+        profile
+            .efforts
+            .insert("gpt-6-terra".into(), CapabilityState::Pending);
+    }
+    dialog.update_choices(&config, &catalog, &Default::default());
+    assert!(dialog.can_save());
 }
 
-fn open_review_from_setup(dashboard: &mut DashboardState) -> DashboardAction {
-    let _ = chord(dashboard, CommandId::OpenConfig);
-    let lines = drawn(dashboard, 100, 30);
-    let code_review = point(&lines, "Code Review");
-    dashboard.handle_mouse(mouse_at(
-        MouseEventKind::Down(MouseButton::Left),
-        code_review,
-    ));
-    dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), code_review));
-    DashboardAction::None
+#[test]
+fn reviewer_focus_follows_model_effort_remove_order() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let snapshot = catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]);
+    dashboard.set_profile_capabilities(snapshot.clone());
+    let config = dashboard.config.clone();
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    let editor = setup.review_editor.as_mut().unwrap();
+    editor.review.reviewers = editor.suggested().unwrap();
+    editor.update_choices(&config, &snapshot, &Default::default());
+    editor.form.get_mut().focus(ReviewSettingsFocus::Model(0));
+    drawn(&mut dashboard, 100, 30);
+    for expected in [
+        ReviewSettingsFocus::Effort(0),
+        ReviewSettingsFocus::Remove(0),
+        ReviewSettingsFocus::Model(1),
+    ] {
+        dashboard.handle_key(key(KeyCode::Tab));
+        let Mode::Setup(setup) = &dashboard.mode else {
+            panic!("setup")
+        };
+        assert_eq!(
+            setup
+                .review_editor
+                .as_ref()
+                .unwrap()
+                .form
+                .borrow()
+                .focused(),
+            Some(expected)
+        );
+    }
 }
 
 #[test]
 fn golden_review_settings() {
-    use std::fmt::Write as _;
-
-    let mut output = String::new();
-
-    let mut no_session = DashboardState::new(
-        config(),
-        mj_core::state::State::default(),
-        Default::default(),
-    );
-    let action = open_review_from_setup(&mut no_session);
-    append_golden_state(
-        &mut output,
-        "Code Review opens without a selected session",
-        100,
-        30,
-        &rendered(&mut no_session, 100, 30),
-    );
-    writeln!(output, "action: {action:?}").expect("write entry action");
-    writeln!(
-        output,
-        "selected session: {:?}",
-        no_session.selected_session_id()
-    )
-    .expect("write selected session");
-
-    let mut palette = DashboardState::new(
-        config(),
-        mj_core::state::State::default(),
-        Default::default(),
-    );
-    open_palette(&mut palette);
-    let has_setup = match &palette.mode {
-        Mode::Palette(palette) => palette
-            .entries
-            .iter()
-            .any(|entry| entry.id == CommandId::OpenConfig),
-        _ => false,
-    };
-    append_golden_state(
-        &mut output,
-        "command palette exposes Setup without a selected session",
-        100,
-        30,
-        &rendered(&mut palette, 100, 30),
-    );
-    writeln!(output, "Setup command available: {has_setup}").expect("write command availability");
-
-    let mut dashboard = dashboard_with_session(running_session());
-    let entry_action = open_review_from_setup(&mut dashboard);
-    append_golden_state(
-        &mut output,
-        "global review form",
-        100,
-        30,
-        &rendered(&mut dashboard, 100, 30),
-    );
-    writeln!(output, "action: {entry_action:?}").expect("write entry action");
-
-    // Show the saved reviewer count in the same form as trigger and profile.
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Reviewers {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    dashboard.handle_key(key(KeyCode::Backspace));
-    dashboard.handle_key(key(KeyCode::Char('4')));
-    append_golden_state(
-        &mut output,
-        "four reviewers remain selectable",
-        100,
-        30,
-        &rendered(&mut dashboard, 100, 30),
-    );
-    assert_eq!(dialog(&dashboard).review.count.get(), 4);
-
-    // Return to Profile, then choose the first configured profile.
-    dialog(&dashboard)
-        .form
-        .borrow_mut()
-        .focus(ReviewSettingsFocus::Profile);
-    let probe = choose_next(&mut dashboard);
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    let action = dashboard.handle_key(key(KeyCode::Enter));
-    append_golden_state(
-        &mut output,
-        "save applies only global review values",
-        100,
-        30,
-        &rendered(&mut dashboard, 100, 30),
-    );
-    writeln!(output, "discovery action: {probe:?}").expect("write discovery action");
-    match action {
-        DashboardAction::SaveSetup { updated, .. } => {
-            let updated: serde_json::Value = serde_json::from_str(&updated).expect("saved config");
-            writeln!(output, "saved global review: {}", updated["review"])
-                .expect("write saved review");
-        }
-        other => panic!("expected global setup save, got {other:?}"),
-    }
-
-    let mut auto = dashboard_with_session(running_session());
-    let _ = open_review_from_setup(&mut auto);
-    let editor = dialog(&auto);
-    let model_enabled = editor.form.borrow().is_enabled(ReviewSettingsFocus::Model);
-    let effort_enabled = editor.form.borrow().is_enabled(ReviewSettingsFocus::Effort);
-    let save_enabled = editor.can_save();
-    append_golden_state(
-        &mut output,
-        "Auto profile leaves manual overrides disabled",
-        100,
-        30,
-        &rendered(&mut auto, 100, 30),
-    );
-    writeln!(output, "profile: Auto; model enabled: {model_enabled}; effort enabled: {effort_enabled}; save enabled: {save_enabled}")
-        .expect("write Auto form state");
-
-    auto.handle_key(key(KeyCode::Enter));
-    append_golden_state(
-        &mut output,
-        "review trigger choices",
-        100,
-        30,
-        &rendered(&mut auto, 100, 30),
-    );
-    auto.handle_key(key(KeyCode::End));
-    auto.handle_key(key(KeyCode::Enter));
-    assert!(dialog(&auto).review.is_push());
-    append_golden_state(
-        &mut output,
-        "before-push review selected",
-        100,
-        30,
-        &rendered(&mut auto, 100, 30),
-    );
-
-    mj_core::golden::assert_golden(
-        env!("CARGO_MANIFEST_DIR"),
-        "review-settings",
-        output.trim_end(),
-    );
-}
-
-#[test]
-fn invalid_reviewer_count_blocks_save_until_a_positive_count_is_entered() {
-    let mut dashboard = dashboard_with_session(running_session());
-    open(&mut dashboard);
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Reviewers {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    dashboard.handle_key(key(KeyCode::Backspace));
-    dashboard.handle_key(key(KeyCode::Char('0')));
-    assert_eq!(dialog(&dashboard).reviewer_count.value(), "0");
-    assert!(!dialog(&dashboard).can_save());
-    assert_eq!(dialog(&dashboard).focused(), ReviewSettingsFocus::Reviewers);
-    assert_eq!(
-        dashboard.handle_key(crossterm::event::KeyEvent::new(
-            KeyCode::Char('s'),
-            crossterm::event::KeyModifiers::CONTROL,
-        )),
-        DashboardAction::None
-    );
-    assert!(dialog(&dashboard).save_error.is_some());
-    dashboard.handle_key(key(KeyCode::Backspace));
-    dashboard.handle_key(key(KeyCode::Char('4')));
-    assert!(dialog(&dashboard).can_save());
-    assert_eq!(dialog(&dashboard).review.count.get(), 4);
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    let DashboardAction::SaveSetup { updated, .. } = dashboard.handle_key(key(KeyCode::Enter))
-    else {
-        panic!("valid reviewer count should save the Settings draft");
-    };
-    let saved: serde_json::Value = serde_json::from_str(&updated).expect("saved config");
-    assert_eq!(saved["review"]["count"], 4);
-}
-
-#[test]
-fn review_selectors_render_as_comboboxes_and_escape_closes_only_the_popup() {
-    let mut dashboard = dashboard_with_session(running_session());
-    open(&mut dashboard);
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    dashboard.set_profile_capabilities(catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]));
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal
         .draw(|frame| crate::render::render(frame, &mut dashboard))
         .unwrap();
-    let text = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(text.matches(ComboBox::GLYPH).count() >= 3, "{text}");
-    assert!(!text.contains("Tier"), "{text}");
-    assert!(
-        !text.contains("Quick") && !text.contains("Extended"),
-        "{text}"
+    let wide = buffer_lines(terminal.backend().buffer()).join("\n");
+    let mut narrow_terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+    narrow_terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .unwrap();
+    let narrow = buffer_lines(narrow_terminal.backend().buffer()).join("\n");
+    let rendered = format!("=== Wide (100x30) ===\n{wide}\n=== Narrow (60x30) ===\n{narrow}");
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "review-settings",
+        rendered.trim_end(),
     );
+}
 
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Profile {
-        dashboard.handle_key(key(KeyCode::Tab));
+#[test]
+fn autoconfigure_waits_for_efforts_then_uses_harness_default_for_unsupported_effort() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let mut snapshot = catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]);
+    for entry in snapshot.profiles.values_mut() {
+        entry.efforts.clear();
     }
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert!(
-        dialog(&dashboard)
-            .combo
-            .is_open(ReviewSettingsFocus::Profile)
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Esc)),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Setup(_)));
-    assert!(dialog(&dashboard).combo.open_id().is_none());
-}
-
-#[test]
-fn progress_choices_are_cached_before_cleanup_and_stale_replies_are_ignored() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.config.review.profile = Some("codex-1".into());
-    dashboard.config.review.trigger = mj_core::config::ReviewTrigger::Turn;
-    let DashboardAction::DiscoverReviewSettings {
-        generation,
-        profile_id,
-        model,
-    } = open(&mut dashboard)
-    else {
-        panic!("configured profile must start discovery")
+    dashboard.set_profile_capabilities(snapshot.clone());
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
     };
-    assert!(dashboard.needs_fast_tick());
-    assert!(dashboard.apply_review_settings_choices(
-        generation,
-        &profile_id,
-        model.as_deref(),
-        ReviewSettingsChoices::default(),
-    ));
-    assert!(dialog(&dashboard).model_choices_discovered);
-    assert!(dialog(&dashboard).probing);
-    assert!(
-        dashboard
-            .review_settings_choices
-            .contains_key(&(profile_id.clone(), model.clone()))
-    );
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert!(!dashboard.needs_fast_tick());
-    open(&mut dashboard);
-    assert!(!dashboard.apply_review_settings_choices(
-        generation,
-        &profile_id,
-        model.as_deref(),
-        ReviewSettingsChoices::default(),
-    ));
-    assert!(dialog(&dashboard).model_choices_discovered);
-}
-
-#[test]
-fn clearing_the_profile_cancels_discovery_without_closing_the_draft() {
-    let mut dashboard = dashboard_with_session(running_session());
-    open(&mut dashboard);
-    choose_next(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Tab));
-    assert!(matches!(
-        choose_next(&mut dashboard),
-        DashboardAction::DiscoverReviewSettings { .. }
-    ));
-    assert!(matches!(
-        choose_first(&mut dashboard),
-        DashboardAction::CancelReviewSettingsDiscovery
-    ));
-    assert!(dialog(&dashboard).review.profile.is_none());
-    assert!(dialog(&dashboard).review.arms_turn_review());
-    assert!(dialog(&dashboard).can_save());
-    // Esc returns to Settings with the change still in its draft.
-    dashboard.handle_key(key(KeyCode::Esc));
-    assert!(!dashboard.dialog_confirmation_open());
-    let Mode::Setup(setup) = &dashboard.mode else {
-        panic!("Esc returns to Settings")
-    };
-    assert!(setup.review_editor.is_none());
-    assert!(setup.is_dirty(), "the enabled review stays in the draft");
-}
-
-#[test]
-
-fn stale_discovery_does_not_replace_choices_after_model_change() {
-    let mut config = config();
-    config.review.profile = Some("codex-1".into());
-    let mut dashboard =
-        DashboardState::new(config, mj_core::state::State::default(), Default::default());
-    let initial = open(&mut dashboard);
-    let DashboardAction::DiscoverReviewSettings {
-        generation,
-        profile_id,
-        model,
-    } = initial
-    else {
-        panic!("expected initial probe")
-    };
-    dashboard.apply_review_settings_discovery(
-        generation,
-        &profile_id,
-        model.as_deref(),
-        Ok(ReviewSettingsDiscoveryResult::Available {
-            choices: ReviewSettingsChoices {
-                model_choices: vec![SessionConfigChoice {
-                    value: "model-a".into(),
-                    name: "Model A".into(),
-                    description: None,
-                }],
-                effort_choices: vec![],
-                effort_capabilities_discovered: false,
-            },
-            cleanup_warning: None,
-        }),
-    );
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Model {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Down)),
-        DashboardAction::None,
-        "previewing a model must not start discovery"
-    );
-    assert_eq!(dialog(&dashboard).generation, generation);
-    let model_action = dashboard.handle_key(key(KeyCode::Enter));
-    let DashboardAction::DiscoverReviewSettings {
-        generation: newer,
-        profile_id,
-        model,
-    } = model_action
-    else {
-        panic!("expected model probe")
-    };
-    assert!(newer > generation);
-    assert!(dialog(&dashboard).probing);
-    assert_eq!(dialog(&dashboard).model_choices[0].value, "model-a");
-    assert!(dialog(&dashboard).effort_choices.is_empty());
-    dashboard.apply_review_settings_discovery(
-        generation,
-        &profile_id,
-        None,
-        Ok(ReviewSettingsDiscoveryResult::Available {
-            choices: ReviewSettingsChoices {
-                model_choices: vec![SessionConfigChoice {
-                    value: "stale".into(),
-                    name: "Stale".into(),
-                    description: None,
-                }],
-                effort_choices: vec![],
-                effort_capabilities_discovered: false,
-            },
-            cleanup_warning: None,
-        }),
-    );
-    assert_eq!(dialog(&dashboard).model_choices[0].value, "model-a");
-    assert!(dialog(&dashboard).probing);
-    dashboard.apply_review_settings_discovery(
-        newer,
-        &profile_id,
-        model.as_deref(),
-        Ok(ReviewSettingsDiscoveryResult::Available {
-            choices: ReviewSettingsChoices::default(),
-            cleanup_warning: None,
-        }),
-    );
-    assert!(!dialog(&dashboard).probing);
-}
-
-#[test]
-fn selecting_the_current_value_does_not_restart_pending_discovery() {
-    let mut config = config();
-    config.review.profile = Some("codex-1".into());
-    let mut dashboard =
-        DashboardState::new(config, mj_core::state::State::default(), Default::default());
-    let initial = open(&mut dashboard);
-    assert!(matches!(
-        initial,
-        DashboardAction::DiscoverReviewSettings { .. }
-    ));
-    let generation = dialog(&dashboard).generation;
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Model {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    assert_eq!(choose_first(&mut dashboard), DashboardAction::None);
-    assert!(dialog(&dashboard).probing);
-    assert_eq!(dialog(&dashboard).generation, generation);
-}
-
-#[test]
-fn effort_change_does_not_restart_discovery() {
-    let mut config = config();
-    config.review.profile = Some("codex-1".into());
-    let mut dashboard =
-        DashboardState::new(config, mj_core::state::State::default(), Default::default());
-    let DashboardAction::DiscoverReviewSettings { generation, .. } = open(&mut dashboard) else {
-        panic!("expected initial probe")
-    };
-    dashboard.apply_review_settings_discovery(
-        generation,
-        "codex-1",
-        None,
-        Ok(ReviewSettingsDiscoveryResult::Available {
-            choices: ReviewSettingsChoices {
-                model_choices: vec![],
-                effort_choices: vec![SessionConfigChoice {
-                    value: "low".into(),
-                    name: "Low".into(),
-                    description: None,
-                }],
-                effort_capabilities_discovered: true,
-            },
-            cleanup_warning: None,
-        }),
-    );
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Effort {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    let action = choose_next(&mut dashboard);
-    assert_eq!(action, DashboardAction::None);
-    assert!(!dialog(&dashboard).probing);
-}
-
-#[test]
-fn selectors_show_unverified_until_capabilities_are_discovered() {
-    assert_eq!(
-        ReviewSettingsDialog::value_label(Some("opus"), &[], false),
-        "opus (unverified)"
-    );
-    assert_eq!(
-        ReviewSettingsDialog::value_label(Some("opus"), &[], true),
-        "opus (unavailable)"
-    );
-}
-
-#[test]
-fn closing_and_reopening_uses_cached_choices() {
-    let mut config = config();
-    config.review.profile = Some("codex-1".into());
-    let mut dashboard =
-        DashboardState::new(config, mj_core::state::State::default(), Default::default());
-    let DashboardAction::DiscoverReviewSettings {
-        generation,
-        profile_id,
-        model,
-    } = open(&mut dashboard)
-    else {
-        panic!("expected initial probe")
-    };
-    if let Mode::Setup(setup) = &mut dashboard.mode {
-        setup
-            .review_editor
-            .as_mut()
-            .expect("review editor")
-            .form
-            .get_mut()
-            .focus(ReviewSettingsFocus::Back);
-    } else {
-        panic!("setup remains open after discovery");
-    }
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::CancelReviewSettingsDiscovery
-    );
-    dashboard.cancel_modal();
-    assert!(!dashboard.modal_open());
-
-    assert!(!dashboard.apply_review_settings_discovery(
-        generation,
-        &profile_id,
-        model.as_deref(),
-        Ok(ReviewSettingsDiscoveryResult::Available {
-            choices: ReviewSettingsChoices {
-                model_choices: vec![SessionConfigChoice {
-                    value: "old".into(),
-                    name: "Old".into(),
-                    description: None,
-                }],
-                effort_choices: vec![],
-                effort_capabilities_discovered: false,
-            },
-            cleanup_warning: None,
-        }),
-    ));
-    let DashboardAction::DiscoverReviewSettings {
-        generation: reopened,
-        profile_id,
-        model,
-    } = open(&mut dashboard)
-    else {
-        panic!("expected reopened discovery")
-    };
-    dashboard.apply_review_settings_discovery(
-        reopened,
-        &profile_id,
-        model.as_deref(),
-        Ok(ReviewSettingsDiscoveryResult::Available {
-            choices: ReviewSettingsChoices {
-                model_choices: vec![SessionConfigChoice {
-                    value: "old".into(),
-                    name: "Old".into(),
-                    description: None,
-                }],
-                effort_choices: vec![],
-                effort_capabilities_discovered: false,
-            },
-            cleanup_warning: None,
-        }),
-    );
-    dashboard.cancel_modal();
-    let reopened = open(&mut dashboard);
-    assert_eq!(reopened, DashboardAction::None);
-    assert!(dialog(&dashboard).model_choices_discovered);
-    assert_eq!(dialog(&dashboard).model_choices[0].value, "old");
-}
-
-#[test]
-fn refresh_clears_only_the_profile_cache_and_retains_current_choices() {
-    let mut config = config();
-    config.review.profile = Some("codex-1".into());
-    let mut dashboard =
-        DashboardState::new(config, mj_core::state::State::default(), Default::default());
-    dashboard.review_settings_choices.insert(
-        ("codex-1".into(), None),
-        ReviewSettingsChoices {
-            model_choices: vec![choice("tiny")],
-            effort_choices: vec![choice("high")],
-            effort_capabilities_discovered: true,
-        },
-    );
-    assert_eq!(open(&mut dashboard), DashboardAction::None);
-    assert_eq!(dialog(&dashboard).model_choices[0].value, "tiny");
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Refresh {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
+    setup
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .form
+        .get_mut()
+        .focus(ReviewSettingsFocus::Autoconfigure);
     let action = dashboard.handle_key(key(KeyCode::Enter));
     assert!(matches!(
         action,
-        DashboardAction::DiscoverReviewSettings { model: None, .. }
-    ));
-    assert!(
-        !dashboard
-            .review_settings_choices
-            .contains_key(&("codex-1".into(), None))
-    );
-    assert_eq!(dialog(&dashboard).model_choices[0].value, "tiny");
-    assert!(dialog(&dashboard).probing);
-    assert!(dialog(&dashboard).choices_loading);
-}
-
-#[test]
-fn profile_definition_changes_invalidate_cache_but_review_edits_do_not() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        mj_core::state::State::default(),
-        Default::default(),
-    );
-    let key = ("codex-1".to_owned(), None);
-    dashboard
-        .review_settings_choices
-        .insert(key.clone(), ReviewSettingsChoices::default());
-    let mut review_edit = dashboard.config.clone();
-    review_edit.review.trigger = mj_core::config::ReviewTrigger::Turn;
-    dashboard.set_config(review_edit);
-    assert!(dashboard.review_settings_choices.contains_key(&key));
-
-    let mut profile_edit = dashboard.config.clone();
-    profile_edit.profiles.get_mut("codex-1").unwrap().home = "/changed".into();
-    dashboard.set_config(profile_edit);
-    assert!(!dashboard.review_settings_choices.contains_key(&key));
-}
-
-#[test]
-fn matching_discovery_replies_apply_to_setup() {
-    let mut config = config();
-    config.review.profile = Some("codex-1".into());
-    let mut dashboard =
-        DashboardState::new(config, mj_core::state::State::default(), Default::default());
-    let DashboardAction::DiscoverReviewSettings {
-        generation,
-        profile_id,
-        model,
-    } = open(&mut dashboard)
-    else {
-        panic!("expected discovery")
-    };
-    assert!(dashboard.apply_review_settings_choices(
-        generation,
-        &profile_id,
-        model.as_deref(),
-        ReviewSettingsChoices {
-            model_choices: vec![choice("tiny")],
-            effort_choices: vec![],
-            effort_capabilities_discovered: false,
-        },
+        DashboardAction::WarmProfileCapabilities { .. }
     ));
     let Mode::Setup(setup) = &dashboard.mode else {
-        panic!("expected setup")
+        panic!("setup")
     };
-    let dialog = setup.review_editor.as_ref().expect("review child");
-    assert!(dialog.model_choices_discovered);
-    assert!(dialog.probing);
-    assert!(
-        dashboard
-            .review_settings_choices
-            .contains_key(&(profile_id, model))
-    );
+    let editor = setup.review_editor.as_ref().unwrap();
+    assert!(editor.pending_autoconfigure.is_some());
+    assert!(editor.review.reviewers.is_empty());
+    assert!(!editor.can_save());
+    for entry in snapshot.profiles.values_mut() {
+        entry
+            .efforts
+            .insert("gpt-6-terra".into(), CapabilityState::Ready(vec![]));
+        entry.efforts.insert(
+            "gpt-6-sol".into(),
+            CapabilityState::Ready(vec![choice("medium")]),
+        );
+    }
+    dashboard.set_profile_capabilities(snapshot.clone());
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    let editor = setup.review_editor.as_mut().unwrap();
+    editor.update_choices(&dashboard.config, &snapshot, &Default::default());
+    assert!(editor.pending_autoconfigure.is_none());
+    assert_eq!(editor.review.reviewers[0].effort, None);
+    assert_eq!(editor.review.reviewers[1].effort.as_deref(), Some("medium"));
 }
 
 #[test]
-fn final_cleanup_warning_keeps_choices_and_zero_effort_is_known() {
-    let mut config = config();
-    config.review.profile = Some("codex-1".into());
-    let mut dashboard =
-        DashboardState::new(config, mj_core::state::State::default(), Default::default());
-    let DashboardAction::DiscoverReviewSettings {
-        generation,
-        profile_id,
-        model,
-    } = open(&mut dashboard)
-    else {
-        panic!("expected discovery")
-    };
-    let mut final_result = available(&["tiny"], &[], true);
-    if let ReviewSettingsDiscoveryResult::Available {
-        cleanup_warning, ..
-    } = &mut final_result
-    {
-        *cleanup_warning = Some("worker cleanup timed out".into());
+fn autoconfigure_timeout_finishes_on_clock_tick_without_a_catalog_update() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let mut snapshot = catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]);
+    for entry in snapshot.profiles.values_mut() {
+        entry.efforts.clear();
     }
-    assert!(dashboard.apply_review_settings_discovery(
-        generation,
-        &profile_id,
-        model.as_deref(),
-        Ok(final_result),
-    ));
-    assert!(!dialog(&dashboard).probing);
-    assert_eq!(
-        dialog(&dashboard).cleanup_warning.as_deref(),
-        Some("worker cleanup timed out")
-    );
-    assert!(dialog(&dashboard).model_choices_discovered);
-    assert!(dialog(&dashboard).effort_capabilities_discovered);
-    assert!(dialog(&dashboard).can_save());
-}
-
-#[test]
-fn known_unsupported_values_disable_save_but_unknown_discovery_does_not() {
-    let mut config = config();
-    config.review.profile = Some("codex-1".into());
-    config.review.trigger = mj_core::config::ReviewTrigger::Turn;
-    config.review.model = Some("missing".into());
-    config.review.effort = Some("missing".into());
-    let mut dashboard =
-        DashboardState::new(config, mj_core::state::State::default(), Default::default());
-    let DashboardAction::DiscoverReviewSettings {
-        generation,
-        profile_id,
-        model,
-    } = open(&mut dashboard)
-    else {
-        panic!("expected discovery")
+    dashboard.set_profile_capabilities(snapshot);
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
     };
-    assert!(dialog(&dashboard).can_save());
-    assert!(dashboard.apply_review_settings_discovery(
-        generation,
-        &profile_id,
-        model.as_deref(),
-        Ok(available(&["tiny"], &["high"], true)),
-    ));
-    assert!(!dialog(&dashboard).can_save());
-    if let Mode::Setup(setup) = &mut dashboard.mode {
-        setup
-            .review_editor
-            .as_mut()
-            .expect("review editor")
-            .form
-            .get_mut()
-            .focus(ReviewSettingsFocus::Back);
-    } else {
-        panic!("setup remains open after discovery");
-    }
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::CancelReviewSettingsDiscovery
-    );
-    let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
-        KeyCode::Char('s'),
-        crossterm::event::KeyModifiers::CONTROL,
-    ));
-    assert_eq!(action, DashboardAction::None);
+    setup
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .form
+        .get_mut()
+        .focus(ReviewSettingsFocus::Autoconfigure);
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    setup
+        .review_editor
+        .as_mut()
+        .unwrap()
+        .pending_autoconfigure
+        .as_mut()
+        .unwrap()
+        .1 = Instant::now() - Duration::from_secs(21);
+    assert!(dashboard.tick_review_autoconfigure());
     let Mode::Setup(setup) = &dashboard.mode else {
-        panic!("setup remains open after rejected save")
+        panic!("setup")
     };
+    let editor = setup.review_editor.as_ref().unwrap();
+    assert!(!editor.checking_efforts());
+    assert_eq!(editor.review.reviewers.len(), 2);
     assert!(
-        setup
-            .notice
+        editor
+            .review
+            .reviewers
+            .iter()
+            .all(|choice| choice.effort.is_none())
+    );
+    assert_eq!(
+        editor.effort_notice.as_deref(),
+        Some(
+            "Reviewer effort discovery failed: claude-1 (timed out); codex-1 (timed out); codex-2 (timed out); using defaults."
+        )
+    );
+}
+
+#[test]
+fn unchanged_legacy_review_remains_valid_during_unrelated_save() {
+    let mut config = config();
+    config.review = ReviewConfig::legacy_default();
+    let dialog = ReviewSettingsDialog::new(&config);
+    assert!(dialog.can_save());
+    assert!(
+        ReviewSettingsDialog::validation_error(&dialog.validation_snapshot(), &dialog.review)
+            .is_none()
+    );
+}
+
+#[test]
+fn failed_effort_discovery_is_reported_when_autoconfigure_times_out() {
+    let config = config();
+    let mut snapshot = catalog(&config, &["gpt-6-terra"]);
+    for profile in snapshot.profiles.values_mut() {
+        profile.efforts.insert(
+            "gpt-6-terra".into(),
+            CapabilityState::Failed("probe failed".into()),
+        );
+    }
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    dialog.pending_autoconfigure = Some((
+        vec![SubagentChoice {
+            model: "gpt-6-terra".into(),
+            effort: Some("high".into()),
+        }],
+        Instant::now() - Duration::from_secs(21),
+    ));
+    dialog.update_choices(&config, &snapshot, &Default::default());
+    assert_eq!(dialog.review.reviewers[0].effort, None);
+    assert!(
+        dialog
+            .effort_notice
             .as_deref()
-            .is_some_and(|notice| notice.contains("unavailable"))
+            .unwrap()
+            .contains("probe failed")
     );
 }
 
 #[test]
-fn save_is_local_while_loading_unavailable_or_failed() {
+fn partial_discovery_does_not_reject_configured_reviewer_on_save() {
     let mut config = config();
-    config.review.profile = Some("codex-1".into());
-    config.review.trigger = mj_core::config::ReviewTrigger::Turn;
-    let mut dashboard =
-        DashboardState::new(config, mj_core::state::State::default(), Default::default());
-    assert!(matches!(
-        open(&mut dashboard),
-        DashboardAction::DiscoverReviewSettings { .. }
-    ));
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
-        dashboard.handle_key(key(KeyCode::Tab));
+    config.review.reviewers = vec![SubagentChoice {
+        model: "custom-model".into(),
+        effort: Some("high".into()),
+    }];
+    let mut snapshot = catalog(&config, &[]);
+    for profile in snapshot.profiles.values_mut() {
+        profile.choices = CapabilityState::Failed("probe failed".into());
     }
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    dialog.update_choices(&config, &snapshot, &Default::default());
+    assert!(dialog.can_save());
+    assert!(
+        ReviewSettingsDialog::validation_error(&dialog.validation_snapshot(), &dialog.review)
+            .is_none()
+    );
+}
+
+#[test]
+fn autoconfigure_warms_newly_selected_model_within_existing_wait() {
+    let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    let initial = catalog(&dashboard.config, &["claude-haiku-5-5"]);
+    dashboard.set_profile_capabilities(initial);
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
+    };
+    let editor = setup.review_editor.as_mut().unwrap();
+    editor.pending_autoconfigure = Some((
+        vec![SubagentChoice {
+            model: "claude-haiku-5-5".into(),
+            effort: Some("xhigh".into()),
+        }],
+        Instant::now(),
+    ));
+    let mut revised = catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]);
+    for entry in revised.profiles.values_mut() {
+        entry.efforts.remove("gpt-6-terra");
+        entry.efforts.remove("gpt-6-sol");
+    }
+    dashboard.set_profile_capabilities(revised);
+    let Mode::Setup(setup) = &dashboard.mode else {
+        panic!("setup")
+    };
+    assert!(setup.review_editor.as_ref().unwrap().checking_efforts());
     assert!(matches!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::SaveSetup { .. }
+        dashboard.take_profile_hydration(),
+        Some(DashboardAction::WarmProfileCapabilities { .. })
     ));
-    dashboard.cancel_modal();
+}
 
-    let DashboardAction::DiscoverReviewSettings {
-        generation,
-        profile_id,
-        model,
-    } = open(&mut dashboard)
-    else {
-        panic!("expected rediscovery")
+#[test]
+fn legacy_draft_autoconfigure_warms_the_recomputed_models() {
+    let mut legacy = config();
+    legacy.review = mj_core::config::ReviewConfig::legacy_default();
+    let mut dashboard = DashboardState::new(legacy, Default::default(), Default::default());
+    dashboard.begin_setup();
+    dashboard.begin_setup_review();
+    dashboard.set_profile_capabilities(catalog(&dashboard.config, &["claude-haiku-5-5"]));
+    let Mode::Setup(setup) = &mut dashboard.mode else {
+        panic!("setup")
     };
-    assert!(dashboard.apply_review_settings_discovery(
-        generation,
-        &profile_id,
-        model.as_deref(),
-        Ok(ReviewSettingsDiscoveryResult::Unavailable),
+    setup.review_editor.as_mut().unwrap().pending_autoconfigure = Some((
+        vec![SubagentChoice {
+            model: "claude-haiku-5-5".into(),
+            effort: Some("xhigh".into()),
+        }],
+        Instant::now(),
     ));
-    assert!(dialog(&dashboard).can_save());
-    dashboard.cancel_modal();
+    let mut revised = catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]);
+    for entry in revised.profiles.values_mut() {
+        entry.efforts.remove("gpt-6-terra");
+        entry.efforts.remove("gpt-6-sol");
+    }
+    dashboard.set_profile_capabilities(revised);
+    let Some(DashboardAction::WarmProfileCapabilities { config, .. }) =
+        dashboard.take_profile_hydration()
+    else {
+        panic!("expected a warm request")
+    };
+    let warmed: Config = serde_json::from_str(&config).unwrap();
+    assert!(!warmed.review.is_legacy());
+    assert!(
+        warmed
+            .review
+            .reviewers
+            .iter()
+            .any(|reviewer| reviewer.model == "gpt-6-terra"),
+        "{config}"
+    );
+}
 
-    let DashboardAction::DiscoverReviewSettings {
-        generation,
-        profile_id,
-        model,
-    } = open(&mut dashboard)
-    else {
-        panic!("expected rediscovery")
-    };
-    assert!(dashboard.apply_review_settings_discovery(
-        generation,
-        &profile_id,
-        model.as_deref(),
-        Err("offline".to_owned()),
-    ));
-    assert!(dialog(&dashboard).can_save());
+#[test]
+fn autoconfigure_ignores_a_failed_profile_that_does_not_offer_the_model() {
+    let mut config = config();
+    let mut snapshot = catalog(&config, &["gpt-6-terra", "gpt-6-sol"]);
+    // The models offer high but not xhigh.
+    for entry in snapshot.profiles.values_mut() {
+        for model in ["gpt-6-terra", "gpt-6-sol"] {
+            entry.efforts.insert(
+                model.into(),
+                CapabilityState::Ready(vec![choice("medium"), choice("high")]),
+            );
+        }
+    }
+    // An unrelated profile whose discovery failed.
+    let (id, profile) = config
+        .profiles
+        .iter()
+        .next()
+        .map(|(id, profile)| (id.clone(), profile.clone()))
+        .unwrap();
+    let mut failed = profile;
+    failed.home = "/profiles/failed".into();
+    let failed_id = format!("{id}-failed");
+    snapshot.profiles.insert(
+        failed.capabilities_key(&failed_id),
+        ProfileCapabilities {
+            choices: CapabilityState::Failed("login expired".into()),
+            efforts: Default::default(),
+        },
+    );
+    config.profiles.insert(failed_id, failed);
+    let mut dialog = ReviewSettingsDialog::new(&config);
+    dialog.pending_autoconfigure = Some((Vec::new(), Instant::now()));
+    dialog.update_choices(&config, &snapshot, &Default::default());
+    assert!(dialog.pending_autoconfigure.is_none());
+    assert!(!dialog.review.reviewers.is_empty());
+    for reviewer in &dialog.review.reviewers {
+        assert!(
+            matches!(reviewer.effort.as_deref(), Some("medium" | "high")),
+            "{reviewer:?}"
+        );
+    }
+    assert!(
+        dialog
+            .review
+            .reviewers
+            .iter()
+            .any(|reviewer| reviewer.effort.as_deref() == Some("high"))
+    );
+    let notice = dialog.effort_notice.as_deref().unwrap();
+    assert!(notice.contains("Adjusted reviewer efforts"), "{notice}");
+    assert!(!notice.contains("discovery failed"), "{notice}");
+    assert!(!notice.contains("timed out"), "{notice}");
 }

@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 109;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 110;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -1988,6 +1988,19 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (109, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
              PRAGMA user_version = 109;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: older readers require ActiveReviewGroup `reviewer` and reject
+    // SessionReview `reviewers` and retained legacy override fields.
+    if version < 110 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 110 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (110, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 110;
              COMMIT;",
         )?;
     }

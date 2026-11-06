@@ -72,7 +72,12 @@ impl HostState {
             let requests = driver.forward(command_id);
             (driver, requests)
         } else {
-            TurnReviewDriver::start(seed, review_id.clone(), prepared.count)
+            TurnReviewDriver::start(
+                seed,
+                review_id.clone(),
+                std::num::NonZeroUsize::new(prepared.reviewers.len())
+                    .unwrap_or(std::num::NonZeroUsize::MIN),
+            )
         };
         if let Some(deltas) = prepared.captured.clone() {
             requests = if prepared.scope == mj_core::relay::CaptureScope::PushableCommits
@@ -107,7 +112,7 @@ impl HostState {
             }
             prepared.state.active_group = Some(mj_core::storage::ActiveReviewGroup {
                 driver: driver.snapshot(),
-                reviewer: prepared.reviewer.clone(),
+                reviewers: prepared.reviewers.clone(),
                 scope: prepared.scope,
                 registrations,
             });
@@ -221,7 +226,7 @@ impl HostState {
                     ReviewSlot {
                         epoch: pending.epoch,
                         driver: pending.driver,
-                        reviewer: pending.prepared.reviewer,
+                        reviewers: pending.prepared.reviewers,
                         state: pending.prepared.state,
                         _background: pending.prepared.background,
                         push,

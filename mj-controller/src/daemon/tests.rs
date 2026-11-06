@@ -8234,7 +8234,7 @@ async fn exercise_child_close_with_a_nested_workspace(
                 forward_attempts: 0,
                 active_group: Some(mj_core::storage::ActiveReviewGroup {
                     driver: driver.snapshot(),
-                    reviewer: Default::default(),
+                    reviewers: vec![Default::default()],
                     scope: Default::default(),
                     registrations: vec![mj_core::storage::ReviewerRegistration {
                         role: "reviewer-1".into(),

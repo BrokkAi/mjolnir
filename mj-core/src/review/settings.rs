@@ -2,28 +2,44 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The preferred review families, in the user's priority order. Models are
-/// identified from advertised IDs, independently of the harness or profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Model families used by reviewer autoconfiguration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewModelFamily {
     Terra,
-    Flash,
+    Sol,
     Haiku,
+    Flash,
     Grok,
+    Kimi,
 }
-
 impl ReviewModelFamily {
     pub fn for_model(model: &str) -> Option<Self> {
         let model = crate::usage::pricing::normalize_model(model);
         let model = model.rsplit('/').next().unwrap_or(&model);
         if model.starts_with("gpt-") && model_matches_family(model, "terra") {
             Some(Self::Terra)
-        } else if model.starts_with("deepseek-") && model_matches_family(model, "flash") {
-            Some(Self::Flash)
-        } else if model.starts_with("claude-") && model_matches_family(model, "haiku") {
+        } else if model.starts_with("gpt-") && model_matches_family(model, "sol") {
+            Some(Self::Sol)
+        } else if model.starts_with("claude-") && model.contains("haiku") {
             Some(Self::Haiku)
-        } else if model.starts_with("grok-") {
+        } else if (model.starts_with("deepseek-") && model_matches_family(model, "flash"))
+            || matches!(model, "dsf" | "dsfmax")
+        {
+            Some(Self::Flash)
+        } else if model.starts_with("grok-")
+            && !["non-reasoning", "multi-agent", "build"]
+                .iter()
+                .any(|part| model.contains(part))
+        {
             Some(Self::Grok)
+        } else if model.starts_with("kimi-k3.")
+            && model[8..]
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .is_some_and(|n| n >= 1)
+        {
+            Some(Self::Kimi)
         } else {
             None
         }
@@ -42,24 +58,22 @@ pub struct ReviewModelSettings {
 pub struct ResolvedReviewSettings {
     pub profile: String,
     pub main: ReviewModelSettings,
-    pub automatic: bool,
     #[serde(default)]
-    pub price_unknown: bool,
+    pub autoconfigured: bool,
 }
 
 impl ResolvedReviewSettings {
     pub fn description(&self) -> String {
         format!(
-            "{}{}: {} / {}{}",
-            if self.automatic { "Auto → " } else { "" },
-            self.profile,
-            self.main.model.as_deref().unwrap_or("harness default"),
-            self.main.effort.as_deref().unwrap_or("default effort"),
-            if self.automatic && self.price_unknown {
-                " (price unavailable)"
+            "{}{}: {} / {}",
+            if self.autoconfigured {
+                "Autoconfigured: "
             } else {
                 ""
-            }
+            },
+            self.profile,
+            self.main.model.as_deref().unwrap_or("harness default"),
+            self.main.effort.as_deref().unwrap_or("default effort")
         )
     }
 }
@@ -91,23 +105,43 @@ pub fn model_version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
 }
 
 /// Whether a review can choose a reviewer for a session with `session`'s
-/// review choice, so its launch should take a review baseline. It applies
-/// the same per-profile rule as the reviewer choice and does not perform
-/// network or quota discovery.
+/// review choice, so its launch should take a review baseline. Every
+/// reviewer is load-balanced across enabled profiles, so any enabled profile
+/// may serve; this performs no network or quota discovery.
 pub fn can_review(
     config: &crate::config::Config,
-    session: Option<&crate::config::SessionReview>,
+    _session: Option<&crate::config::SessionReview>,
 ) -> bool {
-    let settings = config.review.for_session(session);
-    if let Some(id) = settings.profile.as_deref() {
-        return config.enabled_profile(id).is_some();
-    }
-    // Auto can use any advertised model as its cheapest-model fallback.
     config.enabled_profiles().next().is_some()
 }
 
 /// What every surface says about a session whose folder has no Git commits.
 pub const PLAIN_DIRECTORY_REVIEW_OFF: &str = "Code review is off for this session: its folder has no Git commits, and review finds changes through Git history.";
+
+pub const NO_REVIEWERS_REVIEW_OFF: &str = "Review is off for this session: no reviewers are configured. Choose reviewers in Settings › Code Review, or pass --reviewer.";
+
+/// A session whose armed trigger would run with no reviewers is created with
+/// review off. An omitted list means the global list (empty and not legacy
+/// here), and an explicitly empty list means no reviewers whatever the global
+/// list is. Legacy Auto is resolved during review preparation.
+pub fn no_reviewers_turns_review_off(
+    config: &crate::config::Config,
+    session: Option<&crate::config::SessionReview>,
+) -> bool {
+    use crate::config::{ReviewTrigger, SessionReview};
+    match session {
+        Some(SessionReview::Turn { reviewers } | SessionReview::Push { reviewers }) => {
+            match reviewers {
+                Some(reviewers) => reviewers.is_empty(),
+                None => !config.review.is_legacy() && config.review.reviewers.is_empty(),
+            }
+        }
+        Some(SessionReview::Inherit {
+            reviewers: Some(reviewers),
+        }) => reviewers.is_empty() && config.review.trigger != ReviewTrigger::Off,
+        _ => false,
+    }
+}
 
 /// Whether a session created in a folder without a committed Git checkout
 /// gets review turned off. Review cannot run there, so the session is created
@@ -119,4 +153,60 @@ pub fn plain_directory_turns_review_off(
 ) -> bool {
     config.review.for_session(session).trigger != crate::config::ReviewTrigger::Off
         && can_review(config, session)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ReviewTrigger, SessionReview};
+
+    #[test]
+    fn explicit_session_review_without_global_reviewers_turns_off_only_that_session() {
+        let mut config = crate::config::Config::default();
+        config.review.trigger = ReviewTrigger::Off;
+        assert!(no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Turn { reviewers: None })
+        ));
+        assert!(!no_reviewers_turns_review_off(&config, None));
+        assert!(no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Turn {
+                reviewers: Some(vec![])
+            })
+        ));
+        assert!(!no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Inherit {
+                reviewers: Some(vec![])
+            })
+        ));
+        config.review.trigger = ReviewTrigger::Push;
+        config.review.reviewers = vec![crate::config::SubagentChoice {
+            model: "gpt-6-astra".into(),
+            effort: None,
+        }];
+        assert!(no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Push {
+                reviewers: Some(vec![])
+            })
+        ));
+        assert!(no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Inherit {
+                reviewers: Some(vec![])
+            })
+        ));
+        assert!(!no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Turn { reviewers: None })
+        ));
+        config.review.reviewers.clear();
+        config.review = crate::config::ReviewConfig::legacy_default();
+        assert!(!no_reviewers_turns_review_off(
+            &config,
+            Some(&SessionReview::Push { reviewers: None })
+        ));
+    }
 }

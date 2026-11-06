@@ -1209,7 +1209,6 @@ impl DashboardState {
                         && dialog.live_search == LiveSearchState::Pending)
                     || dialog.history == HistoryLoad::Loading
             }
-            Mode::Setup(_) => self.review_settings_discovery_active(),
             _ => false,
         };
         dialog_animates

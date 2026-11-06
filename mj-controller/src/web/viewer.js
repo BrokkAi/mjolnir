@@ -517,6 +517,7 @@ const settingsState = {
   /// The draft's discovered sub-agent choices as last rendered, the pending
   /// re-render while they are still being discovered, and when that gives up.
   subagentOptions: null,
+  reviewerOptions: null,
   discoveryTimer: null,
   discoveryUntil: 0,
 };
@@ -568,9 +569,11 @@ function enqueueSettings(work) {
 /// whose models are not known yet, or a selected model whose efforts are not.
 function settingsDiscovering() {
   const options = settingsState.subagentOptions;
-  if (!options || typeof options !== 'object') return false;
-  return ['straightforward', 'subtle']
+  const subagentsPending = options && typeof options === 'object' && ['straightforward', 'subtle']
     .some(task => options[task] === null || options[task]?.efforts_pending === true);
+  const reviewersPending = Object.values(settingsState.reviewerOptions || {})
+    .some(choice => choice === null || choice?.efforts_pending === true);
+  return subagentsPending || reviewersPending;
 }
 
 /// The daemon discovers a model's efforts once it is selected, so render the
@@ -588,6 +591,7 @@ function scheduleSettingsDiscovery() {
       });
       settingsState.page = reply.page;
       settingsState.subagentOptions = reply.subagent_options ?? null;
+      settingsState.reviewerOptions = reply.reviewer_options ?? null;
     });
   }, SETTINGS_DISCOVERY_POLL_MS);
 }
@@ -597,6 +601,7 @@ function adoptSettingsDocument(document) {
   settingsState.draft = document.draft;
   settingsState.page = document.page;
   settingsState.subagentOptions = document.draft?._subagent_options ?? null;
+  settingsState.reviewerOptions = document.draft?._reviewer_options ?? null;
   settingsState.discoveryUntil = Date.now() + SETTINGS_DISCOVERY_WAIT_MS;
   settingsState.dirty = false;
   settingsState.refused.clear();
@@ -609,6 +614,7 @@ function forgetSettings() {
   settingsState.draft = null;
   settingsState.page = null;
   settingsState.subagentOptions = null;
+  settingsState.reviewerOptions = null;
   settingsState.dirty = false;
   settingsState.refused.clear();
   settingsState.status = '';
@@ -631,6 +637,7 @@ function syncSettingsRoute() {
     });
     settingsState.page = reply.page;
     settingsState.subagentOptions = reply.subagent_options ?? null;
+      settingsState.reviewerOptions = reply.reviewer_options ?? null;
     settingsState.discoveryUntil = Date.now() + SETTINGS_DISCOVERY_WAIT_MS;
     settingsState.error = '';
   });
@@ -646,6 +653,7 @@ function editSettings(pagePath, edit) {
     settingsState.draft = reply.draft;
     settingsState.page = reply.page;
     settingsState.subagentOptions = reply.draft?._subagent_options ?? null;
+    settingsState.reviewerOptions = reply.draft?._reviewer_options ?? null;
     settingsState.discoveryUntil = Date.now() + SETTINGS_DISCOVERY_WAIT_MS;
     const fieldEdit = edit.kind === 'set' || edit.kind === 'toggle';
     if (reply.error) {
@@ -830,6 +838,15 @@ function renderSettingsEntryActions(page) {
       add.onclick = () => editSettings(page.path, { kind: 'add', path: page.path });
       actions.push(add);
     }
+  }
+  for (const action of page.actions || []) {
+    const control = button(action.label, 'secondary');
+    control.type = 'button';
+    control.disabled = !!action.disabled_reason;
+    if (action.disabled_reason) control.title = action.disabled_reason;
+    control.onclick = () => editSettings(page.path, { kind: 'action', id: action.id });
+    actions.push(control);
+    if (action.disabled_reason) actions.push(el('span', 'dim', action.disabled_reason));
   }
   if (page.removable) {
     const remove = button('Remove', 'danger');
@@ -7540,7 +7557,7 @@ function sessionReviewStatusConfig(snapshot, session) {
   return {
     ...snapshot?.review_config,
     trigger: session?.review_trigger ?? snapshot?.review_config?.trigger,
-    count: session?.review_count ?? snapshot?.review_config?.count,
+    count: session?.review_count ?? snapshot?.review_config?.reviewers?.length,
   };
 }
 
@@ -7549,23 +7566,14 @@ function sessionReviewStatusConfig(snapshot, session) {
 /// Keep this byte-for-byte aligned with `hel_chat::review_status_line`: the
 /// same configuration should answer the same way on the terminal and phone.
 function reviewStatusLine(review, open) {
-  const enabled = review?.trigger === "turn";
-  const profile = review?.profile;
-  let armed;
-  if (review?.trigger === "push") {
-    armed = "Review trigger is before push";
-  } else if (enabled && profile) {
-    armed = `Reviewing every completed turn with [review] profile ${JSON.stringify(profile)}`;
-  } else if (enabled) {
-    armed = 'Reviewing every completed turn with Auto';
-  } else if (profile) {
-    armed = `Automatic review is off; /review reviews one turn with ${JSON.stringify(profile)}`;
-  } else {
-    armed = 'Automatic review is off; /review uses Auto';
-  }
-  const count = review?.count;
-  if (count) armed += `; ${count} reviewer${count === 1 ? '' : 's'}`;
-  return open ? `${armed}. A review is open now.` : armed;
+  const trigger = review?.trigger;
+  const armed = trigger === "push" ? "Review trigger is before push"
+    : trigger === "turn" ? "Reviewing every completed turn"
+      : "Automatic review is off; /review reviews one turn";
+  const count = review?.count ?? review?.reviewers?.length ?? 0;
+  const status = count === 0 ? `${armed}; no reviewers`
+    : `${armed}; ${count} reviewer${count === 1 ? '' : 's'}`;
+  return open ? `${status}. A review is open now.` : status;
 }
 
 /// Run a local command, or report that nothing here can.

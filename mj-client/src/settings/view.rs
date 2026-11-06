@@ -17,6 +17,8 @@ pub struct SettingsPage {
     pub breadcrumb: Vec<String>,
     pub help: String,
     pub groups: Vec<SettingsGroup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<SettingsAction>,
     /// Adding an entry, on a page that lists entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add: Option<AddEntry>,
@@ -25,6 +27,14 @@ pub struct SettingsPage {
     /// What this page cannot do here, and where it can be done.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsAction {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +120,9 @@ pub enum SettingsEdit {
     Remove {
         path: Vec<String>,
     },
+    Action {
+        id: String,
+    },
 }
 
 /// What an accepted edit did: the page to show next, and anything else it
@@ -147,8 +160,14 @@ fn read_only(path: &[String], draft: &Value) -> bool {
         // The terminal inspects the machine's mbx installation first, which
         // may own these budgets itself.
         [section, _, page, ..] if section == "machines" && page == "build_cache" => true,
-        // Offered models and efforts come from discovery.
-        [section, key] if section == "review" && matches!(key.as_str(), "model" | "effort") => true,
+        [section, list, index, key]
+            if section == "review"
+                && list == "reviewers"
+                && matches!(key.as_str(), "model" | "effort")
+                && draft["_reviewer_options"][index.as_str()].is_null() =>
+        {
+            true
+        }
         [section, task, key]
             if section == "subagents"
                 && matches!(key.as_str(), "model" | "effort")
@@ -176,7 +195,7 @@ fn notices(path: &[String]) -> Vec<String> {
             "Build cache settings change in the terminal Settings, which inspects this machine's mbx installation first.".to_owned(),
         ],
         ["review"] => vec![
-            "The reviewer's model and effort are chosen in the terminal Settings, which discovers what the profile offers.".to_owned(),
+            "Add reviewer to choose up to three reviewers. Automatic review needs at least one reviewer.".to_owned(),
         ],
         _ => Vec::new(),
     }
@@ -301,9 +320,22 @@ pub fn render_page(draft: &Value, path: &[String]) -> Result<SettingsPage, Strin
             rows: vec![single],
         });
     }
-    let add = page::is_collection(path, current).then(|| AddEntry {
-        label: if path == ["bundles"] { "Create" } else { "Add" }.to_owned(),
-        named: current.is_object(),
+    let add = ((page::is_collection(path, current)
+        && !(path == ["review", "reviewers"]
+            && current
+                .as_array()
+                .is_some_and(|rows| rows.len() >= mj_core::config::MAX_REVIEWERS)))
+        || path == ["review"] && draft["review"].get("reviewers").is_none())
+    .then(|| AddEntry {
+        label: if path == ["bundles"] {
+            "Create"
+        } else if path == ["review"] || path == ["review", "reviewers"] {
+            "Add reviewer"
+        } else {
+            "Add"
+        }
+        .to_owned(),
+        named: current.is_object() && path != ["review"],
     });
     Ok(SettingsPage {
         path: path.to_vec(),
@@ -312,9 +344,24 @@ pub fn render_page(draft: &Value, path: &[String]) -> Result<SettingsPage, Strin
             .unwrap_or("Changes stay in this draft until you save.")
             .to_owned(),
         groups,
+        actions: if path == ["review"] {
+            vec![SettingsAction {
+                id: "review.autoconfigure".into(),
+                label: "Autoconfigure".into(),
+                disabled_reason: None,
+            }]
+        } else {
+            Vec::new()
+        },
         add,
         removable: edit::removable(draft, path),
-        notices: notices(path),
+        notices: {
+            let mut notices = notices(path);
+            if path == ["review"] && draft["review"].get("reviewers").is_none() {
+                notices.push("Reviewers will be configured automatically after profile discovery. Choose Add reviewer to set them now.".into());
+            }
+            notices
+        },
     })
 }
 
@@ -342,6 +389,7 @@ pub fn apply(
         notice,
     };
     match change {
+        SettingsEdit::Action { .. } => Err("This action is available in the web viewer.".into()),
         SettingsEdit::Set { path, text, choice } => match (offered(&path), text, choice) {
             (Some(SettingsControl::Text { .. } | SettingsControl::Hidden), Some(text), None) => {
                 if schema::path_kind(&path) == Some(schema::PathKind::Target)
@@ -373,7 +421,13 @@ pub fn apply(
             if path != page || rendered.add.is_none() {
                 return Err("Entries cannot be added here.".into());
             }
-            let page = edit::add_entry(draft, &path, name.as_deref())?;
+            let collection = if path == ["review"] {
+                draft["review"]["reviewers"] = serde_json::json!([]);
+                vec!["review".to_owned(), "reviewers".to_owned()]
+            } else {
+                path.clone()
+            };
+            let page = edit::add_entry(draft, &collection, name.as_deref())?;
             Ok(EditResult { page, notice: None })
         }
         SettingsEdit::Remove { path } => {
@@ -386,5 +440,30 @@ pub fn apply(
                 notice: removal.notice,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reviewers_can_be_edited_and_trigger_is_editable() {
+        let draft = json!({"review": {"trigger": "push", "reviewers": [{"model": "gpt-6-terra"}]}, "_reviewer_options": {"0": {"models": [{"value": "gpt-6-terra", "label": "Terra"}], "efforts": []}}});
+        let path = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(!read_only(&path(&["review", "reviewers"]), &draft));
+        assert!(!read_only(
+            &path(&["review", "reviewers", "0", "model"]),
+            &draft
+        ));
+        assert!(!read_only(&path(&["review", "trigger"]), &draft));
+        let page = render_page(&draft, &path(&["review"])).unwrap();
+        assert_eq!(page.actions[0].id, "review.autoconfigure");
     }
 }

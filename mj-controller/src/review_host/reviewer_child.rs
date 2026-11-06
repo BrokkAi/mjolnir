@@ -23,7 +23,16 @@ impl HostState {
             return;
         }
         let request_key = registration.request_key.clone();
-        let reviewer = group.reviewer.clone();
+        let Some(index) = group
+            .registrations
+            .iter()
+            .position(|item| item.role == role)
+        else {
+            return;
+        };
+        let Some(reviewer) = group.reviewers.get(index).cloned() else {
+            return;
+        };
         // A push review covers one repository when it names a worktree, so
         // its reviewer reads context from that checkout, not the session's.
         let working_directory = match group.driver.deltas.as_slice() {

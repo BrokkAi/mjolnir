@@ -185,7 +185,7 @@ pub(super) async fn apply_phone_action(
             });
             let session_title_override = Some(title.clone());
             let (published, publication) = tokio::sync::oneshot::channel();
-            let (registered, review_turned_off, capacity_warning) = services
+            let (registered, review_notice, capacity_warning) = services
                 .daemon_runtime
                 .start_create_session_controlled(
                     CreateSessionRequest {
@@ -223,7 +223,7 @@ pub(super) async fn apply_phone_action(
                 .send(PhoneActionStarted {
                     action_id,
                     session: registered.session,
-                    review_turned_off,
+                    review_notice,
                     capacity_warning,
                     published,
                 })

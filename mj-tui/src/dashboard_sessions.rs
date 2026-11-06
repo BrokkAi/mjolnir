@@ -1328,9 +1328,6 @@ impl DashboardState {
     }
 
     pub fn cancel_modal(&mut self) {
-        if self.review_settings_discovery_active() {
-            self.review_settings_generation = self.review_settings_generation.wrapping_add(1);
-        }
         self.session_preflight_generation = self.session_preflight_generation.wrapping_add(1);
         if matches!(self.mode, Mode::WorkspaceManager(_)) {
             self.workspace_management_generation =

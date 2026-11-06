@@ -338,43 +338,28 @@ precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
 ```toml
 [review]
 trigger = "turn"
-count = 2
-profile = "reviewer"
-# model = "provider-model-id"
-# effort = "high"
+
+[[review.reviewers]]
+model = "gpt-6.10-terra"
+effort = "xhigh"
+
+[[review.reviewers]]
+model = "gpt-6.1-sol"
+effort = "medium"
 ```
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `trigger` | string enum | no | `"off"` | `"off"` disables automatic review, `"turn"` reviews eligible completed turns after queued work drains, and `"push"` reviews commits before push. An unchanged turn delta resolves without a review prompt. |
-| `count` | positive integer | no | `2` | Independent reviewer sessions per review. 1–3 reviewers are reasonable; more have diminishing returns. Counts above 3 are allowed. |
-| `tier` | string | no | unset | Deprecated compatibility field. Existing `quick` or `extended` values are accepted but ignored. |
-| `profile` | string | no | Auto (unset) | Auto tries Terra, DeepSeek Flash, Haiku, and Grok on subscriptions, then API billing, then other models by price; always at High effort. A named enabled review-capable profile is honored, including the primary profile. |
-| `model` | string | no | unset (harness default) | Reviewer model override for a named profile. `[review]` refuses it with Auto, which uses fixed model-family defaults; a session's `--review-model` still works with Auto. |
-| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. Auto always requires `high`, including when a session requests another effort. Required effort is checked against the selected model. |
+| `trigger` | string enum | no | `"off"` | `"off"` disables automatic review, `"turn"` reviews completed turns, and `"push"` reviews commits before push. |
+| `reviewers` | array of tables | no | empty | Up to three choices, each with a nonempty `model` and optional `effort`. Each choice is served by an enabled profile offering that model and effort. |
 
-Auto prefers a different model family from the primary within each billing group. It selects the newest advertised version of each preferred family, skips exhausted quota and unsupported High effort, and uses the shared usage-report prices for its cheapest-model fallback. Unknown prices sort after known prices and are disclosed if selected. Reviewers run as hidden child sessions, use the configured review
-profile, model, and effort, and show their transcripts in the review view. See
-[Code review](/turn-review/).
-
-The reviewers use the same resolved profile and model in separate conversations. Findings from every reviewer are labeled with their session and may overlap. A group is clean only when every reviewer finishes cleanly; a failed or missing reviewer keeps the push gate blocked.
+An empty reviewer list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers from enabled profiles' advertised models. The first available combination wins: Terra, Sol, and Haiku; Terra and Sol; two Haiku; two DeepSeek Flash; Grok; or Kimi K3.1 or newer. Within a family, the newest advertised version wins. If no match exists, choose reviewers in **Settings → Code Review**. Reviewers run as hidden child sessions with independent conversations. See [Code review](/turn-review/).
 
 Push review is available for Claude Code, Codex, and DSH primaries, the harnesses that receive Mjolnir delegation tools. They receive `request_review` and a pre-push gate; other harnesses run without review and receive a transcript notice.
 
-An older configuration with `enabled = true` still loads as `trigger = "turn"`;
-`enabled = false` or an absent `enabled` loads as `"off"`. Saving settings
-writes `trigger`, not `enabled`.
+Older `enabled`, `count`, `profile`, `model`, `effort`, and `tier` settings remain readable. Saving writes the new reviewer list and trigger. An old explicit model becomes up to three reviewer choices. On daemon startup, an old Auto selection is upgraded once after capability discovery and saved as chosen reviewer rows, or as an empty list when no model qualifies.
 
-`mj new --review off|turn|push` and `mj import <harness> --review off|turn|push`
-set the trigger for one session, overriding `[review]`. `--review-model <model>`
-and `--review-effort <effort>` set reviewer choices while keeping the configured trigger. `--review-count <count>` overrides the number of reviewers for that session. Use `--review off|turn|push` to select a trigger explicitly. In Auto, Mjolnir picks an enabled profile that offers
-the model, including DSH or any other enabled profile. Auto always uses High effort; the effort override applies only to a named reviewer profile.
-`/review` remains available when the trigger is `off`.
-
-The deprecated `mj new --review-tier quick|extended` option still accepts
-either value, but the value is ignored and does not change the configured
-trigger. `mj import <harness>` accepts the same compatibility option. Existing
-`tier` values in session settings are also ignored.
+`mj new` and `mj import <harness>` accept `--review off|turn|push` and repeatable `--reviewer MODEL[:EFFORT]` (up to three). The list replaces `[review]` for that session. `/review` remains available when the trigger is `off`.
 
 In the terminal, these review fields are edited inside **Settings** so one Save or
 Cancel applies to the entire configuration draft. Settings can discover the
@@ -1194,7 +1179,10 @@ tailscale_detect = true
 
 [review]
 trigger = "off"
-profile = "claude-review"
+
+[[review.reviewers]]
+model = "claude-haiku-4.5"
+effort = "high"
 
 [profiles.codex-work]
 kind = "codex"

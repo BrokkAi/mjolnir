@@ -317,7 +317,10 @@ mod tests {
             },
         );
         config.review.trigger = mj_core::config::ReviewTrigger::Turn;
-        config.review.profile = Some("codex".into());
+        config.review.reviewers = vec![mj_core::config::SubagentChoice {
+            model: "gpt-6-astra".into(),
+            effort: None,
+        }];
         let controller = config_only_controller(config);
         let result = controller
             .preflight_new_session("", "local-bare", Some(directory.path()), &ProcessExecutor)

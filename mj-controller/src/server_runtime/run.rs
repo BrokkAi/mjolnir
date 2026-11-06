@@ -1406,9 +1406,7 @@ pub(crate) async fn run_server(
                     // Registration turned review off for a session it cannot
                     // review; tell whoever asked for it.
                     let started_notice = [
-                        started.review_turned_off.then(|| {
-                            mj_core::review::settings::PLAIN_DIRECTORY_REVIEW_OFF.to_owned()
-                        }),
+                        started.review_notice.map(str::to_owned),
                         started.capacity_warning,
                     ].into_iter().flatten().collect::<Vec<_>>();
                     let started_notice = (!started_notice.is_empty()).then(|| started_notice.join("\n"));

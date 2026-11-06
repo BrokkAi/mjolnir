@@ -247,7 +247,7 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
-    ) -> Result<(RegisteredSession, bool, Option<String>)> {
+    ) -> Result<(RegisteredSession, Option<&'static str>, Option<String>)> {
         self.start_create_session_inner(request, control, Some(publication))
             .await
     }
@@ -257,7 +257,7 @@ impl RuntimeState {
         request: CreateSessionRequest,
         control: LifecycleControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
-    ) -> Result<(RegisteredSession, bool, Option<String>)> {
+    ) -> Result<(RegisteredSession, Option<&'static str>, Option<String>)> {
         let mut request = request;
         let parent = request.profile_id.clone();
         let supplied = request.subagents.clone();
@@ -400,7 +400,7 @@ impl RuntimeState {
                     session,
                     remembered_container_size,
                 },
-                registration.review_turned_off,
+                registration.review_notice,
             ))
         })
         .await?;

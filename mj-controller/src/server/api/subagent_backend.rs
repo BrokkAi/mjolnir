@@ -87,6 +87,11 @@ pub trait SubagentBackend: Send + Sync {
     /// Start discovering what `config` selects, such as a Settings draft's
     /// sub-agent models. Results arrive through the capability publication.
     fn warm_profile_capabilities(&self, _config: &mj_core::config::Config) {}
+    fn profile_capabilities_snapshot(
+        &self,
+    ) -> Option<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot> {
+        None
+    }
     /// Every enabled profile a parent running on `parent_profile` may use for
     /// a sub-agent, with its discovered choices and remaining quota. It waits
     /// for pending discovery; a profile whose discovery fails is reported as
@@ -96,6 +101,29 @@ pub trait SubagentBackend: Send + Sync {
         _parent_profile: String,
     ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
         Box::pin(async { anyhow::bail!("sub-agent profiles are unavailable") })
+    }
+    /// Enabled profiles available to review children, with current quota and health.
+    fn reviewer_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        Box::pin(async { anyhow::bail!("reviewer profiles are unavailable") })
+    }
+    /// Waits for a profile not in `tried` to report that it offers `model`,
+    /// then returns the ready candidates that were not tried. It fails when
+    /// no further profile does.
+    fn reviewer_candidates_for_model(
+        &self,
+        _model: String,
+        _tried: Vec<String>,
+    ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        self.reviewer_candidates()
+    }
+    fn reviewer_autoconfigure_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        self.reviewer_candidates()
+    }
+    fn reviewer_ready_candidates(
+        &self,
+        _model: String,
+    ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        self.reviewer_candidates()
     }
     /// Every enabled profile usable for a user-created session, with its
     /// discovered choices and remaining quota. This is independent of the

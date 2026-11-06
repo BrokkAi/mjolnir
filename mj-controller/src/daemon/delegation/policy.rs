@@ -46,11 +46,20 @@ impl Policy {
         manager: &crate::session_manager::SessionManagerControl,
         stop: &CancellationToken,
     ) -> Self {
-        let catalog = ProfileCatalog::new(stop.child_token());
+        let catalog = ProfileCatalog::new_with_config_path(
+            stop.child_token(),
+            mj_core::config::config_path(),
+        );
         let weak_state = Arc::downgrade(&state);
         catalog.set_publisher(Arc::new(move || {
             if let Some(state) = weak_state.upgrade() {
                 state.publish_revision();
+            }
+        }));
+        let weak_state = Arc::downgrade(&state);
+        catalog.set_notice(Arc::new(move |message| {
+            if let Some(state) = weak_state.upgrade() {
+                state.push_notice("", message);
             }
         }));
         assert!(
@@ -58,6 +67,7 @@ impl Policy {
             "daemon catalogue installed once"
         );
         let reports = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        catalog.set_quota_reports(reports.clone());
         let rejected = Arc::new(std::sync::Mutex::new(
             mj_core::credentials::RejectedLogins::default(),
         ));
