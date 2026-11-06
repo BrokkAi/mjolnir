@@ -149,7 +149,7 @@ are not importable yet either.
 | `--allow-dirty` | Proceed when the source Git checkouts have uncommitted changes. |
 | `--allow-dirty-local` | Compatibility alias for `--allow-dirty`. |
 | `--allow-omitted-non-git` | Acknowledge that modified non-Git or scratch directories will be omitted. |
-| `--review <off\|turn\|push>` | Set the imported session's review trigger, overriding `[review]`. |
+| `--review <off\|push>` | Set the imported session's review mode, overriding global reviewers. |
 | `--reviewer MODEL[:EFFORT]` | Add a reviewer choice; repeat up to three times. The final colon is an effort separator only for `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (for example, `x:0:high` uses model `x:0` and effort `high`). A trailing colon means no effort and removes that colon, so `foo:high:` selects model `foo:high`. Other suffixes, such as `:free` or `:latest`, remain part of the model ID. |
 | `--workspace <name>` | Workspace to put the imported session in. Needed when the instance has more than one workspace. |
 
@@ -289,7 +289,7 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--model <name>] [--effort <name>] [--subagents native|mjolnir|none]
        [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
        [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
-       [--review <off|turn|push>] [--reviewer MODEL[:EFFORT]]...
+       [--review <off|push>] [--reviewer MODEL[:EFFORT]]...
        [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--command-id <id>]
@@ -311,7 +311,6 @@ mj resume (--session <id> | --wiki <sessionwiki-id>)
 mj interrupt-turn --session <id> [--json]
 mj review start --session <id> [--json]
 mj review status --session <id> [--json]
-mj review (forward | dismiss | cancel) --session <id> [--json]
 mj stop-task --session <id> (<task-id> | --all) [--json]
 mj api-info [--json]
 mj events [--session <id>] [--workspace-id <id>] [--workspace <name>] [--after-seq <seq>]
@@ -383,7 +382,7 @@ mj new --workspace eval --bundle product --target builder \
   every child uses the straightforward choice, and the parent is told to
   delegate straightforward work.
   Mjolnir chooses an enabled profile offering its model and effort by quota.
-- `mj new --review off|turn|push` sets the session's trigger, overriding
+- `mj new --review off|push` sets the session's review mode, overriding
   `[review]`. `mj import <harness>` takes the same option for the session it
   adopts. Repeat `--reviewer MODEL[:EFFORT]` up to three times to choose reviewers. See
   [per-session settings](/turn-review/#per-session-settings). An empty global reviewer list means no reviewers; choose rows or press **Autoconfigure** in Settings → Code Review.
@@ -601,7 +600,7 @@ which can take a few minutes while a reviewer is chosen and started, and fails
 with the reason when the session is still working, has queued prompts, is a
 sub-agent, or has no usable reviewer. `mj review status` prints the open
 review's status, reviewer role, and verdict, or `no review is open`.
-The conversation prompt stays available while the review runs. See [turn review](/turn-review/).
+The conversation prompt stays available while the review runs. See [Code review](/turn-review/).
 
 `mj destroy` permanently removes the live session record, environment, and
 recovery archive. Its conversation is indexed in SessionWiki first:
