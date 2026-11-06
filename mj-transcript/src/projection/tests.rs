@@ -1547,6 +1547,10 @@ fn a_harness_turn_runs_the_session_and_marks_where_it_began() {
     let settled = event(
         &session,
         RelayObservation::HarnessTurnSettled {
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: 1,
+                stop_reason: "end_turn".into(),
+            }),
             origin: Some("task-notification".into()),
             prompt_in_flight: false,
         },
@@ -1586,6 +1590,44 @@ fn a_harness_turn_runs_the_session_and_marks_where_it_began() {
     );
 }
 
+// Hard-won: #1450 review: a Codex tail reused an older autonomous marker.
+#[test]
+fn native_tail_preserves_prompt_outcome_and_autonomous_error_is_retained() {
+    let mut session = MaterializedSession::empty("session");
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnStarted { started_at_ms: 1 },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            origin: None,
+            prompt_in_flight: false,
+            autonomous: Some(mj_core::relay::SettledHarnessTurn {
+                start_ordinal: 1,
+                stop_reason: "error".into(),
+            }),
+        },
+    );
+    assert!(
+        matches!(&session.last_turn_outcome.as_ref().unwrap().outcome, TurnOutcomeKind::Completed { stop_reason } if stop_reason == "error")
+    );
+    let mut prompt = session.last_turn_outcome.clone().unwrap();
+    prompt.command_id = "prompt".into();
+    prompt.accepted_ordinal = Some(3);
+    session.last_turn_outcome = Some(prompt);
+    let completed = session.last_turn_outcome.clone();
+    apply_observation(
+        &mut session,
+        RelayObservation::HarnessTurnSettled {
+            origin: Some("codex".into()),
+            prompt_in_flight: false,
+            autonomous: None,
+        },
+    );
+    assert_eq!(session.last_turn_outcome, completed);
+}
+
 #[test]
 fn a_harness_turn_without_output_keeps_its_divider_and_stops_its_clock() {
     let mut session = MaterializedSession::empty("session");
@@ -1604,6 +1646,7 @@ fn a_harness_turn_without_output_keeps_its_divider_and_stops_its_clock() {
     apply_observation(
         &mut session,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: Some("autonomous_task_ended".into()),
             prompt_in_flight: false,
         },
@@ -1655,6 +1698,7 @@ fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
     apply_observation(
         &mut session,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: Some("task-notification".into()),
             prompt_in_flight: true,
         },
@@ -1734,6 +1778,7 @@ fn finishing_an_acp_prompt_preserves_a_later_native_goal_stream() {
     apply_observation(
         &mut session,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: Some("codex".into()),
             prompt_in_flight: false,
         },
@@ -1992,6 +2037,7 @@ fn a_cancel_of_a_turn_the_harness_started_ends_it_as_interrupted() {
     apply_observation(
         &mut session,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         },

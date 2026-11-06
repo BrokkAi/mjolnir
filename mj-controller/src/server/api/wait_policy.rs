@@ -200,7 +200,7 @@ impl WaitObservation {
             Some(StartStatus::Submitted { turn_id }) => self
                 .last_turn_outcome
                 .as_ref()
-                .and_then(MaterializedTurnOutcome::answered_ordinal)
+                .and_then(|turn| turn.answered_ordinal(self.queued_ordinals.iter().copied()))
                 .is_none_or(|ordinal| ordinal < *turn_id),
             _ => false,
         };
@@ -436,11 +436,8 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
             .last_turn_outcome
             .as_ref()
             .filter(|outcome| {
-                !mj_core::subagent::prompt_is_queued(
-                    Some(target),
-                    observation.queued_ordinals.iter().copied(),
-                ) && outcome
-                    .answered_ordinal()
+                outcome
+                    .answered_ordinal(observation.queued_ordinals.iter().copied())
                     .is_some_and(|ordinal| ordinal >= target)
             })
             .and_then(|outcome| observation.turn_end(outcome));

@@ -1571,6 +1571,15 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
             "this is turn {answered}, which ended after turn {requested}; a session keeps only its latest turn's outcome and reply"
         ));
     }
+    // A turn the session ran without a prompt has no turn ID. Only an answer
+    // about a finished turn has a turn number; an error or a question does not.
+    if let (Some(requested), None, Some(_)) = (
+        response.requested_turn_id,
+        response.turn_id,
+        response.turn_number,
+    ) {
+        lines.push(format!("this is a later turn the session ran without a prompt, which ended after turn {requested}; a session keeps only its latest turn's outcome and reply"));
+    }
     // The wait's message, the diagnostic and the agent's last message are
     // often one sentence (a Codex quota error was printed three times,
     // J-25), so each is printed only when it says something new.
@@ -3454,6 +3463,24 @@ mod tests {
             wait_report_lines(&later)[1].contains("turn 87, which ended after turn 82"),
             "{:?}",
             wait_report_lines(&later)
+        );
+        // Hard-won: #1450 review: autonomous outcomes hid which turn answered.
+        let autonomous = wait_response(
+            "finished",
+            serde_json::json!({"requested_turn_id":82, "turn_number":5}),
+        );
+        assert_eq!(
+            wait_report_lines(&autonomous)[1],
+            "this is a later turn the session ran without a prompt, which ended after turn 82; a session keeps only its latest turn's outcome and reply"
+        );
+        // An answer with no finished turn, such as a failed session, is not one.
+        let failed = wait_response("error", serde_json::json!({"requested_turn_id":82}));
+        assert!(
+            !wait_report_lines(&failed)
+                .iter()
+                .any(|line| line.contains("later turn")),
+            "{:?}",
+            wait_report_lines(&failed)
         );
         let same = wait_response(
             "finished",

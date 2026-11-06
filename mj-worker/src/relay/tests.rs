@@ -1816,6 +1816,7 @@ fn idle_clock_waits_for_background_work_and_persists_its_completion() {
     );
     relay
         .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         })
@@ -2909,6 +2910,7 @@ fn codex_replies_preserve_the_user_turn_and_only_autonomous_work_adds_a_notice()
     }
 }
 
+// Hard-won: #1450 review: autonomous outcomes must preserve turn identity and queued work.
 #[test]
 fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
     use mj_core::config::HarnessKind;
@@ -2945,6 +2947,8 @@ fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
         .unwrap();
     let state = relay.operational_state();
     assert!(state.active_prompt.is_none());
+    assert!(relay.originating_command_id().is_none());
+    let completion = state.turn_completion.clone();
     assert!(state.harness_turn.is_some());
     assert_eq!(state.execution, RelayExecutionState::Running);
     assert!(!state.safe_to_replace(HarnessKind::Codex));
@@ -2958,6 +2962,14 @@ fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
         relay.operational_state().execution,
         RelayExecutionState::Idle
     );
+    assert_eq!(relay.operational_state().turn_completion, completion);
+    assert!(matches!(
+        observations(&relay).last(),
+        Some(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
+            ..
+        })
+    ));
     assert!(
         !relay
             .operational_state()
@@ -3379,6 +3391,7 @@ fn observations(relay: &DurableRelay) -> Vec<RelayObservation> {
 /// quota ends like any other cycle: the marker is gone, no tool is left in
 /// flight and a prompt could start. (Session e33442fe's recovery was lost to a
 /// checkpoint, not to a leftover fact; this pins that the facts are clean.)
+// Hard-won: #1450 review: autonomous outcomes must preserve turn identity and queued work.
 #[test]
 fn a_harness_turn_refused_for_quota_ends_with_nothing_left_set() {
     let temp = tempfile::tempdir().unwrap();
@@ -3404,6 +3417,10 @@ fn a_harness_turn_refused_for_quota_ends_with_nothing_left_set() {
     .unwrap()
     .unwrap();
     relay.claude_turn_result(&refusal).unwrap();
+    // Hard-won: #1450 review: quota refusals were recorded as successful turns.
+    assert!(
+        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "error")
+    );
     let facts = relay.operational_state().facts();
     assert_eq!(facts.harness_turn_started_at_ms, None);
     assert!(facts.tools_in_flight.is_empty());
@@ -3509,7 +3526,7 @@ fn a_claude_harness_turn_settles_on_its_result_and_not_on_the_origin_marker() {
     assert!(relay.operational_state().harness_turn.is_none());
     assert!(matches!(
         observations(&relay).last(),
-        Some(RelayObservation::HarnessTurnSettled { origin, prompt_in_flight: false })
+        Some(RelayObservation::HarnessTurnSettled { origin, prompt_in_flight: false, .. })
             if origin.as_deref() == Some("human")
     ));
 
@@ -5601,6 +5618,7 @@ fn continuation_expectation_is_process_local_and_clears_when_a_harness_turn_open
     assert_eq!(relay.activity_facts().expected_continuation, None);
     relay
         .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         })
@@ -7790,12 +7808,7 @@ fn settled_harness_turn_admits_only_its_current_reminder() {
         .unwrap();
     relay.open_harness_turn_if_allowed().unwrap();
     let id = relay.originating_command_id().unwrap();
-    relay
-        .record_observation(RelayObservation::HarnessTurnSettled {
-            origin: None,
-            prompt_in_flight: false,
-        })
-        .unwrap();
+    relay.settle_harness_turn(None, "end_turn").unwrap();
     let completion = relay.operational_state().turn_completion.unwrap();
     assert_eq!(completion.command_id, id);
     let stale = relay

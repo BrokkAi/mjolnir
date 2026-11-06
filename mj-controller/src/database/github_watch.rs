@@ -741,6 +741,7 @@ mod tests {
             (
                 5_200,
                 RelayObservation::HarnessTurnSettled {
+                    autonomous: None,
                     origin: None,
                     prompt_in_flight: false,
                 },

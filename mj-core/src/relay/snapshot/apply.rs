@@ -1325,19 +1325,21 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
         }
         RelayObservation::HarnessTurnSettled {
-            prompt_in_flight, ..
+            prompt_in_flight,
+            autonomous,
+            ..
         } => {
-            if !*prompt_in_flight && let Some(turn) = &snapshot.harness_turn {
+            if let Some(turn) = autonomous {
                 snapshot.turn_completion = Some(crate::activity::verdict::TurnCompletion {
-                    command_id: crate::continuation::harness_turn_id(turn.first_ordinal),
+                    command_id: crate::continuation::harness_turn_id(turn.start_ordinal),
                     completed_ordinal: event.ordinal,
                     decision: crate::activity::verdict::Decision::KeepCurrent,
                 });
             }
-            let started = snapshot.continuation.autonomous_turn_started.take();
-            if let Some(turn) = &snapshot.harness_turn
+            let autonomous_turn = snapshot.autonomous_harness_turn();
+            snapshot.continuation.autonomous_turn_started = None;
+            if let Some(turn) = autonomous_turn
                 && !*prompt_in_flight
-                && started == Some(turn.first_ordinal)
             {
                 // Physical completion does not depend on a retained user command.
                 // Missing authorization gates nudges, never provider assessment.
@@ -1351,9 +1353,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     ),
                 ));
             }
-            if let Some(turn) = &snapshot.harness_turn
+            if let Some(turn) = autonomous_turn
                 && !*prompt_in_flight
-                && started == Some(turn.first_ordinal)
                 && snapshot.continuation.user_command_id.is_some()
             {
                 let id = crate::continuation::harness_turn_id(turn.first_ordinal);

@@ -1061,7 +1061,9 @@ mod settled_task_tests {
                 .unwrap(),
             )
             .unwrap();
-        relay.settle_harness_turn(Some("test".into())).unwrap();
+        relay
+            .settle_harness_turn(Some("test".into()), "end_turn")
+            .unwrap();
         relay.prepare_pending_assessment().unwrap();
         let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
         assert_eq!(
@@ -1177,7 +1179,9 @@ mod settled_task_tests {
                 .unwrap(),
             )
             .unwrap();
-        relay.settle_harness_turn(Some("test".into())).unwrap();
+        relay
+            .settle_harness_turn(Some("test".into()), "end_turn")
+            .unwrap();
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
         relay
@@ -1313,7 +1317,9 @@ mod settled_task_tests {
             })
             .unwrap();
         say(&mut relay, "The build passed.");
-        relay.settle_harness_turn(Some("end_turn".into())).unwrap();
+        relay
+            .settle_harness_turn(Some("end_turn".into()), "end_turn")
+            .unwrap();
         let completion = relay.operational_state().turn_completion;
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, identity) = relay.pending_replied_verdict().unwrap();

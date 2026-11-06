@@ -835,14 +835,17 @@ pub(super) fn project_observation(
             });
         }
         RelayObservation::HarnessTurnSettled {
-            prompt_in_flight, ..
+            prompt_in_flight,
+            autonomous,
+            ..
         } => {
             // A prompt dispatched mid-turn is still running when the turn the
             // harness started on its own settles. The relay keeps the session
             // Running for it, and so does this: the prompt's own result closes
             // the streams and stops the clock.
             if !prompt_in_flight {
-                if let Some(start) = harness_turn_start(current) {
+                if let Some(turn) = autonomous {
+                    let start = turn.start_ordinal;
                     let command_id = mj_core::continuation::harness_turn_id(start);
                     if !current
                         .last_turn_outcome
@@ -856,7 +859,7 @@ pub(super) fn project_observation(
                             completed_ordinal: event.ordinal,
                             completed_at_ms: event.recorded_at_ms,
                             outcome: TurnOutcomeKind::Completed {
-                                stop_reason: "end_turn".into(),
+                                stop_reason: turn.stop_reason.clone(),
                             },
                             diagnostic: None,
                             usage: None,

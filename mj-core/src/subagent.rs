@@ -1121,38 +1121,21 @@ pub struct SubagentReport {
 pub fn awaiting_prompt(
     awaited_ordinal: Option<u64>,
     last_turn: Option<&crate::state::MaterializedTurnOutcome>,
+    queued: impl IntoIterator<Item = Option<u64>>,
 ) -> bool {
-    prompt_unanswered(awaited_ordinal, last_turn.and_then(answered_ordinal))
+    prompt_unanswered(
+        awaited_ordinal,
+        last_turn.and_then(|turn| turn.answered_ordinal(queued)),
+    )
 }
 
 /// Whether the prompt accepted at `awaited_ordinal` is still unanswered by a
 /// finished turn that answers prompts up to `answered_ordinal` (see
-/// [`answered_ordinal`]). This is the one comparison every reader applies.
+/// [`crate::state::MaterializedTurnOutcome::answered_ordinal`]). This is the one comparison every reader applies.
 #[must_use]
 pub fn prompt_unanswered(awaited_ordinal: Option<u64>, answered_ordinal: Option<u64>) -> bool {
     awaited_ordinal
         .is_some_and(|awaited| answered_ordinal.is_none_or(|answered| answered < awaited))
-}
-
-/// A queued prompt remains unanswered regardless of the latest completion.
-pub fn prompt_is_queued(
-    awaited: Option<u64>,
-    queued: impl IntoIterator<Item = Option<u64>>,
-) -> bool {
-    awaited.is_some() && queued.into_iter().any(|ordinal| ordinal == awaited)
-}
-
-/// The newest prompt a finished turn answers, by acceptance ordinal.
-///
-/// A prompt's turn answers the prompt accepted at its own ordinal. A handback
-/// reminder is Mjolnir's, not the parent's: the store gives its turn no
-/// acceptance ordinal, and the report the child hands back in it answers the
-/// turn it reminded about, so it answers every prompt accepted before that
-/// turn finished. A prompt accepted after that runs after the reminder and is
-/// still owed.
-#[must_use]
-pub fn answered_ordinal(turn: &crate::state::MaterializedTurnOutcome) -> Option<u64> {
-    turn.answered_ordinal()
 }
 
 /// How a child's last finished turn failed, if it did: `interrupted` for a
@@ -1590,11 +1573,12 @@ pub fn has_handed_back(
     working: bool,
     last_turn: Option<&crate::state::MaterializedTurnOutcome>,
     now_ms: i64,
+    queued: impl IntoIterator<Item = Option<u64>>,
 ) -> bool {
     let Some(turn) = last_turn else {
         return false;
     };
-    if working || awaiting_prompt(report.awaited_ordinal, Some(turn)) {
+    if working || awaiting_prompt(report.awaited_ordinal, Some(turn), queued) {
         return false;
     }
     match report_state(handback_tool, report, Some(turn), &[], now_ms) {
@@ -1970,16 +1954,19 @@ mod tests {
     fn a_child_is_not_done_until_a_finished_turn_reaches_the_newest_prompt() {
         let mut turn = finished("task", "end_turn");
         turn.accepted_ordinal = Some(20);
-        assert!(!awaiting_prompt(None, Some(&turn)));
-        assert!(awaiting_prompt(Some(45), None), "no turn has finished yet");
+        assert!(!awaiting_prompt(None, Some(&turn), []));
         assert!(
-            awaiting_prompt(Some(45), Some(&turn)),
+            awaiting_prompt(Some(45), None, []),
+            "no turn has finished yet"
+        );
+        assert!(
+            awaiting_prompt(Some(45), Some(&turn), []),
             "the finished turn is older"
         );
         // A prompt steered into the running turn is answered by that turn,
         // which then carries the steered prompt's ordinal.
         turn.accepted_ordinal = Some(45);
-        assert!(!awaiting_prompt(Some(45), Some(&turn)));
+        assert!(!awaiting_prompt(Some(45), Some(&turn), []));
     }
 
     // Hard-won: a91cfd04: A child failing on a usage limit looked completed and its parent never learned why.
@@ -2480,23 +2467,42 @@ mod tests {
             awaited_ordinal: Some(84),
             ..SubagentReport::default()
         };
-        assert!(!awaiting_prompt(Some(84), Some(&reminder_turn)));
+        assert!(!awaiting_prompt(Some(84), Some(&reminder_turn), []));
         assert!(has_handed_back(
             true,
             &report,
             false,
             Some(&reminder_turn),
-            0
+            0,
+            []
         ));
         let harness_turn = crate::state::MaterializedTurnOutcome {
             command_id: crate::continuation::harness_turn_id(103),
             turn_start_position: Some(103),
             ..reminder_turn.clone()
         };
-        assert!(!awaiting_prompt(Some(84), Some(&harness_turn)));
-        assert!(awaiting_prompt(Some(110), Some(&harness_turn)));
+        // Hard-won: #1450 review: a queued task must prevent handback.
+        let queued_report = SubagentReport {
+            awaited_ordinal: Some(84),
+            ..Default::default()
+        };
+        assert!(!has_handed_back(
+            true,
+            &queued_report,
+            false,
+            Some(&harness_turn),
+            0,
+            [Some(84)]
+        ));
+        assert!(awaiting_prompt(
+            Some(84),
+            Some(&harness_turn),
+            [Some(80), None, Some(84)]
+        ));
+        assert!(!awaiting_prompt(Some(84), Some(&harness_turn), []));
+        assert!(awaiting_prompt(Some(110), Some(&harness_turn), []));
         // A prompt accepted after the reminded turn ended is still owed.
-        assert!(awaiting_prompt(Some(110), Some(&reminder_turn)));
+        assert!(awaiting_prompt(Some(110), Some(&reminder_turn), []));
     }
 
     #[test]
@@ -2506,28 +2512,36 @@ mod tests {
             handback: handback("task"),
             ..SubagentReport::default()
         };
-        assert!(has_handed_back(true, &delivered, false, Some(&task), 0));
+        assert!(has_handed_back(true, &delivered, false, Some(&task), 0, []));
         // Still working, never finished a turn, or given a newer prompt.
-        assert!(!has_handed_back(true, &delivered, true, Some(&task), 0));
-        assert!(!has_handed_back(true, &delivered, false, None, 0));
+        assert!(!has_handed_back(true, &delivered, true, Some(&task), 0, []));
+        assert!(!has_handed_back(true, &delivered, false, None, 0, []));
         let newer = SubagentReport {
             awaited_ordinal: Some(9),
             ..delivered.clone()
         };
-        assert!(!has_handed_back(true, &newer, false, Some(&task), 0));
+        assert!(!has_handed_back(true, &newer, false, Some(&task), 0, []));
         // Owes a report and has not been reminded, or was reminded just now.
         assert!(!has_handed_back(
             true,
             &SubagentReport::default(),
             false,
             Some(&task),
-            0
+            0,
+            []
         ));
         let reminded = SubagentReport {
             reminder: reminder("task"),
             ..SubagentReport::default()
         };
-        assert!(!has_handed_back(true, &reminded, false, Some(&task), 1_000));
+        assert!(!has_handed_back(
+            true,
+            &reminded,
+            false,
+            Some(&task),
+            1_000,
+            []
+        ));
         // Its last message is the report once the reminder went unanswered,
         // and always for a child without the tool.
         assert!(has_handed_back(
@@ -2535,14 +2549,16 @@ mod tests {
             &reminded,
             false,
             Some(&task),
-            1_000 + HANDBACK_REMINDER_GRACE_MS
+            1_000 + HANDBACK_REMINDER_GRACE_MS,
+            []
         ));
         assert!(has_handed_back(
             false,
             &SubagentReport::default(),
             false,
             Some(&task),
-            0
+            0,
+            []
         ));
         // A turn that failed or asked a question handed nothing back.
         for stop_reason in ["cancelled", "awaiting_input", "refusal"] {
@@ -2552,7 +2568,8 @@ mod tests {
                     &SubagentReport::default(),
                     false,
                     Some(&finished("task", stop_reason)),
-                    0
+                    0,
+                    []
                 ),
                 "{stop_reason}"
             );

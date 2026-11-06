@@ -315,6 +315,10 @@ mod outcome_tests {
     // Preserve the exact historical wire names independently of the new enum.
     #[allow(clippy::enum_variant_names)]
     enum OldObservation {
+        HarnessTurnSettled {
+            origin: Option<String>,
+            prompt_in_flight: bool,
+        },
         CommandInterrupted {
             command_id: String,
             command: RelayCommandKind,
@@ -335,10 +339,15 @@ mod outcome_tests {
         },
     }
 
+    // Hard-won: #1450 review: absent settlement metadata must preserve old digests.
     #[test]
     fn pre_classification_journals_keep_their_original_digest_in_both_formats() {
         for format in [RELAY_EVENT_FORMAT_V1, RELAY_EVENT_FORMAT_V2] {
             for old in [
+                OldObservation::HarnessTurnSettled {
+                    origin: None,
+                    prompt_in_flight: false,
+                },
                 OldObservation::CommandInterrupted {
                     command_id: "opaque".into(),
                     command: RelayCommandKind::BeginCheckpoint,

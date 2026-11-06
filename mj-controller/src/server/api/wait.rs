@@ -407,6 +407,9 @@ pub(super) fn build_observation(
             .clone_from(&snapshot.materialized.pending_elicitations);
         observation.observe_worker_turn(snapshot);
     } else if let Some(durable) = durable {
+        observation
+            .queued_ordinals
+            .clone_from(&durable.queued_ordinals);
         observation.execution = durable.execution;
         observation.active_turn = durable.active_turn.clone();
         observation

@@ -725,6 +725,7 @@ pub struct TranscriptResponse {
 /// no live actor holds the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnState {
+    pub queued_ordinals: Vec<Option<u64>>,
     pub execution: MaterializedExecutionState,
     pub active_turn: Option<MaterializedTurn>,
     pub last_turn_outcome: Option<MaterializedTurnOutcome>,

@@ -326,13 +326,20 @@ pub struct MaterializedTurnOutcome {
 
 impl MaterializedTurnOutcome {
     /// The newest prompt acceptance this finished turn can answer.
-    pub fn answered_ordinal(&self) -> Option<u64> {
-        if let Some(ordinal) = crate::subagent::reminded_turn_ordinal(&self.command_id) {
-            Some(ordinal)
-        } else if crate::continuation::is_harness_turn_id(&self.command_id) {
-            self.turn_start_position
-        } else {
-            self.accepted_ordinal
+    pub fn answered_ordinal(&self, queued: impl IntoIterator<Item = Option<u64>>) -> Option<u64> {
+        let first = queued.into_iter().flatten().min();
+        let answer = {
+            if let Some(ordinal) = crate::subagent::reminded_turn_ordinal(&self.command_id) {
+                Some(ordinal)
+            } else if crate::continuation::is_harness_turn_id(&self.command_id) {
+                self.turn_start_position
+            } else {
+                self.accepted_ordinal
+            }
+        }?;
+        match first {
+            Some(first) if first <= answer => first.checked_sub(1),
+            _ => Some(answer),
         }
     }
 

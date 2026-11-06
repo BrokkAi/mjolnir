@@ -3618,6 +3618,7 @@ async fn relay_turn_start_retires_only_the_recorded_public_lifecycle_failure() {
     observe(
         &mut view,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         },
@@ -3640,6 +3641,7 @@ async fn relay_turn_start_retires_only_the_recorded_public_lifecycle_failure() {
     observe(
         &mut view,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         },

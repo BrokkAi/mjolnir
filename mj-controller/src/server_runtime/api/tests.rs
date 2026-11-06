@@ -4,6 +4,7 @@ use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe, tes
 use mj_core::config::HarnessKind;
 use mj_core::state::SessionRecord;
 
+// Hard-won: #1450 review: autonomous outcomes must preserve turn identity and queued work.
 #[test]
 fn child_progress_uses_the_published_turn_and_report_together() {
     let mut committed = crate::database::CommittedState {
