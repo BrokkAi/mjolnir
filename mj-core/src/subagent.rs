@@ -1937,6 +1937,7 @@ mod tests {
             crate::config::HarnessKind::Claude,
             crate::config::HarnessKind::Codex,
             crate::config::HarnessKind::Dsh,
+            crate::config::HarnessKind::OpenCode,
         ] {
             for policy in [
                 SubagentPolicy::Native,

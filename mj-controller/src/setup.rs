@@ -15,6 +15,7 @@ use mj_core::config::{
     Config, ContainerTemplate, HarnessHost, HarnessKind, HarnessProfile, ProjectBundle,
     ProjectRepository, TargetTemplate, unique_config_id as unique_id,
 };
+use mj_core::remote_git::{Shorthand, parse_github_remote};
 
 mod availability;
 pub use availability::{AvailabilityReport, check_availability, profile_presence};
@@ -543,8 +544,15 @@ fn claude_credentials_contain_login(credentials: &[u8]) -> bool {
 }
 
 pub fn github_repository_from_origin(origin: &str) -> Option<GithubRepository> {
-    let (owner, repository) = mj_core::remote_git::github_owner_repo(origin)?;
-    Some(GithubRepository { owner, repository })
+    github_repository(origin, Shorthand::Allowed)
+}
+
+fn github_repository(origin: &str, shorthand: Shorthand) -> Option<GithubRepository> {
+    let remote = parse_github_remote(origin, shorthand)?;
+    Some(GithubRepository {
+        owner: remote.owner,
+        repository: remote.repository,
+    })
 }
 
 /// Read the current directory's GitHub origin, through the same executor every
@@ -571,7 +579,11 @@ fn discover_github_repository(
     if output.status != 0 {
         return None;
     }
-    github_repository_from_origin(&String::from_utf8_lossy(&output.stdout))
+    // `git remote get-url` prints a remote, so `owner/repo` is a path here.
+    github_repository(
+        &String::from_utf8_lossy(&output.stdout),
+        Shorthand::Rejected,
+    )
 }
 
 /// Probe the container runtimes setup can configure, reusing the doctor checks

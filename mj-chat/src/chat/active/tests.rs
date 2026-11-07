@@ -3394,6 +3394,10 @@ async fn late_prompt_refusal_from_a_parked_worker_view_reaches_the_live_composer
     assert!(standby.pending_submissions.is_empty());
 }
 
+/// One listing of the session's stored prompts that a test answers.
+type SessionPromptsCall =
+    tokio::sync::oneshot::Sender<anyhow::Result<Vec<mj_core::storage::PromptHistoryEntry>>>;
+
 #[derive(Clone)]
 struct DelayedNativeSession {
     delegate: mj_client::session::SessionHandle,
@@ -3401,6 +3405,8 @@ struct DelayedNativeSession {
         mj_core::relay::RelayCommand,
         tokio::sync::oneshot::Sender<anyhow::Result<u64>>,
     )>,
+    /// When set, session-prompt listings go to the test instead of the delegate.
+    history: Option<tokio::sync::mpsc::UnboundedSender<SessionPromptsCall>>,
 }
 impl mj_client::session::SessionHandleBackend for DelayedNativeSession {
     fn clone_box(&self) -> Box<dyn mj_client::session::SessionHandleBackend> {
@@ -3429,9 +3435,30 @@ impl mj_client::session::SessionHandleBackend for DelayedNativeSession {
         bundle: String,
         scope: mj_core::storage::HistoryScope,
         query: String,
+        after: Option<mj_core::storage::HistoryCursor>,
+        limit: usize,
+    ) -> mj_client::session::BoxFuture<'_, anyhow::Result<mj_core::storage::PromptHistoryPage>>
+    {
+        Box::pin(
+            self.delegate
+                .search_prompts(bundle, scope, query, after, limit),
+        )
+    }
+    fn session_prompts(
+        &self,
     ) -> mj_client::session::BoxFuture<'_, anyhow::Result<Vec<mj_core::storage::PromptHistoryEntry>>>
     {
-        Box::pin(self.delegate.search_prompts(bundle, scope, query))
+        if let Some(history) = &self.history {
+            let (reply, listing) = tokio::sync::oneshot::channel();
+            let sent = history.send(reply);
+            return Box::pin(async move {
+                sent.map_err(|_| anyhow::anyhow!("test history closed"))?;
+                listing
+                    .await
+                    .map_err(|_| anyhow::anyhow!("test history reply dropped"))?
+            });
+        }
+        Box::pin(self.delegate.session_prompts())
     }
     fn config_result(
         &self,
@@ -3512,8 +3539,11 @@ async fn native_acknowledgements_survive_dropping_the_view_that_submitted_them()
                 .await
                 .unwrap();
             let (replies, mut observed) = tokio::sync::mpsc::unbounded_channel();
-            let session =
-                mj_client::session::SessionHandle::new(DelayedNativeSession { delegate, replies });
+            let session = mj_client::session::SessionHandle::new(DelayedNativeSession {
+                delegate,
+                replies,
+                history: None,
+            });
             let mut source = ActiveChat::open(
                 session,
                 "bundle",
@@ -3725,4 +3755,82 @@ async fn deferred_move_prompts_keep_their_original_operation_through_attach_and_
     unresolved.settle_deferred_move_origin(5, Some("cancelled-original"), false);
     assert!(unresolved.drain_composer().is_none());
     assert_eq!(unresolved.draft(), "do not rebind this deferred prompt");
+}
+
+// Hard-won: 747d8ed78: a prompt sent to an open session from the web never reached Up
+#[tokio::test]
+async fn an_accepted_prompt_lists_the_sessions_prompts_again_for_up() {
+    use mj_core::storage::PromptHistoryEntry;
+    let fixture = mj_client::session::replacement_session_test_fixture("history-refresh", 1);
+    fixture
+        .replacement_view
+        .send_replace(managed_view(MaterializedSession::empty("history-refresh")));
+    let delegate = fixture.control.session("history-refresh").await.unwrap();
+    let (replies, _observed) = tokio::sync::mpsc::unbounded_channel();
+    let (history, mut listings) = tokio::sync::mpsc::unbounded_channel();
+    let session = mj_client::session::SessionHandle::new(DelayedNativeSession {
+        delegate,
+        replies,
+        history: Some(history),
+    });
+    let mut chat = ActiveChat::open(
+        session,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+    );
+    let entry = |id: i64, text: &str| PromptHistoryEntry {
+        id,
+        session_id: "history-refresh".into(),
+        text: text.into(),
+    };
+    async fn answer(
+        chat: &mut ActiveChat,
+        listings: &mut tokio::sync::mpsc::UnboundedReceiver<SessionPromptsCall>,
+        entries: Vec<PromptHistoryEntry>,
+    ) {
+        let reply = tokio::time::timeout(Duration::from_secs(2), listings.recv())
+            .await
+            .expect("the session's prompts were listed")
+            .unwrap();
+        reply.send(Ok(entries)).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                chat.drain().await;
+                if !chat.state.session_history.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the listing arrived");
+    }
+
+    answer(&mut chat, &mut listings, vec![entry(1, "typed here")]).await;
+    // The session accepted a prompt sent from the web viewer.
+    chat.state.apply_event(&SequencedEvent {
+        seq: 2,
+        recorded_at_ms: None,
+        request_id: Some("phone-prompt".into()),
+        event: WorkerEvent::PromptAccepted {
+            request_id: "phone-prompt".into(),
+            text: "sent from the web".into(),
+            attachments: Vec::new(),
+        },
+    });
+    chat.drain().await;
+    chat.state.session_history.clear();
+    answer(
+        &mut chat,
+        &mut listings,
+        vec![entry(2, "sent from the web"), entry(1, "typed here")],
+    )
+    .await;
+
+    chat.handle_event_result(Event::Key(key(KeyCode::Up)));
+    assert_eq!(chat.state.input, "sent from the web");
 }

@@ -171,7 +171,7 @@ pub(super) fn extend_writable_directories(
     if harness == mj_core::config::HarnessKind::Muse {
         return;
     }
-    for name in ["MJ_TOOL_CACHE_DIR", "MJ_NX_HOME_DIR", "MJ_TOOL_CACHE_HOME"] {
+    for name in crate::acp::TOOL_CACHE_DIRECTORY_VARIABLES {
         if let Some(path) = environment.get(name).map(PathBuf::from)
             && path.is_absolute()
             && !directories.contains(&path)

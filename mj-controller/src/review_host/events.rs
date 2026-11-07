@@ -58,6 +58,12 @@ pub(super) enum HostEvent {
         epoch: u64,
         step: ReviewStep,
     },
+    /// A finished reviewer child whose review no longer tracks it. The host
+    /// owns every reviewer child close, so the delegation loop hands it here
+    /// instead of closing it again itself.
+    CloseChild {
+        child_session_id: String,
+    },
     ReviewerFinished {
         session_id: String,
         child_session_id: String,
@@ -213,7 +219,8 @@ pub(super) struct HostState {
     pub(super) persistence: Option<mpsc::UnboundedSender<PersistenceRequest>>,
     pub(super) persistence_task: Option<tokio::task::JoinHandle<()>>,
     pub(super) child_closures: tokio::task::JoinSet<Result<(), String>>,
-    pub(super) child_closure_owners: BTreeMap<tokio::task::Id, (String, std::time::Duration)>,
+    pub(super) child_closure_owners:
+        BTreeMap<tokio::task::Id, (String, super::reviewer_child::CloseAttempts)>,
     pub(super) reviews: BTreeMap<String, ReviewSlot>,
     /// Sessions whose review is being prepared. Preparation is asynchronous,
     /// so without this an automatic trigger and a manual `/review` racing each

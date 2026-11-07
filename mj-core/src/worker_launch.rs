@@ -430,7 +430,7 @@ pub fn resolve_subagent_mcp_role(
 impl WorkerLaunchConfig {
     pub fn review_gate(&self) -> bool {
         self.review_trigger == crate::config::ReviewTrigger::Push
-            && self.harness.supports_delegation_tools()
+            && self.harness.supports_review_gate()
             && !self.is_managed_subagent()
             && !self.handback_tool
             && self.reviewer_launch.is_none()
@@ -664,6 +664,8 @@ mod tests {
             HarnessKind::Codex,
             HarnessKind::Dsh,
             HarnessKind::Muse,
+            // Delegates through Mjolnir but has no push review gate.
+            HarnessKind::OpenCode,
         ] {
             for trigger in [
                 crate::config::ReviewTrigger::Off,
@@ -676,8 +678,8 @@ mod tests {
                 let saved = serde_json::to_value(&launch).unwrap();
                 let read: WorkerLaunchConfig = serde_json::from_value(saved).unwrap();
                 assert_eq!(read.review_trigger, trigger);
-                let expected =
-                    trigger == crate::config::ReviewTrigger::Push && harness != HarnessKind::Muse;
+                let expected = trigger == crate::config::ReviewTrigger::Push
+                    && !matches!(harness, HarnessKind::Muse | HarnessKind::OpenCode);
                 assert_eq!(launch.review_gate(), expected);
                 for policy in [
                     SubagentPolicy::None,

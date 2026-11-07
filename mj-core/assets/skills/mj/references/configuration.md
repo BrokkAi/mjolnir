@@ -517,8 +517,10 @@ command-line tool must match the version Mjolnir links.
 
 ## Sub-agents `[subagents]`
 
-A Claude, Codex, or DSH session can use Mjolnir's `spawn` tool. Create and Move offer
-Native or Mjolnir. Native uses the harness's own delegation. DSH has none, so
+A Claude, Codex, DSH, or OpenCode session can use Mjolnir's `spawn` tool. Create and Move offer
+Native or Mjolnir. Native uses the harness's own delegation. OpenCode gets the tools
+as `mj-agents_spawn` and so on, learns of finished children at the end of its turn (it has
+no steering), and loses its own `subagent` tool unless the choice is Native. DSH has none, so
 for a DSH profile they offer Mjolnir or None, starting on Mjolnir only when the
 last choice was Mjolnir and it is configured; a DSH session's None does not
 change the remembered choice that Claude and Codex sessions start from. Mjolnir needs a
@@ -571,7 +573,7 @@ optional effort must be offered by an enabled profile. Each effort flag requires
 its matching model flag; `adaptive` and combining an override with `native` or
 `none` are rejected. Omitted effort uses the harness default. The retired
 `--subagent-model` and `--subagent-effort` flags fail with guidance to use the
-four per-type flags. `none` (CLI only) gives a Claude, Codex, or DSH session no
+four per-type flags. `none` (CLI only) gives a Claude, Codex, DSH, or OpenCode session no
 delegation tools.
 
 `mj new` and `mj move` take `--oracle enabled|disabled` and `--subagent-oracle M`
@@ -1246,9 +1248,7 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_CONTROLLER_BINARY` | Path to `mj` when `mj-desktop` cannot find its sibling controller. |
 | `MJ_VOICE_WORKER` | Path to the local dictation helper. |
 | `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
-| `MJ_SSH_MAX_CONCURRENT` | Cap on concurrent SSH connections per host; see the SSH target guide. |
-| `MJ_SSH_SESSIONS_PER_CONNECTION` | Sessions per shared OpenSSH connection; defaults to `8`. See the [SSH guide](/ssh/#sharing-connections-per-host). |
-| `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. |
+| `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. Mjolnir learns how many sessions each shared connection carries from the server's refusal and has no setting for it; see the [SSH guide](/ssh/#sharing-connections-per-host). |
 | `MJ_DEV_RESTART_STALE_DAEMON` | When set to any value, a client restarts a running daemon whose executable was replaced, or whose development workers changed, since it started, unless the daemon's build is newer than the client's. For development checkouts. |
 | `MJ_TURN_STALL_TIMEOUT_MS` | Milliseconds of harness silence, with no tool call open, after which the worker ends the turn with the reason `harness_inactive`. Off unless set to a positive value. |
 | `MJ_TURN_TOOL_STALL_TIMEOUT_MS` | Milliseconds one tool call may run before the worker ends the turn the same way. Off unless set to a positive value. |

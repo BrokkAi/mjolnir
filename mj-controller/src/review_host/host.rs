@@ -199,6 +199,13 @@ impl TurnReviewHost {
         self.begin_push(session_id, None).await.map(|_| ())
     }
 
+    /// Hands a finished reviewer child to the host's closer. The host retries
+    /// the close with backoff until it succeeds; callers must not close the
+    /// child again themselves.
+    pub(crate) fn close_child(&self, child_session_id: String) {
+        let _ = self.events.send(HostEvent::CloseChild { child_session_id });
+    }
+
     pub(crate) async fn reviewer_finished(
         &self,
         session_id: String,
