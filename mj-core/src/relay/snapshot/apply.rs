@@ -468,11 +468,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                                 )
                             )
                     }) {
-                        a.revision = event.ordinal;
-                        a.status = crate::assessment::Status::Pending;
-                        a.evidence = None;
-                        a.verdict = None;
-                        a.action = None;
+                        a.classify_again(event.ordinal);
                         a.failures = 0;
                         a.retry_at_ms = None;
                         a.reason = "authorization_evidence_changed".into();

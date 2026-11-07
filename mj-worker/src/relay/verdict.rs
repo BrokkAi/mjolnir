@@ -121,11 +121,7 @@ impl DurableRelay {
                 e.background_commands != facts.background_commands
                     || e.queued_commands != facts.queued_commands
             }) {
-                a.revision = self.snapshot.latest_ordinal + 1;
-                a.status = mj_core::assessment::Status::Pending;
-                a.evidence = None;
-                a.action = None;
-                a.verdict = None;
+                a.classify_again(self.snapshot.latest_ordinal + 1);
                 self.store_assessment(a)?;
             }
         }
@@ -209,11 +205,7 @@ impl DurableRelay {
         tracing::info!(target: "mj_jev", session = %self.snapshot.session_id,
             revision = a.revision, phase = "replied",
             "asking Jev again about leftover processes after a worker restart");
-        a.revision = self.snapshot.latest_ordinal + 1;
-        a.status = mj_core::assessment::Status::Pending;
-        a.evidence = None;
-        a.action = None;
-        a.verdict = None;
+        a.classify_again(self.snapshot.latest_ordinal + 1);
         self.store_assessment(a)
     }
 
@@ -240,11 +232,7 @@ impl DurableRelay {
         }) else {
             return Ok(());
         };
-        a.revision = self.snapshot.latest_ordinal + 1;
-        a.status = mj_core::assessment::Status::Pending;
-        a.evidence = None;
-        a.verdict = None;
-        a.action = None;
+        a.classify_again(self.snapshot.latest_ordinal + 1);
         a.failures = 0;
         a.retry_at_ms = None;
         a.reason = "authorization_evidence_changed".into();
@@ -597,13 +585,15 @@ mod tests {
             Status::Assessed
         );
 
-        let stale = assessed(&relay, true);
+        let mut stale = assessed(&relay, true);
+        stale.question_message = Some("agent:reply".into());
         relay.store_assessment(stale).unwrap();
         relay.prepare_pending_assessment().unwrap();
         let a = relay.snapshot.assessment.as_ref().unwrap();
         assert_eq!(a.status, Status::Pending);
         assert_eq!(a.action, None);
         assert_eq!(a.reason, "authorization_evidence_changed");
+        assert_eq!(a.question_message, None);
     }
 
     #[test]

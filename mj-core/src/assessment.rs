@@ -303,6 +303,17 @@ impl TurnAssessment {
             question_message: None,
         }
     }
+    /// Classify this turn again at `revision`: everything derived from the
+    /// previous verdict goes, including which reply held its question, so the
+    /// next verdict and its question locator start from nothing.
+    pub fn classify_again(&mut self, revision: u64) {
+        self.revision = revision;
+        self.status = Status::Pending;
+        self.evidence = None;
+        self.verdict = None;
+        self.action = None;
+        self.question_message = None;
+    }
     pub fn current(&self) -> bool {
         !matches!(self.status, Status::Consumed | Status::Superseded)
     }
