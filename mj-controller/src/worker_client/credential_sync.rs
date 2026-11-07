@@ -1284,7 +1284,7 @@ pub(super) async fn aws_cycle(
         }
     }
     let aws = match start_scoped_mint(target, force_new) {
-        Some(mint) => match mint
+        Some((mint, _stops_with_the_task)) => match mint
             .await
             .context("AWS role assumption task stopped")
             .and_then(|result| result)
@@ -1614,16 +1614,27 @@ fn backoff(base: Duration, failures: u32, limit: Duration) -> Duration {
 /// outcome: the worker keeps the credentials it has, and no path falls back to
 /// the unscoped export. `force_new` drops the cached credentials first, for a
 /// session whose credentials may have been refused.
+///
+/// The mint is owned by the task that awaits it: the returned guard, dropped
+/// with that task, terminates the AWS CLI's process group through the shared
+/// executor's cancellation, and only then does the cache entry's lock (held
+/// across the subprocess) come free. A superseded task's stuck helper therefore
+/// cannot keep its replacement waiting.
 fn start_scoped_mint(
     target: &CredentialSyncTarget,
     force_new: bool,
-) -> Option<tokio::task::JoinHandle<Result<mj_core::aws_credentials::AwsCredentials>>> {
+) -> Option<(
+    tokio::task::JoinHandle<Result<mj_core::aws_credentials::AwsCredentials>>,
+    mj_core::targets::ProcessCancellationGuard,
+)> {
     let source = target
         .aws_credentials
         .clone()
         .filter(|source| source.role.is_some())?;
     let session_id = target.session_id.clone();
-    Some(tokio::task::spawn_blocking(move || {
+    let executor = crate::targets::CancellableProcessExecutor::new(Arc::default());
+    let stops_with_the_task = executor.cancel_on_drop();
+    let mint = tokio::task::spawn_blocking(move || {
         // The harness's configuration may select the AWS profile; it is read
         // now, every time a mint is wanted, because an edit to it does not
         // rebuild the target. If it cannot be read, nothing is minted.
@@ -1637,10 +1648,11 @@ fn start_scoped_mint(
         cache.credentials_for(
             &session_id,
             &source,
-            // No deadline of our own, as for the unscoped export.
-            &crate::targets::ProcessExecutor,
+            // No deadline of our own; cancelled only with the task.
+            &executor,
         )
-    }))
+    });
+    Some((mint, stops_with_the_task))
 }
 
 /// The skills tree this session should converge to: the profile's own skills

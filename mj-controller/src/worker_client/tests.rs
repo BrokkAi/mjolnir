@@ -3587,6 +3587,85 @@ async fn obsolete_credentials_are_withdrawn_before_a_stuck_mint_and_the_step_say
     renewal.abort();
 }
 
+// A mint belongs to the renewal task that awaits it. When the task is
+// superseded (its target changed, though not the role or the environment the
+// cache is keyed by), the AWS CLI it started is terminated, so the cache
+// entry's lock is released and the replacement is not left waiting on a helper
+// nobody wants.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_superseded_renewals_stuck_helper_is_terminated_and_the_replacement_mints() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let (pids, release) = (
+        scratch.path().join("helper-pids"),
+        scratch.path().join("helper-release"),
+    );
+    std::fs::write(
+        cli.join("aws"),
+        format!(
+            "#!/bin/sh\n/bin/echo $$ >> {pids}\nwhile [ ! -e {release} ] && [ -d {dir} ]; do /bin/sleep 0.05; done\nexec /bin/cat {output}\n",
+            pids = pids.display(),
+            release = release.display(),
+            dir = scratch.path().display(),
+            output = scratch.path().join("granted.json").display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(cli.join("aws"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _release_on_exit = ReleaseOnDrop(release.clone());
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "superseded", None);
+    let coordinator = CredentialSyncCoordinator::spawn();
+    let handle = coordinator.handle();
+    handle.set_targets(vec![target.clone()]);
+    let helper_pids = || -> Vec<u32> {
+        std::fs::read_to_string(&pids)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect()
+    };
+    let wait_for = async |what: &str, condition: &(dyn Fn() -> bool + Sync)| {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    };
+    wait_for("the first helper", &|| helper_pids().len() == 1).await;
+    let stuck = helper_pids()[0];
+    assert!(std::path::Path::new(&format!("/proc/{stuck}")).exists());
+
+    // The target changes without changing what the cache is keyed by: the
+    // task is replaced, and its helper is terminated with it.
+    let mut changed = target.clone();
+    changed.skips_login_file_sync = !changed.skips_login_file_sync;
+    handle.set_targets(vec![changed]);
+    wait_for("the replacement's helper", &|| helper_pids().len() == 2).await;
+    wait_for("the superseded helper to end", &|| {
+        !std::path::Path::new(&format!("/proc/{stuck}")).exists()
+    })
+    .await;
+    assert!(!root.join("aws").exists());
+
+    // The replacement mints once the helper answers.
+    std::fs::write(&release, "").unwrap();
+    wait_for("the replacement's credentials", &|| {
+        root.join("aws").exists()
+    })
+    .await;
+    drop(coordinator);
+}
+
 // When the controller cannot read the profile's Codex configuration it cannot
 // tell which AWS login to use, so nothing is minted that cycle. The session
 // stays managed as role-scoped: credentials the controller did not issue (the
