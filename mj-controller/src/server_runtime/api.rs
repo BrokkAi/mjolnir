@@ -130,15 +130,6 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("workspace file injection is unavailable") })
     }
 
-    /// Ask the session's worker what its agent left running and what its
-    /// working tree holds. A backend without a daemon has no worker to ask.
-    fn work_facts(
-        &self,
-        _session_id: String,
-    ) -> BoxFuture<'_, Result<mj_core::work_facts::WorkFacts>> {
-        Box::pin(async { anyhow::bail!("work facts are unavailable without a daemon") })
-    }
-
     /// Checkpoint a session now, returning the archive it wrote.
     fn checkpoint_now(
         &self,
@@ -345,13 +336,6 @@ impl ExportRuntime for RuntimeState {
         session_id: String,
     ) -> BoxFuture<'_, Result<crate::session_manager::ManagedSessionHandle>> {
         Box::pin(async move { self.workspace_session_handle(&session_id).await })
-    }
-
-    fn work_facts(
-        &self,
-        session_id: String,
-    ) -> BoxFuture<'_, Result<mj_core::work_facts::WorkFacts>> {
-        Box::pin(async move { self.session_work_facts(&session_id).await })
     }
 
     fn checkpoint_now(
@@ -1714,6 +1698,56 @@ impl ApiBackend {
         if ready.is_empty() {
             return Ok(());
         }
+        // Facts are never asked of a worker here: this runs for every parent in
+        // the mailbox sweep, and one slow worker must not hold up any other
+        // report. The child's own completion task collects them once per
+        // finish and stores them; a finish it has not stored yet is left for
+        // the pass that follows its storing.
+        let ids = ready
+            .iter()
+            .map(|child| child.relation.child_session_id.clone())
+            .collect::<Vec<_>>();
+        let stored = blocking("load recorded work facts", move || {
+            crate::database::load_work_facts(&ids)
+        })
+        .await?;
+        let mut work_facts = BTreeMap::new();
+        let mut reportable = Vec::with_capacity(ready.len());
+        for child in ready {
+            let id = child.relation.child_session_id.clone();
+            if child.finished && child.relation.kind != mj_core::subagent::SubagentKind::Oracle {
+                match &child.identity {
+                    Some(mj_core::subagent::SubagentFinishIdentity::Turn {
+                        completed_ordinal,
+                        ..
+                    }) => {
+                        let recorded = stored
+                            .get(&id)
+                            .filter(|recorded| recorded.finish_ordinal == Some(*completed_ordinal))
+                            .and_then(|recorded| recorded.finish.clone());
+                        let Some(facts) = recorded else {
+                            continue;
+                        };
+                        work_facts.insert(id, facts);
+                    }
+                    // Not the end of a turn (a start that failed, a child that
+                    // was closed): no completion task asks its worker.
+                    _ => {
+                        work_facts.insert(
+                            id,
+                            mj_core::work_facts::WorkFacts::unavailable(
+                                "the child ended without a completed turn, so its worker was not asked",
+                            ),
+                        );
+                    }
+                }
+            }
+            reportable.push(child);
+        }
+        let ready = reportable;
+        if ready.is_empty() {
+            return Ok(());
+        }
         let spans = ready
             .iter()
             .map(|child| {
@@ -1727,24 +1761,6 @@ impl ApiBackend {
             crate::database::load_child_answer_messages(&spans)
         })
         .await?;
-        // One question per finish, asked of the worker that owns the answer,
-        // and all of them at once: a slow Git read in one child must not hold
-        // up another's report. A restart before the report row exists asks
-        // again, so no fact is stored twice for one finish.
-        let mut work_facts = futures::future::join_all(
-            ready
-                .iter()
-                .filter(|child| {
-                    child.finished && child.relation.kind != mj_core::subagent::SubagentKind::Oracle
-                })
-                .map(|child| async {
-                    let id = child.relation.child_session_id.clone();
-                    (id.clone(), self.observe_work(&id).await)
-                }),
-        )
-        .await
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
         let mut notifications = Vec::with_capacity(ready.len());
         for child in ready {
             let id = &child.relation.child_session_id;
@@ -1790,20 +1806,6 @@ impl ApiBackend {
         })
         .await?;
         Ok(())
-    }
-
-    /// Ask the child's worker what its agent left running and what its working
-    /// tree holds. A worker that cannot be reached yields facts that say so:
-    /// the report is still sent, and an unknown is never rendered as zero.
-    async fn observe_work(&self, child_id: &str) -> mj_core::work_facts::WorkFacts {
-        self.exports
-            .work_facts(child_id.to_owned())
-            .await
-            .unwrap_or_else(|error| {
-                mj_core::work_facts::WorkFacts::unavailable(format!(
-                    "the worker could not be reached: {error:#}"
-                ))
-            })
     }
 
     async fn require_owned_child(&self, parent_id: &str, child_id: &str) -> Result<()> {

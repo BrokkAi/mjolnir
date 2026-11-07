@@ -116,6 +116,11 @@ pub struct ChangedPath {
 /// for a park whose stop script ran to its check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParkFacts {
+    /// The stop was begun and its outcome is not recorded. The counts mean
+    /// nothing until a daemon settles the park: this is the marker a daemon
+    /// that died between the stop and its record finds at startup.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
     /// The processes seen just before the stop script ran.
     pub snapshot: Observed<ProcessFacts>,
     /// Counted from the check after the stop; zero when `unverified`.
@@ -140,6 +145,7 @@ impl ParkFacts {
     /// that was not observable settles with nothing counted.
     pub fn settled(snapshot: Observed<ProcessFacts>, survivors: &[u32]) -> Self {
         let mut park = Self {
+            pending: false,
             snapshot,
             stopped: 0,
             survived: 0,
@@ -167,6 +173,18 @@ impl ParkFacts {
         park
     }
 
+    /// The park as it stands when its stop is about to run: the snapshot, and
+    /// no outcome.
+    pub fn started(snapshot: Observed<ProcessFacts>) -> Self {
+        let mut park = Self::settled(snapshot, &[]);
+        park.pending = true;
+        park.stopped = 0;
+        park.survived = 0;
+        park.stopped_shown.clear();
+        park.survived_shown.clear();
+        park
+    }
+
     /// A park whose check after the stop could not run.
     pub fn unverified(snapshot: Observed<ProcessFacts>, reason: impl Into<String>) -> Self {
         let mut park = Self::settled(snapshot, &[]);
@@ -187,14 +205,18 @@ impl ParkFacts {
     /// stopped a process, one survived, or what happened to processes that
     /// were running could not be checked.
     pub fn is_news(&self) -> bool {
-        self.stopped > 0
-            || self.survived > 0
-            || (self.unverified.is_some() && self.observed_running() > 0)
+        !self.pending
+            && (self.stopped > 0
+                || self.survived > 0
+                || (self.unverified.is_some() && self.observed_running() > 0))
     }
 
     /// The lines of a `list_agents` entry.
     pub fn render_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
+        if self.pending {
+            return vec!["Park: stopping; the result is not recorded yet".into()];
+        }
         match (&self.snapshot, &self.unverified) {
             (Observed::Unavailable { reason }, _) => lines.push(format!(
                 "Park: the processes could not be observed before the stop ({reason})"

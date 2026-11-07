@@ -7286,7 +7286,9 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
     }
     connection
         .execute_batch(
-            "DELETE FROM schema_migrations WHERE version >= 115; PRAGMA user_version = 114;",
+            "DELETE FROM schema_migrations WHERE version >= 115;
+             UPDATE schema_compatibility SET minimum_compatible_version = 114;
+             PRAGMA user_version = 114;",
         )
         .unwrap();
     drop(connection);

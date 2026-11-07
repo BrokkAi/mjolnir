@@ -349,6 +349,35 @@ impl RuntimeState {
         }
     }
 
+    /// Collect and store, once, what the child's worker observed for the
+    /// finish that completed turn `ordinal`. The child's own completion task
+    /// runs this: the report is enqueued only after, from the stored value, so
+    /// no other child's or parent's report waits on this child's worker. A
+    /// worker that cannot be asked is stored as unknown, with the reason.
+    pub(super) async fn collect_finish_facts(&self, child_id: &str, ordinal: u64) -> Result<()> {
+        let recorded = blocking({
+            let child_id = child_id.to_owned();
+            move || crate::database::load_work_facts(&[child_id])
+        })
+        .await?;
+        if recorded
+            .get(child_id)
+            .is_some_and(|recorded| recorded.finish_ordinal == Some(ordinal))
+        {
+            return Ok(());
+        }
+        let facts = self
+            .session_work_facts(child_id)
+            .await
+            .unwrap_or_else(|error| {
+                mj_core::work_facts::WorkFacts::unavailable(format!(
+                    "the worker could not be reached: {error:#}"
+                ))
+            });
+        let child_id = child_id.to_owned();
+        blocking(move || crate::database::record_finish_facts(child_id, ordinal, facts)).await
+    }
+
     /// Checkpoint a session now and publish the result, the way the daemon's
     /// own checkpoint action does.
     ///

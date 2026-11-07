@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 114;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 117;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2196,19 +2196,22 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
-    // Compatible: an additive table that older daemons never read or write.
-    // No existing column, stored JSON shape, enum value or constraint changes,
-    // so `minimum_compatible_version` stays where it is. Destroying a session
-    // removes its row through the foreign key, as for revision 86's table; an
-    // older writer that destroys a session fires the same cascade.
+    // Breaking: the new table is additive, but a finished child's park is now
+    // reported to its parent as a `subagent_parked` mailbox event, which is
+    // persisted in `mailbox_outbox.event_json`. A revision-116 daemon cannot
+    // deserialize that body and would skip the row, so it must not write or
+    // read this store once such an event can exist. The table also cascades
+    // from `sessions`, which older writers do not know to rely on.
     if version < 117 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
              CREATE TABLE IF NOT EXISTS subagent_work_facts (
                  child_session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 finish_ordinal INTEGER,
                  finish_json TEXT CHECK(finish_json IS NULL OR json_valid(finish_json)),
                  park_json TEXT CHECK(park_json IS NULL OR json_valid(park_json))
              ) STRICT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 117 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (117, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
              PRAGMA user_version = 117;
@@ -4223,8 +4226,11 @@ mod reader_tests {
         assert_eq!(state.minimum_compatible, Some(SCHEMA_VERSION));
     }
 
+    // Hard-won: a430ee620: revision 117 was classified compatible, but it lets a
+    // `subagent_parked` mailbox event into the outbox, which a revision-116
+    // daemon cannot deserialize and so silently skips.
     #[test]
-    fn work_facts_migration_adds_a_compatible_table_that_follows_its_session() {
+    fn work_facts_migration_raises_the_floor_and_its_table_follows_its_session() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         let record = super::super::tests::session("facts-upgrade", "project");
@@ -4233,15 +4239,15 @@ mod reader_tests {
         let connection = open_writer(&path).unwrap();
         let state = read_schema_state(&connection).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        // Compatible: a build that predates the table still reads and writes
-        // the store, because the floor did not move.
-        state
-            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
-            .unwrap();
+        assert_eq!(state.minimum_compatible, Some(117));
+        // A revision-116 build is refused, as a store with a park event needs.
+        let refused = state.ensure_supported_by(116).unwrap_err();
+        assert!(format!("{refused:#}").contains("117"), "{refused:#}");
+        state.ensure_supported_by(117).unwrap();
         connection
             .execute(
-                "INSERT INTO subagent_work_facts(child_session_id, finish_json, park_json)
-                 VALUES (?1, '{}', NULL)",
+                "INSERT INTO subagent_work_facts(child_session_id, finish_ordinal, finish_json, park_json)
+                 VALUES (?1, 9, '{}', NULL)",
                 [&record.id],
             )
             .unwrap();
@@ -4319,6 +4325,7 @@ mod reader_tests {
         connection
             .execute_batch(
                 "DELETE FROM schema_migrations WHERE version >= 116;
+                 UPDATE schema_compatibility SET minimum_compatible_version = 114;
                  PRAGMA user_version = 115;",
             )
             .unwrap();
@@ -4362,7 +4369,7 @@ mod reader_tests {
         assert_eq!(state.revision, SCHEMA_VERSION);
         state
             .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
-            .expect("a revision-115 build still reads and writes the store");
+            .expect("the store is readable at the compatibility floor");
         let matching = |query: &str| -> Vec<String> {
             connection
                 .prepare(

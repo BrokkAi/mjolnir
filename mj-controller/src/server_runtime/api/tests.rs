@@ -2110,9 +2110,6 @@ struct ParkingExports {
     unpark_failure: Option<String>,
     defer_unpark: std::sync::atomic::AtomicBool,
     protocol: u32,
-    /// What the child's worker answers when asked for work facts; `None` is a
-    /// worker that cannot be reached.
-    work_facts: std::sync::Mutex<Option<mj_core::work_facts::WorkFacts>>,
 }
 
 impl ParkingExports {
@@ -2137,17 +2134,12 @@ impl ParkingExports {
             unparks: Default::default(),
             unpark_failure: unpark_failure.map(str::to_owned),
             defer_unpark: Default::default(),
-            work_facts: Default::default(),
             protocol: if modern_worker {
                 mj_core::relay::RELAY_PROTOCOL_VERSION
             } else {
                 mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL
             },
         })
-    }
-
-    fn set_work_facts(&self, facts: mj_core::work_facts::WorkFacts) {
-        *self.work_facts.lock().unwrap() = Some(facts);
     }
 
     fn set_child_state(&self, state: SessionState) {
@@ -2173,19 +2165,6 @@ impl ParkingExports {
 }
 
 impl ExportRuntime for ParkingExports {
-    fn work_facts(
-        &self,
-        _session_id: String,
-    ) -> BoxFuture<'_, Result<mj_core::work_facts::WorkFacts>> {
-        Box::pin(async move {
-            self.work_facts
-                .lock()
-                .unwrap()
-                .clone()
-                .context("connection refused")
-        })
-    }
-
     fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
         Box::pin(load_startup_status(session_id))
     }
@@ -4738,6 +4717,7 @@ async fn a_failed_turn_says_the_child_is_still_usable_but_an_errored_child_does_
     };
     conversation.last_turn_outcome = Some(turn);
     crate::database::save_materialized_session(&conversation).unwrap();
+    store_stand_in_facts("child-1", 9);
 
     let (backend, exports) = report_backend(active_parent_view("working"));
     let list = || async {
@@ -4814,10 +4794,15 @@ fn observed_work() -> mj_core::work_facts::WorkFacts {
     }
 }
 
-/// A finished child, reported once, and what `list_agents` then says of it.
+/// A finished child, with its finish facts stored (or not), reconciled, and
+/// what `list_agents` then says of it. `None` is a finish whose completion
+/// task has not stored its facts yet.
 async fn finish_report_and_listing(
     facts: Option<mj_core::work_facts::WorkFacts>,
-) -> (mj_core::mailbox::SubagentFinishedReport, serde_json::Value) {
+) -> (
+    Option<mj_core::mailbox::SubagentFinishedReport>,
+    serde_json::Value,
+) {
     let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
     let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
@@ -4828,20 +4813,23 @@ async fn finish_report_and_listing(
         message: "ACP prompt returned no session updates".into(),
         reason: None,
     };
+    let finish_ordinal = turn.completed_ordinal;
     conversation.last_turn_outcome = Some(turn);
     crate::database::save_materialized_session(&conversation).unwrap();
-    let (backend, exports) = report_backend(active_parent_view("working"));
+    let (backend, _exports) = report_backend(active_parent_view("working"));
     if let Some(facts) = facts {
-        exports.set_work_facts(facts);
+        crate::database::record_finish_facts("child-1".into(), finish_ordinal, facts).unwrap();
     }
     backend.reconcile_parent_reports("parent-1").await.unwrap();
     let events = crate::database::pending_mailbox_events(10).unwrap();
-    assert_eq!(events.len(), 1);
-    let event: mj_core::mailbox::MailboxEvent =
-        serde_json::from_str(&events[0].event_json).unwrap();
-    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = event.body else {
-        panic!("wrong event");
-    };
+    let report = events.first().map(|event| {
+        let event: mj_core::mailbox::MailboxEvent =
+            serde_json::from_str(&event.event_json).unwrap();
+        let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = event.body else {
+            panic!("wrong event");
+        };
+        *report
+    });
     let listing = backend
         .execute_subagent_tool(
             "parent-1".into(),
@@ -4855,7 +4843,7 @@ async fn finish_report_and_listing(
         .await;
     assert!(!listing.is_error, "{}", listing.message);
     let listing: serde_json::Value = serde_json::from_str(&listing.message).unwrap();
-    (*report, listing["agents"][0].clone())
+    (report, listing["agents"][0].clone())
 }
 
 /// The finish report carries what the child's worker saw, the same lines
@@ -4869,7 +4857,7 @@ async fn a_finish_report_carries_what_the_worker_observed_and_list_agents_repeat
     }
     let observed = observed_work();
     let (report, child) = finish_report_and_listing(Some(observed.clone())).await;
-    assert_eq!(report.facts.as_ref(), Some(&observed));
+    assert_eq!(report.unwrap().facts.as_ref(), Some(&observed));
     let lines = observed.render_lines();
     let listed: Vec<String> =
         serde_json::from_value(child["facts"]["finish"]["lines"].clone()).unwrap();
@@ -4884,30 +4872,24 @@ async fn a_finish_report_carries_what_the_worker_observed_and_list_agents_repeat
     assert!(child["facts"].get("park").is_none(), "{child}");
 }
 
-/// A worker that cannot be asked yields a report that says so. It is never
-/// the "0 processes" of a worker that was asked.
+// Hard-won: a430ee620: the report reconcile awaited every ready child's worker,
+// so one slow Git read or a child inside an idle checkpoint delayed every
+// sibling's report, every other parent's reports and all mailbox delivery.
+/// Reconciling reports never asks a worker. A finish whose completion task has
+/// not stored its facts yet is left for the pass after it does, and nothing
+/// else waits for it: this test has no worker to ask at all.
 #[tokio::test]
-async fn a_finish_report_says_the_worker_could_not_be_reached_instead_of_reporting_zero() {
-    if !isolated_parked_test(
-        "a_finish_report_says_the_worker_could_not_be_reached_instead_of_reporting_zero",
-    ) {
+async fn a_report_reconcile_never_asks_a_worker_and_waits_for_no_childs_facts() {
+    if !isolated_parked_test("a_report_reconcile_never_asks_a_worker_and_waits_for_no_childs_facts")
+    {
         return;
     }
     let (report, child) = finish_report_and_listing(None).await;
-    let facts = report.facts.expect("a finish report always carries facts");
-    assert!(matches!(
-        &facts.processes,
-        mj_core::work_facts::Observed::Unavailable { reason }
-            if reason.contains("the worker could not be reached") && reason.contains("connection refused")
-    ));
-    assert!(facts.worktree.known().is_none());
     assert!(
-        child["facts"]["finish"]["lines"][0]
-            .as_str()
-            .unwrap()
-            .contains("unavailable"),
-        "{child}"
+        report.is_none(),
+        "a finish with no stored facts was reported before its completion task stored them"
     );
+    assert!(child.get("facts").is_none(), "{child}");
 }
 
 /// A restart that fails leaves the child parked, so the parent can try
@@ -4946,6 +4928,17 @@ async fn a_failed_restart_leaves_the_child_parked_and_tells_the_parent_why() {
     assert!(delivered_prompts(&mut delivered).is_empty());
 }
 
+/// The child's completion task stores its finish facts before a report is
+/// built; stand in for it where a test sets a finish up by hand.
+fn store_stand_in_facts(child_id: &str, completed_ordinal: u64) {
+    crate::database::record_finish_facts(
+        child_id.into(),
+        completed_ordinal,
+        mj_core::work_facts::WorkFacts::unavailable("not observed in this test"),
+    )
+    .unwrap();
+}
+
 fn record_finished_child(
     child_id: &str,
     command_id: &str,
@@ -4974,6 +4967,14 @@ fn record_finished_child(
         )
         .unwrap()
     );
+    // The child's completion task stores its finish facts before a report is
+    // built; stand in for it, so the report is ready to be reconciled.
+    crate::database::record_finish_facts(
+        child_id.into(),
+        completed_ordinal,
+        mj_core::work_facts::WorkFacts::unavailable("not observed in this test"),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -5539,6 +5540,8 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
             .outcome
             .is_some()
     );
+    // The child's completion task stores the facts of the final finish.
+    store_stand_in_facts("child-1", 20);
     let backend = backend_for(view);
     backend.reconcile_parent_reports("parent-1").await.unwrap();
     backend.reconcile_parent_reports("parent-1").await.unwrap();
@@ -5586,6 +5589,8 @@ async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
     turn.diagnostic = Some(diagnostic.clone());
     conversation.last_turn_outcome = Some(turn);
     crate::database::save_materialized_session(&conversation).unwrap();
+    store_stand_in_facts("child-1", 9);
+    store_stand_in_facts("child-1", 9);
     // The session and relation now name helper; the failed turn ran on this
     // test's unique profile, avoiding shared health state across parallel tests.
     let test_profile = "provider_failed_child_report_names_its_turn_profile_and_backoff";

@@ -196,8 +196,7 @@ async fn run(
                 let state = state.clone();
                 let observation = observation.clone();
                 let task = completions.spawn(async move {
-                    let _work = work;
-                    complete_child(state, backend, child_id, observation).await
+                    complete_child(state, backend, child_id, observation, work).await
                 });
                 completion_ids.insert(task.id(), (child.clone(), outcome.completed_ordinal));
             }
@@ -311,7 +310,9 @@ async fn complete_child(
     backend: Arc<ApiBackend>,
     child_id: String,
     observation: DelegationObservation,
+    work: crate::upgrade::Work,
 ) -> Result<ChildCompletion> {
+    let mut work = Some(work);
     let id = child_id.clone();
     let relation =
         tokio::task::spawn_blocking(move || crate::database::load_subagent(&id)).await??;
@@ -364,6 +365,22 @@ async fn complete_child(
             return Ok(ChildCompletion::Settled);
         }
     }
+    if relation.kind == mj_core::subagent::SubagentKind::Worker {
+        // What the child's worker observed is asked once per finish, here, in
+        // this child's own task. The wait is on the worker and can take a
+        // while (an idle checkpoint holds its connection), so it holds no
+        // handoff admission: a replaced daemon asks again before any report.
+        drop(work.take());
+        state
+            .collect_finish_facts(&child_id, outcome.completed_ordinal)
+            .await?;
+        let Ok(admitted) = crate::upgrade::activity_unless_draining("delegation child completion")
+        else {
+            return Ok(ChildCompletion::RetryPark);
+        };
+        work = Some(admitted);
+    }
+    let _work = work;
     state
         .reconcile_parent_reports(&relation.parent_session_id)
         .await?;
@@ -521,19 +538,37 @@ mod tests {
                 state.clone(),
                 backend.clone(),
                 "child".into(),
-                observation.clone()
+                observation.clone(),
+                crate::upgrade::activity_unless_draining("test completion").unwrap()
             )
             .await
             .unwrap(),
             ChildCompletion::RetryPark
         ));
         assert!(matches!(
-            complete_child(state.clone(), backend, "child".into(), observation)
-                .await
-                .unwrap(),
+            complete_child(
+                state.clone(),
+                backend,
+                "child".into(),
+                observation,
+                crate::upgrade::activity_unless_draining("test completion").unwrap()
+            )
+            .await
+            .unwrap(),
             ChildCompletion::Settled
         ));
         assert_eq!(parks.0.load(Ordering::SeqCst), 2);
+        // The facts were asked once for this finish by the child's own task
+        // (it has no worker here, so they are stored as unknown, with why),
+        // and the second pass did not ask again.
+        let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
+        let recorded = &recorded["child"];
+        assert_eq!(recorded.finish_ordinal, Some(10));
+        assert!(matches!(
+            &recorded.finish.as_ref().unwrap().processes,
+            mj_core::work_facts::Observed::Unavailable { reason }
+                if reason.contains("the worker could not be reached")
+        ));
         assert_eq!(
             crate::database::load_subagent("child")
                 .unwrap()

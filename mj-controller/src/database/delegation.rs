@@ -194,17 +194,6 @@ pub(crate) fn enqueue_subagent_reports(
             if already_enqueued {
                 continue;
             }
-            if let Some(facts) = &report.facts {
-                // The row records the facts this report states, and clears the
-                // park result of any earlier finish: it described that finish.
-                transaction.execute(
-                    "INSERT INTO subagent_work_facts(child_session_id, finish_json, park_json)
-                     VALUES (?1, ?2, NULL)
-                     ON CONFLICT(child_session_id)
-                     DO UPDATE SET finish_json=excluded.finish_json, park_json=NULL",
-                    params![child_id, serde_json::to_string(facts)?],
-                )?;
-            }
             let event = mj_core::mailbox::MailboxEvent {
                 key: key.clone(),
                 source: "mjolnir".into(),
@@ -238,16 +227,23 @@ pub(crate) fn enqueue_subagent_reports(
     Ok(())
 }
 
-/// The facts recorded for one child: those its latest finish report stated,
+/// The facts recorded for one child: those collected for its latest finish,
 /// and what the park after it did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct StoredWorkFacts {
+    /// The completed turn the finish facts describe.
+    pub finish_ordinal: Option<u64>,
     pub finish: Option<mj_core::work_facts::WorkFacts>,
     pub park: Option<mj_core::work_facts::ParkFacts>,
 }
 
-fn decode_work_facts(finish: Option<String>, park: Option<String>) -> Result<StoredWorkFacts> {
+fn decode_work_facts(
+    finish_ordinal: Option<u64>,
+    finish: Option<String>,
+    park: Option<String>,
+) -> Result<StoredWorkFacts> {
     Ok(StoredWorkFacts {
+        finish_ordinal,
         finish: finish.map(|text| serde_json::from_str(&text)).transpose()?,
         park: park.map(|text| serde_json::from_str(&text)).transpose()?,
     })
@@ -257,23 +253,95 @@ fn decode_work_facts(finish: Option<String>, park: Option<String>) -> Result<Sto
 pub(crate) fn load_work_facts(children: &[String]) -> Result<BTreeMap<String, StoredWorkFacts>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
-        "SELECT finish_json, park_json FROM subagent_work_facts WHERE child_session_id=?1",
+        "SELECT finish_ordinal, finish_json, park_json FROM subagent_work_facts
+         WHERE child_session_id=?1",
     )?;
     let mut facts = BTreeMap::new();
     for child in children {
         let row = statement
             .query_row([child], |row| {
                 Ok((
-                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<u64>>(0)?,
                     row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
                 ))
             })
             .optional()?;
-        if let Some((finish, park)) = row {
-            facts.insert(child.clone(), decode_work_facts(finish, park)?);
+        if let Some((ordinal, finish, park)) = row {
+            facts.insert(child.clone(), decode_work_facts(ordinal, finish, park)?);
         }
     }
     Ok(facts)
+}
+
+/// Record what the child's worker observed for the finish that completed turn
+/// `ordinal`. A new finish clears the park result of the one before it; the
+/// same finish recorded again leaves the park result alone.
+pub(crate) fn record_finish_facts(
+    child: String,
+    ordinal: u64,
+    facts: mj_core::work_facts::WorkFacts,
+) -> Result<()> {
+    submit_database_write("record finish facts", move |connection| {
+        connection.execute(
+            "INSERT INTO subagent_work_facts(child_session_id, finish_ordinal, finish_json, park_json)
+             VALUES (?1, ?2, ?3, NULL)
+             ON CONFLICT(child_session_id) DO UPDATE SET
+                 park_json = CASE WHEN finish_ordinal IS excluded.finish_ordinal
+                                  THEN park_json ELSE NULL END,
+                 finish_ordinal = excluded.finish_ordinal,
+                 finish_json = excluded.finish_json",
+            params![child, ordinal, serde_json::to_string(&facts)?],
+        )?;
+        Ok(())
+    })
+}
+
+/// Write the pre-stop snapshot of a park with its unfinished marker, before
+/// the irreversible stop, so a daemon that dies between the stop and its
+/// outcome can settle the park from this row at startup.
+pub(crate) fn record_park_started(
+    child: String,
+    park: mj_core::work_facts::ParkFacts,
+) -> Result<()> {
+    submit_database_write("record park start", move |connection| {
+        connection.execute(
+            "INSERT INTO subagent_work_facts(child_session_id, finish_ordinal, finish_json, park_json)
+             VALUES (?1, NULL, NULL, ?2)
+             ON CONFLICT(child_session_id) DO UPDATE SET park_json=excluded.park_json",
+            params![child, serde_json::to_string(&park)?],
+        )?;
+        Ok(())
+    })
+}
+
+/// Parks whose stop was begun and whose outcome is not recorded.
+pub(crate) fn load_unfinished_parks() -> Result<Vec<(String, mj_core::work_facts::ParkFacts)>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT child_session_id, park_json FROM subagent_work_facts
+         WHERE json_extract(park_json, '$.pending') = 1",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(|(child, park)| Ok((child, serde_json::from_str(&park)?)))
+        .collect()
+}
+
+/// Forget an unfinished park that did not stop anything.
+pub(crate) fn discard_unfinished_park(child: String) -> Result<()> {
+    submit_database_write("discard unfinished park", move |connection| {
+        connection.execute(
+            "UPDATE subagent_work_facts SET park_json=NULL
+             WHERE child_session_id=?1 AND json_extract(park_json, '$.pending') = 1",
+            [child],
+        )?;
+        Ok(())
+    })
 }
 
 /// Record what a park did to the child's processes, and, when that is news
