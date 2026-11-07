@@ -175,10 +175,9 @@ pub(crate) fn hold_image_pull<'a>(
 /// Run `work` with nothing downloading this target's image underneath it.
 ///
 /// For a container target this waits for a background download of the same
-/// image on the same host, and reports the wait as the "Pull image" stage with
-/// a notice saying what it is waiting for. Nothing extra is reported in the
-/// ordinary case where no download is running, and a target that runs no image
-/// just runs `work`.
+/// image on the same host. Contention is reported as queue time; once this
+/// caller owns the lock, `work` runs under the "Pull image" stage. A target
+/// that runs no image just runs `work`.
 pub(crate) fn with_image_ready<T>(
     target: &TargetTemplate,
     executor: &impl CommandExecutor,
@@ -189,9 +188,6 @@ pub(crate) fn with_image_ready<T>(
     };
     let image = container.image.clone();
     let lock = image_pull_mutex(&host, &image);
-    // The stage guard is created inside `on_wait`, so it exists only on the
-    // waiting path, and dropped as soon as the wait is over: the stage
-    // describes the wait, not the work that follows it.
     let mut waiting = None;
     let guard = hold_image_pull(
         &lock,
@@ -199,14 +195,16 @@ pub(crate) fn with_image_ready<T>(
         || {
             waiting = Some(ProvisionStageGuard::new(
                 executor,
-                ProvisionStage::PullingImage,
+                ProvisionStage::WaitingForImagePull,
             ));
             executor.notify_notice(&format!("Waiting for image {image} to finish downloading"));
         },
     )?;
     drop(waiting);
+    let pulling = ProvisionStageGuard::new(executor, ProvisionStage::PullingImage);
     let result = work();
     drop(guard);
+    drop(pulling);
     result
 }
 

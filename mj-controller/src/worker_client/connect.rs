@@ -192,7 +192,18 @@ impl RelayClient {
                     error = %format!("{error:#}"),
                     "could not start relay proxy"
                 );
-                error
+                // A local launch whose program is absent can never reach a
+                // worker: a local bare session's proxy is the worker binary
+                // in its root, so no worker can answer. That is the same
+                // transport death as a proxy that exits during hello.
+                if crate::streamed_child::is_missing_program(&error) {
+                    error.context(RelayTransportDead::new(format!(
+                        "relay proxy program {} is missing",
+                        spec.program
+                    )))
+                } else {
+                    error
+                }
             })?;
         let stderr_tail: ProxyStderrTail = Default::default();
         let handshake_done = Arc::new(AtomicBool::new(false));

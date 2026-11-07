@@ -2196,6 +2196,29 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Compatible: deletes only the `worker_restart_intents` rows of sessions
+    // that are `stopped` and hold no target, so no worker can exist to
+    // restart. A sub-agent's close left them behind. Older builds read and
+    // write these rows per session, only while restarting or observing that
+    // session's worker; a stopped session without a target has neither, and
+    // a restart that finds no row begins a new one. No column, constraint or
+    // stored value changes, so the compatibility floor stays where it is.
+    if version < 117 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             DELETE FROM worker_restart_intents
+                 WHERE session_id IN (
+                     SELECT session_id FROM sessions
+                     WHERE state = 'stopped'
+                       AND NOT EXISTS (SELECT 1 FROM session_targets
+                                       WHERE session_targets.session_id = sessions.session_id));
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (117, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 117;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -4382,6 +4405,67 @@ mod reader_tests {
                 [],
             )
             .expect("the index agrees with prompt_history");
+    }
+
+    #[test]
+    fn stopped_targetless_sessions_lose_their_worker_restart_intents_and_others_keep_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let connection = open_writer(&path).unwrap();
+        // Rewind to revision 116 and store what a revision-116 build left:
+        // intents of a closed child, of a stopped session that still names a
+        // container, of a failed child and of a live session.
+        connection
+            .execute_batch(
+                "DELETE FROM schema_migrations WHERE version >= 117;
+                 PRAGMA user_version = 116;",
+            )
+            .unwrap();
+        for (id, state, phase, target) in [
+            ("closed-child", "stopped", "swapping", false),
+            ("kept-container", "stopped", "awaiting_readiness", true),
+            ("failed-child", "error", "awaiting_readiness", false),
+            ("live", "running", "swapping", false),
+        ] {
+            connection
+                .execute_batch(&format!(
+                    "INSERT INTO session_contexts(session_id, bundle_id, created_at)
+                         VALUES ('{id}', 'project', 'now');
+                     INSERT INTO sessions(session_id, title, harness_kind, last_profile,
+                                          target_template_id, state, updated_at)
+                         VALUES ('{id}', '{id}', 'codex', 'codex', 'local', '{state}', 'now');
+                     INSERT INTO worker_restart_intents(session_id, operation_id, target_json,
+                                                        desired_build, phase)
+                         VALUES ('{id}', 'op-{id}', '{{}}', '', '{phase}');"
+                ))
+                .unwrap();
+            if target {
+                connection
+                    .execute(
+                        "INSERT INTO session_targets(session_id, kind, resource_id)
+                         VALUES (?1, 'local-podman', 'container')",
+                        [id],
+                    )
+                    .unwrap();
+            }
+        }
+        drop(connection);
+        forget_verified_schema(&path);
+
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        state
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+            .expect("a revision-116 build still reads and writes the store");
+        let remaining: Vec<String> = connection
+            .prepare("SELECT session_id FROM worker_restart_intents ORDER BY session_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(remaining, ["failed-child", "kept-container", "live"]);
     }
 
     #[test]

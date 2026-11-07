@@ -206,6 +206,17 @@ impl TurnReviewHost {
         let _ = self.events.send(HostEvent::CloseChild { child_session_id });
     }
 
+    /// Reports that a reviewer child's session ended (stopped, destroyed or
+    /// failed). The daemon's record owner calls this once per such transition.
+    /// A role that already has an outcome, and a child no open group tracks,
+    /// are left alone.
+    pub(crate) fn child_ended(&self, child_session_id: String, reason: String) {
+        let _ = self.events.send(HostEvent::ChildEnded {
+            child_session_id,
+            reason,
+        });
+    }
+
     pub(crate) async fn reviewer_finished(
         &self,
         session_id: String,
@@ -217,7 +228,12 @@ impl TurnReviewHost {
             .send(HostEvent::ReviewerFinished {
                 session_id,
                 child_session_id,
-                answer,
+                report: match answer {
+                    Some(answer) => ReviewerReport::Answer(answer),
+                    None => ReviewerReport::Failed(
+                        "the reviewer finished without calling handback".into(),
+                    ),
+                },
                 reply,
             })
             .map_err(|_| "review host stopped".to_owned())?;

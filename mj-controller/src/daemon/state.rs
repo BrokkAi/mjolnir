@@ -97,7 +97,12 @@ impl RuntimeState {
             workspaces_tx,
             workspace_refresh: tokio::sync::Mutex::new(()),
             session_manager,
-            owner: Mutex::new(RuntimeStateOwner::new(controller)),
+            owner: Mutex::new(RuntimeStateOwner::new(controller, {
+                let review_host = review_host.clone();
+                Arc::new(move |child: &str, reason| {
+                    review_host.child_ended(child.to_owned(), reason)
+                })
+            })),
             report_backend: std::sync::OnceLock::new(),
             credential_targets: Arc::new(tokio::sync::watch::channel(Vec::new()).0),
             recent_launch: tokio::sync::watch::channel(None).0,

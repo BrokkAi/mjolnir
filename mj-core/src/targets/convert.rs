@@ -365,7 +365,7 @@ impl TryFrom<RecordedTarget<'_>> for targets::TargetLocator {
 
 /// The stored locator's target kind, spelled as [`TargetTemplate::kind_name`]
 /// spells it so a mismatch names both sides the same way.
-const fn locator_kind_name(locator: &TargetLocator) -> &'static str {
+pub const fn locator_kind_name(locator: &TargetLocator) -> &'static str {
     match locator {
         TargetLocator::LocalBare { .. } => "local-bare",
         TargetLocator::LocalPodman { .. } => "local-podman",

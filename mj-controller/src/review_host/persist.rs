@@ -202,6 +202,7 @@ impl HostState {
                         start_reply: pending.reply,
                         pending_outcome: None,
                         queued_outcomes: Vec::new(),
+                        ended_while_queued: BTreeMap::new(),
                     },
                 );
                 if let Some(slot) = self.reviews.get_mut(&session_id)

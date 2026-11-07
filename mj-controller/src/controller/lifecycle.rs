@@ -1191,6 +1191,7 @@ impl Controller {
                     if self.state.subagents.contains_key(session_id) {
                         targets::borrowed_worker_cleanup_plan(&backend, session_id)?
                             .execute(executor)?;
+                        retire_worker_restart_intent(session_id)?;
                     } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
                         plan.execute(executor)?;
                         deferred = true;
@@ -1414,6 +1415,7 @@ impl Controller {
                     if self.state.subagents.contains_key(session_id) {
                         targets::borrowed_worker_cleanup_plan(&backend, session_id)?
                             .execute(executor)?;
+                        retire_worker_restart_intent(session_id)?;
                         self.remove_child_report_directory(session_id, executor);
                     } else {
                         execute_target_cleanup(&backend, &session, &self.config, executor)?;
@@ -1522,8 +1524,14 @@ fn execute_target_cleanup(
     if let Some(release) = BuildStateRelease::for_target(session, backend, config) {
         release.run(executor);
     }
-    // Exact teardown proved there is no process left whose boot must be
-    // preserved. Retire the intent before publishing a different placement.
+    retire_worker_restart_intent(session_id)
+}
+
+/// Exact teardown proved there is no process left whose boot must be
+/// preserved. Retire the intent before publishing a different placement. A
+/// sub-agent's teardown removes only its own worker and private state, which
+/// is all its intent covers.
+fn retire_worker_restart_intent(session_id: &str) -> Result<()> {
     if let Some(intent) = crate::database::load_worker_restart(session_id)? {
         crate::database::finish_worker_restart(session_id, &intent.operation_id)?;
     }
