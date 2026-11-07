@@ -22,6 +22,14 @@ pub(crate) fn current_background_session(
     }))
 }
 
+/// Resolves once an admission's cancellation flag is set. Admitted work that
+/// cannot be cancelled by being dropped polls this instead.
+pub(crate) async fn wait_until_cancelled(flag: &AtomicBool) {
+    while !flag.load(Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
 /// Reports session activity to the recovery coordinator.
 ///
 /// Reporting retains only the newest observation per session. Completed-turn
@@ -117,14 +125,9 @@ impl RecoveryGate {
         // under it for as long as this future lives.
         let _admission = admission.clone();
         let work = work(admission);
-        let cancellation = async {
-            while !cancelled.load(Ordering::Acquire) {
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-        };
         tokio::select! {
             biased;
-            _ = cancellation => None,
+            () = wait_until_cancelled(&cancelled) => None,
             result = work => Some(result),
         }
     }

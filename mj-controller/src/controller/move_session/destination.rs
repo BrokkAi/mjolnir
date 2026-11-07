@@ -299,6 +299,7 @@ impl Controller {
         &mut self,
         id: &str,
         github_token: Option<&str>,
+        executor: &impl CommandExecutor,
     ) -> Result<Option<targets::CommandPlan>> {
         let Some(mut operation) = crate::database::load_move_operation(id)? else {
             return Ok(None);
@@ -315,6 +316,19 @@ impl Controller {
             .clone();
         let runtime = destination.runtime.clone();
         let backend = prepared_backend(&target, &runtime, id)?;
+        // One rule for every instance Mjolnir adopts: a destination an older
+        // daemon recorded as checked never had IMDSv2 required, so it is
+        // required here too. The check is idempotent and costs one describe
+        // when the instance already requires it.
+        if let targets::TargetLocator::AwsEc2 {
+            profile,
+            region,
+            instance_id,
+            ..
+        } = &backend
+        {
+            super::super::backend::ensure_imdsv2(profile, region, instance_id, executor)?;
+        }
         let bundle = self
             .move_destination_bundle(id)?
             .context("prepared EC2 Move bundle missing")?;

@@ -1722,7 +1722,7 @@ async fn role_scoped_sessions_receive_assumed_credentials_and_never_the_unscoped
         .unwrap();
     let error = denied_outcome.failure_text().unwrap();
     assert!(
-        error.contains("AccessDenied") && error.contains("remove [profiles."),
+        error.contains("AccessDenied") && error.contains("trust policy"),
         "{error}"
     );
     assert!(!error.contains("unscoped export ran"), "{error}");
@@ -2764,7 +2764,7 @@ async fn the_credential_cache_is_swept_on_the_schedule_even_with_no_sessions() {
     };
     let cache = crate::aws_assume_role::ScopedAwsCredentials::shared();
     cache
-        .credentials_for("work", "swept-last-session", &source, &ShortLived)
+        .credentials_for("swept-last-session", &source, &ShortLived)
         .unwrap();
     assert!(cache.holds("swept-last-session"));
     // Its credentials expire; no session is left to sync.
@@ -3215,6 +3215,116 @@ async fn a_queued_job_releases_its_hold_as_soon_as_admission_is_cancelled() {
     let mut client = RelayClient::connect(&target.spec, &session).await.unwrap();
     Box::new(job).run(&mut client).await;
     assert!(root.join("aws").exists(), "a cancelled job ran");
+}
+
+// A lifecycle operation that cancels the admission of a job the actor is
+// already running must not wait for the worker: the call in flight is
+// abandoned (with its connection, as a timeout would), the hold is released and
+// the job is reported as deferred, not failed.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_running_credential_job_stops_when_its_admission_is_cancelled() {
+    use crate::session_manager::{RelayConnectionJob, RelayJobDeferred};
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    // The worker holds its first AWS answer for longer than this test waits:
+    // only cancellation can end the job.
+    let never = scratch.path().join("never-released");
+    let target = aws_sync_session_named(home.path(), &root, &token, &cli, SESSION_ID, Some(&never));
+    let session = target.session_id.clone();
+    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let steps = credential_sync::SessionSteps::default();
+    let queue = || async {
+        let work =
+            credential_sync::SyncWork::Aws(Box::new(credential_sync::AwsSync::Unavailable {
+                error: "no credentials".into(),
+                scoped_required: true,
+                expected_scope: None,
+            }));
+        let hold = credential_sync::JobHold::new(
+            gate.try_start(&session),
+            Some(steps.enter(&session).await),
+            None,
+            None,
+        );
+        credential_sync::CredentialSyncJob::queue(target.clone(), work, hold)
+    };
+
+    let (job, response, _queued) = queue().await;
+    let mut client = RelayClient::connect(&target.spec, &session).await.unwrap();
+    let running = tokio::spawn(async move {
+        Box::new(job).run(&mut client).await;
+        client
+    });
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !root.join("waiting").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the job reached the worker");
+    gate.cancel_busy(&session);
+    let answer = tokio::time::timeout(Duration::from_secs(5), response)
+        .await
+        .expect("the running job waited for the worker after it was cancelled")
+        .unwrap();
+    let error = answer.err().expect("a cancelled job reported success");
+    assert!(RelayJobDeferred::marks(&error), "{error:#}");
+    let mut client = running.await.unwrap();
+    assert!(
+        !gate.is_busy(&session),
+        "the cancelled job kept the session"
+    );
+    tokio::time::timeout(Duration::from_secs(5), steps.enter(&session))
+        .await
+        .expect("the cancelled job kept the session's turn");
+    // The reply to the abandoned call may still arrive, so the connection is
+    // not used again.
+    let error = client.aws_credentials_state().await.unwrap_err();
+    assert!(format!("{error:#}").contains("abandoned"), "{error:#}");
+
+    // Cancelled while still queued, with the awaiting side still there: the
+    // actor reports it as deferred, not as a dropped sync.
+    let (job, response, _queued) = queue().await;
+    gate.cancel_busy(&session);
+    let mut fresh = RelayClient::connect(&target.spec, &session).await.unwrap();
+    Box::new(job).run(&mut fresh).await;
+    let error = response.await.unwrap().err().unwrap();
+    assert!(RelayJobDeferred::marks(&error), "{error:#}");
+}
+
+// Failed renewals back off, doubling from the retry interval up to the
+// credentials' half-life, so a permanent failure does not call STS and the
+// worker once a minute for the life of the session.
+#[test]
+fn renewal_retries_double_up_to_the_credential_half_life() {
+    let minute = Duration::from_secs(60);
+    let role = role_config();
+    let limit = crate::aws_assume_role::credential_half_life(&role);
+    assert_eq!(limit, Duration::from_secs(1800), "AWS's one-hour default");
+    let delays = (0..8)
+        .map(|failures| credential_sync::backoff(minute, failures, limit).as_secs())
+        .collect::<Vec<_>>();
+    assert_eq!(delays, [60, 120, 240, 480, 960, 1800, 1800, 1800]);
+    // A configured lifetime sets the limit; a limit under the base is the base.
+    let short = mj_core::config::AwsRoleConfig {
+        duration_seconds: Some(900),
+        ..role
+    };
+    assert_eq!(
+        crate::aws_assume_role::credential_half_life(&short),
+        Duration::from_secs(450)
+    );
+    assert_eq!(credential_sync::backoff(minute, 5, Duration::ZERO), minute);
+    // Any number of failures stays within the limit.
+    assert_eq!(credential_sync::backoff(minute, u32::MAX, limit), limit);
 }
 
 // An authentication failure may mean the session's credentials are no longer

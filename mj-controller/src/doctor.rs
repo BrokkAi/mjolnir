@@ -1087,7 +1087,7 @@ fn aws_scope_check(
             title,
             format!("{error:#}"),
             format!(
-                "Make the controller's AWS login (profile {}) able to assume the role: allow sts:AssumeRole on it, and name the login in the role's trust policy{}. Sessions on this profile are refused until then, or remove `[profiles.{id}.aws]` to give sessions your AWS credentials unscoped.",
+                "Make the controller's AWS login (profile {}) able to assume the role: allow sts:AssumeRole on it, and name the login in the role's trust policy{}. Sessions on this profile are refused until then.",
                 source
                     .environment
                     .get("AWS_PROFILE")

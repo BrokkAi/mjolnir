@@ -226,6 +226,7 @@ impl RelayClient {
             output: BufReader::new(output),
             request_timeout,
             abandoned: None,
+            cancellation: None,
             next_request: 1,
             connection_nonce: u64::from_le_bytes(nonce_bytes),
             protocol_version: RELAY_PROTOCOL_VERSION,

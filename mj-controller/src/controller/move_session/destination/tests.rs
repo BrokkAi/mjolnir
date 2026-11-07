@@ -512,7 +512,7 @@ fn destination_adoption_preserves_the_created_instance_and_handoff_identity() {
     controller.state.sessions.get_mut(ID).unwrap().state = SessionState::Provisioning;
     crate::database::save_session(&controller.state.sessions[ID]).unwrap();
     let plan = controller
-        .adopt_prepared_ec2_destination(ID, None)
+        .adopt_prepared_ec2_destination(ID, None, &cloud)
         .unwrap()
         .unwrap();
     assert!(plan.commands.iter().all(|command| command.program != "aws"));
@@ -533,6 +533,51 @@ fn destination_adoption_preserves_the_created_instance_and_handoff_identity() {
         PreparedDestinationState::Adopted { .. }
     ));
     assert_eq!(cloud.tokens.lock().unwrap().len(), 1);
+}
+
+// A destination an older daemon recorded as `Checked` skipped the IMDSv2
+// requirement when it was prepared; adoption enforces it, whichever path led
+// there.
+#[test]
+fn adopting_a_checked_destination_requires_imdsv2_on_its_instance() {
+    if !isolated("adopting_a_checked_destination_requires_imdsv2_on_its_instance") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, mut operation) = fixture();
+    controller
+        .prepare_ec2_move_destination(&mut operation, &Ec2::default())
+        .unwrap();
+    assert!(matches!(
+        operation.prepared_destination.as_ref().unwrap().state,
+        PreparedDestinationState::Checked { .. }
+    ));
+    let archives = tempfile::tempdir().unwrap();
+    operation.handoff = Some(write_network_checkpoint_archive(archives.path(), ID, 0));
+    operation.phase = MovePhase::ResumingDestination;
+    crate::database::save_move_operation(&operation).unwrap();
+    controller.state.sessions.get_mut(ID).unwrap().state = SessionState::Provisioning;
+    crate::database::save_session(&controller.state.sessions[ID]).unwrap();
+
+    // The instance it recorded allows IMDSv1.
+    let cloud = Ec2 {
+        imds_optional: AtomicBool::new(true),
+        ..Default::default()
+    };
+    controller
+        .adopt_prepared_ec2_destination(ID, None, &cloud)
+        .unwrap()
+        .unwrap();
+    assert!(
+        cloud
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| command.purpose == "require IMDSv2 on EC2 instance"),
+        "an instance that allows IMDSv1 was adopted"
+    );
+    assert!(!cloud.imds_optional.load(Ordering::SeqCst));
 }
 
 #[test]

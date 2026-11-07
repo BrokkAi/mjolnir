@@ -243,6 +243,18 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - Decision (twelfth review): `sign_scope` failures keep their own message. Only the call to AWS and reading its answer are wrapped in "Could not assume AWS role... or remove [profiles.<id>.aws]", whose advice (give sessions unscoped credentials) does not answer a signing-key problem. The signing key is derived once per process (`SCOPE_KEY`) and kept; the async verification path loads it on the blocking pool on first use and afterwards reads the kept key, so it never takes the key file's lock on the runtime. A key rotation takes effect at the next daemon start, as for phone cookies.
   Date/Author: 2026-11-07 / Claude, from review.
 
+- Decision (thirteenth review): every adoption of an EC2 Move destination requires IMDSv2, including one an older daemon recorded as `Checked`. `adopt_prepared_ec2_destination` now takes the executor and runs `ensure_imdsv2` on the recorded instance before adopting it (one describe when the instance already requires it); a failure fails the adoption and the Move's cleanup terminates the instance, as for a fresh launch.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (thirteenth review): a credential job the actor is running observes lifecycle cancellation. The relay client carries the admission's cancellation flag while a job runs; a call in flight when the flag is set is abandoned (dropped, with its connection abandoned the way a timeout abandons it, since its reply would otherwise be read as the next call's), and later calls fail at once. The job then reports `RelayJobDeferred` and releases its hold, so a close, restart or Move, and a daemon handoff behind it, wait for no worker RPC. Abandoning is safe because the next cycle reconciles from the worker's reported state. A job dropped before it started because its admission was cancelled also replies `RelayJobDeferred`, so the awaiting side does not report a failure. The cancellation wait is one function shared with the gate.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (thirteenth review): failed renewals back off. Consecutive failures double the retry delay from the sync interval up to half the role's credential lifetime (`aws_assume_role::credential_half_life`: the configured `duration_seconds`, or AWS's documented one-hour default), the point at which a renewal is due anyway and after which waiting longer would let the credentials run out. A success, an authentication wake, or a changed target (a new task) starts over; a deferred cycle (the actor was busy) is not counted.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (thirteenth review): the refusal when AWS will not let the controller assume the role names only the trust-policy fix (which identity must be allowed `sts:AssumeRole` on which role, and be named in its trust policy). It no longer offers removing `[profiles.<id>.aws]`, which is a configuration edit and widens access; the session stays refused (fail closed). `credentials_for` no longer takes the profile id, which only the old message used.
+  Date/Author: 2026-11-07 / Claude, from review.
+
 ## Outcomes & Retrospective
 
 Implemented through Milestone 6 on 2026-11-07. A Bedrock profile with `[profiles.<id>.aws] role_arn = ...` now gives each container or SSH session credentials assumed for it alone (role session name `mj-<session id>`), narrowed by a session policy, renewed after half their lifetime through the existing credential sync, with no relay or database change. A refused role fails the launch with AWS's error line and a remedy, or fails the running session's sync outcome while the worker keeps what it has; nothing falls back to the unscoped export. Profiles without a role behave as before, and `mj doctor` warns about them and probes a configured role with a real throwaway AssumeRole. Every EC2 launch (ordinary and Move) requires IMDSv2, verified in the launch response, and doctor warns about a launch template that allows IMDSv1.
@@ -464,3 +476,6 @@ Revision note (2026-11-07, tenth review): jobs own their admission, turn and ins
 Revision note (2026-11-07, eleventh review): one combined AWS failure per step, one creator for the signing key, key errors do not withdraw, lock maps without scans. Reason: eleventh review.
 
 Revision note (2026-11-07, twelfth review): a queued job's hold is released when its awaiter is stopped or its admission cancelled; every renewal cycle reports its outcome to the notices; signing errors keep their message; the signing key is derived once and loaded on the blocking pool. Reason: twelfth review.
+
+
+Revision note (2026-11-07, thirteenth review): IMDSv2 required on every adoption; running jobs observe cancellation and report deferred; failed renewals back off to the credential half-life; the refusal names only the trust-policy fix. Reason: thirteenth review.

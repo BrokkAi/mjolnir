@@ -167,7 +167,6 @@ impl ScopedAwsCredentials {
     /// reports the failure; nothing widens the scope.
     pub(crate) fn credentials_for(
         &self,
-        profile_id: &str,
         session_id: &str,
         source: &AwsCredentialSource,
         executor: &impl CommandExecutor,
@@ -224,7 +223,7 @@ impl ScopedAwsCredentials {
             })
             .with_context(|| {
                 format!(
-                    "Could not assume AWS role {} for this session. Check that the controller's AWS login can assume the role and that the role's trust policy allows it; or remove [profiles.{profile_id}.aws] to give sessions your AWS credentials unscoped",
+                    "Could not assume AWS role {} for this session. The controller's AWS login (profile {host_profile}) must be allowed to assume it: give that login sts:AssumeRole on the role, and name it in the role's trust policy",
                     role.role_arn
                 )
             })?;
@@ -370,6 +369,22 @@ pub(crate) async fn scope_is_authentic(
         .is_ok())
 }
 
+/// What AWS documents as the default `DurationSeconds` of `AssumeRole` when the
+/// call sets none: one hour.
+const STS_DEFAULT_DURATION: Duration = Duration::from_secs(3600);
+
+/// Half the lifetime a role's credentials are granted, which is when they are
+/// renewed (`ScopedEntry::refresh_at`). A renewal that keeps failing is retried
+/// no more slowly than this, because slower than this the credentials would
+/// run out between attempts.
+pub(crate) fn credential_half_life(role: &AwsRoleConfig) -> Duration {
+    role.duration_seconds
+        .map_or(STS_DEFAULT_DURATION, |seconds| {
+            Duration::from_secs(u64::from(seconds))
+        })
+        / 2
+}
+
 /// The role session name: it appears in the assumed-role ARN of every
 /// CloudTrail event the session causes. A session id is 32 hex characters, so
 /// this fits STS's 64-character limit.
@@ -497,13 +512,12 @@ pub(crate) fn probe(
 /// with a role. Launch calls this; the credential sync calls the same two
 /// functions, because it exports once per profile and mints once per session.
 pub(crate) fn obtain(
-    profile_id: &str,
     session_id: &str,
     source: &AwsCredentialSource,
     executor: &impl CommandExecutor,
 ) -> Result<AwsCredentials> {
     if source.role.is_some() {
-        ScopedAwsCredentials::shared().credentials_for(profile_id, session_id, source, executor)
+        ScopedAwsCredentials::shared().credentials_for(session_id, source, executor)
     } else {
         crate::aws_credentials::export(source, executor)
     }
@@ -516,7 +530,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const SESSION: &str = "0123456789abcdef0123456789abcdef";
-    const PROFILE: &str = "bedrock";
 
     fn role() -> AwsRoleConfig {
         AwsRoleConfig {
@@ -626,11 +639,7 @@ mod tests {
             let aws = FakeAws::new(&clock, lifetime);
             let cache = cache(&clock);
             let source = source(role());
-            let mint = || {
-                cache
-                    .credentials_for(PROFILE, SESSION, &source, &aws)
-                    .unwrap()
-            };
+            let mint = || cache.credentials_for(SESSION, &source, &aws).unwrap();
             let first = mint();
             // AWS reports whole seconds, so the granted lifetime can be a
             // fraction of a second short.
@@ -667,7 +676,7 @@ mod tests {
         let cache = cache(&clock);
         SIGNING_KEY_UNAVAILABLE.with(|unavailable| unavailable.set(true));
         let error = cache
-            .credentials_for(PROFILE, SESSION, &source(role()), &aws)
+            .credentials_for(SESSION, &source(role()), &aws)
             .map(|_| ())
             .unwrap_err();
         SIGNING_KEY_UNAVAILABLE.with(|unavailable| unavailable.set(false));
@@ -684,7 +693,7 @@ mod tests {
         let clock = TestClock::new();
         let aws = FakeAws::new(&clock, Duration::from_secs(3600));
         let issued = cache(&clock)
-            .credentials_for(PROFILE, SESSION, &source(role()), &aws)
+            .credentials_for(SESSION, &source(role()), &aws)
             .unwrap();
         let scope = issued.scope().unwrap().clone();
         let fingerprint = mj_core::aws_credentials::snapshot(&issued.encode().unwrap()).fingerprint;
@@ -702,15 +711,9 @@ mod tests {
         let cache = cache(&clock);
         let source = source(role());
         let other = "fedcba9876543210fedcba9876543210";
-        cache
-            .credentials_for(PROFILE, SESSION, &source, &aws)
-            .unwrap();
-        cache
-            .credentials_for(PROFILE, other, &source, &aws)
-            .unwrap();
-        cache
-            .credentials_for(PROFILE, SESSION, &source, &aws)
-            .unwrap();
+        cache.credentials_for(SESSION, &source, &aws).unwrap();
+        cache.credentials_for(other, &source, &aws).unwrap();
+        cache.credentials_for(SESSION, &source, &aws).unwrap();
         let commands = aws.commands.lock().unwrap();
         let names = commands
             .iter()
@@ -732,15 +735,13 @@ mod tests {
         let aws = FakeAws::new(&clock, Duration::from_secs(900));
         let cache = cache(&clock);
         let source = source(role());
-        cache
-            .credentials_for(PROFILE, SESSION, &source, &aws)
-            .unwrap();
+        cache.credentials_for(SESSION, &source, &aws).unwrap();
         clock.advance(Duration::from_secs(450));
         *aws.stderr.lock().unwrap() = Some(
             include_str!("../tests/fixtures/aws-sts-assume-role-access-denied.txt").to_owned(),
         );
         let error = cache
-            .credentials_for(PROFILE, SESSION, &source, &aws)
+            .credentials_for(SESSION, &source, &aws)
             .map(|_| ())
             .unwrap_err();
         let reported = format!("{error:#}");
@@ -751,16 +752,19 @@ mod tests {
             reported.contains("is not authorized to perform: sts:AssumeRole"),
             "{reported}"
         );
+        // The remedy is the trust-policy fix only; the scope is never offered
+        // for removal, which would widen access.
         assert!(
-            reported.contains("remove [profiles.bedrock.aws]"),
+            reported.contains("named in the role's trust policy")
+                || reported.contains("name it in the role's trust policy"),
             "{reported}"
         );
+        assert!(!reported.contains("remove [profiles."), "{reported}");
+        assert!(!reported.contains("unscoped"), "{reported}");
         assert!(!reported.contains("private-key-material"), "{reported}");
         // AWS recovered: the next pass renews without needing the old entry.
         *aws.stderr.lock().unwrap() = None;
-        cache
-            .credentials_for(PROFILE, SESSION, &source, &aws)
-            .unwrap();
+        cache.credentials_for(SESSION, &source, &aws).unwrap();
         assert_eq!(aws.calls.load(Ordering::SeqCst), 3);
     }
 
@@ -770,13 +774,11 @@ mod tests {
         let aws = FakeAws::new(&clock, Duration::from_secs(900));
         let cache = cache(&clock);
         let source = source(role());
-        cache
-            .credentials_for(PROFILE, SESSION, &source, &aws)
-            .unwrap();
+        cache.credentials_for(SESSION, &source, &aws).unwrap();
         assert_eq!(cache.entries.lock().unwrap().len(), 1);
         clock.advance(Duration::from_secs(901));
         cache
-            .credentials_for(PROFILE, "fedcba9876543210fedcba9876543210", &source, &aws)
+            .credentials_for("fedcba9876543210fedcba9876543210", &source, &aws)
             .unwrap();
         // A call scans nothing but its own key...
         assert_eq!(cache.entries.lock().unwrap().len(), 2);
@@ -796,9 +798,7 @@ mod tests {
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 scope.spawn(|| {
-                    cache
-                        .credentials_for(PROFILE, SESSION, &source, &aws)
-                        .unwrap();
+                    cache.credentials_for(SESSION, &source, &aws).unwrap();
                 });
             }
         });
@@ -811,20 +811,14 @@ mod tests {
         let aws = FakeAws::new(&clock, Duration::from_secs(3600));
         let cache = cache(&clock);
         let mut source = source(role());
-        cache
-            .credentials_for(PROFILE, SESSION, &source, &aws)
-            .unwrap();
-        cache
-            .credentials_for(PROFILE, SESSION, &source, &aws)
-            .unwrap();
+        cache.credentials_for(SESSION, &source, &aws).unwrap();
+        cache.credentials_for(SESSION, &source, &aws).unwrap();
         assert_eq!(aws.calls.load(Ordering::SeqCst), 1);
         // The same AWS profile name now resolves through another config file.
         source
             .environment
             .insert("AWS_CONFIG_FILE".into(), "/elsewhere/config".into());
-        cache
-            .credentials_for(PROFILE, SESSION, &source, &aws)
-            .unwrap();
+        cache.credentials_for(SESSION, &source, &aws).unwrap();
         assert_eq!(aws.calls.load(Ordering::SeqCst), 2);
         let commands = aws.commands.lock().unwrap();
         assert_eq!(
@@ -839,9 +833,7 @@ mod tests {
         let aws = FakeAws::new(&clock, Duration::from_secs(900));
         let cache = cache(&clock);
         let source = source(role());
-        cache
-            .credentials_for(PROFILE, SESSION, &source, &aws)
-            .unwrap();
+        cache.credentials_for(SESSION, &source, &aws).unwrap();
         // A racing caller has cloned the cell and waits for its lock.
         let held = Arc::clone(cache.entries.lock().unwrap().values().next().unwrap());
         clock.advance(Duration::from_secs(901));
@@ -850,9 +842,7 @@ mod tests {
         // That caller finds the expired entry in its own cell and mints again,
         // into the cell the cache still holds.
         drop(held);
-        cache
-            .credentials_for(PROFILE, SESSION, &source, &aws)
-            .unwrap();
+        cache.credentials_for(SESSION, &source, &aws).unwrap();
         assert_eq!(cache.entries.lock().unwrap().len(), 1);
         assert_eq!(aws.calls.load(Ordering::SeqCst), 2);
         // Once nobody holds it and it has expired, a pass removes it with no

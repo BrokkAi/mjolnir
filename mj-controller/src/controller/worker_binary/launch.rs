@@ -238,12 +238,7 @@ impl Controller {
             executor.notify_notice(&notice);
         }
         if let Some(source) = self.aws_credential_source(session_id)? {
-            let credentials = crate::aws_assume_role::obtain(
-                &session.last_profile,
-                session_id,
-                &source,
-                executor,
-            )?;
+            let credentials = crate::aws_assume_role::obtain(session_id, &source, executor)?;
             credentials.install(&profile_stage, Path::new(&target_profile_home))?;
         }
         stage_claude_keychain_login(

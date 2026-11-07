@@ -132,6 +132,20 @@ impl JobHold {
         started
     }
 
+    /// The admission's cancellation flag, for the connection to observe while
+    /// the job's calls are in flight.
+    fn cancellation(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+        self.0.cancellation.clone()
+    }
+
+    /// A lifecycle operation asked the admitted work to stop.
+    fn cancelled(&self) -> bool {
+        self.0
+            .cancellation
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+    }
+
     /// The job is done: release the slots.
     fn finish(&self) {
         let released = std::mem::replace(&mut *self.phase(), HoldPhase::Over);
@@ -1270,6 +1284,16 @@ async fn renew_session_aws(
     mut wakes: mpsc::UnboundedReceiver<RenewalWake>,
 ) {
     let mut wake = None::<RenewalWake>;
+    // Cycles in a row that reached the session and failed. A deferred cycle
+    // (the actor was busy) is neither a failure nor a success.
+    let mut failures_in_a_row = 0u32;
+    let retry_limit = target
+        .aws_credentials
+        .as_ref()
+        .and_then(|source| source.role.as_ref())
+        .map_or(env.retry, |role| {
+            crate::aws_assume_role::credential_half_life(role).max(env.retry)
+        });
     loop {
         let mut delay = env.retry;
         let installing = env.installs.enter(&target.session_id).await;
@@ -1289,6 +1313,12 @@ async fn renew_session_aws(
         // the notices decide what that ends. A deferred cycle checked
         // nothing and says nothing.
         let checked = !matches!(&result, Ok(None));
+        if completed {
+            failures_in_a_row = 0;
+        } else if checked {
+            failures_in_a_row = failures_in_a_row.saturating_add(1);
+            delay = backoff(env.retry, failures_in_a_row - 1, retry_limit);
+        }
         let mut outcomes = BTreeMap::new();
         merge_aws_cycle(&mut outcomes, &target.session_id, result);
         let mut report = outcomes.remove(&target.session_id).or_else(|| {
@@ -1331,11 +1361,23 @@ async fn renew_session_aws(
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
             next = wakes.recv() => match next {
-                Some(next) => wake = Some(next),
+                Some(next) => {
+                    // A trigger asks for a fresh attempt now, and starts the
+                    // delays over.
+                    failures_in_a_row = 0;
+                    wake = Some(next);
+                }
                 None => return,
             },
         }
     }
+}
+
+/// How long to wait after the `failures`-th consecutive failure (counting from
+/// zero): `base` doubled each time, up to `limit`.
+pub(super) fn backoff(base: Duration, failures: u32, limit: Duration) -> Duration {
+    base.saturating_mul(2u32.saturating_pow(failures.min(31)))
+        .min(limit.max(base))
 }
 
 /// Start the AWS role assumption for a session whose profile names a role,
@@ -1353,14 +1395,13 @@ fn start_scoped_mint(
         .aws_credentials
         .clone()
         .filter(|source| source.role.is_some())?;
-    let (profile_id, session_id) = (target.profile_id.clone(), target.session_id.clone());
+    let session_id = target.session_id.clone();
     Some(tokio::task::spawn_blocking(move || {
         let cache = crate::aws_assume_role::ScopedAwsCredentials::shared();
         if force_new {
             cache.forget(&session_id, &source);
         }
         cache.credentials_for(
-            &profile_id,
             &session_id,
             &source,
             &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
@@ -1853,6 +1894,11 @@ impl RelayConnectionJob for CredentialSyncJob {
                     session_id = %target.session_id,
                     "credential sync dropped: no longer wanted"
                 );
+                // Deferred, not failed: the awaiting side, if it is still
+                // there, tries again in the next cycle.
+                let _ = reply.send(Err(anyhow::Error::new(RelayJobDeferred(
+                    "the credential sync was cancelled before it started",
+                ))));
                 return;
             }
             if hold.gated() {
@@ -1872,7 +1918,20 @@ impl RelayConnectionJob for CredentialSyncJob {
                     }
                 }
             }
+            // A lifecycle operation that cancels the admission cancels the
+            // job's calls too: one in flight is abandoned (with its
+            // connection, as a timeout would), and the next cycle reconciles
+            // from what the worker reports.
+            client.set_cancellation(hold.cancellation());
             let result = run_work(client, &target, work).await;
+            client.set_cancellation(None);
+            let result = if hold.cancelled() {
+                Err(anyhow::Error::new(RelayJobDeferred(
+                    "the credential sync was cancelled by a lifecycle operation",
+                )))
+            } else {
+                result
+            };
             // Released before the answer, so whoever awaits it can take the
             // session's slot at once.
             hold.finish();
