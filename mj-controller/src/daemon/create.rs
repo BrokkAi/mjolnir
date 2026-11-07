@@ -247,27 +247,6 @@ impl RuntimeState {
         })
         .await
         .context("reviewer harness did not become ready")??;
-        if launch.harness != mj_core::config::HarnessKind::Muse {
-            let snapshot = handle
-                .view()
-                .snapshot
-                .context("reviewer snapshot is missing")?;
-            let mut surface = mj_core::acp::surface::AcpSessionSurface::default();
-            surface.set_harness_kind(launch.harness);
-            surface.set_config_options(&snapshot.operational.config_options);
-            surface.set_session_modes(snapshot.operational.modes.clone());
-            if let Ok(control) = surface.plan_control(true)
-                && let Err(error) = self
-                    .session_manager
-                    .client()
-                    .session(child)
-                    .await?
-                    .apply_plan_control(format!("{}-plan", relation.request_key), control)
-                    .await
-            {
-                tracing::warn!(child, %error, "reviewer harness refused plan mode");
-            }
-        }
         use crate::server_runtime::api::ExportRuntime;
         Arc::clone(self)
             .queue_startup(
