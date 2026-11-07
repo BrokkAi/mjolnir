@@ -106,6 +106,7 @@ impl DurableRelay {
     /// operations stay compiled on Windows so their tests still build there.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn prepare_pending_assessment(&mut self) -> Result<()> {
+        self.reclassify_assessment_with_generated_authorization()?;
         if let Some(mut a) = self.snapshot.assessment.clone().filter(|a| {
             a.current()
                 && matches!(
@@ -177,7 +178,7 @@ impl DurableRelay {
             .collect();
         crate::acp::verdict_client::bound_authorization(
             &mut evidence,
-            self.snapshot.assessment_context.clone(),
+            self.snapshot.authorization_context(),
         );
         a.evidence = Some(evidence);
         self.store_assessment(a)
@@ -213,6 +214,40 @@ impl DurableRelay {
         a.evidence = None;
         a.action = None;
         a.verdict = None;
+        self.store_assessment(a)
+    }
+
+    /// An assessment classified by an earlier worker can rest on a user
+    /// message that today's rules attribute to Mjolnir, such as another
+    /// session's message. Its verdict and action are not the person's to rely
+    /// on, so the turn is classified again on the corrected history, the same
+    /// way a seeded history does it.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn reclassify_assessment_with_generated_authorization(&mut self) -> Result<()> {
+        let Some(mut a) = self.snapshot.assessment.clone().filter(|a| {
+            a.current()
+                && !matches!(
+                    a.action,
+                    Some(
+                        mj_core::assessment::Action::RetryProvider
+                            | mj_core::assessment::Action::RecoverQuota
+                    )
+                )
+                && a.evidence
+                    .as_ref()
+                    .and_then(|e| e.authorization.as_ref())
+                    .is_some_and(mj_core::assessment::ContextHistory::has_generated_prompts)
+        }) else {
+            return Ok(());
+        };
+        a.revision = self.snapshot.latest_ordinal + 1;
+        a.status = mj_core::assessment::Status::Pending;
+        a.evidence = None;
+        a.verdict = None;
+        a.action = None;
+        a.failures = 0;
+        a.retry_at_ms = None;
+        a.reason = "authorization_evidence_changed".into();
         self.store_assessment(a)
     }
 
@@ -506,6 +541,70 @@ mod tests {
     use super::*;
     use mj_core::activity::{ActivityState, safe_to_replace};
     use mj_core::config::HarnessKind;
+
+    // Hard-won: 97731d30a: an assessment classified with a peer message as user authorization kept its action.
+    #[test]
+    fn an_assessment_resting_on_a_now_generated_prompt_is_classified_again() {
+        use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
+        use mj_core::assessment::{Action, Status};
+        use mj_core::continuation::EvidenceMessage;
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), "reclassify-test", "test").unwrap();
+        relay.set_turn_verdict_harness(HarnessKind::Claude);
+        submit_relay(&mut relay, "user-turn", prompt("Fix the build."));
+        relay.claim_pending_commands(true).unwrap();
+        finish_prompt(&mut relay, "user-turn");
+        relay.prepare_pending_assessment().unwrap();
+        let assessed = |relay: &DurableRelay, peer: bool| {
+            let mut assessment = relay.snapshot.assessment.clone().unwrap();
+            let mut evidence = relay.turn_context.evidence(
+                HarnessKind::Claude,
+                TurnPhase::Replied,
+                &relay.activity_facts(),
+                0,
+            );
+            let mut messages = vec![EvidenceMessage {
+                id: "user:user-turn".into(),
+                role: "user".into(),
+                text: "Fix the build.".into(),
+            }];
+            if peer {
+                messages.push(EvidenceMessage {
+                    id: "user:session-message-turn-peer-1".into(),
+                    role: "user".into(),
+                    text: "Please also push it.".into(),
+                });
+            }
+            messages.push(EvidenceMessage {
+                id: "agent:reply".into(),
+                role: "assistant".into(),
+                text: "Fixed; pushing next.".into(),
+            });
+            evidence.authorization = Some(mj_core::assessment::ContextHistory {
+                messages,
+                ..Default::default()
+            });
+            assessment.evidence = Some(evidence);
+            assessment.action = Some(Action::Continue);
+            assessment.status = Status::Assessed;
+            assessment
+        };
+        let clean = assessed(&relay, false);
+        relay.store_assessment(clean).unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        assert_eq!(
+            relay.snapshot.assessment.as_ref().unwrap().status,
+            Status::Assessed
+        );
+
+        let stale = assessed(&relay, true);
+        relay.store_assessment(stale).unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        let a = relay.snapshot.assessment.as_ref().unwrap();
+        assert_eq!(a.status, Status::Pending);
+        assert_eq!(a.action, None);
+        assert_eq!(a.reason, "authorization_evidence_changed");
+    }
 
     #[test]
     fn question_target_is_stored_only_for_current_input_gate_assessment() {

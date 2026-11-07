@@ -232,71 +232,73 @@ pub fn is_generated_prompt_text(text: &str) -> bool {
     is_control_origin_prompt(text) || text.trim() == PARENT_WAIT_PROMPT_TEXT
 }
 
-/// Every producer of user-role prompts that Mjolnir submits itself rather
-/// than the person typing them. This is the one owner of those command ids:
-/// producers build their ids here and every reader asks [`is_generated_prompt`],
-/// so a new producer cannot be added without being recognized.
-///
-/// A prompt that carries the person's own text (plan-review feedback, image
-/// pastes, startup prompts, `prompt-`, `web-prompt-`) is not generated, and
-/// neither is a command that is not a prompt (`auto-steer-`, a goal resume).
-/// The id strings are stored in journals and transcripts; do not change them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GeneratedPrompt {
-    /// Automatic continuation of unfinished work.
-    AutoContinue,
-    /// The retry a quota recovery submits.
-    QuotaRetry,
-    /// Review findings forwarded to the author. No current producer; older
-    /// transcripts still carry it.
-    ReviewForward,
-    /// Restored archive context. No current producer; older transcripts still
-    /// carry it.
-    Archive,
-    /// Sub-agent traffic: another session's input (`subagent-input-`), a
-    /// child's spawn brief (`subagent-spawn-`) and older wait notices.
-    Subagent,
-    /// A mailbox event that wakes an idle session.
-    MailboxWake,
-    /// The prompt that reminds a child to hand back its report.
-    HandbackReminder,
-    /// Another session's message delivered as a turn.
-    SessionMessageTurn,
-    /// A worker's retry after a provider failure.
-    ServerRetry,
-    /// Older workers' name for [`Self::ServerRetry`].
-    CapacityRetry,
+/// Declares the producers once, so the enum, [`GeneratedPrompt::ALL`] and
+/// [`GeneratedPrompt::prefix`] cannot disagree: a variant left out of `ALL`
+/// would make its prompts look like the person's.
+macro_rules! generated_prompts {
+    (
+        $(#[doc = $enum_doc:literal])*
+        pub enum GeneratedPrompt {
+            $($(#[doc = $doc:literal])* $variant:ident => $prefix:literal,)*
+        }
+    ) => {
+        $(#[doc = $enum_doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum GeneratedPrompt {
+            $($(#[doc = $doc])* $variant,)*
+        }
+
+        impl GeneratedPrompt {
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
+
+            pub const fn prefix(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $prefix,)*
+                }
+            }
+        }
+    };
+}
+
+generated_prompts! {
+    /// Every producer of user-role prompts that Mjolnir submits itself rather
+    /// than the person typing them. This is the one owner of those command ids:
+    /// producers build their ids here and every reader asks [`is_generated_prompt`],
+    /// so a new producer cannot be added without being recognized (one
+    /// declaration lists every producer).
+    ///
+    /// A prompt that carries the person's own text (plan-review feedback, image
+    /// pastes, startup prompts, `prompt-`, `web-prompt-`) is not generated, and
+    /// neither is a command that is not a prompt (`auto-steer-`, a goal resume).
+    /// The id strings are stored in journals and transcripts; do not change them.
+    pub enum GeneratedPrompt {
+        /// Automatic continuation of unfinished work.
+        AutoContinue => "auto-continue-",
+        /// The retry a quota recovery submits.
+        QuotaRetry => "quota-retry-",
+        /// Review findings forwarded to the author. No current producer; older
+        /// transcripts still carry it.
+        ReviewForward => "review-forward-",
+        /// Restored archive context. No current producer; older transcripts still
+        /// carry it.
+        Archive => "archive-",
+        /// Sub-agent traffic: another session's input (`subagent-input-`), a
+        /// child's spawn brief (`subagent-spawn-`) and older wait notices.
+        Subagent => "subagent-",
+        /// A mailbox event that wakes an idle session.
+        MailboxWake => "mailbox-wake-",
+        /// The prompt that reminds a child to hand back its report.
+        HandbackReminder => "handback-reminder-",
+        /// Another session's message delivered as a turn.
+        SessionMessageTurn => "session-message-turn-",
+        /// A worker's retry after a provider failure.
+        ServerRetry => "server-retry-",
+        /// Older workers' name for [`Self::ServerRetry`].
+        CapacityRetry => "capacity-retry-",
+    }
 }
 
 impl GeneratedPrompt {
-    pub const ALL: [Self; 10] = [
-        Self::AutoContinue,
-        Self::QuotaRetry,
-        Self::ReviewForward,
-        Self::Archive,
-        Self::Subagent,
-        Self::MailboxWake,
-        Self::HandbackReminder,
-        Self::SessionMessageTurn,
-        Self::ServerRetry,
-        Self::CapacityRetry,
-    ];
-
-    pub const fn prefix(self) -> &'static str {
-        match self {
-            Self::AutoContinue => "auto-continue-",
-            Self::QuotaRetry => "quota-retry-",
-            Self::ReviewForward => "review-forward-",
-            Self::Archive => "archive-",
-            Self::Subagent => "subagent-",
-            Self::MailboxWake => "mailbox-wake-",
-            Self::HandbackReminder => "handback-reminder-",
-            Self::SessionMessageTurn => "session-message-turn-",
-            Self::ServerRetry => "server-retry-",
-            Self::CapacityRetry => "capacity-retry-",
-        }
-    }
-
     /// The command id this producer gives a prompt: its prefix and `suffix`.
     pub fn command_id(self, suffix: impl std::fmt::Display) -> String {
         format!("{}{suffix}", self.prefix())
@@ -332,7 +334,8 @@ impl GeneratedPrompt {
     /// The producer that submitted the prompt with this command id.
     pub fn of(command_id: &str) -> Option<Self> {
         Self::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .find(|producer| producer.recognizes(command_id))
     }
 

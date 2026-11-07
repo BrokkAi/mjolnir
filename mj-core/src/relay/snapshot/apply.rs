@@ -391,20 +391,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 // Legacy protocol-39 journals still replay this command.
                 RelayCommand::SetSubagentWait { .. } => {}
                 RelayCommand::Prompt { prompt }
-                    if !crate::continuation::is_generated_prompt(command_id)
-                        && !crate::continuation::is_generated_prompt_text(
-                            &prompt
-                                .iter()
-                                .filter_map(|b| {
-                                    if let ContentBlock::Text(t) = b {
-                                        Some(t.text.as_str())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ) =>
+                    if crate::continuation::is_user_authored_message(
+                        Some(command_id),
+                        &prompt
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Text(t) = b {
+                                    Some(t.text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ) =>
                 {
                     snapshot.continuation = crate::continuation::ContinuationState {
                         user_command_id: Some(command_id.clone()),
