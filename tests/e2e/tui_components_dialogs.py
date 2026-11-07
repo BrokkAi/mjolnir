@@ -23,6 +23,7 @@ the companion tui_components_actions module against the same owned fixture.
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 from reliability_lab import TIMEOUT_SCALE
@@ -361,25 +362,21 @@ def probe_web_dialog(lab: Any, tmux: Any, evidence: Any) -> None:
     )
 
 
-def probe_setup_double_click(lab: Any, tmux: Any, evidence: Any) -> None:
-    """Selection and activation use the same row as keyboard Enter."""
+def probe_setup_click(lab: Any, tmux: Any, evidence: Any) -> None:
+    """One click on a Settings row opens its page, the same as keyboard Enter."""
     del lab
     from tui_components_tmux import locate_text
     tmux.send_prefix("s")
-    screen = _wait(tmux, "Interface", "setup categories")
-    x, y = locate_text(screen, "Interface")
+    _wait(tmux, "Interface", "setup categories")
+    # A control takes clicks once the frame that drew it has registered it.
+    time.sleep(0.3 * TIMEOUT_SCALE)
+    x, y = locate_text(_capture(tmux), "Interface")
     tmux.mouse_click(x, y)
-    selected = _capture(tmux)
-    if "Settings › Interface" in selected:
-        raise AssertionError("one setup click activated instead of selecting")
-    # A fresh pair is sent together so capture latency cannot affect the interval.
-    tmux.send_key("Home")
-    tmux.mouse_click(x, y)
-    tmux.mouse_click(x, y)
-    opened = _wait(tmux, "Settings › Interface", "double-click opens selected setup category")
-    _record(evidence, tmux, "setup-double-click", "select once, then double-click Interface", "Interface opens like Enter", opened)
-    tmux.send_key("BSpace")
-    _wait(tmux, "Interface", "setup parent category")
+    opened = _wait(tmux, "Settings › Interface", "one click opens the setup category like Enter")
+    _record(evidence, tmux, "setup-click", "click Interface", "Interface opens like Enter", opened)
+    # Escape goes back to the categories, which keep their selection.
+    tmux.send_key("Escape")
+    tmux.wait_until(lambda: "Settings › Interface" not in _capture(tmux), "setup parent category")
     tmux.send_key("Enter")
     _wait(tmux, "Settings › Interface", "Enter reopens the restored selection")
     # Escape goes back one level at a time: first to the categories, then out.
@@ -397,7 +394,7 @@ def run_dialog_acceptance(lab: Any, tmux: Any, evidence: Any) -> None:
     preconditions; every probe restores them before returning.
     """
 
-    probe_setup_double_click(lab, tmux, evidence)
+    probe_setup_click(lab, tmux, evidence)
     probe_rename(lab, tmux, evidence)
     probe_target_config_id(lab, tmux, evidence)
     probe_new_wizard(lab, tmux, evidence)

@@ -496,7 +496,7 @@ def dashboard_dimensions(tmux: TmuxController, evidence: Evidence) -> None:
             screen = tmux.wait_for_any(
                 ("Sessions", "live-components"),
                 f"dashboard at {columns}x{rows}",
-                timeout=5,
+                timeout=5 * TIMEOUT_SCALE,
             )
         capture = evidence.capture(f"dashboard-{columns}x{rows}", screen)
         evidence.event(
@@ -537,6 +537,7 @@ def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
         )
 
     states: dict[str, tuple[int, int, int]] = {}
+    before: tuple[int, int, int] | None = None
     for glyph, label in [("▄", "wide"), ("▁", "narrow"), ("▄", "wide-again")]:
         screen = tmux.capture().splitlines()
         y = next(i for i, line in enumerate(screen) if "▁" in line)
@@ -544,14 +545,17 @@ def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
         previous: list[tuple[int, int, int]] = []
 
         def settled() -> bool:
-            # The same, complete layout on two reads in a row.
+            # The same, complete layout on two reads in a row, and, after the
+            # first click, a different one from before the click: two reads of
+            # the old layout on a slow host are not the click's result. The
+            # first click may ask for the layout already showing.
             current = layout()
             stable = bool(previous) and previous[-1] == current
             previous.append(current)
-            return stable and -1 not in current
+            return stable and -1 not in current and (before is None or current != before)
 
         tmux.wait_until(settled, f"support panes settled with {label} sidebar")
-        states[label] = layout()
+        states[label] = before = layout()
         edge, targets_x, quota_x = states[label]
         if targets_x != quota_x:
             raise ScenarioFailure(f"Targets and Profiles are not aligned in {label}: {states}")
