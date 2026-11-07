@@ -5372,6 +5372,118 @@ async fn an_older_collection_never_replaces_a_newer_finishs_facts() {
     );
 }
 
+/// A report built while its working tree was pending, and enqueued after the
+/// child finished again, promises no follow-up: nobody will read that tree, and
+/// the promise would never be kept. The wording and the mark that owes the
+/// follow-up are one decision, taken from the facts as stored when the report is
+/// enqueued.
+#[tokio::test]
+async fn a_report_enqueued_after_a_newer_finish_does_not_promise_its_tree() {
+    if !isolated_parked_test("a_report_enqueued_after_a_newer_finish_does_not_promise_its_tree") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let known = observed_work();
+    let mut pending = known.clone();
+    pending.worktree = mj_core::work_facts::Observed::Pending;
+    // The report was built from finish 9, whose tree was still being read.
+    crate::database::record_finish_facts("child-1".into(), 9, pending.clone()).unwrap();
+    let mut report: mj_core::mailbox::SubagentFinishedReport =
+        serde_json::from_value(serde_json::json!({
+            "child_session_id": "child-1", "task_name": "audit deps", "state": "completed",
+            "finished": true, "output": "done", "report_dir": null
+        }))
+        .unwrap();
+    report.facts = Some(pending);
+    // The child finished again before the report was enqueued.
+    crate::database::record_finish_facts("child-1".into(), 10, known.clone()).unwrap();
+    crate::database::enqueue_subagent_reports(
+        "parent-1".into(),
+        vec![(
+            mj_core::subagent::SubagentFinishIdentity::Turn {
+                start_position: 1,
+                completed_ordinal: 9,
+                state: "completed".into(),
+            },
+            report,
+        )],
+    )
+    .unwrap();
+
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&events[0].event_json).unwrap();
+    let text = mj_core::mailbox::render_mailbox_event(&event);
+    assert!(
+        !text.contains("a later message from Mjolnir gives it"),
+        "{text}"
+    );
+    assert!(text.contains("the child finished again"), "{text}");
+    // Nothing is owed for the finish that was replaced.
+    crate::database::record_finish_worktree("child-1".into(), 9, known.worktree.clone()).unwrap();
+    crate::database::record_finish_worktree("child-1".into(), 10, known.worktree).unwrap();
+    assert!(working_tree_followups().is_empty());
+}
+
+/// A park that could not be confirmed and the real outcome of a later attempt
+/// are different messages for one finish: the parent receives "could not
+/// confirm" once however often it repeats, and then the outcome.
+#[tokio::test]
+async fn an_unconfirmed_park_and_its_later_outcome_are_both_told_to_the_parent() {
+    if !isolated_parked_test(
+        "an_unconfirmed_park_and_its_later_outcome_are_both_told_to_the_parent",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let known = observed_work();
+    crate::database::record_finish_facts("child-1".into(), 9, known.clone()).unwrap();
+    let attempt = |settled: bool| {
+        let (_, marker) = crate::database::record_park_started("child-1".into()).unwrap();
+        let outcome = if settled {
+            mj_core::work_facts::ParkFacts::settled(marker.snapshot, &[41301])
+        } else {
+            mj_core::work_facts::ParkFacts::unconfirmed(marker.snapshot, "the stop failed")
+        };
+        crate::database::record_park_outcome("child-1".into(), "audit deps".into(), outcome)
+            .unwrap();
+    };
+    let parked_events = || -> Vec<String> {
+        crate::database::pending_mailbox_events(20)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_json.contains("subagent_parked"))
+            .map(|event| {
+                let parsed: mj_core::mailbox::MailboxEvent =
+                    serde_json::from_str(&event.event_json).unwrap();
+                mj_core::mailbox::render_mailbox_event(&parsed)
+            })
+            .collect()
+    };
+    attempt(false);
+    attempt(false);
+    assert_eq!(parked_events().len(), 1, "a repeat is not told twice");
+    attempt(true);
+    let told = parked_events();
+    assert_eq!(told.len(), 2, "{told:?}");
+    assert!(
+        told[0].contains("could not confirm the park of child task"),
+        "{}",
+        told[0]
+    );
+    assert!(!told[0].contains("Mjolnir: parked"), "{}", told[0]);
+    assert!(
+        told[1].contains("Mjolnir: parked child task"),
+        "the real outcome comes last: {}",
+        told[1]
+    );
+    attempt(false);
+    assert_eq!(parked_events().len(), 2, "{:?}", parked_events());
+}
+
 /// Whether to use a finish's recorded facts follows from its completed turn,
 /// not from the kind of finish identity. A finished child whose last message
 /// delivery failed has a terminal identity, and its report still carries the

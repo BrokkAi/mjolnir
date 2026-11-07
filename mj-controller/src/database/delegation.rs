@@ -194,9 +194,34 @@ pub(crate) fn enqueue_subagent_reports(
             if already_enqueued {
                 continue;
             }
-            let tree_pending = report.facts.as_ref().is_some_and(|facts| {
-                matches!(facts.worktree, mj_core::work_facts::Observed::Pending)
-            });
+            // The report's promise of a working-tree follow-up and the mark that
+            // owes it are one decision, taken from the facts as stored in this
+            // transaction, not from those the report was built with: a finish
+            // recorded since replaced them, and a promise about a tree that is
+            // no longer anyone's to read would never be kept.
+            let mut report = report;
+            let mut tree_pending = false;
+            if let Some(facts) = report.facts.as_mut()
+                && matches!(facts.worktree, mj_core::work_facts::Observed::Pending)
+            {
+                let stored_finish: Option<u64> = transaction
+                    .query_row(
+                        "SELECT finish_ordinal FROM subagent_work_facts WHERE child_session_id=?1",
+                        [child_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                if identity.completed_ordinal().is_some()
+                    && stored_finish == identity.completed_ordinal()
+                {
+                    tree_pending = true;
+                } else {
+                    facts.worktree = mj_core::work_facts::Observed::unavailable(
+                        "the child finished again before this working tree was read; the report of the newer finish carries its working tree",
+                    );
+                }
+            }
             let event = mj_core::mailbox::MailboxEvent {
                 key: key.clone(),
                 source: "mjolnir".into(),
@@ -674,7 +699,7 @@ pub(crate) fn record_park_outcome_expecting(
         )?;
         let mut enqueued = false;
         if park.is_news() {
-            let key = subagent_parked_key(&relation, ordinal)?;
+            let key = subagent_parked_key(&relation, ordinal, park.unconfirmed.is_some())?;
             let already_enqueued: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
                 [&key],
@@ -791,18 +816,29 @@ pub(crate) fn settle_followups_after_restart() -> Result<()> {
     Ok(())
 }
 
+/// The outbox key of a park's follow-up. A park that could not be confirmed and
+/// one that was settled are different messages for one finish: the parent is
+/// told "could not confirm" once however often that is repeated, and the real
+/// outcome of a later attempt still reaches it.
 fn subagent_parked_key(
     relation: &mj_core::subagent::SubagentRecord,
     ordinal: u64,
+    unconfirmed: bool,
 ) -> Result<String> {
     use sha2::{Digest, Sha256};
+    let identity = (
+        &relation.parent_session_id,
+        &relation.child_session_id,
+        ordinal,
+    );
+    let digest = if unconfirmed {
+        Sha256::digest(serde_json::to_vec(&(identity, "unconfirmed"))?)
+    } else {
+        Sha256::digest(serde_json::to_vec(&identity)?)
+    };
     Ok(format!(
         "subagent-parked-{}",
-        mj_core::hex::lower_hex(Sha256::digest(serde_json::to_vec(&(
-            &relation.parent_session_id,
-            &relation.child_session_id,
-            ordinal,
-        ))?))
+        mj_core::hex::lower_hex(digest)
     ))
 }
 

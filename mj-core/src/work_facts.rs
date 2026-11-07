@@ -374,17 +374,11 @@ impl WorkFacts {
     pub fn render_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         match &self.processes {
-            Observed::Known(processes) => {
-                lines.extend(render_processes(
-                    "Running processes started by the child's agent",
-                    processes,
-                ));
+            Observed::Known(processes) => lines.extend(render_processes(processes)),
+            Observed::Unavailable { reason } => {
+                lines.push(format!("Running processes: unavailable ({reason})"));
             }
-            Observed::Unavailable { reason } => lines.push(format!(
-                "Running processes started by the child's agent: unavailable ({reason})"
-            )),
-            Observed::Pending => lines
-                .push("Running processes started by the child's agent: still being read".into()),
+            Observed::Pending => lines.push("Running processes: still being read".into()),
         }
         lines.extend(render_worktree_part(&self.worktree));
         lines
@@ -434,11 +428,20 @@ pub fn render_process(process: &RunningProcess) -> String {
     )
 }
 
-fn render_processes(label: &str, processes: &ProcessFacts) -> Vec<String> {
+/// What the process scan looks at. A process outside it (a job started with
+/// `env -i setsid` whose launching shell has exited, say) is not seen, so the
+/// lines say what was searched and an empty result says none were found there,
+/// not that none are running.
+const PROCESS_SCOPE: &str = "in the worker's process tree or carrying this session's marker";
+
+fn render_processes(processes: &ProcessFacts) -> Vec<String> {
     let mut lines = if processes.running == 0 {
-        vec![format!("{label}: none")]
+        vec![format!("No running processes found {PROCESS_SCOPE}")]
     } else {
-        let mut lines = vec![format!("{label}: {}", processes.running)];
+        let mut lines = vec![format!(
+            "Running processes found {PROCESS_SCOPE}: {}",
+            processes.running
+        )];
         lines.extend(
             processes
                 .shown

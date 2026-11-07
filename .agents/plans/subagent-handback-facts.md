@@ -295,6 +295,18 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
 - Decision (eighth review, 6): When the lifecycle write fails after a successful stop, the park is settled at once as "could not be confirmed" with the error (`report_unconfirmed_park`, the helper the failed-stop path uses), so no marker stays pending until a restart. No dedicated test: the writer-thread failure cannot be injected from outside the database module, and the helper is covered by the failed-stop test.
   Date/Author: 2026-11-07 / implementing agent, from review.
 
+- Decision (ninth review, 1): The report's promise of a working-tree follow-up and the mark that owes it are one decision, taken inside the enqueue transaction from the stored finish row. If the stored finish is still the report's and its tree is pending, the report promises the follow-up and marks it owed. Otherwise (a newer finish replaced it) the report says its working tree is unavailable because the child finished again, and the newer finish's report carries its tree; nothing is owed. No new state. Test `a_report_enqueued_after_a_newer_finish_does_not_promise_its_tree`.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (ninth review, 2): The outbox key of a park follow-up names its kind. A park that could not be confirmed has its own key, shared by repeats for one finish, and the settled outcome keeps the key it had. So "could not confirm" and a later real outcome both reach the parent, the settled one last. Test `an_unconfirmed_park_and_its_later_outcome_are_both_told_to_the_parent`.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (ninth review, 3): The process lines say what was searched: "Running processes found in the worker's process tree or carrying this session's marker: N", and "No running processes found in ..." for an empty result. A job started with `env -i setsid` whose launching shell has exited is outside that scope (measured in M0), and is not detected. Unavailable and pending lines say "Running processes: ...". Golden updated.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (ninth review, 4): A park follow-up that could not be confirmed is headed "Mjolnir: could not confirm the park of child task ..." and its transcript line has no counts. Golden updated.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
 
 ## Outcomes & Retrospective
 
