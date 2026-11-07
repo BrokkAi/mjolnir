@@ -8200,6 +8200,74 @@ async fn a_capture_cancelled_by_the_harness_stopping_publishes_unavailable_facts
     assert!(facts.processes.known().is_none());
 }
 
+/// A Git read that never returns must not hold the turn's outcome, or the
+/// commands behind it: a cancellation accepted during the observation ends it,
+/// the outcome is published with the facts unavailable, and the Git read is
+/// killed with the dropped observation.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancellation_accepted_during_a_capture_ends_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-only", prompt("only"));
+    let relay = Arc::new(Mutex::new(durable));
+    let git = gated_git(work.path(), false);
+    let observer = capture_observer(&relay, work.path(), git);
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_capturing_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+        observer,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-only", "only");
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-only".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    wait_for("the capture to start", async {
+        while !work.path().join("status.started").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(prompt_outcome_facts(&relay), None, "published early");
+
+    submit(&mut relay.lock().unwrap(), "cancel-1", RelayCommand::Cancel);
+    wake_tx.send(()).await.unwrap();
+    wait_for("the outcome to be published", async {
+        while prompt_outcome_facts(&relay).is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let facts = prompt_outcome_facts(&relay).unwrap().expect("with facts");
+    assert!(
+        matches!(
+            &facts.worktree,
+            mj_core::work_facts::Observed::Unavailable { reason }
+                if reason.contains("cancellation or close")
+        ),
+        "{facts:?}"
+    );
+    drop(event_tx);
+    drop(wake_tx);
+    let _ = coordinator.await;
+}
+
 /// A session that is not a sub-agent has no observer, and its outcome says
 /// nothing of facts.
 #[tokio::test]

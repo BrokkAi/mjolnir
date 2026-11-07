@@ -1904,6 +1904,13 @@ impl DurableRelay {
         self.close_requested()
     }
 
+    /// Whether a cancellation or an accepted Close is waiting or running. Work
+    /// the worker does for its own purposes, such as observing a finished
+    /// turn, ends when this is true, so that the command is not held behind it.
+    pub fn cancellation_or_close_pending(&self) -> bool {
+        self.turn_cancellation_pending() || self.close_requested()
+    }
+
     fn pending_close_barrier_id(&self) -> Option<&str> {
         self.snapshot.dispatches.values().find_map(|dispatch| {
             if matches!(

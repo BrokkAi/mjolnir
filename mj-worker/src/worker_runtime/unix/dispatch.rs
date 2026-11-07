@@ -190,6 +190,10 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     // Runtime events already in the channel always belong
                     // before any newly admitted checkpoint cut.
                     let queued = events.len();
+                    let mut capturing = capture.as_ref().map(|observer| Capture {
+                        observer,
+                        wakes: &mut dispatch_wakes,
+                    });
                     if record_queued_runtime_events(
                         &relay,
                         &mut in_flight,
@@ -198,7 +202,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                         &mut user_shells,
                         &mut kimi_tasks,
                         queued,
-                        capture.as_ref(),
+                        capturing.as_mut(),
                     ).await? {
                         verdict_tasks.shutdown().await;
                         return Ok(());
@@ -222,6 +226,10 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     verdict_tasks.shutdown().await;
                     return Ok(());
                 };
+                let mut capturing = capture.as_ref().map(|observer| Capture {
+                    observer,
+                    wakes: &mut dispatch_wakes,
+                });
                 if record_runtime_event_batch(
                     &relay,
                     &mut in_flight,
@@ -230,7 +238,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     &mut session_configured,
                     &mut user_shells,
                     &mut kimi_tasks,
-                    capture.as_ref(),
+                    capturing.as_mut(),
                 ).await? {
                     verdict_tasks.shutdown().await;
                     return Ok(());
@@ -361,6 +369,13 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
     }
 }
 
+/// What observing a sub-agent's finishing prompt needs from its coordinator:
+/// the observer, and the channel that says a command has been accepted.
+pub(crate) struct Capture<'a> {
+    pub(crate) observer: &'a crate::work_facts::WorkObserver,
+    pub(crate) wakes: &'a mut mpsc::Receiver<()>,
+}
+
 /// Observe a sub-agent's work for the prompt that is finishing, together with
 /// whatever else must happen before its outcome is published (`prepare`, which
 /// for Kimi waits for the turn's native records to settle): the time added is
@@ -368,24 +383,43 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
 /// next prompt is dispatched by this task after the outcome is recorded.
 ///
 /// There is no timeout of ours. The observation ends by itself, or is cancelled
-/// by what really ends a turn early: the harness stopping or restarting, or its
-/// event channel closing. A Close cannot be accepted while it runs (it needs an
-/// idle checkpoint barrier, and the prompt is not idle until its outcome is
-/// recorded), and a park waits for the report, which waits for the outcome. The
+/// by what really ends a turn early: the harness stopping or restarting, its
+/// event channel closing, or the relay accepting a cancellation or a Close
+/// (this task is what dispatches those, so they would otherwise wait behind a
+/// Git read that does not return; dropping the observation kills its Git
+/// children). A park waits for the report, which waits for the outcome. The
 /// outcome is then published with the facts unavailable and the reason. Events
 /// that arrive while it runs belong after the outcome, and are kept, in order,
-/// in `deferred`.
+/// in `deferred`. Wakes consumed here need no replay: the caller dispatches
+/// pending commands once the outcome is recorded.
 async fn capture_while_open(
-    observer: &crate::work_facts::WorkObserver,
+    capture: &mut Capture<'_>,
+    relay: &Arc<Mutex<DurableRelay>>,
     events: &mut mpsc::Receiver<RuntimeEvent>,
     deferred: &mut std::collections::VecDeque<RuntimeEvent>,
 ) -> mj_core::work_facts::WorkFacts {
-    let observation = crate::work_facts::capture(observer);
+    let observation = crate::work_facts::capture(capture.observer);
     tokio::pin!(observation);
+    let mut wakes_open = true;
     loop {
         tokio::select! {
             biased;
             facts = &mut observation => return facts,
+            wake = capture.wakes.recv(), if wakes_open => match wake {
+                // The coordinator finds the closed channel itself afterwards.
+                None => wakes_open = false,
+                Some(()) => {
+                    if relay
+                        .lock()
+                        .expect("relay state lock poisoned")
+                        .cancellation_or_close_pending()
+                    {
+                        return mj_core::work_facts::WorkFacts::unavailable(
+                            "a cancellation or close was accepted while the turn's observation was being taken",
+                        );
+                    }
+                }
+            },
             event = events.recv() => match event {
                 None => {
                     return mj_core::work_facts::WorkFacts::unavailable(
@@ -420,15 +454,15 @@ async fn record_one_runtime_event(
     session_configured: &mut bool,
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
-    capture: Option<&crate::work_facts::WorkObserver>,
+    capture: Option<&mut Capture<'_>>,
 ) -> Result<bool> {
     let mut deferred = std::collections::VecDeque::new();
     let finishing_prompt = matches!(event, RuntimeEvent::PromptFinished { .. });
     let work_facts = match capture.filter(|_| finishing_prompt) {
-        Some(observer) => {
+        Some(capture) => {
             let (prepared, facts) = tokio::join!(
                 prepare_kimi_runtime_event(kimi_tasks, relay, &mut event),
-                capture_while_open(observer, events, &mut deferred),
+                capture_while_open(capture, relay, events, &mut deferred),
             );
             prepared?;
             Some(facts)
@@ -479,7 +513,7 @@ pub(crate) async fn record_runtime_event_batch(
     session_configured: &mut bool,
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
-    capture: Option<&crate::work_facts::WorkObserver>,
+    mut capture: Option<&mut Capture<'_>>,
 ) -> Result<bool> {
     if record_one_runtime_event(
         relay,
@@ -489,7 +523,7 @@ pub(crate) async fn record_runtime_event_batch(
         session_configured,
         user_shells,
         kimi_tasks,
-        capture,
+        capture.as_deref_mut(),
     )
     .await?
     {
@@ -518,7 +552,7 @@ pub(crate) async fn record_queued_runtime_events(
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
     maximum: usize,
-    capture: Option<&crate::work_facts::WorkObserver>,
+    mut capture: Option<&mut Capture<'_>>,
 ) -> Result<bool> {
     for recorded in 0..maximum {
         match events.try_recv() {
@@ -531,7 +565,7 @@ pub(crate) async fn record_queued_runtime_events(
                     session_configured,
                     user_shells,
                     kimi_tasks,
-                    capture,
+                    capture.as_deref_mut(),
                 )
                 .await?
                 {

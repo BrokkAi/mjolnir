@@ -343,6 +343,9 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
   Storage and protocol: the table is gone; migration 118 stays as a floor-only Breaking revision (the stored outcome JSON gains a field a revision-117 daemon's `deny_unknown_fields` decoder would refuse). Relay protocol 56 (#1424 took 55): the outcome gains an optional field that older relay readers ignore; the constant is `RELAY_FINISH_FACTS_PROTOCOL`.
   Date/Author: 2026-11-07 / implementing agent, at the user's request.
 
+- Decision (review fix, 3d4437d0d): two reviewers found that a Git read that never returns would hold the coordinator for as long as it hung, so the turn's outcome and every command behind it (a Cancel included) waited. The capture is now also cancelled by a real event: a wake (a command accepted) during the observation, when the relay then has a cancellation or an accepted Close pending (`DurableRelay::cancellation_or_close_pending`, which reuses `turn_cancellation_pending`). The outcome is published with the facts unavailable ("a cancellation or close was accepted while the turn's observation was being taken"), the dropped observation kills its Git children (`run_bounded_observed` uses `kill_on_drop` and a process group), and the coordinator then dispatches the pending commands. Wakes consumed during the capture need no replay because the caller always runs `dispatch_pending` after recording. Still no timeout of ours: a hung Git read with nobody cancelling holds only that sub-agent's next turn, and a user who wants it back cancels or destroys. This corrects the paragraph above that said a Close or park could not interrupt a capture; the Cancel was the missing path.
+  Date/Author: 2026-11-07 / implementing agent.
+
 
 ## Outcomes & Retrospective
 
