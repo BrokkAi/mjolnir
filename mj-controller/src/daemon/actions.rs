@@ -65,7 +65,9 @@ pub(super) async fn handle_action(
         }
         DaemonAction::RunDoctor => {
             let errors = blocking(|| {
-                let executor = crate::targets::ProcessExecutor;
+                // Daemon-owned work is bounded: one deadline per probe, as
+                // `mj doctor` and `mj setup` have.
+                let executor = crate::doctor::probe_executor();
                 let checks = crate::doctor::run_with_config_path(
                     &mj_core::config::config_path(),
                     &executor,
