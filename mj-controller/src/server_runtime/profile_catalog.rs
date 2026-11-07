@@ -23,6 +23,7 @@ use mj_core::worker_launch::ProfileConfig;
 use sha2::{Digest, Sha256};
 
 use crate::quota::ProfileQuota;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
@@ -185,9 +186,12 @@ struct Inner {
     /// entry keeps its older digest and stays stale.
     home_settled: BTreeMap<CacheKey, [u8; 32]>,
     /// When the watch may launch the next re-probe for an identity whose
-    /// edit re-probe failed. Bounded like the expiry refresh: a persistent
+    /// edit re-probe failed, and the digest that failure was retrying.
+    /// A pass whose current digest differs from the armed one is a fresh
+    /// edit: it bypasses the window, which a launch then re-arms against
+    /// the new digest. Bounded like the expiry refresh: a persistent
     /// failure is retried rarely, not every pass.
-    home_edit_retry_after: BTreeMap<String, tokio::time::Instant>,
+    home_edit_retry_after: BTreeMap<String, (tokio::time::Instant, Option<[u8; 32]>)>,
 }
 
 impl Inner {
@@ -947,7 +951,7 @@ impl ProfileCatalog {
                 inner
                     .entries
                     .iter()
-                    .filter(|(_, entry)| !matches!(entry, Entry::Failed { .. }))
+                    .filter(|(_, entry)| matches!(entry, Entry::Ready(_)))
                     .map(|(key, _)| key.clone())
                     .collect::<BTreeSet<_>>(),
             )
@@ -958,6 +962,7 @@ impl ProfileCatalog {
         }
         let mut stale = BTreeSet::new();
         let mut converged = BTreeSet::new();
+        let mut digest_by_identity: BTreeMap<String, [u8; 32]> = BTreeMap::new();
         let mut updates: Vec<(PathBuf, HomeFiles)> = Vec::new();
         for (home, current) in polled {
             let Some(mut current) = current else {
@@ -991,8 +996,8 @@ impl ProfileCatalog {
             // the pass observed.
             updates.push((home.clone(), current.clone()));
             // Every served answer must have been read from the home as it
-            // now is. A Failed entry serves no home-derived answer — its own
-            // supervisor retries it with backoff, and its success records a
+            // now is. A Failed or Pending entry serves no complete answer —
+            // its own supervisor finishes it, and its success records a
             // digest that joins the check — so it neither settles nor blocks
             // convergence.
             for identity in &identities_by_home[&home] {
@@ -1005,16 +1010,19 @@ impl ProfileCatalog {
                 } else {
                     stale.insert(identity.clone());
                 }
+                digest_by_identity.insert(identity.clone(), current.digest);
             }
         }
         // A failed re-probe records nothing, so the identity stays stale and
         // the next pass tries again; bound how often the re-probe repeats,
         // matching the expiry refresh cadence for persistent failures.
-        // Launches and failed re-probes arm the window; nothing else touches
-        // it, so concurrent probes cannot disagree about it. An identity
-        // observed converged this pass has nothing left to retry: clear its
-        // window before deciding what launches, so a genuinely new edit
-        // re-probes on the next pass instead of waiting the window out.
+        // Launches and failed re-probes arm the window, against the digest
+        // that made the identity stale; a pass whose current digest differs
+        // from the armed one is a fresh edit and bypasses the window, and a
+        // launch re-arms against the new digest. An identity observed
+        // converged this pass has nothing left to retry: its window is
+        // cleared before deciding what launches, so a follow-up edit after
+        // a success re-probes on the next pass instead of waiting it out.
         let watched: BTreeSet<&str> = identities_by_home
             .values()
             .flat_map(|identities| identities.iter().map(String::as_str))
@@ -1029,9 +1037,12 @@ impl ProfileCatalog {
             stale
                 .iter()
                 .filter(|identity| {
+                    let current = digest_by_identity[*identity];
                     !matches!(
                         inner.home_edit_retry_after.get(*identity),
-                        Some(after) if *after > now
+                        Some((after, armed))
+                            if *after > now
+                                && armed.is_none_or(|armed| armed == current)
                     )
                 })
                 .cloned()
@@ -1057,9 +1068,10 @@ impl ProfileCatalog {
             .home_settled
             .retain(|key, _| watched.contains(key.0.as_str()));
         for identity in launched_identities {
+            let armed = digest_by_identity.get(&identity).copied();
             inner
                 .home_edit_retry_after
-                .insert(identity, now + retry_wait);
+                .insert(identity, (now + retry_wait, armed));
         }
     }
 
@@ -1142,12 +1154,19 @@ impl ProfileCatalog {
                 // The re-probe failed: the entry keeps its pre-edit copy and
                 // the identity stays stale. Re-arm the retry window so the
                 // next pass waits it out instead of re-probing the identity
-                // every poll. The window is cleared by the home watch when
-                // it observes every served entry settled, never by a probe.
-                inner.home_edit_retry_after.insert(
-                    key.0.clone(),
-                    tokio::time::Instant::now() + self.home_edit_retry_wait(),
-                );
+                // every poll, keeping the digest the retry is about so a
+                // fresh edit can bypass the window. The window is cleared by
+                // the home watch when it observes every served entry
+                // settled, never by a probe.
+                match inner.home_edit_retry_after.get_mut(&key.0) {
+                    Some((after, _)) => *after = Instant::now() + self.home_edit_retry_wait(),
+                    None => {
+                        inner.home_edit_retry_after.insert(
+                            key.0.clone(),
+                            (Instant::now() + self.home_edit_retry_wait(), None),
+                        );
+                    }
+                }
                 return;
             };
             let Some(Entry::Ready(previous)) = inner.entries.get(&key).cloned() else {
@@ -2953,6 +2972,139 @@ mod tests {
             Some("solo-second")
         );
         assert_eq!(calls.load(Ordering::SeqCst), 9);
+    }
+
+    // Hard-won: #1337 review: a still-pending entry kept its identity stale,
+    // re-probing the healthy entries every retry window.
+    #[tokio::test]
+    async fn a_pending_entry_does_not_keep_repriming_its_healthy_siblings() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_home_model(root, "solo", "solo-first");
+        let calls = calls();
+        let (mut config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
+        config.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+            model: "extra".into(),
+            effort: None,
+        });
+        let probe_homes = homes.clone();
+        let model_homes = homes;
+        let probe_calls = calls.clone();
+        let model_calls = calls.clone();
+        // The selected model's probe waits for a release the test controls,
+        // standing for a harness launch that has not finished.
+        let (release, gate) = tokio::sync::watch::channel(false);
+        let catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            Arc::new(move |profile| {
+                probe_calls.fetch_add(1, Ordering::SeqCst);
+                let homes = probe_homes.clone();
+                Box::pin(async move {
+                    let mut choices = read_home_choices(&homes, &profile)?;
+                    choices.models.push(mj_core::acp::SessionConfigChoice {
+                        value: "extra".into(),
+                        name: "extra".into(),
+                        description: None,
+                    });
+                    Ok(choices)
+                })
+            }),
+            Arc::new(move |profile, model| {
+                model_calls.fetch_add(1, Ordering::SeqCst);
+                let homes = model_homes.clone();
+                let mut gate = gate.clone();
+                Box::pin(async move {
+                    if !*gate.borrow_and_update() {
+                        let _ = gate.changed().await;
+                    }
+                    let mut choices = read_home_choices(&homes, &profile)?;
+                    choices.model = Some(model);
+                    Ok(choices)
+                })
+            }),
+        );
+        catalog.sync(&config);
+        // The default probe launches at once; the selected model's probe is
+        // claimed when it publishes, and the test holds it in flight, its
+        // entry still Pending.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        converge_on(&catalog, "solo", "solo-first").await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // The Pending entry neither settles nor blocks convergence: passes
+        // stay quiet, with no re-probes of the healthy default.
+        catalog.watch_homes();
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a pending entry does not keep its identity stale"
+        );
+
+        // Once the probe finishes and records its digest, the identity
+        // settles at one digest and stays quiet.
+        release.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if catalog
+                    .lock()
+                    .entries
+                    .values()
+                    .all(|entry| matches!(entry, Entry::Ready(_)))
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the held probe publishes");
+        catalog.watch_homes();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    // Hard-won: #1337 review: a fresh edit after a failed re-probe waited
+    // out the retry window instead of re-probing on the next pass.
+    #[tokio::test]
+    async fn a_fresh_edit_bypasses_the_retry_window_of_an_earlier_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_home_model(root, "solo", "solo-first");
+        let calls = calls();
+        let failing = Arc::new(AtomicBool::new(false));
+        let (config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
+        let flaky = flaky_home_model_probe(homes, calls.clone(), failing.clone());
+        let mut catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            flaky.clone(),
+            Arc::new(move |id, _| flaky(id)),
+        );
+        Arc::get_mut(&mut catalog).unwrap().home_edit_retry_wait = Duration::from_secs(60);
+        catalog.sync_now(&config).await;
+        catalog.watch_homes();
+
+        // The first edit's re-probe fails, arming the window.
+        failing.store(true, Ordering::SeqCst);
+        write_home_model(root, "solo", "solo-second");
+        catalog.watch_homes();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        while !catalog.lock().refreshing.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            current_model(&catalog, "solo").await.as_deref(),
+            Some("solo-first")
+        );
+
+        // A fresh edit is a new digest, not the failure the window is
+        // retrying: it re-probes on the next pass, inside the window.
+        write_home_model(root, "solo", "solo-third");
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            5,
+            "a fresh edit bypasses the earlier failure's retry window"
+        );
     }
 
     // Hard-won: #1337 review: a permanently failed entry kept its identity
