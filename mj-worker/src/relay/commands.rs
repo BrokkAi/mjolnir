@@ -2018,7 +2018,8 @@ impl DurableRelay {
         let mut random = [0u8; 16];
         getrandom::fill(&mut random)
             .map_err(|error| anyhow!("generate mailbox wake ID: {error}"))?;
-        let command_id = format!("mailbox-wake-{}", mj_core::hex::lower_hex(random));
+        let command_id = mj_core::continuation::GeneratedPrompt::MailboxWake
+            .command_id(mj_core::hex::lower_hex(random));
         self.append_relay_event(
             Some(&command_id),
             RelayObservation::CommandQueued {

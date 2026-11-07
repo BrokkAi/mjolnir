@@ -2502,7 +2502,11 @@ impl Controller {
                 // Its durable ledger deduplicates this operation across retries,
                 // including a crash after acceptance but before our next save.
                 relay
-                    .submit_accepted(format!("quota-retry-{}", operation.operation_id), command)
+                    .submit_accepted(
+                        mj_core::continuation::GeneratedPrompt::QuotaRetry
+                            .command_id(&operation.operation_id),
+                        command,
+                    )
                     .await?;
             }
             for queued in verified.canonical_session.queued_prompts {

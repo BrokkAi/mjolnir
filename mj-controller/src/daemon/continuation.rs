@@ -942,13 +942,14 @@ fn spawn_with_gate(
                                                 && c.completed_command_id.as_ref() == Some(&completed),
                                             "continuation evidence changed"
                                         );
-                                        let command_id = format!(
-                                            "auto-continue-{}-{}",
-                                            ended_turn(snapshot)
-                                                .context("missing ended turn")?
-                                                .completed_ordinal,
-                                            c.attempts + 1
-                                        );
+                                        let command_id = mj_core::continuation::GeneratedPrompt::AutoContinue
+                                            .command_id(format_args!(
+                                                "{}-{}",
+                                                ended_turn(snapshot)
+                                                    .context("missing ended turn")?
+                                                    .completed_ordinal,
+                                                c.attempts + 1
+                                            ));
                                         if let Some(diagnostic) = &diagnostic {
                                             diagnostic.update(None, serde_json::json!({"command_id":command_id, "attempt":c.attempts + 1, "expected_ordinal":snapshot.operational.latest_ordinal}));
                                         }

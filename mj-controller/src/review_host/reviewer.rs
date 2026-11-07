@@ -327,13 +327,7 @@ pub(super) fn seed_from_session(session: &MaterializedSession) -> TurnReviewSeed
         if text.is_empty() {
             continue;
         }
-        if mj_core::continuation::is_generated_prompt_text(text)
-            || mj_core::continuation::is_generated_prompt(
-                item.stable_id
-                    .strip_prefix("user:")
-                    .unwrap_or(&item.stable_id),
-            )
-        {
+        if !mj_core::continuation::is_user_authored_message(Some(&item.stable_id), text) {
             continue;
         }
         task = text.to_owned();

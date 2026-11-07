@@ -1578,6 +1578,16 @@ pub struct SettledHarnessTurn {
 }
 
 impl RelaySnapshot {
+    /// The stored assessment history as readers must see it: without the
+    /// user messages that today's rules attribute to Mjolnir. The history is
+    /// stored as written so journal digests stay valid; every reader that
+    /// hands it to Jev or the question locator goes through here.
+    pub fn authorization_context(&self) -> Option<crate::assessment::ContextHistory> {
+        self.assessment_context
+            .as_ref()
+            .map(crate::assessment::ContextHistory::without_generated_prompts)
+    }
+
     /// The open turn that began without a prompt.
     pub fn autonomous_harness_turn(&self) -> Option<StoredHarnessTurn> {
         self.harness_turn

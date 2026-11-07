@@ -620,7 +620,7 @@ pub(crate) fn recover_registered_subagent_startup(
     if relation.kind != mj_core::subagent::SubagentKind::Reviewer
         && crate::database::load_startup_group(
             &relation.child_session_id,
-            &format!("subagent-spawn-{}", relation.request_key),
+            &mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key),
         )?
         .is_empty()
     {
@@ -638,7 +638,7 @@ fn initial_startup_deliveries(
     if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
         return Ok(Vec::new());
     }
-    let group_id = format!("subagent-spawn-{}", relation.request_key);
+    let group_id = mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&relation.request_key);
     crate::daemon::startup_followup::api_followup_steps(
         &group_id,
         crate::server::api::StartFollowup {

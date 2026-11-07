@@ -189,10 +189,8 @@ impl ApiBackend {
             });
         }
 
-        let command_id = format!(
-            "{}{request_id}",
-            mj_core::transcript::SESSION_MESSAGE_TURN_COMMAND_PREFIX
-        );
+        let command_id =
+            mj_core::continuation::GeneratedPrompt::SessionMessageTurn.command_id(&request_id);
         if let Some(ordinal) = prompt_acceptance(&target_session_id, &command_id).await? {
             return Ok(crate::server::api::SessionMessageResponse {
                 session_id: target_session_id,
@@ -358,7 +356,8 @@ impl ApiBackend {
             return Ok(SubagentInputDelivery::Mailbox);
         }
 
-        let command_id = format!("subagent-input-{}", request.request_id);
+        let command_id =
+            mj_core::continuation::GeneratedPrompt::subagent_input_id(&request.request_id);
         // A prior accepted turn fixes the route before checking the current
         // worker protocol.
         if let Some(ordinal) = prompt_acceptance(child, &command_id).await? {

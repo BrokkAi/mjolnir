@@ -391,20 +391,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 // Legacy protocol-39 journals still replay this command.
                 RelayCommand::SetSubagentWait { .. } => {}
                 RelayCommand::Prompt { prompt }
-                    if !crate::continuation::is_generated_prompt(command_id)
-                        && !crate::continuation::is_generated_prompt_text(
-                            &prompt
-                                .iter()
-                                .filter_map(|b| {
-                                    if let ContentBlock::Text(t) = b {
-                                        Some(t.text.as_str())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ) =>
+                    if crate::continuation::is_user_authored_message(
+                        Some(command_id),
+                        &prompt
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Text(t) = b {
+                                    Some(t.text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ) =>
                 {
                     snapshot.continuation = crate::continuation::ContinuationState {
                         user_command_id: Some(command_id.clone()),
@@ -418,19 +418,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.continuation.completed_command_id = None;
                     snapshot.continuation.harness_turn = None;
                 }
+                // Another session's message delivered as a turn, by a mailbox
+                // wake or, for workers without mailbox delivery, as a prompt.
                 RelayCommand::MailboxWake { .. } => {
-                    let continuation = &mut snapshot.continuation;
-                    // The accepted wake owns a new turn even after restore or
-                    // cancellation. It may recover from quota without granting
-                    // new authorization or renewing the ordinary nudge allowance.
-                    if continuation.user_command_id.is_none() {
-                        continuation.user_command_id = Some(command_id.clone());
-                        continuation.suppressed = true;
-                    }
-                    continuation.completed_command_id = None;
-                    continuation.harness_turn = None;
-                    continuation.quota_suppressed = false;
-                    continuation.quota_recovery = None;
+                    begin_delivered_message_turn(&mut snapshot.continuation, command_id);
+                }
+                RelayCommand::Prompt { .. }
+                    if crate::continuation::GeneratedPrompt::of(command_id)
+                        == Some(crate::continuation::GeneratedPrompt::SessionMessageTurn) =>
+                {
+                    begin_delivered_message_turn(&mut snapshot.continuation, command_id);
                 }
                 RelayCommand::InstallPromptContext { text } => {
                     match snapshot.pending_prompt_context.as_mut() {
@@ -471,11 +468,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                                 )
                             )
                     }) {
-                        a.revision = event.ordinal;
-                        a.status = crate::assessment::Status::Pending;
-                        a.evidence = None;
-                        a.verdict = None;
-                        a.action = None;
+                        a.classify_again(event.ordinal);
                         a.failures = 0;
                         a.retry_at_ms = None;
                         a.reason = "authorization_evidence_changed".into();
@@ -2013,4 +2006,21 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         }
         _ => {}
     }
+}
+
+/// The accepted delivery owns a new turn even after restore or cancellation.
+/// It may recover from quota without granting new authorization or renewing
+/// the ordinary nudge allowance.
+fn begin_delivered_message_turn(
+    continuation: &mut crate::continuation::ContinuationState,
+    command_id: &str,
+) {
+    if continuation.user_command_id.is_none() {
+        continuation.user_command_id = Some(command_id.to_owned());
+        continuation.suppressed = true;
+    }
+    continuation.completed_command_id = None;
+    continuation.harness_turn = None;
+    continuation.quota_suppressed = false;
+    continuation.quota_recovery = None;
 }

@@ -30,7 +30,12 @@ import urllib.parse
 import urllib.request
 
 
-TIMEOUT = 20.0
+# Waits are tuned for an idle host. On a loaded one a daemon or a session can
+# take several times longer to come up, so MJ_E2E_TIMEOUT_SCALE multiplies the
+# lab's and the tmux harness's waits of 20 seconds or less. The 150-second
+# review waits are long enough already. The default, 1, changes nothing.
+TIMEOUT_SCALE = float(os.environ.get("MJ_E2E_TIMEOUT_SCALE", "1"))
+TIMEOUT = 20.0 * TIMEOUT_SCALE
 INTERNED_VIEWER_FIELDS = (
     "available_commands",
     "capabilities",
@@ -159,7 +164,7 @@ class ScenarioFailure(RuntimeError):
 
 
 def daemon_request(
-    data: pathlib.Path, action: dict[str, object], request_id: int = 99, timeout: float = 5
+    data: pathlib.Path, action: dict[str, object], request_id: int = 99, timeout: float = 5 * TIMEOUT_SCALE
 ) -> object:
     """Send one authenticated request to a daemon in an isolated data directory.
 
@@ -309,11 +314,11 @@ class PtyClient:
         # Detach is the prefix chord: ctrl+b arms, then q quits.
         self.send(b"\x02q")
         try:
-            self.process.wait(timeout=2)
+            self.process.wait(timeout=2 * TIMEOUT_SCALE)
         except subprocess.TimeoutExpired as error:
             raise ScenarioFailure(f"{self.name} did not quit within two seconds") from error
         elapsed = time.monotonic() - started
-        self.reader.join(timeout=1)
+        self.reader.join(timeout=1 * TIMEOUT_SCALE)
         self.capture.close()
         with contextlib.suppress(OSError):
             os.close(self.master)
@@ -326,12 +331,12 @@ class PtyClient:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(self.process.pid, signal.SIGTERM)
             try:
-                self.process.wait(timeout=2)
+                self.process.wait(timeout=2 * TIMEOUT_SCALE)
             except subprocess.TimeoutExpired:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(self.process.pid, signal.SIGKILL)
-                self.process.wait(timeout=2)
-        self.reader.join(timeout=1)
+                self.process.wait(timeout=2 * TIMEOUT_SCALE)
+        self.reader.join(timeout=1 * TIMEOUT_SCALE)
         if not self.capture.closed:
             self.capture.close()
         with contextlib.suppress(OSError):
@@ -896,12 +901,12 @@ pull_policy = "never"
         raise ScenarioFailure(f"daemon/web viewer did not become ready: {last[-4000:]}")
 
     def daemon_request(
-        self, action: dict[str, object], request_id: int = 99, timeout: float = 5
+        self, action: dict[str, object], request_id: int = 99, timeout: float = 5 * TIMEOUT_SCALE
     ) -> object:
         return daemon_request(self.data, action, request_id, timeout)
 
     def request(
-        self, method: str, path: str, body: object | None = None, *, timeout: float = 5
+        self, method: str, path: str, body: object | None = None, *, timeout: float = 5 * TIMEOUT_SCALE
     ) -> tuple[int, object | None]:
         data = None if body is None else json.dumps(body).encode()
         request = urllib.request.Request(
@@ -1124,7 +1129,7 @@ pull_policy = "never"
         if self.daemon_pid is None:
             return
         self.command("daemon", "stop", check=False)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 5 * TIMEOUT_SCALE
         while time.monotonic() < deadline:
             if not process_is_running(self.daemon_pid):
                 self.record_process("stopped", "daemon", self.daemon_pid)
@@ -1147,7 +1152,7 @@ pull_policy = "never"
             for pid in pids:
                 with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.kill(pid, signal.SIGTERM)
-            grace = time.monotonic() + 2
+            grace = time.monotonic() + 2 * TIMEOUT_SCALE
             while pids and time.monotonic() < grace:
                 pids = [pid for pid in pids if process_is_running(pid)]
                 time.sleep(0.05)
@@ -1167,7 +1172,7 @@ pull_policy = "never"
 
         second = self.start_tui("tui-2")
         second.wait_for("Sessions")
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 5 * TIMEOUT_SCALE
         attached = 0
         while time.monotonic() < deadline:
             status_text = self.command("daemon", "status").stdout
@@ -1391,7 +1396,7 @@ pull_policy = "never"
         self.record_action("active-stop", session_id=session_id, elapsed_seconds=elapsed)
 
         marker = "active turn cancellation settled before checkpoint barrier"
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 5 * TIMEOUT_SCALE
         while time.monotonic() < deadline:
             logs = self.data / "logs"
             text = "\n".join(
