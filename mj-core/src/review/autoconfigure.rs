@@ -299,6 +299,7 @@ mod tests {
         assert_eq!(configured.adjusted[1].used.as_deref(), Some("high"));
     }
 
+    // Hard-won: ed508ae8c: stripping Kimi Code's provider selected an older Kimi model.
     #[test]
     fn autoconfigure_uses_first_matching_row_and_newest_family_versions() {
         type Case = (
@@ -343,6 +344,10 @@ mod tests {
             (
                 &["unrelated-model", "kimi-k3"],
                 &[("kimi-k3", "high"), ("kimi-k3", "high")],
+            ),
+            (
+                &["kimi-k2.7-code", "kimi-code/k3"],
+                &[("kimi-code/k3", "high"), ("kimi-code/k3", "high")],
             ),
         ];
         for (ids, expected) in cases {

@@ -16,6 +16,11 @@ pub enum ReviewModelFamily {
 impl ReviewModelFamily {
     pub fn for_model(model: &str) -> Option<Self> {
         let model = crate::usage::pricing::normalize_model(model);
+        // Kimi Code qualifies its version as `kimi-code/k3`, so the
+        // provider segment is part of the family identity.
+        if model.rsplit('/').nth(1) == Some("kimi-code") {
+            return Some(Self::Kimi);
+        }
         let model = model.rsplit('/').next().unwrap_or(&model);
         if model.trim().is_empty() {
             return None;
