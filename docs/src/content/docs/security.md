@@ -217,6 +217,37 @@ the authority granted to that GitHub account, so a remote target receiving it
 belongs inside the token's trust boundary. Raw local sessions do not receive
 this synchronized GitHub token.
 
+AWS credentials for an Amazon Bedrock profile (one that authenticates with the
+AWS credential chain) are delivered to container and SSH sessions the same way.
+What a session receives depends on the profile:
+
+- With no `[profiles.<id>.aws]` table, a session receives a copy of the
+  controller host's own AWS credentials. Anything running in the session can
+  use everything those credentials allow, for as long as they last. `mj doctor`
+  warns about this.
+- With `[profiles.<id>.aws] role_arn = ...`, the controller uses the host's
+  AWS login to assume that IAM role for each session (AWS `AssumeRole`), and
+  the session receives only the resulting temporary credentials. They are
+  limited to the role intersected with a session policy (by default, Bedrock
+  invocation only, or the policy you set), they last an hour unless you set
+  `duration_seconds`, and the controller renews them after half of that time.
+  The session id is the role session name, so AWS CloudTrail attributes every
+  call to its session; `source_identity = true` also records it as the
+  immutable `SourceIdentity`. The host's own credentials never leave the
+  controller. If AWS refuses the role, a launch fails with AWS's error and the
+  fix, and a running session keeps its current credentials until they expire
+  while the sync reports the failure; Mjolnir never falls back to the host's
+  credentials. See [Limiting the AWS credentials sessions receive](/profiles/#limiting-the-aws-credentials-sessions-receive).
+
+This applies only to sessions that receive synced credentials. A raw local
+session reads the host's AWS files directly, an EC2 session uses its instance
+role (Mjolnir requires IMDSv2 on every instance it launches; see
+[AWS EC2 machines](https://github.com/BrokkAi/mjolnir/blob/master/docs/AWS.md)),
+explicit AWS keys in a profile or target environment stay as configured, and a
+Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`) is not covered. Scoped
+credentials bound what stolen credentials can do and for how long; they do not
+stop code in the session from using them while they are valid.
+
 The slopcop login travels the same way. When the machine running Mjolnir is
 signed in to slopcop (`SLOPCOP_TOKEN`, or the login `slopcop login` stored),
 Mjolnir keeps a copy of that token, and of a non-default service URL, in every
