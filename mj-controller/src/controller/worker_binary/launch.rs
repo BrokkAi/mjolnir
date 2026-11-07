@@ -124,6 +124,8 @@ impl Controller {
         executor: &impl CommandExecutor,
         preparation: WorkerFilePreparation,
     ) -> Result<()> {
+        let _timing =
+            crate::launch_timing::LaunchPhaseTimer::new(session_id, "prepare worker files");
         let owner = crate::worker_lifecycle::require(session_id)?;
         let session = self
             .state
@@ -193,7 +195,8 @@ impl Controller {
         // so `target_profile_home` is always a home the session owns and the
         // stage is always installed there.
         let profile_stage = staging.path().join("profile");
-        let started = Instant::now();
+        let staging_timing =
+            crate::launch_timing::LaunchPhaseTimer::new(session_id, "stage harness profile");
         let result = stage_profile_with_catalog(
             &session.last_profile,
             profile,
@@ -201,11 +204,7 @@ impl Controller {
             &fetch_catalog_over_https,
             &SharedCatalogCache,
         );
-        tracing::debug!(
-            session_id,
-            elapsed_ms = started.elapsed().as_millis(),
-            "profile staging completed"
-        );
+        drop(staging_timing);
         result?;
         if let Some(source) = self.aws_credential_source(session_id)? {
             let credentials = crate::aws_credentials::export(&source, executor)?;

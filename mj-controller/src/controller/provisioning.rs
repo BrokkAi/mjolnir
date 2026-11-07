@@ -23,6 +23,7 @@ use super::git_cache;
 use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
 use super::worker_binary::{bridge_readiness_stage, start_worker_durably, worker_probe_diagnosis};
 use super::{Controller, execute_checked, now};
+use crate::launch_timing::LaunchPhaseTimer;
 
 const INHERITED_GIT_SETTINGS: &[&str] = &[
     "diff.algorithm",
@@ -126,6 +127,11 @@ pub(super) enum ProvisioningFailureDisposition {
     Preserve,
 }
 
+struct RepositorySetup {
+    plan: targets::CommandPlan,
+    managed_checkout: Option<super::worktree::PreparedManagedCheckout>,
+}
+
 impl Controller {
     pub async fn provision_session_controlled_with_commit(
         &mut self,
@@ -139,11 +145,14 @@ impl Controller {
             "provision session controlled with commit",
             executor,
             async {
+                let _total = LaunchPhaseTimer::new(session_id, "provision session");
                 crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
+                let credentials = LaunchPhaseTimer::new(session_id, "resolve GitHub credentials");
                 let github_token = self
                     .github_token_for_session(session_id)
                     .await
                     .context("resolve GitHub credentials for session")?;
+                drop(credentials);
                 let repositories = self
                     .provision_session_target_with_failure_disposition(
                         session_id,
@@ -154,7 +163,7 @@ impl Controller {
                     )
                     .await?;
                 let setup = execute_concurrent_lanes(
-                    || execute_repository_setup(&repositories, executor),
+                    || execute_repository_setup(session_id, &repositories, executor),
                     || self.install_worker_payload(session_id, executor),
                 );
                 let result = match setup {
@@ -526,7 +535,7 @@ impl Controller {
                 true,
             )
             .await?;
-        match execute_repository_setup(&repositories, executor) {
+        match execute_repository_setup(session_id, &repositories, executor) {
             Ok(()) => Ok(()),
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
                 Err(self.rollback_failed_new_session(session_id, error)?)
@@ -542,8 +551,9 @@ impl Controller {
         github_token: Option<&str>,
         failure_disposition: ProvisioningFailureDisposition,
         remember_launch_choices: bool,
-    ) -> Result<targets::CommandPlan> {
+    ) -> Result<RepositorySetup> {
         crate::worker_lifecycle::run(session_id, "provision session target with failure disposition", executor, async {
+        let _target_timing = LaunchPhaseTimer::new(session_id, "plan checkout and provision target");
         let session = self
             .state
             .sessions
@@ -554,7 +564,7 @@ impl Controller {
             bail!("session {session_id} is not provisioning");
         }
         if let Some(plan) = self.adopt_prepared_ec2_destination(session_id, github_token)? {
-            return Ok(plan);
+            return Ok(RepositorySetup { plan, managed_checkout: None });
         }
         let preparation = (|| {
             let selected = self
@@ -596,11 +606,18 @@ impl Controller {
                 .profiles
                 .get(&session.last_profile)
                 .context("harness profile disappeared during provisioning")?;
-            super::worker_binary::preflight_worker_binary(template, executor)?;
-            super::worker_binary::preflight_harness(template, profile, executor)?;
-            self.prepare_managed_raw_worktree(session_id, executor)
+            {
+                let _timing = LaunchPhaseTimer::new(session_id, "preflight worker binary");
+                super::worker_binary::preflight_worker_binary(template, executor)?;
+            }
+            {
+                let _timing = LaunchPhaseTimer::new(session_id, "preflight harness");
+                super::worker_binary::preflight_harness(template, profile, executor)?;
+            }
+            let _timing = LaunchPhaseTimer::new(session_id, "plan managed checkout");
+            self.plan_managed_raw_worktree(session_id, executor)
         })();
-        let created_worktree = match preparation {
+        let managed_checkout = match preparation {
             Ok(created) => created,
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
                 return Err(self.fail_new_session_with_cleanup(session_id, error, executor)?);
@@ -791,7 +808,7 @@ impl Controller {
         })();
         let result = match result {
             Err(error)
-                if created_worktree
+                if managed_checkout.is_some()
                     && failure_disposition == ProvisioningFailureDisposition::Discard =>
             {
                 return Err(self.fail_new_session_with_cleanup(session_id, error, executor)?);
@@ -900,7 +917,7 @@ impl Controller {
             }
         }
         self.persist_session_state(session_id)?;
-        result
+        result.map(|plan| RepositorySetup { plan, managed_checkout })
 
         }).await
     }
@@ -943,6 +960,7 @@ impl Controller {
         session_id: &str,
         executor: &impl CommandExecutor,
     ) -> Result<(targets::TargetLocator, String)> {
+        let _timing = LaunchPhaseTimer::new(session_id, "prepare worker payload");
         // Worker/profile installation is independent of repository cloning.
         let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
         let (backend, worker_root) = self.worker_placement(session_id)?;
@@ -962,6 +980,7 @@ impl Controller {
         crate::worker_lifecycle::run(session_id, "connect and start worker", executor, async {
             let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
             if initialize_workspace {
+                let _timing = LaunchPhaseTimer::new(session_id, "initialize workspace");
                 install_inherited_git_settings(executor, backend, session_id)?;
                 self.initialize_network_workspaces(session_id, backend, syncing)?;
             }
@@ -978,6 +997,8 @@ impl Controller {
             let readiness_stage = bridge_readiness_stage(profile);
             let reconnect = &targets::reconnect_plan(backend, session_id)?.commands[0];
             let readiness = async {
+                let _timing =
+                    LaunchPhaseTimer::new(session_id, "start worker and await native session");
                 let mut relay = {
                     let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
                     start_worker_durably(
@@ -1244,9 +1265,16 @@ pub(super) fn execute_concurrent_lanes<A: Send, B: Send>(
 }
 
 fn execute_repository_setup(
-    plan: &targets::CommandPlan,
+    session_id: &str,
+    setup: &RepositorySetup,
     executor: &(impl CommandExecutor + Sync),
 ) -> Result<()> {
+    let _timing = LaunchPhaseTimer::new(session_id, "materialize checkout");
+    if let Some(checkout) = &setup.managed_checkout {
+        let _cloning = ProvisionStageGuard::new(executor, ProvisionStage::Cloning);
+        checkout.execute(executor)?;
+    }
+    let plan = &setup.plan;
     if plan.commands.is_empty() {
         return Ok(());
     }

@@ -6,6 +6,7 @@ mod claude_usage;
 mod codex_usage;
 mod grok_usage;
 mod kimi_auth;
+mod launch_timing;
 mod muse_usage;
 mod oauth_lock;
 mod quota_runtime;

@@ -1963,3 +1963,136 @@ fn limits_a_rootless_podman_host_cannot_enforce_are_dropped_and_reported() {
     assert!(args.contains(&"--cpus=4".to_owned()), "{args:?}");
     assert!(args.contains(&"--memory=8589934592".to_owned()), "{args:?}");
 }
+
+/// A held real Git checkout must not prevent runtime preparation from starting,
+/// and a preparation failure must join that checkout before rollback removes it.
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cleanup() {
+    const NAME: &str =
+        "managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cleanup";
+    const CHILD: &str = "MJ_TEST_CHECKOUT_PAYLOAD_OVERLAP";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), NAME))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "checkout-payload-overlap")
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::test_hooks::fake_worker_dispatcher(),
+            )
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let source = crate::controller::test_support::committed_repository();
+    let root = source.path().canonicalize().unwrap();
+    let home = mj_core::config::data_dir().join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile::new(HarnessKind::Codex, home),
+    );
+    config.save().unwrap();
+    let mut record =
+        crate::controller::test_support::raw_session_on("localhost", root.to_str().unwrap());
+    record.state = SessionState::Provisioning;
+    record.target = None;
+    record.native_session_id = None;
+    record.create_managed_worktree = Some(true);
+    record.no_project_memory = true;
+    record.oracle = false;
+    crate::database::save_session(&record).unwrap();
+    let mut controller = Controller::load().unwrap();
+
+    struct OverlapExecutor {
+        checkout_started: std::sync::mpsc::Sender<()>,
+        await_checkout: Mutex<std::sync::mpsc::Receiver<()>>,
+        preparation_started: std::sync::mpsc::Sender<()>,
+        await_preparation: Mutex<std::sync::mpsc::Receiver<()>>,
+        checkout_finished: std::sync::atomic::AtomicBool,
+    }
+    impl CommandExecutor for OverlapExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let bound = std::time::Duration::from_secs(20);
+            match command.purpose.as_str() {
+                "select managed clone starting branch" => {
+                    self.checkout_started.send(())?;
+                    self.await_preparation
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(bound)
+                        .context("runtime preparation did not overlap checkout")?;
+                    let result = targets::ProcessExecutor.execute(command);
+                    self.checkout_finished
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    result
+                }
+                "prepare exact managed harness before worker startup" => {
+                    self.await_checkout
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(bound)
+                        .context("checkout did not overlap runtime preparation")?;
+                    self.preparation_started.send(())?;
+                    bail!("injected runtime preparation failure")
+                }
+                "start detached Mjolnir worker" => panic!("a failed setup must not start a worker"),
+                _ => targets::ProcessExecutor.execute(command),
+            }
+        }
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            targets::ProcessExecutor.execute_with_stdin(command, input)
+        }
+    }
+    let (checkout_started, await_checkout) = std::sync::mpsc::channel();
+    let (preparation_started, await_preparation) = std::sync::mpsc::channel();
+    let executor = OverlapExecutor {
+        checkout_started,
+        await_checkout: Mutex::new(await_checkout),
+        preparation_started,
+        await_preparation: Mutex::new(await_preparation),
+        checkout_finished: std::sync::atomic::AtomicBool::new(false),
+    };
+    let error = controller
+        .provision_session_controlled_with_commit(
+            &record.id,
+            &executor,
+            || panic!("failed setup cannot commit"),
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("injected runtime preparation failure"),
+        "{error:#}"
+    );
+    assert!(
+        executor
+            .checkout_finished
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert_eq!(
+        Controller::load().unwrap().state.sessions[&record.id].state,
+        SessionState::Error
+    );
+    let checkout = root.join(".mj/clones").join(&record.id);
+    assert!(
+        !checkout.exists(),
+        "rollback must remove the completed checkout"
+    );
+    assert!(!checkout.with_extension("provisioning").exists());
+    assert!(
+        root.join("nested/file.txt").is_file(),
+        "source remains intact"
+    );
+}

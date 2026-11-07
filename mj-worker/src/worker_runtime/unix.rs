@@ -1876,7 +1876,7 @@ pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<(
     environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     config.environment = environment;
     if config.requires_harness_preparation() {
-        super::prepare_harness_launch(
+        super::harness_launch::prepare_harness_runtime(
             config.harness,
             config.harness_runtime,
             config.execution_policy,
