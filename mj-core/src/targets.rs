@@ -432,9 +432,10 @@ pub(crate) mod fake_ssh {
     impl FakeSsh {
         /// `plan` has one word per attempt: `refuse-session`, `refuse-auth`,
         /// `refuse-session-late-stderr` (closes stdout first and prints the
-        /// refusal to stderr moments later), or `run-then-255` (runs the
-        /// command, then fails like a dropped connection). Attempts past the
-        /// plan just run.
+        /// refusal to stderr moments later), `warn-then-run` (prints an ssh
+        /// warning to stderr before the session starts, then runs), or
+        /// `run-then-255` (runs the command, then fails like a dropped
+        /// connection). Attempts past the plan just run.
         pub(crate) fn new(plan: &[&str]) -> Self {
             let directory = tempfile::tempdir().expect("fake ssh directory");
             let script = r#"#!/bin/sh
@@ -454,6 +455,10 @@ case "$(sed -n "$((count + 1))p" "$dir/plan")" in
   refuse-auth)
     echo 'kex_exchange_identification: Connection closed by 10.0.0.1 port 22' >&2
     exit 255 ;;
+  warn-then-run)
+    echo "Warning: Permanently added 'fake-host' to the list of known hosts." >&2
+    sleep 0.3
+    exec sh -c "$last" ;;
   run-then-255)
     sh -c "$last"
     echo 'Read from remote host fake-host: Connection reset by peer' >&2

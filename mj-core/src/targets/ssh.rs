@@ -918,7 +918,9 @@ pub const SSH_TRANSPORT_EXIT_STATUS: i32 = 255;
 /// host HOST: Connection reset by peer"), and those must not match: the remote
 /// command may already be running, even if its start marker never arrived.
 fn is_pre_authentication_hangup(line: &str) -> bool {
-    if line.contains("kex_exchange_identification")
+    // `kex_exchange_identification` since OpenSSH 8.4, `ssh_exchange_identification`
+    // before it.
+    if line.contains("exchange_identification:")
         || line.contains("Connection timed out during banner exchange")
     {
         return true;
@@ -4097,7 +4099,7 @@ mod tests {
     // Hard-won: 75da0c2b0: a reset after the remote command started was read as a pre-authentication refusal and the command ran again
     #[test]
     fn transport_rejection_matches_only_sshd_hangups() {
-        let cases: [(i32, &str, bool); 10] = [
+        let cases: [(i32, &str, bool); 12] = [
             (255, "Connection closed by 192.168.1.77 port 22", true),
             (
                 255,
@@ -4113,6 +4115,17 @@ mod tests {
                 false,
             ),
             (1, "Connection closed by 192.168.1.77 port 22", false),
+            // OpenSSH before 8.4 spells the banner exchange differently.
+            (
+                255,
+                "ssh_exchange_identification: Connection closed by remote host",
+                true,
+            ),
+            (
+                255,
+                "ssh_exchange_identification: read: Connection reset by peer",
+                true,
+            ),
             // The same events once the session runs: the command may have started.
             (255, "Connection to h closed by remote host.", false),
             (

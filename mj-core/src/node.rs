@@ -860,10 +860,18 @@ async fn run_child(
                     let bytes = match (&mut scan, &gate) {
                         (Some(scan), Some(gate)) => {
                             passed.clear();
-                            if scan.push(&buffer[..read], &mut passed) {
+                            let started = scan.push(&buffer[..read], &mut passed);
+                            if started {
                                 gate.mark_started();
                             }
                             if passed.is_empty() {
+                                if started {
+                                    // The marker alone: an empty frame tells the
+                                    // forwarder to release held stderr now.
+                                    if frames.send(frame(tag, &[])).await.is_err() {
+                                        return Ok(());
+                                    }
+                                }
                                 continue;
                             }
                             &passed[..]
@@ -931,7 +939,11 @@ async fn run_child(
                     for earlier in held.drain(..) {
                         send_all(send, earlier).await?;
                     }
-                    send_all(send, framed).await?
+                    // An empty frame only signals the start; the daemon gets
+                    // nothing for it.
+                    if framed.len() > 5 {
+                        send_all(send, framed).await?
+                    }
                 }
                 None => return anyhow::Ok(held),
             }
@@ -1791,5 +1803,38 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&stdout).trim(), length.to_string());
         assert_eq!(stderr, b"", "refused attempts print nothing to the daemon");
         assert_eq!(fake.attempts(), 6);
+    }
+
+    /// Stderr printed before the session starts is held, and the start marker
+    /// alone forwards no output. A command that then stays quiet must still
+    /// release that stderr when it starts, not when it exits.
+    // Hard-won: 6f9354f41: held stderr stayed hidden from the daemon until a quiet command's next output or exit
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // The sharing override is process-wide.
+    async fn stderr_held_before_the_start_reaches_the_daemon_when_a_quiet_command_starts() {
+        use crate::targets::fake_ssh::FakeSsh;
+        use crate::targets::{SshSharingForTest, set_ssh_connection_sharing_for_test};
+
+        let _guard = crate::targets::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let fake = FakeSsh::new(&["warn-then-run"]);
+        let client = connected().await;
+        let exec = client
+            .exec(&fake.command(&["sleep", "30"]).to_node_run(false))
+            .await
+            .unwrap();
+        let (_stdin, mut output) = exec.split();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), output.next())
+            .await
+            .expect("the warning arrives while the command still runs");
+        set_ssh_connection_sharing_for_test(None);
+        match frame.unwrap().expect("a frame") {
+            NodeFrame::Stderr(bytes) => {
+                assert!(String::from_utf8_lossy(&bytes).contains("Permanently added"))
+            }
+            other => panic!("expected the held stderr, got {other:?}"),
+        }
     }
 }
