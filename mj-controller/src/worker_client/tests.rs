@@ -1911,6 +1911,8 @@ import base64, gzip, hashlib, json, os, sys, time
 protocol, session, root = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 # A slow worker: its first AWS answer waits for this file, or fails the exchange.
 wait_for = sys.argv[4] if len(sys.argv) > 4 else ""
+# A slow login step: the first skills request announces itself and waits for this file.
+login_hold = sys.argv[5] if len(sys.argv) > 5 else ""
 def path(name): return os.path.join(root, name)
 def hold():
     # The first AWS request of a slow worker announces itself and then waits.
@@ -1941,6 +1943,7 @@ for line in sys.stdin:
         payload = {"type": "credential_state", "data": state("aws")}
     elif method == "install_aws_credentials":
         hold()
+        if os.path.exists(path("install-fails")): sys.exit(1)
         secret = base64.b64decode(params["data"])
         open(path("aws"), "wb").write(secret)
         # The scope record sits beside the secret, bound to it by fingerprint.
@@ -1969,6 +1972,13 @@ for line in sys.stdin:
         s = state("github")
         payload = {"type": "github_token_state", "data": {"present": True, "fingerprint": s["fingerprint"]}}
     elif method == "skills_state":
+        if login_hold:
+            open(path("login-holding"), "w").close()
+            tries = 0
+            while not os.path.exists(login_hold):
+                tries += 1
+                if tries > 200: sys.exit(1)
+                time.sleep(0.05)
         payload = {"type": "skills_state", "data": {"present": True, "fingerprint": open(path("skills")).read() if os.path.exists(path("skills")) else "stale"}}
     elif method == "install_skills":
         archive = base64.b64decode(params["data"])
@@ -2094,6 +2104,27 @@ fn granting_aws_cli(dir: &std::path::Path) -> std::path::PathBuf {
     std::fs::write(
         &aws,
         format!("#!/bin/sh\nexec /bin/cat {}\n", output.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
+    bin
+}
+
+/// [`granting_aws_cli`] that takes `millis` to answer and counts its calls in
+/// `mints`, next to the stub.
+#[cfg(unix)]
+fn slow_counting_aws_cli(dir: &std::path::Path, millis: u32) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = granting_aws_cli(dir);
+    let aws = bin.join("aws");
+    std::fs::write(
+        &aws,
+        format!(
+            "#!/bin/sh\necho x >> {mints}\n/bin/sleep {seconds}\nexec /bin/cat {output}\n",
+            mints = dir.join("mints").display(),
+            seconds = f64::from(millis) / 1000.0,
+            output = dir.join("granted.json").display(),
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -2620,6 +2651,149 @@ async fn the_credential_cache_is_swept_on_the_schedule_even_with_no_sessions() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     drop(coordinator);
     assert!(!cache.holds("swept-last-session"));
+}
+
+// Hard-won: db9e62ed7: the AWS install and the session's login step both needed the session's one admission slot, and the install was skipped, silently and again at every sync, whenever the login step held it when the mint completed.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skipped() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    // The mint takes long enough that the login step is certainly running,
+    // and holding the slot, when it completes.
+    let cli = slow_counting_aws_cli(scratch.path(), 400);
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    let release_login = scratch.path().join("release-the-login-step");
+    let mut target = aws_sync_session_named(home.path(), &root, &token, &cli, "busy-login", None);
+    // wait_for (none), then the file the login step waits for.
+    target.spec.args.push(String::new());
+    target
+        .spec
+        .args
+        .push(release_login.to_string_lossy().into_owned());
+    // The production path: background admission through a gate.
+    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let pass = tokio::spawn({
+        let (gate, target) = (gate.clone(), target.clone());
+        async move {
+            credential_sync::reconcile_profile_guarded(
+                &SessionRelays::Direct,
+                &[target],
+                None,
+                Some(&gate),
+                None,
+                credential_sync::unknown_slopcop_login,
+                &Default::default(),
+            )
+            .await
+        }
+    });
+    // The login step holds the session's slot; the mint finishes meanwhile.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !root.join("login-holding").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the login step reached the session");
+    assert!(gate.is_busy("busy-login"));
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        !root.join("aws").exists(),
+        "installed while the slot was held"
+    );
+
+    // The slot frees; the install happens, once.
+    std::fs::write(&release_login, "").unwrap();
+    let outcomes = pass.await.unwrap();
+    assert!(
+        root.join("aws").exists(),
+        "the install was skipped: {outcomes:?}"
+    );
+    assert!(
+        outcomes[0]
+            .outcome
+            .as_ref()
+            .is_ok_and(|actions| actions.contains(&CredentialSyncAction::Pushed)),
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("mints"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+// Hard-won: db9e62ed7: every AWS error was labelled "withdrawal", though install errors come through the same step.
+#[cfg(unix)]
+#[tokio::test]
+async fn aws_errors_are_labelled_by_the_branch_that_failed() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let token = root.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    // The worker drops the connection when asked to install.
+    std::fs::write(root.path().join("install-fails"), "").unwrap();
+    let granting = granting_aws_cli(root.path());
+    let installing = aws_sync_session(home.path(), root.path(), &token, &granting);
+    let outcomes = reconcile_profile(std::slice::from_ref(&installing), None).await;
+    let failure = outcomes[0].step_failure.as_deref().unwrap();
+    assert!(failure.contains("AWS credentials install"), "{failure}");
+    assert!(!failure.contains("withdrawal"), "{failure}");
+
+    // A refused role with a worker that cannot withdraw is the other label.
+    let refusing = refusing_aws_cli(root.path());
+    let mut withdrawing = aws_sync_session(home.path(), root.path(), &token, &refusing);
+    withdrawing.spec.args[3] = "54".into();
+    let outcomes = reconcile_profile(std::slice::from_ref(&withdrawing), None).await;
+    assert!(
+        outcomes[0]
+            .step_failure
+            .as_deref()
+            .unwrap()
+            .contains("AWS credentials withdrawal"),
+        "{outcomes:?}"
+    );
+}
+
+// Hard-won: db9e62ed7: the AssumeRole call was made before checking that the session was still current.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_session_that_is_no_longer_current_is_not_minted_for() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = slow_counting_aws_cli(scratch.path(), 0);
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "gone-session", None);
+    // No daemon says it is current, and nothing on disk lists it.
+    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(false));
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+
+    let outcomes = credential_sync::reconcile_profile_guarded(
+        &SessionRelays::Direct,
+        &[target],
+        None,
+        Some(&gate),
+        None,
+        credential_sync::unknown_slopcop_login,
+        &Default::default(),
+    )
+    .await;
+
+    assert!(
+        !scratch.path().join("mints").exists(),
+        "AssumeRole was called: {outcomes:?}"
+    );
+    assert!(!root.join("aws").exists());
 }
 
 // Hard-won: a064656da: a worker before protocol 55 cannot withdraw, and the person was told to restart the session by hand.

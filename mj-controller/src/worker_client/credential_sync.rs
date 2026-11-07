@@ -70,6 +70,39 @@ impl AwsInstalls {
     }
 }
 
+/// One step at a time per session within a pass. A session's login step and
+/// its AWS install both need the session's single background admission slot
+/// (`RecoveryGate::try_start`), which turns a second taker away; taking turns
+/// here first means the two never contend for it, so neither is skipped
+/// because the other held it. A step waits only for the same session's other
+/// step, never another session's. The lock is released on every exit path.
+#[derive(Clone, Default)]
+pub(super) struct SessionSteps(
+    Arc<std::sync::Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
+);
+
+impl SessionSteps {
+    pub(super) async fn enter(&self, session_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Finished sessions leave no entry behind.
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            match locks.get(session_id).and_then(std::sync::Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(tokio::sync::Mutex::new(()));
+                    locks.insert(session_id.to_owned(), Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        lock.lock_owned().await
+    }
+}
+
 pub struct CredentialSyncCoordinator {
     pub(super) handle: CredentialSyncHandle,
     pub(super) results: mpsc::UnboundedReceiver<CredentialSyncResult>,
@@ -358,6 +391,7 @@ pub(super) async fn reconcile_profile_guarded(
     // also drops expired credentials, so a stopped session's secrets do not
     // outlive them.
     crate::aws_assume_role::ScopedAwsCredentials::shared().sweep_expired();
+    let steps = SessionSteps::default();
     let scoped = futures::stream::FuturesUnordered::new();
     for target in targets {
         if target
@@ -367,7 +401,7 @@ pub(super) async fn reconcile_profile_guarded(
             && let Some(claim) = aws_installs.claim(&target.session_id)
         {
             scoped.push(Box::pin(install_scoped_aws(
-                relays, gate, runtime, target, claim,
+                relays, gate, runtime, target, claim, &steps,
             )));
         }
     }
@@ -409,6 +443,7 @@ pub(super) async fn reconcile_profile_guarded(
         skills: &skills,
         slopcop_login: &slopcop_login,
         triggered_by,
+        steps: &steps,
     };
     // The AWS step of the sequential pass: the profile's one export. A
     // role-scoped session's AWS credentials are installed by its own
@@ -622,6 +657,7 @@ struct PassContext<'a> {
     skills: &'a Arc<CanonicalSkills>,
     slopcop_login: &'a HostSlopcopLogin,
     triggered_by: Option<&'a str>,
+    steps: &'a SessionSteps,
 }
 
 /// What reconciling one session in one pass found.
@@ -646,12 +682,23 @@ fn joined_failures(failures: &[String]) -> Option<String> {
     (!unique.is_empty()).then(|| unique.join("; "))
 }
 
+// Lets a test run the gated path without a daemon to say which sessions are
+// current: every session is, on the thread that sets this.
+#[cfg(test)]
+thread_local! {
+    pub(super) static SESSIONS_ARE_CURRENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Whether the session is still the one this target describes. A lifecycle
 /// may have completed since the dashboard published its target list.
 async fn target_is_current(
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
     target: &CredentialSyncTarget,
 ) -> Result<bool> {
+    #[cfg(test)]
+    if SESSIONS_ARE_CURRENT.with(std::cell::Cell::get) {
+        return Ok(true);
+    }
     if let Some(runtime) = runtime {
         return runtime.credential_target_is_current(target);
     }
@@ -709,7 +756,11 @@ async fn reconcile_target(
         skills,
         slopcop_login,
         triggered_by,
+        steps,
     } = context;
+    // After the same session's AWS install, if it is running, never racing it
+    // for the session's admission slot.
+    let _turn = steps.enter(&target.session_id).await;
     let result = admitted(*gate, *runtime, target, async {
         // A failed GitHub token lookup is that step's failure, not the
         // session's: the AWS credentials, skills and logins do not depend on it.
@@ -808,7 +859,21 @@ async fn install_scoped_aws(
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
     target: &CredentialSyncTarget,
     _claim: AwsInstallClaim,
+    steps: &SessionSteps,
 ) -> (String, Result<Option<SessionSync>>) {
+    let session_id = target.session_id.clone();
+    // A session that is gone, or replaced, is not given credentials. This is
+    // checked before the mint, which stays outside admission: an AssumeRole
+    // call can take seconds and must not hold the session's slot.
+    // (Without a gate, as in tests of the direct path, nothing says which
+    // sessions are current, here or under admission.)
+    if gate.is_some() {
+        match target_is_current(runtime, target).await {
+            Ok(true) => {}
+            Ok(false) => return (session_id, Ok(None)),
+            Err(error) => return (session_id, Err(error)),
+        }
+    }
     let aws = match start_scoped_mint(target) {
         Some(mint) => match mint
             .await
@@ -824,11 +889,14 @@ async fn install_scoped_aws(
         },
         None => AwsSync::Unmanaged,
     };
+    // Takes its turn with the same session's login step instead of competing
+    // with it for the admission slot, where a refusal would skip the install.
+    let _turn = steps.enter(&target.session_id).await;
     let result = admitted(gate, runtime, target, async {
         run_on_session(relays, target, SyncWork::Aws(aws)).await
     })
     .await;
-    (target.session_id.clone(), result)
+    (session_id, result)
 }
 
 /// Start the AWS role assumption for a session whose profile names a role,
@@ -1162,11 +1230,15 @@ pub(super) async fn reconcile_on(
 /// The AWS step of a session's sync, recorded on `sync`. It fails on its own:
 /// the other steps do not depend on STS.
 async fn reconcile_aws_step(client: &mut RelayClient, aws: &AwsSync, sync: &mut SessionSync) {
+    // Named for the branch that failed: installing credentials, or
+    // withdrawing the ones that must not stay.
+    let step = match aws {
+        AwsSync::Install(_) => "AWS credentials install",
+        _ => "AWS credentials withdrawal",
+    };
     match reconcile_aws(client, aws).await {
         Ok(action) => sync.actions.extend(action),
-        Err(error) => sync
-            .failures
-            .push(format!("AWS credentials withdrawal: {error:#}")),
+        Err(error) => sync.failures.push(format!("{step}: {error:#}")),
     }
     if let AwsSync::Unavailable { error, .. } = aws {
         sync.failures.push(format!("AWS credentials: {error}"));
