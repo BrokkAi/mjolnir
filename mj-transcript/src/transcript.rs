@@ -1597,10 +1597,12 @@ pub fn apply_session_update_to_entries(
                     status: plan_status(&entry.status),
                 })
                 .collect();
+            // Turn order, not authorship: a plan made after any prompt,
+            // including one Mjolnir submitted, belongs below that prompt.
             let latest_user_seq = entries
                 .iter()
                 .rev()
-                .find(|entry| entry.is_user_authored())
+                .find(|entry| entry.role == ChatRole::User)
                 .map_or(0, |entry| entry.seq);
             if let Some(entry) = entries
                 .iter_mut()
