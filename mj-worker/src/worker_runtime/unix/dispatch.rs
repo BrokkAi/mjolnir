@@ -384,8 +384,8 @@ pub(crate) struct Capture<'a> {
 ///
 /// There is no timeout of ours. The observation ends by itself, or is cancelled
 /// by what really ends a turn early: the harness stopping or restarting, its
-/// event channel closing, or the relay accepting a cancellation or a Close
-/// (this task is what dispatches those, so they would otherwise wait behind a
+/// event channel closing, or the relay holding a cancellation or a Close it
+/// has not yet delivered (this task is what dispatches those, so they would otherwise wait behind a
 /// Git read that does not return; dropping the observation kills its Git
 /// children). A park waits for the report, which waits for the outcome. The
 /// outcome is then published with the facts unavailable and the reason. Events
@@ -398,6 +398,20 @@ async fn capture_while_open(
     events: &mut mpsc::Receiver<RuntimeEvent>,
     deferred: &mut std::collections::VecDeque<RuntimeEvent>,
 ) -> mj_core::work_facts::WorkFacts {
+    // The relay is asked on entry and on every wake, never only on a wake: the
+    // wake of a command accepted just before this prompt's event was drained is
+    // already consumed, and the command is still waiting for this task.
+    let ends_for_command = || {
+        relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .undelivered_cancellation_or_close_pending()
+    };
+    const COMMAND_ACCEPTED: &str =
+        "a cancellation or close was accepted while the turn's observation was being taken";
+    if ends_for_command() {
+        return mj_core::work_facts::WorkFacts::unavailable(COMMAND_ACCEPTED);
+    }
     let observation = crate::work_facts::capture(capture.observer);
     tokio::pin!(observation);
     let mut wakes_open = true;
@@ -409,14 +423,8 @@ async fn capture_while_open(
                 // The coordinator finds the closed channel itself afterwards.
                 None => wakes_open = false,
                 Some(()) => {
-                    if relay
-                        .lock()
-                        .expect("relay state lock poisoned")
-                        .cancellation_or_close_pending()
-                    {
-                        return mj_core::work_facts::WorkFacts::unavailable(
-                            "a cancellation or close was accepted while the turn's observation was being taken",
-                        );
+                    if ends_for_command() {
+                        return mj_core::work_facts::WorkFacts::unavailable(COMMAND_ACCEPTED);
                     }
                 }
             },
