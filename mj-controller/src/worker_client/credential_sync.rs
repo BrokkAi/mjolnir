@@ -34,18 +34,40 @@ pub(super) fn unknown_slopcop_login() -> Result<Option<mj_core::slopcop::Slopcop
 }
 
 /// What a session's job owns from the moment it is queued on the session's
-/// actor until it has run or been dropped: the session's background admission,
-/// its turn among the session's steps, and, for a role-scoped renewal, its
-/// install lock. The job holds them, not the task that queued it, so stopping
-/// that task (its target changed, the session went away) cannot hand the
-/// session to a newer job while the older one is still queued or running.
-/// Released together when the last holder drops it, admission first.
+/// actor until it has run or been abandoned: the session's background
+/// admission, its turn among the session's steps and, for a role-scoped
+/// renewal, its install lock. The job holds them, not the task that queued it,
+/// so stopping that task (its target changed, the session went away) cannot
+/// hand the session to a newer job while the older one is running.
+///
+/// One state machine decides who may release them. While the job is only
+/// queued, the task awaiting it can abandon it (its future was dropped, or the
+/// gate cancelled its admission), and abandoning releases the slots at once:
+/// a close, restart or move waiting for the admission, and a daemon handoff
+/// behind it, must not wait for an actor busy with something else to reach a
+/// job nobody wants. Once the actor starts the job it runs to the end under
+/// the slots, because it is then using the session's connection. The actor
+/// finds an abandoned job over and drops it unrun.
 #[derive(Clone)]
-pub(super) struct JobHold(Arc<HeldSlots>);
+pub(super) struct JobHold(Arc<HoldState>);
 
-struct HeldSlots {
-    admission: Option<crate::recovery_gate::RecoveryAttempt>,
+struct HoldState {
+    phase: std::sync::Mutex<HoldPhase>,
+    /// The admission's cancellation flag; `None` without a gate.
+    cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
     runtime: Option<Arc<crate::daemon::RuntimeState>>,
+}
+
+enum HoldPhase {
+    Queued(HeldSlots),
+    Running { _slots: HeldSlots },
+    Over,
+}
+
+/// Released in declaration order: the admission first, so whoever waits on the
+/// session's turn then finds the admission already free.
+struct HeldSlots {
+    _admission: Option<crate::recovery_gate::RecoveryAttempt>,
     _turn: Option<SessionTurn>,
     _installing: Option<SessionTurn>,
 }
@@ -57,26 +79,88 @@ impl JobHold {
         installing: Option<SessionTurn>,
         runtime: Option<Arc<crate::daemon::RuntimeState>>,
     ) -> Self {
-        Self(Arc::new(HeldSlots {
-            admission,
+        Self(Arc::new(HoldState {
+            cancellation: admission.as_ref().map(|admission| admission.cancellation()),
+            phase: std::sync::Mutex::new(HoldPhase::Queued(HeldSlots {
+                _admission: admission,
+                _turn: turn,
+                _installing: installing,
+            })),
             runtime,
-            _turn: turn,
-            _installing: installing,
         }))
     }
 
     /// The job runs under the gate's admission, so the gate's lifecycle
     /// operations can cancel it and its target is checked as current.
     fn gated(&self) -> bool {
-        self.0.admission.is_some()
+        self.0.cancellation.is_some()
     }
 
-    /// A lifecycle operation asked the admitted work to stop.
-    fn cancelled(&self) -> bool {
+    fn phase(&self) -> std::sync::MutexGuard<'_, HoldPhase> {
         self.0
-            .admission
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The actor's turn to run the job. `false` when the job was abandoned
+    /// (its slots are already released), or a lifecycle operation cancelled
+    /// the admission while it waited (they are released now).
+    fn start(&self) -> bool {
+        let cancelled = self
+            .0
+            .cancellation
             .as_ref()
-            .is_some_and(|admission| admission.load(std::sync::atomic::Ordering::Acquire))
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
+        // Slots are dropped after the lock is released, so a release never
+        // runs another lock's code under this one.
+        let mut released = HoldPhase::Over;
+        let started = {
+            let mut phase = self.phase();
+            match std::mem::replace(&mut *phase, HoldPhase::Over) {
+                HoldPhase::Queued(slots) if !cancelled => {
+                    *phase = HoldPhase::Running { _slots: slots };
+                    true
+                }
+                other => {
+                    released = other;
+                    false
+                }
+            }
+        };
+        drop(released);
+        started
+    }
+
+    /// The job is done: release the slots.
+    fn finish(&self) {
+        let released = std::mem::replace(&mut *self.phase(), HoldPhase::Over);
+        drop(released);
+    }
+
+    /// The task awaiting the job no longer wants it. Releases the slots if
+    /// the actor has not started it; a job already running is not touched.
+    fn abandon_if_queued(&self) {
+        let released = {
+            let mut phase = self.phase();
+            if matches!(*phase, HoldPhase::Queued(_)) {
+                std::mem::replace(&mut *phase, HoldPhase::Over)
+            } else {
+                HoldPhase::Over
+            }
+        };
+        drop(released);
+    }
+}
+
+/// Held by the task awaiting a queued job: if that task stops, or the gate
+/// cancels its admission, before the actor has started the job, the job's
+/// slots are released right then.
+pub(super) struct QueuedJob(JobHold);
+
+impl Drop for QueuedJob {
+    fn drop(&mut self) {
+        self.0.abandon_if_queued();
     }
 }
 
@@ -895,7 +979,7 @@ async fn target_is_current(
 /// still current. `None` means the work was deferred. `work` receives the hold
 /// (the admission, the session's turn and its install lock) to pass on to
 /// whatever outlives this future.
-async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
+pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
     target: &CredentialSyncTarget,
@@ -1185,7 +1269,6 @@ async fn renew_session_aws(
     target: CredentialSyncTarget,
     mut wakes: mpsc::UnboundedReceiver<RenewalWake>,
 ) {
-    let mut failed_before = false;
     let mut wake = None::<RenewalWake>;
     loop {
         let mut delay = env.retry;
@@ -1201,30 +1284,32 @@ async fn renew_session_aws(
         )
         .await;
         let completed = matches!(&result, Ok(Some(sync)) if sync.failures.is_empty());
+        // A cycle that reached the session has checked its AWS credentials,
+        // whatever it found: clean or failed, its outcome is reported, and
+        // the notices decide what that ends. A deferred cycle checked
+        // nothing and says nothing.
+        let checked = !matches!(&result, Ok(None));
         let mut outcomes = BTreeMap::new();
         merge_aws_cycle(&mut outcomes, &target.session_id, result);
-        let failed = outcomes
-            .values()
-            .any(|outcome| !outcome.step_failures.is_empty() || outcome.outcome.is_err());
-        let ended = failed_before && completed;
-        let mut report = outcomes.remove(&target.session_id);
-        // A trigger that woke this cycle carries its outcome, and the task
-        // then says only that an earlier failure ended. Said when there is
-        // something to say: work done, a failure, or the end of a failure, so
-        // a persistent one is not repeated.
-        if let Some(wake) = wake.take() {
-            report = match wake.reply.send(report) {
-                Ok(()) => None,
-                Err(undelivered) => undelivered,
-            };
-        }
-        if let Some(outcome) = report.or_else(|| {
-            ended.then(|| CredentialSyncOutcome {
+        let mut report = outcomes.remove(&target.session_id).or_else(|| {
+            checked.then(|| CredentialSyncOutcome {
                 session_id: target.session_id.clone(),
                 outcome: Ok(Vec::new()),
                 step_failures: Vec::new(),
             })
-        }) {
+        });
+        // A trigger that woke this cycle receives its full outcome. The task
+        // still reports what the cycle checked, without the actions the
+        // trigger's result now carries.
+        if let (Some(wake), Some(full)) = (wake.take(), report.clone())
+            && wake.reply.send(Some(full)).is_ok()
+        {
+            report = report.map(|outcome| CredentialSyncOutcome {
+                outcome: Ok(Vec::new()),
+                ..outcome
+            });
+        }
+        if let Some(outcome) = report {
             let sent = env.results.send(CredentialSyncResult {
                 profile_id: target.profile_id.clone(),
                 trigger: None,
@@ -1236,7 +1321,6 @@ async fn renew_session_aws(
                 return;
             }
         }
-        failed_before = failed;
         if completed
             && let Some(source) = &target.aws_credentials
             && let Some(until) = crate::aws_assume_role::ScopedAwsCredentials::shared()
@@ -1465,15 +1549,8 @@ pub(super) async fn run_on_session(
                 );
                 return Ok(None);
             };
-            let (reply, response) = tokio::sync::oneshot::channel();
-            handle
-                .run_on_connection(Box::new(CredentialSyncJob {
-                    target: target.clone(),
-                    work,
-                    reply,
-                    hold,
-                }))
-                .await;
+            let (job, response, _queued) = CredentialSyncJob::queue(target.clone(), work, hold);
+            handle.run_on_connection(Box::new(job)).await;
             match response
                 .await
                 .context("the session actor dropped the credential sync")?
@@ -1492,6 +1569,7 @@ pub(super) async fn run_on_session(
         }
         #[cfg(test)]
         SessionRelays::Direct => {
+            let _queued = QueuedJob(hold);
             let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
             let result = run_work(&mut client, target, work).await;
             if let Err(error) = client.detach().await {
@@ -1697,6 +1775,7 @@ async fn reconcile_aws(
                 // session keeps what it has and the step reports why: an error
                 // is not evidence that the record was forged.
                 if crate::aws_assume_role::scope_is_authentic(&recorded, &held.fingerprint)
+                    .await
                     .context("could not verify the session's AWS scope record; its credentials were left as they are")?
                 {
                     return Ok(None);
@@ -1728,6 +1807,33 @@ pub(super) struct CredentialSyncJob {
     pub(super) hold: JobHold,
 }
 
+impl CredentialSyncJob {
+    /// The job, the receiver of its answer, and the guard that abandons the
+    /// job if the awaiting task stops first.
+    pub(super) fn queue(
+        target: CredentialSyncTarget,
+        work: SyncWork,
+        hold: JobHold,
+    ) -> (
+        Self,
+        tokio::sync::oneshot::Receiver<Result<SessionSync>>,
+        QueuedJob,
+    ) {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let queued = QueuedJob(hold.clone());
+        (
+            Self {
+                target,
+                work,
+                reply,
+                hold,
+            },
+            response,
+            queued,
+        )
+    }
+}
+
 impl RelayConnectionJob for CredentialSyncJob {
     fn run<'a>(self: Box<Self>, client: &'a mut RelayClient) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async move {
@@ -1740,9 +1846,9 @@ impl RelayConnectionJob for CredentialSyncJob {
             // The actor decides, when it is this job's turn, whether the job is
             // still wanted: the task that queued it may have stopped while it
             // waited (its target changed, the session went away), or a
-            // lifecycle operation may have cancelled its admission. The work
-            // is then dropped, and the hold with it.
-            if reply.is_closed() || hold.cancelled() {
+            // lifecycle operation may have cancelled its admission. Either
+            // already released the hold, and the work is dropped unrun.
+            if !hold.start() {
                 tracing::debug!(
                     session_id = %target.session_id,
                     "credential sync dropped: no longer wanted"
@@ -1753,18 +1859,23 @@ impl RelayConnectionJob for CredentialSyncJob {
                 match target_is_current(hold.0.runtime.as_ref(), &target).await {
                     Ok(true) => {}
                     Ok(false) => {
+                        hold.finish();
                         let _ = reply.send(Err(anyhow::Error::new(RelayJobDeferred(
                             "the session changed before the credential sync ran",
                         ))));
                         return;
                     }
                     Err(error) => {
+                        hold.finish();
                         let _ = reply.send(Err(error));
                         return;
                     }
                 }
             }
             let result = run_work(client, &target, work).await;
+            // Released before the answer, so whoever awaits it can take the
+            // session's slot at once.
+            hold.finish();
             if reply.send(result).is_err() {
                 tracing::debug!(
                     session_id = %target.session_id,

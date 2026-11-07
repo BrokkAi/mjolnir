@@ -207,27 +207,31 @@ impl ScopedAwsCredentials {
             &session_name(session_id),
             &source.environment,
         );
-        let minted = mint(&command, host_profile, executor)
+        let name = session_name(session_id);
+        // Only the call to AWS (and reading its answer) is the role's to
+        // explain: its advice, including the unscoped fallback, does not
+        // apply to a failure of the controller's own signing key.
+        let issued = mint(&command, host_profile, executor)
             .and_then(|credentials| {
                 // Recorded beside the secret on the worker, so what Mjolnir
-                // issued for this session's role is recognisable later, and
-                // authenticated with a key the session cannot compute.
-                let name = session_name(session_id);
-                credentials
-                    .issued_for(
-                        &role.role_arn,
-                        &name,
-                        &role.session_policy_fingerprint(),
-                        role.source_identity.then_some(name.as_str()),
-                    )?
-                    .sign_scope(sign_scope)
+                // issued for this session's role is recognisable later.
+                credentials.issued_for(
+                    &role.role_arn,
+                    &name,
+                    &role.session_policy_fingerprint(),
+                    role.source_identity.then_some(name.as_str()),
+                )
             })
             .with_context(|| {
-            format!(
-                "Could not assume AWS role {} for this session. Check that the controller's AWS login can assume the role and that the role's trust policy allows it; or remove [profiles.{profile_id}.aws] to give sessions your AWS credentials unscoped",
-                role.role_arn
-            )
-        })?;
+                format!(
+                    "Could not assume AWS role {} for this session. Check that the controller's AWS login can assume the role and that the role's trust policy allows it; or remove [profiles.{profile_id}.aws] to give sessions your AWS credentials unscoped",
+                    role.role_arn
+                )
+            })?;
+        // ...and authenticated with a key the session cannot compute.
+        let minted = issued.sign_scope(sign_scope).context(
+            "could not sign the session's AWS scope record with the controller's signing key",
+        )?;
         let minted_at = (self.now)();
         let expires_at = minted
             .expires_at_epoch_millis()
@@ -274,15 +278,25 @@ fn selected_profile(source: &AwsCredentialSource) -> &str {
 /// key, the documented sign-everyone-out gesture, also makes every record fail
 /// verification, which withdraws what a failed mint would otherwise keep: the
 /// safe direction.
-fn scope_key() -> Result<Vec<u8>> {
+///
+/// The key is derived once per process and kept: reading it can create the
+/// key file and block on its lock, so verification must not repeat that, and
+/// the async path loads it on the blocking pool. A rotation therefore takes
+/// effect when the daemon restarts, as it does for phone cookies.
+static SCOPE_KEY: OnceLock<Vec<u8>> = OnceLock::new();
+
+/// Blocking: reads (or creates) the signing key on first use.
+fn scope_key() -> Result<&'static [u8]> {
     #[cfg(test)]
-    let root = {
-        anyhow::ensure!(
-            !SIGNING_KEY_UNAVAILABLE.with(std::cell::Cell::get),
-            "the signing key is unreadable (test)"
-        );
-        b"test signing key, not a secret".to_vec()
-    };
+    anyhow::ensure!(
+        !SIGNING_KEY_UNAVAILABLE.with(std::cell::Cell::get),
+        "the signing key is unreadable (test)"
+    );
+    if let Some(key) = SCOPE_KEY.get() {
+        return Ok(key);
+    }
+    #[cfg(test)]
+    let root = b"test signing key, not a secret".to_vec();
     #[cfg(not(test))]
     let root = crate::server::load_or_create_cookie_key(&crate::server::cookie_key_path())
         .context("read the controller's signing key")?;
@@ -290,7 +304,24 @@ fn scope_key() -> Result<Vec<u8>> {
     let mut derive =
         Hmac::<sha2::Sha256>::new_from_slice(&root).expect("HMAC accepts any key length");
     derive.update(b"mjolnir aws credential scope key v1");
-    Ok(derive.finalize().into_bytes().to_vec())
+    Ok(SCOPE_KEY.get_or_init(|| derive.finalize().into_bytes().to_vec()))
+}
+
+/// The key for code on the async runtime: the first use is loaded on the
+/// blocking pool, every later one is a read of the kept key.
+async fn scope_key_without_blocking() -> Result<&'static [u8]> {
+    // The blocking pool's threads do not see a test's flag.
+    #[cfg(test)]
+    anyhow::ensure!(
+        !SIGNING_KEY_UNAVAILABLE.with(std::cell::Cell::get),
+        "the signing key is unreadable (test)"
+    );
+    if let Some(key) = SCOPE_KEY.get() {
+        return Ok(key);
+    }
+    tokio::task::spawn_blocking(scope_key)
+        .await
+        .context("signing key load task stopped")?
 }
 
 // Lets a test make the signing key unreadable on the thread that sets this.
@@ -313,7 +344,7 @@ fn scope_mac(
 /// The tag for a scope record describing the secret with this fingerprint.
 pub(crate) fn sign_scope(scope: &AwsCredentialScope, secret_fingerprint: &str) -> Result<String> {
     use hmac::Mac;
-    let mac = scope_mac(&scope_key()?, scope, secret_fingerprint);
+    let mac = scope_mac(scope_key()?, scope, secret_fingerprint);
     Ok(mj_core::hex::lower_hex(mac.finalize().into_bytes()))
 }
 
@@ -322,19 +353,19 @@ pub(crate) fn sign_scope(scope: &AwsCredentialScope, secret_fingerprint: &str) -
 /// itself does not verify. An error means the answer is unknown (the signing
 /// key could not be read), which is not the same as "not authentic": callers
 /// must not act on it as if the record were forged.
-pub(crate) fn scope_is_authentic(
+pub(crate) async fn scope_is_authentic(
     scope: &AwsCredentialScope,
     secret_fingerprint: &str,
 ) -> Result<bool> {
     use hmac::Mac;
-    let key = scope_key()?;
+    let key = scope_key_without_blocking().await?;
     let Some(tag) = (0..scope.tag.len() / 2)
         .map(|index| u8::from_str_radix(scope.tag.get(index * 2..index * 2 + 2)?, 16).ok())
         .collect::<Option<Vec<u8>>>()
     else {
         return Ok(false);
     };
-    Ok(scope_mac(&key, scope, secret_fingerprint)
+    Ok(scope_mac(key, scope, secret_fingerprint)
         .verify_slice(&tag)
         .is_ok())
 }
@@ -624,6 +655,44 @@ mod tests {
             mint();
             assert_eq!(aws.calls.load(Ordering::SeqCst), 2);
         }
+    }
+
+    // The signing key is the controller's own: when it cannot be read, the
+    // failure says so, and does not tell the person to give sessions their
+    // unscoped AWS credentials instead.
+    #[test]
+    fn a_signing_key_failure_is_not_reported_as_a_failed_role_assumption() {
+        let clock = TestClock::new();
+        let aws = FakeAws::new(&clock, Duration::from_secs(3600));
+        let cache = cache(&clock);
+        SIGNING_KEY_UNAVAILABLE.with(|unavailable| unavailable.set(true));
+        let error = cache
+            .credentials_for(PROFILE, SESSION, &source(role()), &aws)
+            .map(|_| ())
+            .unwrap_err();
+        SIGNING_KEY_UNAVAILABLE.with(|unavailable| unavailable.set(false));
+        let reported = format!("{error:#}");
+        assert!(reported.contains("signing key"), "{reported}");
+        assert!(!reported.contains("Could not assume"), "{reported}");
+        assert!(!reported.contains("unscoped"), "{reported}");
+    }
+
+    // Verification uses the key derived once per process: after the first
+    // use, the async path reads it from memory instead of loading it again.
+    #[tokio::test]
+    async fn verification_keeps_the_derived_key_for_later_use() {
+        let clock = TestClock::new();
+        let aws = FakeAws::new(&clock, Duration::from_secs(3600));
+        let issued = cache(&clock)
+            .credentials_for(PROFILE, SESSION, &source(role()), &aws)
+            .unwrap();
+        let scope = issued.scope().unwrap().clone();
+        let fingerprint = mj_core::aws_credentials::snapshot(&issued.encode().unwrap()).fingerprint;
+        assert!(scope_is_authentic(&scope, &fingerprint).await.unwrap());
+        assert!(SCOPE_KEY.get().is_some());
+        let mut forged = scope.clone();
+        forged.role_arn.push('x');
+        assert!(!scope_is_authentic(&forged, &fingerprint).await.unwrap());
     }
 
     #[test]

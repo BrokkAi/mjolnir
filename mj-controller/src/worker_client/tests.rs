@@ -2997,12 +2997,155 @@ async fn a_stalled_session_does_not_keep_another_session_from_being_renewed_on_a
     std::fs::write(&release, "").unwrap();
 }
 
-// A renewal task stopped while its job waited on the session's actor leaves
-// the job holding the session's admission and turn; the actor then drops the
-// job unrun, and only then are they free.
+// An open AWS failure outlives the task that reported it: the replacement
+// task's first clean cycle is reported too, so the notices end the failure and
+// report a later recurrence.
 #[cfg(unix)]
 #[tokio::test]
-async fn an_aborted_renewals_queued_job_is_dropped_by_the_actor() {
+async fn a_replaced_renewal_task_still_ends_the_failure_its_predecessor_reported() {
+    use crate::pollers::CredentialSyncNotices;
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("install-fails"), "").unwrap();
+    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "replaced", None);
+    let mut coordinator = CredentialSyncCoordinator::spawn();
+    let handle = coordinator.handle();
+    handle.set_targets(vec![target.clone()]);
+    let next_partial = async |coordinator: &mut CredentialSyncCoordinator| {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let result = coordinator.result().await.expect("coordinator stopped");
+                if result.partial {
+                    return result;
+                }
+            }
+        })
+        .await
+        .expect("a renewal result arrived")
+    };
+    let mut notices = CredentialSyncNotices::default();
+    let state = mj_core::state::State::default();
+
+    let failed = next_partial(&mut coordinator).await;
+    assert!(failed.failures().next().is_some(), "{failed:?}");
+    assert!(notices.notice(&failed, None, &state).is_some());
+
+    // The target changes (a role edit): its task is replaced, and the worker
+    // now accepts the install.
+    std::fs::remove_file(root.join("install-fails")).unwrap();
+    let mut changed = target.clone();
+    changed
+        .aws_credentials
+        .as_mut()
+        .unwrap()
+        .environment
+        .insert("AWS_REGION".into(), "us-east-2".into());
+    handle.set_targets(vec![changed]);
+    let clean = next_partial(&mut coordinator).await;
+    assert!(clean.failures().next().is_none(), "{clean:?}");
+    assert_eq!(notices.notice(&clean, None, &state), None);
+
+    // The failure ended, so it is reported again when it recurs.
+    assert!(notices.notice(&failed, None, &state).is_some());
+}
+
+// A renewal task stopped while its job waits on the session's actor takes the
+// job's hold with it (the actor drops the job unrun); stopped while the actor
+// is already running the job, the hold stays with the job until it ends, so a
+// replacement task's job never overlaps it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stopped_renewals_job_is_dropped_if_queued_and_finishes_if_running() {
+    use crate::session_manager::RelayConnectionJob;
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    let release = scratch.path().join("release-the-worker");
+    // The worker holds its first AWS answer until `release` exists.
+    let target =
+        aws_sync_session_named(home.path(), &root, &token, &cli, SESSION_ID, Some(&release));
+    let session = target.session_id.clone();
+    // The job, if it ran, would withdraw these.
+    std::fs::write(root.join("aws"), "host credentials").unwrap();
+    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let steps = credential_sync::SessionSteps::default();
+    let queue = || async {
+        let work =
+            credential_sync::SyncWork::Aws(Box::new(credential_sync::AwsSync::Unavailable {
+                error: "no credentials".into(),
+                scoped_required: true,
+                expected_scope: None,
+            }));
+        let hold = credential_sync::JobHold::new(
+            gate.try_start(&session),
+            Some(steps.enter(&session).await),
+            None,
+            None,
+        );
+        credential_sync::CredentialSyncJob::queue(target.clone(), work, hold)
+    };
+
+    // Queued: the awaiting task stops, the hold is released at once, and the
+    // actor, when it gets to the job, drops it.
+    let (job, response, queued) = queue().await;
+    drop((response, queued));
+    assert!(!gate.is_busy(&session));
+    tokio::time::timeout(Duration::from_secs(5), steps.enter(&session))
+        .await
+        .expect("the turn was not released with the abandoned job");
+    let mut client = RelayClient::connect(&target.spec, &session).await.unwrap();
+    Box::new(job).run(&mut client).await;
+    assert!(root.join("aws").exists(), "an abandoned job ran");
+    drop(client);
+
+    // Running: the awaiting task stops while the actor talks to the worker.
+    // The job keeps the session until it ends.
+    let (job, response, queued) = queue().await;
+    let mut client = RelayClient::connect(&target.spec, &session).await.unwrap();
+    let running = tokio::spawn(async move { Box::new(job).run(&mut client).await });
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !root.join("waiting").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the job reached the worker");
+    drop((response, queued));
+    assert!(gate.is_busy(&session), "a running job lost the session");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), steps.enter(&session))
+            .await
+            .is_err(),
+        "a running job lost its turn"
+    );
+    std::fs::write(&release, "").unwrap();
+    running.await.unwrap();
+    assert!(!gate.is_busy(&session));
+    assert!(
+        !root.join("aws").exists(),
+        "the running job did not finish its work"
+    );
+}
+
+// A job queued behind an actor that is busy with something else holds the
+// session's admission and turn only until the gate cancels the admission: a
+// close, restart or move waiting for the session (and a daemon handoff behind
+// it) must not wait for the actor to reach a job nobody wants.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_queued_job_releases_its_hold_as_soon_as_admission_is_cancelled() {
     use crate::session_manager::RelayConnectionJob;
 
     let home = tempfile::tempdir().unwrap();
@@ -3014,58 +3157,64 @@ async fn an_aborted_renewals_queued_job_is_dropped_by_the_actor() {
     std::fs::create_dir(&root).unwrap();
     let target = aws_sync_session(home.path(), &root, &token, &cli);
     let session = target.session_id.clone();
-    // The job, if it ran, would withdraw these.
     std::fs::write(root.join("aws"), "host credentials").unwrap();
     super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
     let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
     let steps = credential_sync::SessionSteps::default();
-    let withdraw = || {
-        credential_sync::SyncWork::Aws(Box::new(credential_sync::AwsSync::Unavailable {
-            error: "no credentials".into(),
-            scoped_required: true,
-            expected_scope: None,
-        }))
-    };
-    let queue = |reply| async {
-        credential_sync::CredentialSyncJob {
-            target: target.clone(),
-            work: withdraw(),
-            reply,
-            hold: credential_sync::JobHold::new(
-                gate.try_start(&session),
-                Some(steps.enter(&session).await),
-                None,
-                None,
-            ),
-        }
-    };
-    let mut client = RelayClient::connect(&target.spec, &session).await.unwrap();
 
-    let (reply, response) = tokio::sync::oneshot::channel();
-    let queued = queue(reply).await;
-    // The task that awaited the job is gone; the job holds the session.
-    drop(response);
-    assert!(gate.is_busy(&session));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), steps.enter(&session))
+    // The task that waits for the job: it queues it (here, hands it to the
+    // test, which plays the busy actor) and waits for the answer.
+    let (queue_tx, queue_rx) = tokio::sync::oneshot::channel();
+    let waiting = tokio::spawn({
+        let (gate, steps, target) = (gate.clone(), steps.clone(), target.clone());
+        async move {
+            let turn = steps.enter(&target.session_id).await;
+            let for_admission = target.clone();
+            credential_sync::admitted(
+                Some(&gate),
+                None,
+                &for_admission,
+                turn,
+                None,
+                |hold| async move {
+                    let work = credential_sync::SyncWork::Aws(Box::new(
+                        credential_sync::AwsSync::Unavailable {
+                            error: "no credentials".into(),
+                            scoped_required: true,
+                            expected_scope: None,
+                        },
+                    ));
+                    let (job, response, _queued) =
+                        credential_sync::CredentialSyncJob::queue(target, work, hold);
+                    queue_tx.send(job).ok();
+                    let _ = response.await;
+                    Ok::<Option<()>, anyhow::Error>(None)
+                },
+            )
             .await
-            .is_err(),
-        "the session's turn was free while its job was queued"
-    );
+        }
+    });
+    let job = queue_rx.await.unwrap();
+    assert!(gate.is_busy(&session));
 
-    Box::new(queued).run(&mut client).await;
-    assert!(root.join("aws").exists(), "an abandoned job ran");
-    assert!(!gate.is_busy(&session));
+    // A lifecycle operation cancels the admission and waits for it to free.
+    gate.cancel_busy(&session);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while gate.is_busy(&session) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the queued job kept the session's admission after it was cancelled");
     tokio::time::timeout(Duration::from_secs(5), steps.enter(&session))
         .await
-        .expect("the turn was not released with the job");
+        .expect("the queued job kept the session's turn");
+    waiting.await.unwrap().unwrap();
 
-    // A job whose task is waiting still runs.
-    let (reply, response) = tokio::sync::oneshot::channel();
-    Box::new(queue(reply).await).run(&mut client).await;
-    response.await.unwrap().unwrap();
-    assert!(!root.join("aws").exists(), "a wanted job did not run");
-    assert!(!gate.is_busy(&session));
+    // The actor reaches the job at last and drops it unrun.
+    let mut client = RelayClient::connect(&target.spec, &session).await.unwrap();
+    Box::new(job).run(&mut client).await;
+    assert!(root.join("aws").exists(), "a cancelled job ran");
 }
 
 // An authentication failure may mean the session's credentials are no longer

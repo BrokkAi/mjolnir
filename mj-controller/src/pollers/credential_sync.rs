@@ -269,13 +269,16 @@ impl CredentialSyncNotices {
                     key.2 == Some(SyncStep::Aws)
                 }
         });
-        let mut notice = None;
+        // Every key is recorded as reported, so every newly failed step is
+        // said now, in one notice.
+        let mut new_messages = Vec::new();
         for (key, message) in failures {
             if self.last_failures.get(&key) != Some(&message) {
-                notice.get_or_insert_with(|| message.clone());
+                new_messages.push(message.clone());
             }
             self.last_failures.insert(key, message);
         }
+        let notice = (!new_messages.is_empty()).then(|| new_messages.join(" "));
         if let Some(text) = notice {
             return Some(warning(text));
         }

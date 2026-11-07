@@ -1609,6 +1609,20 @@ fn a_result_clears_only_the_failures_of_the_steps_it_checked() {
     assert_eq!(notices.notice(&aws_failed(), None, &state), None);
     assert!(notices.notice(&login_failed(), None, &state).is_some());
 
+    // Two steps failing in one pass are both said, in one notice.
+    let mut two_steps = login_failed();
+    two_steps.outcomes[0].step_failures.push(StepFailure {
+        step: SyncStep::Skills,
+        detail: "skills: archive unreadable".into(),
+    });
+    let said = CredentialSyncNotices::default()
+        .notice(&two_steps, None, &state)
+        .unwrap();
+    assert!(
+        said.contains("harness login: refused") && said.contains("skills: archive unreadable"),
+        "{said}"
+    );
+
     // Two failures of one step are both said.
     let mut both = aws_failed();
     both.outcomes[0].step_failures.push(StepFailure {
