@@ -1140,13 +1140,18 @@ impl ProfileCatalog {
         model: Option<String>,
         refresh: bool,
     ) -> Attempt {
-        let probe: BoxFuture<'static, Result<ProfileConfig>> = {
+        let probe: BoxFuture<'static, Result<crate::controller::profile_config::Discovery>> = {
             #[cfg(test)]
             if let Some((probe, model_probe)) = &self.probe {
                 match model {
                     None => probe(definition.id.clone()),
                     Some(model) => model_probe(definition.id.clone(), model),
                 }
+                .map_ok(|choices| crate::controller::profile_config::Discovery {
+                    choices,
+                    probed: true,
+                })
+                .boxed()
             } else {
                 crate::controller::profile_config::discover_for(
                     (*definition.config).clone(),
@@ -1179,10 +1184,18 @@ impl ProfileCatalog {
                 .as_deref()
                 .and_then(hash_home_inputs)
                 .map(|inputs| home_digest(&inputs));
-            let choices = probe.await?;
+            let discovery = probe.await?;
+            // A cache-served answer predates the home edit the digest just
+            // captured: it settles nothing, so the watch keeps the entry
+            // pending for a real re-probe instead of masking the edit.
+            let home_digest = if discovery.probed {
+                digest_at_start
+            } else {
+                None
+            };
             Ok(ProbeOutcome {
-                choices,
-                home_digest: digest_at_start,
+                choices: discovery.choices,
+                home_digest,
             })
         }
         .map_err(|error: anyhow::Error| AttemptError::new(&error))

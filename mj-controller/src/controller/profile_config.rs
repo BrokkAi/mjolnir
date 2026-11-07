@@ -44,15 +44,18 @@ pub async fn subagent_options_for(
 /// they exist because something outside the profile definition (a home edit
 /// the catalog owner detected, an expired entry) may have changed what the
 /// harness advertises, so a cache row discovered earlier must not answer.
+/// Reports whether the harness actually ran: a served cache row answers
+/// from an earlier read of the home, which the catalog's settled-digest
+/// recording must not treat as current.
 pub(crate) async fn discover_for(
     config: Config,
     id: String,
     model: Option<String>,
     cancellation: CancellationToken,
     refresh: bool,
-) -> Result<ProfileConfig> {
+) -> Result<Discovery> {
     serialized_until(id.clone(), cancellation, move |cancelled| {
-        discover_from_config(&config, &id, model, refresh, cancelled)
+        discover_with_provenance(&config, &id, model, refresh, cancelled)
     })
     .await
 }
@@ -243,11 +246,14 @@ async fn serialized(
     serialized_until(profile_id, CancellationToken::new(), job).await
 }
 
-async fn serialized_until(
+async fn serialized_until<T>(
     profile_id: String,
     cancellation: CancellationToken,
-    job: impl FnOnce(Arc<std::sync::atomic::AtomicBool>) -> Result<ProfileConfig> + Send + 'static,
-) -> Result<ProfileConfig> {
+    job: impl FnOnce(Arc<std::sync::atomic::AtomicBool>) -> Result<T> + Send + 'static,
+) -> Result<T>
+where
+    T: Send + 'static,
+{
     let lock = {
         let mut locks = PROBES
             .get_or_init(Default::default)
@@ -425,7 +431,17 @@ fn discover_blocking(
         "profile discovery cancelled"
     );
     let config = Config::load()?;
-    discover_from_config(&config, profile_id, model, refresh, cancelled)
+    Ok(discover_with_provenance(&config, profile_id, model, refresh, cancelled)?.choices)
+}
+
+/// What discovery returned, and whether the harness actually ran: a
+/// process-cache row younger than the choice lifetime is served without
+/// launching anything, and its choices may predate the profile home's
+/// current files. Settled-digest recording and any other answer that must
+/// describe the home as it is now need `probed`.
+pub(crate) struct Discovery {
+    pub choices: ProfileConfig,
+    pub probed: bool,
 }
 
 fn discover_from_config(
@@ -435,6 +451,16 @@ fn discover_from_config(
     refresh: bool,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ProfileConfig> {
+    Ok(discover_with_provenance(config, profile_id, model, refresh, cancelled)?.choices)
+}
+
+fn discover_with_provenance(
+    config: &Config,
+    profile_id: &str,
+    model: Option<String>,
+    refresh: bool,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Discovery> {
     ensure!(
         !cancelled.load(std::sync::atomic::Ordering::Acquire),
         "profile discovery cancelled"
@@ -453,10 +479,13 @@ fn discover_from_config(
     // caching it: always probe the installation that actually runs, and never
     // write the result back.
     if profile.kind == mj_core::config::HarnessKind::Muse {
-        return probe_profile(profile_id, profile, environment, model, cancelled);
+        return Ok(Discovery {
+            choices: probe_profile(profile_id, profile, environment, model, cancelled)?,
+            probed: true,
+        });
     }
     let fingerprint = fingerprint(profile);
-    resolve_cached(
+    resolve_cached_discovery(
         refresh,
         is_current,
         || Ok(load(profile_id, &model, &fingerprint)),
@@ -494,7 +523,10 @@ fn is_current_at(choices: &ProfileConfig, now: i64) -> bool {
 
 /// Serve current cached choices, or probe. An out-of-date entry is still
 /// served when the probe fails, so an offline or signed-out provider keeps
-/// its last known choices instead of losing them.
+/// its last known choices instead of losing them. Production discovery uses
+/// [`resolve_cached_discovery`], which also reports whether the harness ran;
+/// this wrapper remains for its unit tests.
+#[cfg(test)]
 fn resolve_cached(
     refresh: bool,
     current: impl FnOnce(&ProfileConfig) -> bool,
@@ -502,23 +534,44 @@ fn resolve_cached(
     probe: impl FnOnce() -> Result<ProfileConfig>,
     save: impl FnOnce(&ProfileConfig) -> Result<()>,
 ) -> Result<ProfileConfig> {
+    Ok(resolve_cached_discovery(refresh, current, load, probe, save)?.choices)
+}
+
+/// [`resolve_cached`] with the added fact of whether the answer came from
+/// running the harness (`probed`) or from a cache row that was read earlier.
+fn resolve_cached_discovery(
+    refresh: bool,
+    current: impl FnOnce(&ProfileConfig) -> bool,
+    load: impl FnOnce() -> Result<Option<ProfileConfig>>,
+    probe: impl FnOnce() -> Result<ProfileConfig>,
+    save: impl FnOnce(&ProfileConfig) -> Result<()>,
+) -> Result<Discovery> {
     let cached = if refresh { None } else { load()? };
     if let Some(choices) = &cached
         && current(choices)
     {
-        return Ok(choices.clone());
+        return Ok(Discovery {
+            choices: choices.clone(),
+            probed: false,
+        });
     }
     match probe() {
         Ok(choices) => {
             save(&choices)?;
-            Ok(choices)
+            Ok(Discovery {
+                choices,
+                probed: true,
+            })
         }
         Err(error) => match cached {
             Some(choices) => {
                 if !discovery_is_unsupported(&error) {
                     tracing::warn!(error = %format!("{error:#}"), "profile discovery failed; serving out-of-date cached choices");
                 }
-                Ok(choices)
+                Ok(Discovery {
+                    choices,
+                    probed: false,
+                })
             }
             None => Err(error),
         },
@@ -1033,7 +1086,7 @@ mod tests {
     async fn retiring_a_definition_cancels_probes_and_preserves_its_replacement() {
         let cancellation = CancellationToken::new();
         let (started, running) = tokio::sync::oneshot::channel();
-        let first = tokio::spawn(serialized_until(
+        let first = tokio::spawn(serialized_until::<()>(
             "retirement-test".into(),
             cancellation.clone(),
             move |cancelled| {
@@ -1269,6 +1322,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, stale);
+    }
+
+    // Hard-won: #1337 review: a cache-served retry recorded the home's
+    // current digest as settled, masking an edit for up to the choice
+    // lifetime. Only an answer the harness actually read may settle.
+    #[test]
+    fn resolve_cached_discovery_reports_whether_the_harness_ran() {
+        let cached = ProfileConfig {
+            model: Some("cached".into()),
+            models: vec![],
+            efforts: vec![],
+            observed_at: 1,
+        };
+        let probed = ProfileConfig {
+            model: Some("probed".into()),
+            observed_at: 2,
+            ..cached.clone()
+        };
+
+        // A current cache row is served without probing.
+        let served = resolve_cached_discovery(
+            false,
+            |_| true,
+            || Ok(Some(cached.clone())),
+            || panic!("a current cache row must not probe"),
+            |_| panic!("a cache hit saves nothing"),
+        )
+        .unwrap();
+        assert_eq!(served.choices, cached);
+        assert!(
+            !served.probed,
+            "a cache row answers from an earlier read of the home"
+        );
+
+        // A refresh bypasses the cache and reports the probe ran.
+        let saved = RefCell::new(None);
+        let served = resolve_cached_discovery(
+            true,
+            |_| true,
+            || Ok(Some(cached.clone())),
+            || Ok(probed.clone()),
+            |choices| {
+                *saved.borrow_mut() = Some(choices.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(served.choices, probed);
+        assert!(served.probed);
+        assert_eq!(saved.borrow().as_ref(), Some(&probed));
+
+        // A failed probe falls back to the stale row, also not read now.
+        let served = resolve_cached_discovery(
+            false,
+            |_| false,
+            || Ok(Some(cached.clone())),
+            || anyhow::bail!("provider offline"),
+            |_| panic!("a failed probe saves nothing"),
+        )
+        .unwrap();
+        assert_eq!(served.choices, cached);
+        assert!(!served.probed);
     }
 
     /// Muse models and efforts change server-side without a managed-pin bump,
