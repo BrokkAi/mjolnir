@@ -9,6 +9,26 @@ use serde::{Deserialize, Serialize};
 pub const SHARED_CREDENTIALS_FILE: &str = "aws-credentials";
 pub const CONFIG_FILE: &str = "aws-config";
 pub const EMPTY_CREDENTIALS_FILE: &str = "aws-empty-credentials";
+/// Beside the secret: which role and session Mjolnir issued it for.
+pub const SCOPE_FILE: &str = "aws-scope.json";
+
+/// Which credentials Mjolnir issued, for what, until when. The worker keeps it
+/// beside the secret, so a controller that has lost its memory (a restart) can
+/// still tell credentials it issued for a session's role from anything else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AwsCredentialScope {
+    pub role_arn: String,
+    /// The STS role session name, `mj-<session id>`.
+    pub role_session_name: String,
+    pub expires_at_epoch_millis: i64,
+}
+
+/// What the worker stores: the scope, bound to the secret it describes.
+#[derive(Serialize, Deserialize)]
+struct StoredScope {
+    scope: AwsCredentialScope,
+    secret_fingerprint: String,
+}
 
 /// The controller environment used by the AWS CLI to resolve one profile.
 #[derive(Clone, PartialEq, Eq)]
@@ -47,6 +67,9 @@ pub struct AwsCredentials {
     expiration: Option<String>,
     #[serde(default = "default_profile")]
     profile: String,
+    /// Not part of the credential file the SDK reads; travels beside it.
+    #[serde(skip)]
+    scope: Option<AwsCredentialScope>,
 }
 
 fn default_profile() -> String {
@@ -91,9 +114,34 @@ impl AwsCredentials {
             session_token: Some(output.credentials.session_token),
             expiration: Some(output.credentials.expiration),
             profile: profile.to_owned(),
+            scope: None,
         };
         credentials.validate()?;
         Ok(credentials)
+    }
+
+    /// These credentials, recorded as issued by Mjolnir for `role_arn` and
+    /// the STS session `role_session_name`.
+    pub fn issued_for(mut self, role_arn: &str, role_session_name: &str) -> Result<Self> {
+        let expires_at_epoch_millis = self
+            .expires_at_epoch_millis()
+            .context("issued AWS credentials have no expiration")?;
+        self.scope = Some(AwsCredentialScope {
+            role_arn: role_arn.to_owned(),
+            role_session_name: role_session_name.to_owned(),
+            expires_at_epoch_millis,
+        });
+        Ok(self)
+    }
+
+    pub fn scope(&self) -> Option<&AwsCredentialScope> {
+        self.scope.as_ref()
+    }
+
+    /// Attach a scope read from the wire.
+    pub fn with_scope(mut self, scope: Option<AwsCredentialScope>) -> Self {
+        self.scope = scope;
+        self
     }
 
     /// When these credentials stop working, in milliseconds since the Unix
@@ -185,6 +233,20 @@ impl AwsCredentials {
         let bytes = self.encode()?;
         crate::config::atomic_write(&home.join(CONFIG_FILE), &self.configuration(target_home)?)?;
         crate::config::atomic_write(&home.join(EMPTY_CREDENTIALS_FILE), b"")?;
+        // The scope record goes first, so the secret is never published
+        // without the record of what it is; credentials Mjolnir did not issue
+        // leave no record, and a stale one is removed.
+        match &self.scope {
+            Some(scope) => crate::config::atomic_write(
+                &home.join(SCOPE_FILE),
+                &serde_json::to_vec(&StoredScope {
+                    scope: scope.clone(),
+                    secret_fingerprint: crate::credentials::credential_fingerprint(&bytes),
+                })
+                .context("encode AWS credential scope")?,
+            )?,
+            None => remove_if_present(&home.join(SCOPE_FILE))?,
+        }
         crate::config::atomic_write(&home.join(SHARED_CREDENTIALS_FILE), &bytes)?;
         Ok(snapshot(&bytes))
     }
@@ -194,12 +256,37 @@ impl AwsCredentials {
 /// without it the native process provider finds nothing to use, and a later
 /// install writes every file again.
 pub fn remove(home: &Path) -> Result<crate::credentials::CredentialSnapshot> {
-    match std::fs::remove_file(home.join(SHARED_CREDENTIALS_FILE)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).context("remove session AWS credentials"),
-    }
+    remove_if_present(&home.join(SHARED_CREDENTIALS_FILE))?;
+    remove_if_present(&home.join(SCOPE_FILE))?;
     state(home)
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+/// The scope Mjolnir recorded for the credentials in `home`, when the record
+/// describes the secret that is there now.
+pub fn scope(home: &Path) -> Result<Option<AwsCredentialScope>> {
+    let read = |name: &str| match std::fs::read(home.join(name)) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read session AWS {name}")),
+    };
+    let (Some(record), Some(secret)) = (read(SCOPE_FILE)?, read(SHARED_CREDENTIALS_FILE)?) else {
+        return Ok(None);
+    };
+    let Ok(stored) = serde_json::from_slice::<StoredScope>(&record) else {
+        return Ok(None);
+    };
+    Ok(
+        (stored.secret_fingerprint == crate::credentials::credential_fingerprint(&secret))
+            .then_some(stored.scope),
+    )
 }
 
 pub fn snapshot(bytes: &[u8]) -> crate::credentials::CredentialSnapshot {

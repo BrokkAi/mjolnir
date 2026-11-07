@@ -774,6 +774,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         for request in [
             RelayRequest::InstallAwsCredentials {
                 data: base64::engine::general_purpose::STANDARD.encode(&aws_bytes),
+                scope: None,
             },
             RelayRequest::AwsCredentialsState,
         ] {
@@ -841,6 +842,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
                 &mut writer,
                 RelayRequest::InstallAwsCredentials {
                     data: base64::engine::general_purpose::STANDARD.encode(&aws_bytes),
+                    scope: None,
                 },
             )
             .await;
@@ -873,6 +875,74 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
             );
         }
     }
+
+    // Credentials Mjolnir issued carry a scope the worker keeps beside the
+    // secret and reports; it describes only the secret it was written with.
+    let scope = mj_core::aws_credentials::AwsCredentialScope {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        role_session_name: "mj-0123456789abcdef0123456789abcdef".into(),
+        expires_at_epoch_millis: 4_070_908_800_000,
+    };
+    let scoped_credentials =
+        |key: &str, scope: Option<&mj_core::aws_credentials::AwsCredentialScope>| {
+            let credentials = mj_core::aws_credentials::AwsCredentials::from_export(
+                "bedrock",
+                &serde_json::to_vec(&serde_json::json!({
+                    "Version": 1, "AccessKeyId": key, "SecretAccessKey": "secret",
+                    "SessionToken": "token", "Expiration": "2099-01-01T00:00:00Z",
+                }))
+                .unwrap(),
+            )
+            .unwrap()
+            .with_scope(scope.cloned());
+            base64::engine::general_purpose::STANDARD.encode(credentials.encode().unwrap())
+        };
+    for (key, recorded, expected) in [
+        ("issued", Some(&scope), Some(scope.clone())),
+        ("host-own", None, None),
+    ] {
+        delegation_exchange(
+            &mut lines,
+            &mut writer,
+            RelayRequest::InstallAwsCredentials {
+                data: scoped_credentials(key, recorded),
+                scope: recorded.cloned(),
+            },
+        )
+        .await;
+        let reported =
+            delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsScope).await;
+        assert!(
+            matches!(&reported, RelayResponsePayload::AwsCredentialsScope { scope } if *scope == expected),
+            "{key}: {reported:?}"
+        );
+    }
+    // A record never vouches for a different secret.
+    delegation_exchange(
+        &mut lines,
+        &mut writer,
+        RelayRequest::InstallAwsCredentials {
+            data: scoped_credentials("issued", Some(&scope)),
+            scope: Some(scope.clone()),
+        },
+    )
+    .await;
+    let secret = temp
+        .path()
+        .join(mj_core::aws_credentials::SHARED_CREDENTIALS_FILE);
+    std::fs::write(
+        &secret,
+        String::from_utf8(std::fs::read(&secret).unwrap())
+            .unwrap()
+            .replace("issued", "swapped"),
+    )
+    .unwrap();
+    let reported =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsScope).await;
+    assert!(matches!(
+        reported,
+        RelayResponsePayload::AwsCredentialsScope { scope: None }
+    ));
 
     // Withdrawing the credentials deletes the secret file, reports them absent
     // and leaves the way open to install again.

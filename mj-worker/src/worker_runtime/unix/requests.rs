@@ -427,6 +427,9 @@ pub(crate) fn apply_credential_request_at(
         RelayRequest::AwsCredentialsState => Ok(credential_state_payload(
             &mj_core::aws_credentials::state(&endpoint.home)?,
         )),
+        RelayRequest::AwsCredentialsScope => Ok(RelayResponsePayload::AwsCredentialsScope {
+            scope: mj_core::aws_credentials::scope(&endpoint.home)?,
+        }),
         RelayRequest::RemoveAwsCredentials => Ok(credential_state_payload(
             &mj_core::aws_credentials::remove(&endpoint.home)?,
         )),
@@ -454,14 +457,15 @@ pub(crate) fn apply_credential_request_at(
                 &mj_core::credentials::CredentialSnapshot::absent(),
             ))
         }
-        RelayRequest::InstallAwsCredentials { data } => {
+        RelayRequest::InstallAwsCredentials { data, scope } => {
             if data.len() > MAX_CREDENTIAL_BYTES * 2 {
                 bail!("AWS credential payload is above the {MAX_CREDENTIAL_BYTES} byte limit");
             }
             let bytes = BASE64
                 .decode(data.as_bytes())
                 .context("decode AWS credential payload")?;
-            let credentials = mj_core::aws_credentials::AwsCredentials::decode(&bytes)?;
+            let credentials =
+                mj_core::aws_credentials::AwsCredentials::decode(&bytes)?.with_scope(scope.clone());
             Ok(credential_state_payload(
                 &credentials.install(&endpoint.home, &endpoint.home)?,
             ))

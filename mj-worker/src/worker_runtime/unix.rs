@@ -2152,6 +2152,7 @@ pub(super) async fn serve_client_with_memory(
                     | RelayRequest::AwsCredentialsState
                     | RelayRequest::InstallAwsCredentials { .. }
                     | RelayRequest::RemoveAwsCredentials
+                    | RelayRequest::AwsCredentialsScope
                     | RelayRequest::SlopcopLoginState
                     | RelayRequest::InstallSlopcopLogin { .. }
                     | RelayRequest::RemoveSlopcopLogin
