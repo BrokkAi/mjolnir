@@ -68,7 +68,7 @@ pub use remote::*;
 mod spawn;
 pub use spawn::*;
 mod actor;
-pub(crate) use actor::terminal_for_reconnect;
+pub(crate) use actor::session_has_ended;
 use actor::*;
 mod standalone;
 mod subagent_queue;

@@ -103,6 +103,30 @@ impl HostState {
                 child_session_id.as_deref(),
                 reason,
             ),
+            HostEvent::ReviewerEndNotSaved {
+                child_session_id,
+                reason,
+                error,
+            } => self.reviewer_end_not_saved(child_session_id, reason, error),
+            HostEvent::RestoredReviewerUnread {
+                session_id,
+                epoch,
+                role,
+                error,
+            } => self.restored_reviewer_unread(&session_id, epoch, role, error),
+            HostEvent::RetryRestoredReviewer {
+                session_id,
+                epoch,
+                role,
+            } => {
+                if self
+                    .reviews
+                    .get(&session_id)
+                    .is_some_and(|slot| slot.epoch == epoch)
+                {
+                    self.launch_reviewer_child(&session_id, &role, false);
+                }
+            }
             HostEvent::RetryPushDelivery { session_id, epoch } => {
                 if self
                     .reviews
@@ -149,7 +173,7 @@ impl HostState {
             HostEvent::ReviewerFinished {
                 session_id,
                 child_session_id,
-                answer,
+                report,
                 reply,
             } => {
                 if !self.startup_ready && !self.reviews.contains_key(&session_id) {
@@ -157,12 +181,12 @@ impl HostState {
                         session_id,
                         ReviewerHandback {
                             child_session_id,
-                            answer,
+                            report,
                             reply,
                         },
                     ));
                 } else {
-                    self.reviewer_finished(session_id, child_session_id, answer, reply);
+                    self.reviewer_finished(session_id, child_session_id, report, reply);
                 }
             }
             HostEvent::Resolve {
@@ -204,7 +228,7 @@ impl HostState {
                     self.reviewer_finished(
                         session_id,
                         handback.child_session_id,
-                        handback.answer,
+                        handback.report,
                         handback.reply,
                     );
                 }

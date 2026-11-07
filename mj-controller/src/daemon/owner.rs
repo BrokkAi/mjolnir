@@ -93,13 +93,13 @@ fn reviewer_child_end(
 ) -> Option<String> {
     let prior = before.sessions.get(id)?;
     if before.subagents.get(id)?.kind != mj_core::subagent::SubagentKind::Reviewer
-        || crate::session_manager::terminal_for_reconnect(prior.state)
+        || crate::session_manager::session_has_ended(prior.state)
     {
         return None;
     }
     match after {
         None => Some("the reviewer's session was destroyed".into()),
-        Some(record) if crate::session_manager::terminal_for_reconnect(record.state) => {
+        Some(record) if crate::session_manager::session_has_ended(record.state) => {
             Some(match &record.last_error {
                 Some(cause) => format!(
                     "the reviewer's session ended ({}): {cause}",
@@ -473,6 +473,61 @@ impl RuntimeState {
 mod tests {
     use super::super::tests::runtime_test_session;
     use super::*;
+
+    fn state_with_reviewer_child(child: SessionState) -> mj_core::state::State {
+        let mut state = mj_core::state::State::default();
+        let record = runtime_test_session("child", "workspace", child);
+        state.sessions.insert(record.id.clone(), record);
+        state.subagents.insert(
+            "child".into(),
+            mj_core::subagent::SubagentRecord {
+                kind: mj_core::subagent::SubagentKind::Reviewer,
+                reviewer_launch: None,
+                child_session_id: "child".into(),
+                parent_session_id: "parent".into(),
+                task_name: "child".into(),
+                profile_id: "codex".into(),
+                model: None,
+                effort: None,
+                working_directory: std::path::PathBuf::new(),
+                initial_prompt: String::new(),
+                request_key: "child".into(),
+                created_at: "now".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            }
+            .into(),
+        );
+        state
+    }
+
+    /// Provisioning enters `StartupCleanup` before retrying a worker start
+    /// that failed before publishing its socket, so the reviewer's session has
+    /// not ended while it is there.
+    // Hard-won: pre-push review of 2ac022d85/4aaf9274c: a reviewer whose worker start was being retried was reported ended
+    #[test]
+    fn a_reviewer_child_passing_through_startup_cleanup_has_not_ended() {
+        let step = |from, to| {
+            let before = state_with_reviewer_child(from);
+            let after = state_with_reviewer_child(to);
+            reviewer_child_end(&before, "child", after.sessions.get("child"))
+        };
+        assert_eq!(
+            step(SessionState::Provisioning, SessionState::StartupCleanup),
+            None
+        );
+        assert_eq!(
+            step(SessionState::StartupCleanup, SessionState::Running),
+            None
+        );
+        // Cleanup that gives up does end it.
+        assert!(
+            step(SessionState::StartupCleanup, SessionState::Error)
+                .is_some_and(|reason| reason.contains("ended"))
+        );
+        assert!(step(SessionState::Running, SessionState::Stopped).is_some());
+    }
 
     #[cfg(unix)]
     #[test]

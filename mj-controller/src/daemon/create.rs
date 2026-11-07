@@ -1,4 +1,4 @@
-use super::views::CreateProgress;
+use super::views::{CreateProgress, StalledCreate};
 use super::*;
 
 /// How long creating a parent's report root on its target may take.
@@ -355,7 +355,11 @@ impl RuntimeState {
             anyhow::bail!("reviewer child {child} no longer exists");
         };
         match record.state {
+            // `StartupCleanup` is provisioning retrying a worker start that
+            // failed before publishing its socket; the retry can still end
+            // in `Running`.
             mj_core::state::SessionState::Provisioning
+            | mj_core::state::SessionState::StartupCleanup
             | mj_core::state::SessionState::Running
             | mj_core::state::SessionState::Disconnected
             | mj_core::state::SessionState::Checkpointing => Ok(()),
@@ -390,19 +394,19 @@ impl RuntimeState {
             CreateProgress::Stalled {
                 idle,
                 stages,
-                cancelled,
+                phase,
             } => {
                 let stage = if stages.is_empty() {
                     "between stages".to_owned()
                 } else {
                     stages.join(" + ")
                 };
-                let outcome = if cancelled {
-                    "its Create was cancelled"
-                } else {
-                    "its Create has committed and was left running"
+                let outcome = match phase {
+                    StalledCreate::Cancelled => "its Create was cancelled",
+                    StalledCreate::AlreadyCancelling => "its Create was already being cancelled",
+                    StalledCreate::Committed => "its Create had committed and was left running",
                 };
-                tracing::warn!(session_id = child, idle_secs = idle.as_secs(), %stage, cancelled, "reviewer child Create stalled");
+                tracing::warn!(session_id = child, idle_secs = idle.as_secs(), %stage, ?phase, "reviewer child Create stalled");
                 anyhow::bail!(
                     "the reviewer child {child} stalled while provisioning: no stage started or finished for {} s (stalled in: {stage}); {outcome}",
                     idle.as_secs()

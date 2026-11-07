@@ -12,10 +12,21 @@ pub(super) enum CreateProgress {
         idle: Duration,
         /// The stages it is in; empty between stages.
         stages: Vec<String>,
-        /// Whether the cancel was accepted. A Create that has committed
-        /// cannot be cancelled and stays with its caller.
-        cancelled: bool,
+        /// What the stall check found when it asked the Create to cancel.
+        phase: StalledCreate,
     },
+}
+
+/// The Create's lifecycle phase when the stall check asked it to cancel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StalledCreate {
+    /// The cancel was accepted.
+    Cancelled,
+    /// A cancel was already under way, so this one added nothing.
+    AlreadyCancelling,
+    /// The Create has committed and cannot be cancelled; it stays with its
+    /// caller.
+    Committed,
 }
 
 impl RuntimeState {
@@ -602,7 +613,8 @@ impl RuntimeState {
     /// Decide, in one owner critical section, whether the session's running
     /// Create has stalled, and cancel it when it has. A stall is `bound`
     /// without a provisioning stage starting or finishing; a Create that is
-    /// queued for a slot (`ProvisionStage::is_queue_wait`) is never stalled.
+    /// queued for a slot or preparing a harness (`ProvisionStage::pauses_stall_clock`)
+    /// is never stalled.
     ///
     /// Cancelling is what ends the stall: failing only the reviewer start
     /// would leave the Create running with its lifecycle admission held, and
@@ -624,16 +636,22 @@ impl RuntimeState {
             || operation
                 .active_stages
                 .keys()
-                .any(ProvisionStage::is_queue_wait)
+                .any(ProvisionStage::pauses_stall_clock)
         {
             return CreateProgress::Running;
         }
         let stages = operation.stage_labels();
-        let cancelled = operation.request_cancel(session_id, "create stalled");
+        let phase = if operation.request_cancel(session_id, "create stalled") {
+            StalledCreate::Cancelled
+        } else if matches!(operation.phase, LifecyclePhase::Cancelling) {
+            StalledCreate::AlreadyCancelling
+        } else {
+            StalledCreate::Committed
+        };
         CreateProgress::Stalled {
             idle,
             stages,
-            cancelled,
+            phase,
         }
     }
 

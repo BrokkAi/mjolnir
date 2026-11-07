@@ -3468,6 +3468,37 @@ async fn a_create_queued_for_a_turn_longer_than_the_bound_is_not_stalled() {
     assert!(check_progress(&state, bound).is_err());
 }
 
+/// Harness preparation reports its own progress and failure, and one step (a
+/// download) can be slow: it stays off the stall clock, as it is off the
+/// native startup deadline.
+// Hard-won: pre-push review of 2ac022d85: a reviewer whose harness preparation spent over ten minutes in one step was cancelled as stalled
+#[tokio::test(start_paused = true)]
+async fn a_create_preparing_a_harness_longer_than_the_bound_is_not_stalled() {
+    let state = test_runtime_state();
+    start_idle_create(&state);
+    tokio::task::yield_now().await;
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        "session-1".into(),
+    );
+    let bound = create::CREATE_STALL_BOUND;
+    let preparing = ProvisionStage::PreparingHarness {
+        harness: mj_core::config::HarnessKind::Codex,
+        step: "Downloading".into(),
+        since_ms: 0,
+    };
+    executor.stage_started(preparing.clone());
+    tokio::time::sleep(bound * 3).await;
+    check_progress(&state, bound).expect("harness preparation is not a stall");
+    executor.stage_finished(preparing);
+    // The clock starts again when preparation ends.
+    tokio::time::sleep(bound - Duration::from_secs(1)).await;
+    check_progress(&state, bound).unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(check_progress(&state, bound).is_err());
+}
+
 // Hard-won: 9c928ddc2: a stalled Create only failed the reviewer start and kept running with its lifecycle admission held, which blocks daemon handoff.
 #[tokio::test(start_paused = true)]
 async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
@@ -3499,6 +3530,10 @@ async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     let error = check_progress(&state, bound).unwrap_err().to_string();
     assert!(error.contains("its Create was cancelled"), "{error}");
+    // Asked again while the cancel is still under way, the message says so
+    // and does not claim the Create had committed.
+    let again = check_progress(&state, bound).unwrap_err().to_string();
+    assert!(again.contains("already being cancelled"), "{again}");
     // The cancel reached the Create's own flag, and the Create ended, which
     // is what drops its admission.
     let outcome = tokio::time::timeout(

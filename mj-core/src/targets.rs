@@ -113,10 +113,12 @@ impl ProvisionStage {
         }
     }
 
-    /// Whether the stage is a wait for a turn behind other work, as opposed to
-    /// work of this operation. Queue time is not progress, and a stall bound
-    /// must not count it.
-    pub fn is_queue_wait(&self) -> bool {
+    /// Whether time in this stage stays off a stall clock. Queue time is not
+    /// progress: the stage waits for a turn behind other work, and admission
+    /// ends it. Harness preparation reports its own progress and failure
+    /// (the native startup deadline is likewise suspended during it), and one
+    /// step, such as a download, can be slow without being stuck.
+    pub fn pauses_stall_clock(&self) -> bool {
         matches!(
             self,
             Self::WaitingForImagePull
@@ -124,6 +126,7 @@ impl ProvisionStage {
                 | Self::WaitingForWorkerStore
                 | Self::WaitingForSshConnection
                 | Self::WaitingForStartSlot
+                | Self::PreparingHarness { .. }
         )
     }
 

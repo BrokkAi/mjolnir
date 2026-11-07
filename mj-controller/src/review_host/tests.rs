@@ -247,6 +247,8 @@ struct FakeEnvironment {
     /// What the store says about each reviewer child; absent means live with
     /// no handback.
     standings: Mutex<std::collections::BTreeMap<String, ChildStanding>>,
+    /// A child's next standing read fails with this error, once.
+    standing_errors: Mutex<std::collections::BTreeMap<String, String>>,
     register_error: Mutex<Option<String>>,
     register_gate: Mutex<Option<Arc<SaveGate>>>,
     registered_gate: Mutex<Option<Arc<SaveGate>>>,
@@ -333,6 +335,7 @@ impl FakeEnvironment {
             close_attempts: std::sync::atomic::AtomicUsize::new(0),
             start_error: Mutex::new(None),
             standings: Mutex::new(std::collections::BTreeMap::new()),
+            standing_errors: Mutex::new(std::collections::BTreeMap::new()),
             register_error: Mutex::new(None),
             register_gate: Mutex::new(None),
             registered_gate: Mutex::new(None),
@@ -436,6 +439,9 @@ impl ReviewEnvironment for FakeEnvironment {
     }
 
     fn reviewer_child_standing(&self, child: &str) -> Result<ChildStanding, String> {
+        if let Some(error) = self.standing_errors.lock().unwrap().remove(child) {
+            return Err(error);
+        }
         Ok(self
             .standings
             .lock()
@@ -2225,6 +2231,120 @@ async fn a_restored_reviewer_whose_session_already_ended_fails_its_role() {
             .unwrap()
             .contains(&"busy-child-1".to_owned()),
         "an ended child is not started"
+    );
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: pre-push review of 4aaf9274c: a restored reviewer whose standing could not be read was started as live and never settled if it had ended
+#[tokio::test]
+async fn a_restored_reviewer_whose_standing_cannot_be_read_waits_and_reads_again() {
+    let session = session_id("restored-unread");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment
+        .standing_errors
+        .lock()
+        .unwrap()
+        .insert("busy-child-1".into(), "database is locked".into());
+    environment.standings.lock().unwrap().insert(
+        "busy-child-1".into(),
+        ChildStanding {
+            ended: Some("stopped".into()),
+            handback: None,
+        },
+    );
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &["busy-child-1"]).await;
+
+    // The unread child is neither started nor failed while the read fails.
+    assert!(host.view(&session).is_some());
+    assert!(
+        !environment
+            .started
+            .lock()
+            .unwrap()
+            .contains(&"busy-child-1".to_owned())
+    );
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &children[1],
+        Some("real defect"),
+    )
+    .await;
+    // The read is repeated on the review's retry delay (1 s first), and
+    // then the ended session settles the role.
+    wait_until_review_resolves(&host, &session).await;
+
+    let (complete, failures) = delivered_findings(&environment);
+    assert!(!complete);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0]
+            .reason
+            .contains("ended before the review was restored (stopped)"),
+        "{failures:?}"
+    );
+    assert!(
+        !environment
+            .started
+            .lock()
+            .unwrap()
+            .contains(&"busy-child-1".to_owned()),
+        "an ended child is not started"
+    );
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: pre-push review of 4aaf9274c: an ended reviewer's failure bypassed the serialized outcome path, so a failed save of another outcome dropped it
+#[tokio::test]
+async fn an_ended_reviewers_failure_is_applied_after_a_failed_outcome_save() {
+    let session = session_id("ended-during-save");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+
+    // Reviewer 1's outcome is saving, and the save will fail.
+    let gate = SaveGate::new();
+    *environment.save_gate.lock().unwrap() = Some(gate.clone());
+    *environment.save_error.lock().unwrap() = Some("database busy".into());
+    let first = tokio::spawn({
+        let host = host.clone();
+        let session = session.clone();
+        let child = children[0].clone();
+        async move {
+            host.reviewer_finished(session, child, Some("real defect".into()))
+                .await
+        }
+    });
+    gate.entered().await;
+    // Reviewer 2's session ends while that save is pending.
+    host.child_ended(
+        children[1].clone(),
+        "the reviewer's session ended (error)".into(),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    gate.release();
+    assert!(first.await.unwrap().unwrap_err().contains("database busy"));
+
+    // The failed save restored reviewer 1's role to awaiting; reviewer 2's
+    // failure waited behind it and is applied now.
+    host.reviewer_finished(
+        session.clone(),
+        children[0].clone(),
+        Some("real defect".into()),
+    )
+    .await
+    .unwrap();
+    wait_until_review_resolves(&host, &session).await;
+
+    let (complete, failures) = delivered_findings(&environment);
+    assert!(!complete);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].label.contains("Reviewer 2"), "{failures:?}");
+    assert!(
+        failures[0].reason.contains("session ended (error)"),
+        "{failures:?}"
     );
     host.shutdown().await.unwrap();
 }

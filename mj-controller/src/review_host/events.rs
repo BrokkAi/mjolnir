@@ -73,8 +73,14 @@ pub(super) enum HostEvent {
     ReviewerFinished {
         session_id: String,
         child_session_id: String,
-        answer: Option<String>,
+        report: ReviewerReport,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// An ended reviewer's failure could not be saved.
+    ReviewerEndNotSaved {
+        child_session_id: String,
+        reason: String,
+        error: String,
     },
     ReviewerOutcomeSaved {
         session_id: String,
@@ -98,6 +104,19 @@ pub(super) enum HostEvent {
     RetryPushDelivery {
         session_id: String,
         epoch: u64,
+    },
+    /// The store would not say whether a restored reviewer's session had
+    /// ended. The role stays pending until a later read answers.
+    RestoredReviewerUnread {
+        session_id: String,
+        epoch: u64,
+        role: String,
+        error: String,
+    },
+    RetryRestoredReviewer {
+        session_id: String,
+        epoch: u64,
+        role: String,
     },
     QuestionTarget {
         session_id: String,
@@ -199,9 +218,19 @@ pub(super) struct PendingOpen {
 
 pub(super) type ReviewerIdentity = mj_core::review::settings::ResolvedReviewSettings;
 
+/// What a reviewer child gave the host. Handbacks and ended sessions both
+/// arrive as reports, so [`HostState::reviewer_finished`] decides every
+/// reviewer outcome and failure one at a time, behind a saving outcome.
+pub(super) enum ReviewerReport {
+    /// The text of its handback.
+    Answer(String),
+    /// It ended without one; the reason says why.
+    Failed(String),
+}
+
 pub(super) struct ReviewerHandback {
     pub(super) child_session_id: String,
-    pub(super) answer: Option<String>,
+    pub(super) report: ReviewerReport,
     pub(super) reply: oneshot::Sender<Result<(), String>>,
 }
 
@@ -220,6 +249,17 @@ pub(super) struct ReviewSlot {
     pub(super) start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
     pub(super) pending_outcome: Option<TurnReviewState>,
     pub(super) queued_outcomes: Vec<ReviewerHandback>,
+}
+
+impl ReviewSlot {
+    /// The wait before the next retry of anything this review retries
+    /// (push delivery, a restored reviewer's standing read); each call
+    /// doubles the next wait up to 30 s.
+    pub(super) fn take_retry_delay(&mut self) -> std::time::Duration {
+        let delay = self.retry_delay;
+        self.retry_delay = (delay * 2).min(std::time::Duration::from_secs(30));
+        delay
+    }
 }
 
 pub(super) struct HostState {

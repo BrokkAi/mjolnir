@@ -248,7 +248,7 @@ impl ReviewEnvironment for ControllerEnvironment {
             .map_err(|error| format!("{error:#}"))?
         {
             None => Some("removed".to_owned()),
-            Some(record) if crate::session_manager::terminal_for_reconnect(record.state) => {
+            Some(record) if crate::session_manager::session_has_ended(record.state) => {
                 Some(match record.last_error {
                     Some(cause) => format!("{}: {cause}", record.state.as_str()),
                     None => record.state.as_str().to_owned(),

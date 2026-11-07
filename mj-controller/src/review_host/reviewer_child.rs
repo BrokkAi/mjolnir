@@ -45,37 +45,39 @@ async fn reviewer_standing(
 }
 
 /// The one rule for a reviewer child whose session has ended: a handback it
-/// recorded is its outcome, delivered the way a finished turn's is, and only
-/// without one does its role fail. Both events are idempotent in the host.
+/// recorded is its outcome, and only without one does its role fail. Both go
+/// to the host as a report, the way a finished turn's does, so the host
+/// decides them one at a time. Both are idempotent in the host.
 fn settle_ended_reviewer(
     events: &mpsc::UnboundedSender<HostEvent>,
     session_id: String,
-    epoch: u64,
-    role: String,
     child: String,
     reason: String,
     handback: Option<String>,
 ) {
-    let event = match handback {
-        Some(answer) => {
-            // The host answers a delegation caller; nobody waits here.
-            let (reply, _) = oneshot::channel();
-            HostEvent::ReviewerFinished {
-                session_id,
-                child_session_id: child,
-                answer: Some(answer),
-                reply,
-            }
-        }
-        None => HostEvent::RoleFailed {
-            session_id,
-            epoch,
-            role,
-            child_session_id: Some(child),
-            reason,
-        },
+    let report = match handback {
+        Some(answer) => ReviewerReport::Answer(answer),
+        None => ReviewerReport::Failed(reason.clone()),
     };
-    let _ = events.send(event);
+    // No delegation caller waits for this report, so nobody would retry a
+    // save that failed: the host does, through `ReviewerEndNotSaved`.
+    let (reply, saved) = oneshot::channel();
+    let _ = events.send(HostEvent::ReviewerFinished {
+        session_id,
+        child_session_id: child.clone(),
+        report,
+        reply,
+    });
+    let events = events.clone();
+    tokio::spawn(async move {
+        if let Ok(Err(error)) = saved.await {
+            let _ = events.send(HostEvent::ReviewerEndNotSaved {
+                child_session_id: child,
+                reason,
+                error,
+            });
+        }
+    });
 }
 
 impl HostState {
@@ -228,8 +230,6 @@ impl HostState {
                         settle_ended_reviewer(
                             &events,
                             session_id,
-                            epoch,
-                            role,
                             child,
                             format!(
                                 "the reviewer's session ended before the review was restored ({state})"
@@ -239,8 +239,18 @@ impl HostState {
                         return;
                     }
                     Ok(_) => {}
+                    // Starting a child that may have ended, or failing one that
+                    // may be live, would each be a guess. The role stays
+                    // pending and the read is repeated.
                     Err(error) => {
-                        tracing::warn!(child, %error, "could not read a restored reviewer's standing; starting it");
+                        tracing::warn!(child, %error, "could not read a restored reviewer's standing");
+                        let _ = events.send(HostEvent::RestoredReviewerUnread {
+                            session_id,
+                            epoch,
+                            role,
+                            error,
+                        });
+                        return;
                     }
                 }
             }
@@ -258,6 +268,61 @@ impl HostState {
                     tracing::warn!(child, %error, "reviewer child startup reconciliation did not finish");
                 }
             }
+        });
+    }
+
+    /// Reads a restored reviewer's standing again after the delay the review
+    /// uses for its other retries, until a read answers.
+    pub(super) fn restored_reviewer_unread(
+        &mut self,
+        session_id: &str,
+        epoch: u64,
+        role: String,
+        error: String,
+    ) {
+        let Some(slot) = self
+            .reviews
+            .get_mut(session_id)
+            .filter(|slot| slot.epoch == epoch)
+        else {
+            return;
+        };
+        let delay = slot.take_retry_delay();
+        tracing::warn!(%session_id, role, %error, retry_in_seconds = delay.as_secs(), "restored reviewer's standing will be read again");
+        let events = self.events.clone();
+        let session_id = session_id.to_owned();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = events.send(HostEvent::RetryRestoredReviewer {
+                session_id,
+                epoch,
+                role,
+            });
+        });
+    }
+
+    /// An ended reviewer's report did not save. Report it again after the
+    /// review's retry delay; the host holds no other record that it ended.
+    pub(super) fn reviewer_end_not_saved(&mut self, child: String, reason: String, error: String) {
+        let Some(slot) = self.reviews.values_mut().find(|slot| {
+            slot.state.active_group.as_ref().is_some_and(|group| {
+                group
+                    .registrations
+                    .iter()
+                    .any(|item| item.child_session_id.as_deref() == Some(&child))
+            })
+        }) else {
+            return;
+        };
+        let delay = slot.take_retry_delay();
+        tracing::warn!(child, %error, retry_in_seconds = delay.as_secs(), "an ended reviewer's report did not save; it will be reported again");
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = events.send(HostEvent::ChildEnded {
+                child_session_id: child,
+                reason,
+            });
         });
     }
 
@@ -389,10 +454,11 @@ impl HostState {
     }
 
     /// A reviewer child's session ended. A handback it recorded is its
-    /// outcome; without one its role fails through [`Self::role_failed`], so
-    /// the group resolves like any other reviewer failure.
+    /// outcome; without one its role fails, through [`Self::reviewer_finished`]
+    /// like every other reviewer outcome, so the group resolves like any other
+    /// reviewer failure.
     pub(super) fn child_ended(&mut self, child: &str, reason: String) {
-        let Some((session_id, epoch, role)) = self.reviews.iter().find_map(|(session_id, slot)| {
+        let Some((session_id, role)) = self.reviews.iter().find_map(|(session_id, slot)| {
             let registration = slot
                 .state
                 .active_group
@@ -400,7 +466,7 @@ impl HostState {
                 .registrations
                 .iter()
                 .find(|item| item.child_session_id.as_deref() == Some(child))?;
-            Some((session_id.clone(), slot.epoch, registration.role.clone()))
+            Some((session_id.clone(), registration.role.clone()))
         }) else {
             return;
         };
@@ -428,7 +494,7 @@ impl HostState {
                 }
             };
             tracing::info!(child, session_id, role, %reason, found_handback = handback.is_some(), "reviewer child ended");
-            settle_ended_reviewer(&events, session_id, epoch, role, child, reason, handback);
+            settle_ended_reviewer(&events, session_id, child, reason, handback);
         });
     }
 
@@ -436,7 +502,7 @@ impl HostState {
         &mut self,
         session_id: String,
         child_session_id: String,
-        answer: Option<String>,
+        report: ReviewerReport,
         reply: oneshot::Sender<Result<(), String>>,
     ) {
         let Some(slot) = self.reviews.get_mut(&session_id) else {
@@ -458,7 +524,7 @@ impl HostState {
         if slot.pending_outcome.is_some() {
             slot.queued_outcomes.push(ReviewerHandback {
                 child_session_id,
-                answer,
+                report,
                 reply,
             });
             return;
@@ -476,16 +542,15 @@ impl HostState {
         };
         let prior = slot.state.clone();
         let prior_driver = slot.driver.snapshot();
-        let requests = match answer {
-            Some(answer) => {
+        let requests = match report {
+            ReviewerReport::Answer(answer) => {
                 slot.driver
                     .role_turn_completed(&command_id, &child_session_id, &answer)
             }
-            None => slot.driver.role_failed(
-                &role,
-                Some(&child_session_id),
-                "the reviewer finished without calling handback",
-            ),
+            ReviewerReport::Failed(reason) => {
+                slot.driver
+                    .role_failed(&role, Some(&child_session_id), reason)
+            }
         };
         if prior_driver == slot.driver.snapshot() {
             let _ = reply.send(Ok(()));
@@ -494,10 +559,8 @@ impl HostState {
         if let Some(group) = slot.state.active_group.as_mut() {
             group.driver = slot.driver.snapshot();
         }
-        if matches!(
-            slot.driver.last_verdict(),
-            Some(ReviewVerdict::Failed { .. })
-        ) {
+        if let Some(ReviewVerdict::Failed { reason }) = slot.driver.last_verdict() {
+            answer(slot.start_reply.take(), Err(StartRefusal(reason.clone())));
             slot.state.active = None;
         }
         slot.pending_outcome = Some(prior);
@@ -561,7 +624,7 @@ impl HostState {
                 self.reviewer_finished(
                     session_id.clone(),
                     handback.child_session_id,
-                    handback.answer,
+                    handback.report,
                     handback.reply,
                 );
             }

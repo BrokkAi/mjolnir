@@ -228,7 +228,12 @@ impl TurnReviewHost {
             .send(HostEvent::ReviewerFinished {
                 session_id,
                 child_session_id,
-                answer,
+                report: match answer {
+                    Some(answer) => ReviewerReport::Answer(answer),
+                    None => ReviewerReport::Failed(
+                        "the reviewer finished without calling handback".into(),
+                    ),
+                },
                 reply,
             })
             .map_err(|_| "review host stopped".to_owned())?;
