@@ -926,7 +926,12 @@ impl ProfileCatalog {
                 identities_by_home,
                 inner.home_stats.clone(),
                 inner.home_settled.clone(),
-                inner.entries.keys().cloned().collect::<BTreeSet<_>>(),
+                inner
+                    .entries
+                    .iter()
+                    .filter(|(_, entry)| !matches!(entry, Entry::Failed { .. }))
+                    .map(|(key, _)| key.clone())
+                    .collect::<BTreeSet<_>>(),
             )
         };
         let mut polled = BTreeMap::new();
@@ -945,6 +950,11 @@ impl ProfileCatalog {
             // The stat cache is only a polling optimization; store whatever
             // the pass observed.
             updates.push((home.clone(), current.clone()));
+            // Every served answer must have been read from the home as it
+            // now is. A Failed entry serves no home-derived answer — its own
+            // supervisor retries it with backoff, and its success records a
+            // digest that joins the check — so it neither settles nor blocks
+            // convergence.
             for identity in &identities_by_home[home] {
                 let every_entry_settled = served
                     .iter()
@@ -2820,6 +2830,78 @@ mod tests {
             Some("solo-second")
         );
         assert_eq!(calls.load(Ordering::SeqCst), 6);
+    }
+
+    // Hard-won: #1337 review: a permanently failed entry kept its identity
+    // stale, re-probing the healthy entries every pass.
+    #[tokio::test]
+    async fn a_failed_entry_does_not_keep_repriming_its_healthy_siblings() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_home_model(root, "solo", "solo-first");
+        let calls = calls();
+        let (mut config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
+        config.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+            model: "extra".into(),
+            effort: None,
+        });
+        let probe_homes = homes.clone();
+        let model_homes = homes;
+        let probe_calls = calls.clone();
+        let model_calls = calls.clone();
+        let catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            Arc::new(move |profile| {
+                probe_calls.fetch_add(1, Ordering::SeqCst);
+                let homes = probe_homes.clone();
+                Box::pin(async move {
+                    let mut choices = read_home_choices(&homes, &profile)?;
+                    choices.models.push(mj_core::acp::SessionConfigChoice {
+                        value: "extra".into(),
+                        name: "extra".into(),
+                        description: None,
+                    });
+                    Ok(choices)
+                })
+            }),
+            Arc::new(move |profile, model| {
+                model_calls.fetch_add(1, Ordering::SeqCst);
+                let homes = model_homes.clone();
+                Box::pin(async move {
+                    // The delisted model's probe fails for good; other models
+                    // answer from the home like the default probe does.
+                    if model == "extra" {
+                        return Err(crate::controller::profile_config::DiscoveryUnsupported.into());
+                    }
+                    let mut choices = read_home_choices(&homes, &profile)?;
+                    choices.model = Some(model.clone());
+                    Ok(choices)
+                })
+            }),
+        );
+        catalog.sync_now(&config).await;
+        // sync_now claimed the default and the current model, and the
+        // selected model's probe failed permanently.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // The failed entry neither settles nor blocks convergence: passes
+        // stay quiet, with no re-probes of the healthy entries.
+        catalog.watch_homes();
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a failed entry does not keep its identity stale"
+        );
+
+        // A home edit still re-probes the healthy entries, and convergence
+        // returns once they record the new digest.
+        write_home_model(root, "solo", "solo-second");
+        catalog.watch_homes();
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        converge_on(&catalog, "solo", "solo-second").await;
+        catalog.watch_homes();
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
 
     // Hard-won: #1337: an edit made while the daemon was stopped stayed stale after start.
