@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use mj_checkpoint::archive::{
     GitCommand, GitCommandRunner, GitOutput, diff_between_trees, numstat_between_trees,
-    review_baseline_ref,
+    session_start_scope,
 };
 use mj_core::relay::{FileLineChange, RepoDelta};
 use mj_review::delta::RawDiffSummary;
@@ -643,7 +643,7 @@ fn parse_numstat(output: &[u8]) -> Vec<FileLineChange> {
 
 fn session_start_ref(runner: &dyn GitCommandRunner, root: &Path, session: &str) -> Result<String> {
     use sha2::{Digest, Sha256};
-    let baseline = review_baseline_ref(runner, root)?;
+    let baseline = session_start_scope(runner, root)?;
     let prefix = format!(
         "refs/mj/session-start/{}",
         mj_core::hex::lower_hex(Sha256::digest(session.as_bytes()))
@@ -1581,7 +1581,7 @@ pub(super) mod push_tests {
     }
 
     #[test]
-    fn session_start_pin_survives_restart_missing_baseline_and_worktree_moves() {
+    fn session_start_pin_survives_restart_and_worktree_moves() {
         let temp = repository();
         let root = temp.path().join("checkout");
 
@@ -1599,14 +1599,6 @@ pub(super) mod push_tests {
         assert_eq!(
             session_start_head(&SystemGit, &root, "session").unwrap(),
             Some(start.clone())
-        );
-        git(
-            &root,
-            &[
-                "update-ref",
-                "-d",
-                &review_baseline_ref(&SystemGit, &root).unwrap(),
-            ],
         );
         ensure_session_start_head(&SystemGit, &root, "session").unwrap();
         assert_eq!(

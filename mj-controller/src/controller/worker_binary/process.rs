@@ -347,6 +347,20 @@ pub(in crate::controller) struct WorkerProbe {
 pub(in crate::controller) struct WorkerStartupRecord {
     /// The latest step the worker reached.
     pub step: String,
+    /// Ordered startup history; older workers recorded only the latest step.
+    #[serde(default)]
+    pub steps: Vec<WorkerStartupStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(in crate::controller) struct WorkerStartupStep {
+    pub step: String,
+}
+
+impl WorkerStartupRecord {
+    fn reached(&self, step: &str) -> bool {
+        self.step == step || self.steps.iter().any(|entry| entry.step == step)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -362,6 +376,18 @@ pub(in crate::controller) struct WorkerExitRecord {
 }
 
 impl WorkerProbe {
+    pub fn accepting(&self) -> bool {
+        self.startup
+            .as_ref()
+            .is_some_and(|record| record.reached("serving"))
+    }
+
+    pub fn reached_socket(&self) -> bool {
+        self.startup
+            .as_ref()
+            .is_some_and(|record| record.reached("bind-socket") || record.reached("serving"))
+    }
+
     pub fn alive(&self) -> bool {
         !self.pids.is_empty()
     }
@@ -505,6 +531,7 @@ mod probe_tests {
         let probe = WorkerProbe {
             startup: Some(WorkerStartupRecord {
                 step: "acp-initialized".into(),
+                steps: vec![],
             }),
             exit: Some(WorkerExitRecord {
                 reason: "select required ACP execution mode auto: Cannot set permission mode \

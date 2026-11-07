@@ -1,3 +1,9 @@
+=== user message (transcript row) ===
+safered
+=== plan proposal (transcript row) ===
+safered
+=== system message (transcript row) ===
+safered
 === new file diff detail (transcript row) ===
 /workspace/new.txt  +2 −0
 

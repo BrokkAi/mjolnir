@@ -882,6 +882,14 @@ impl SessionHandleBackend for FakeSession {
         _bundle_id: String,
         _scope: mj_core::storage::HistoryScope,
         _query: String,
+        _after: Option<mj_core::storage::HistoryCursor>,
+        _limit: usize,
+    ) -> BoxFuture<'_, AnyResult<mj_core::storage::PromptHistoryPage>> {
+        Box::pin(async { Ok(Default::default()) })
+    }
+
+    fn session_prompts(
+        &self,
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::storage::PromptHistoryEntry>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -950,6 +958,9 @@ struct CapturedSessionMessageRequest {
 
 #[derive(Default)]
 struct FakeBackend {
+    /// When set, a history write announces itself on the first and waits
+    /// for the second before it finishes.
+    record_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     usage_queries: Mutex<Vec<mj_core::usage::SessionUsageQuery>>,
     workspaces: FakeWorkspaces,
     /// Successive answers to `turn_state`, newest last. The final entry
@@ -1191,6 +1202,19 @@ impl SubagentBackend for FakeBackend {
             Ok(self.prompt_ordinal)
         })
     }
+    fn record_user_prompt(
+        &self,
+        _session_id: String,
+        _command_id: String,
+        _text: String,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if let Some((started, release)) = &self.record_gate {
+                started.notify_one();
+                release.notified().await;
+            }
+        })
+    }
     fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, AnyResult<String>> {
         Box::pin(async move { Ok(requested_id) })
     }
@@ -1366,6 +1390,21 @@ impl SubagentBackend for FakeBackend {
         &self,
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::workspace::WorkspaceRecord>>> {
         Box::pin(async { Ok(self.workspaces.0.lock().unwrap().clone()) })
+    }
+    fn workspace(
+        &self,
+        id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::workspace::WorkspaceRecord>>> {
+        Box::pin(async move {
+            Ok(self
+                .workspaces
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|workspace| workspace.id == id)
+                .cloned())
+        })
     }
     fn create_workspace(
         &self,
@@ -1856,6 +1895,58 @@ async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches(
 }
 
 // Hard-won: 5dafd135: a withdrawn startup prompt was still submitted after the worker attached.
+// Hard-won: 09f2862aa: an interrupt during a ready session's history write could not withdraw its prompt
+#[tokio::test]
+async fn an_interrupt_during_the_history_write_withdraws_a_ready_sessions_prompt() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let backend = Arc::new(FakeBackend {
+        prompt_ordinal: 3,
+        record_gate: Some((started.clone(), release.clone())),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        snapshot.sessions[0].capabilities.prompt = true;
+        snapshot.sessions[0].capabilities.interrupt_turn = false;
+    });
+    let prompt = tokio::spawn(
+        app.clone().oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"stop me"}"#))
+                .unwrap(),
+        ),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .expect("the history write began");
+
+    let interrupted = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("the interrupt found the prompt to withdraw")
+    .unwrap();
+    assert_eq!(interrupted.status(), StatusCode::ACCEPTED);
+    release.notify_one();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), prompt)
+        .await
+        .expect("the withdrawn prompt answers")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(
+        backend.prompts.lock().unwrap().is_empty(),
+        "a withdrawn prompt is never submitted"
+    );
+}
+
 #[tokio::test]
 async fn an_interrupt_withdraws_a_prompt_held_for_a_starting_session() {
     // R2-1: an ACP cancel sent while the prompt was held reached
@@ -4753,13 +4844,20 @@ async fn input_aware_wait_returns_the_form_without_needing_a_turn_summary() {
     assert_eq!(body["pending_elicitations"][0]["id"], "question-1");
 }
 
+/// A backend whose store holds the fixture session's workspace, which is
+/// where a resume of that session must find it.
+fn backend_holding_the_session_workspace() -> Arc<FakeBackend> {
+    let mut workspace = FakeWorkspaces::record("default");
+    workspace.id = "default".into();
+    Arc::new(FakeBackend {
+        workspaces: FakeWorkspaces(Mutex::new(vec![workspace])),
+        ..FakeBackend::default()
+    })
+}
+
 /// Make the fixture session look the way `mj suspend` leaves one: suspended, with
 /// resume as the thing it can do next.
 fn make_stopped(snapshot: &mut ViewerSnapshot) {
-    snapshot.workspaces.push(super::super::ViewerWorkspace {
-        id: snapshot.sessions[0].workspace_id.clone(),
-        name: "default".into(),
-    });
     let session = &mut snapshot.sessions[0];
     session.state = "stopped".into();
     session.lifecycle = ViewerLifecycleCategory::Suspended;
@@ -4773,7 +4871,7 @@ fn make_stopped(snapshot: &mut ViewerSnapshot) {
 #[tokio::test]
 async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operation() {
     let (app, mut actions, snapshot_tx, _) =
-        api_app(Arc::new(FakeBackend::default()), make_stopped);
+        api_app(backend_holding_the_session_workspace(), make_stopped);
     let mut response = tokio::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/resume"))
@@ -4907,7 +5005,7 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
 #[tokio::test]
 async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
     let (app, mut actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+        api_app(backend_holding_the_session_workspace(), |snapshot| {
             make_stopped(snapshot);
             // A launch that failed before its first checkpoint.
             let session = &mut snapshot.sessions[0];
@@ -4967,7 +5065,7 @@ fn a_published_session_says_whether_it_has_a_checkpoint() {
 #[tokio::test]
 async fn resuming_an_unknown_session_is_not_found() {
     let (app, _actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), make_stopped);
+        api_app(backend_holding_the_session_workspace(), make_stopped);
     let response = app
         .oneshot(
             bearer(Request::post("/api/v1/sessions/session-404/resume"))

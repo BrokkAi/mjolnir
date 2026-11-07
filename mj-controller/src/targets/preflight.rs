@@ -163,10 +163,7 @@ pub fn ensure_apple_container_runtime(
         "operation cancelled while checking Apple container runtime"
     );
 
-    let status = CommandSpec::new("container", ["system", "status"])
-        .purpose("check Apple container runtime")
-        .stage(ProvisionStage::Provisioning);
-    if executor.execute(&status)?.status == 0 {
+    if let AppleContainerStatus::Running = apple_container_runtime_status(executor)? {
         return Ok(AppleContainerRuntime::Running);
     }
 
@@ -181,14 +178,50 @@ pub fn ensure_apple_container_runtime(
         apple_container_output(&output)
     );
 
+    match apple_container_runtime_status(executor)? {
+        AppleContainerStatus::Running => Ok(AppleContainerRuntime::Started),
+        AppleContainerStatus::Stopped { status, detail } => {
+            bail!("container system status still failed after start with status {status}: {detail}")
+        }
+    }
+}
+
+/// What `container system status` says about Apple's local container service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppleContainerStatus {
+    /// The command exited with status 0.
+    Running,
+    /// The command ran and exited nonzero, which is how it reports a stopped
+    /// service. `detail` is whatever it printed.
+    Stopped { status: i32, detail: String },
+}
+
+/// Ask whether Apple's local container service is running, without changing
+/// anything.
+///
+/// This is the one owner of that question. Callers that only need to know
+/// (the launch options and the image refresher) use it alone; only
+/// `ensure_apple_container_runtime` goes on to start the service. An `Err`
+/// means the answer is unknown: the command could not run, timed out, or was
+/// cancelled.
+pub fn apple_container_runtime_status(
+    executor: &impl CommandExecutor,
+) -> Result<AppleContainerStatus> {
+    let status = CommandSpec::new(
+        "container",
+        APPLE_CONTAINER_STATUS_PROBE[1..].iter().copied(),
+    )
+    .purpose("check Apple container runtime")
+    .stage(ProvisionStage::Provisioning);
     let output = executor.execute(&status)?;
-    ensure!(
-        output.status == 0,
-        "container system status still failed after start with status {}: {}",
-        output.status,
-        apple_container_output(&output)
-    );
-    Ok(AppleContainerRuntime::Started)
+    Ok(if output.status == 0 {
+        AppleContainerStatus::Running
+    } else {
+        AppleContainerStatus::Stopped {
+            status: output.status,
+            detail: apple_container_output(&output),
+        }
+    })
 }
 
 fn apple_container_output(output: &CommandOutput) -> String {

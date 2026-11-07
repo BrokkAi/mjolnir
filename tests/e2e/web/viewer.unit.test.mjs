@@ -1352,7 +1352,7 @@ test('Create sends the selected delegation policy across the browser action wire
 });
 
 test('delegation reflects unavailable configuration and rechecks it before submission', async () => {
-  for (const [kind, configured] of [['codex', false], ['grok', true], ['claude', true]]) {
+  for (const [kind, configured] of [['codex', false], ['grok', true], ['claude', true], ['opencode', true]]) {
     const context = delegationContext(kind, configured);
     const body = makeNode();
     const draft = { profileId: 'profile', subagents: { mode: 'native' } };

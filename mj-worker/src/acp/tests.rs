@@ -249,15 +249,30 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         }),
         stall_policy: None,
     };
-    let request = serde_json::to_value(new_session_request(&spec, true)).unwrap();
+    let request = serde_json::to_value(new_session_request(
+        &spec,
+        &spec.additional_directories,
+        true,
+    ))
+    .unwrap();
     assert_eq!(
         request.get("mcpServers"),
         Some(&serde_json::json!([])),
         "a new session always states its MCP set, even when it is empty"
     );
     for opened in [
-        serde_json::to_value(resume_session_request(&spec, SessionId::from("native"))).unwrap(),
-        serde_json::to_value(load_session_request(&spec, SessionId::from("native"))).unwrap(),
+        serde_json::to_value(resume_session_request(
+            &spec,
+            &spec.additional_directories,
+            SessionId::from("native"),
+        ))
+        .unwrap(),
+        serde_json::to_value(load_session_request(
+            &spec,
+            &spec.additional_directories,
+            SessionId::from("native"),
+        ))
+        .unwrap(),
     ] {
         assert!(
             opened
@@ -293,11 +308,24 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
             socket.profile_registration = profile_registration;
             socket.review_gate = review_gate;
             for request in [
-                serde_json::to_value(new_session_request(&spec, true)).unwrap(),
-                serde_json::to_value(resume_session_request(&spec, SessionId::from("native")))
-                    .unwrap(),
-                serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
-                    .unwrap(),
+                serde_json::to_value(new_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    true,
+                ))
+                .unwrap(),
+                serde_json::to_value(resume_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    SessionId::from("native"),
+                ))
+                .unwrap(),
+                serde_json::to_value(load_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    SessionId::from("native"),
+                ))
+                .unwrap(),
             ] {
                 let expected = if profile_registration {
                     Vec::new()
@@ -315,6 +343,41 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         }
     }
     spec.subagent_mcp_socket.as_mut().unwrap().review_gate = false;
+}
+
+/// OpenCode 2.2.6 titles an MCP call `<server>_<tool>`, and server names may
+/// contain `_`, so another server can produce an owned tool's exact title.
+// Hard-won: 01332d2da: a server named `mj-agents_send` could borrow `send_message`'s approval
+#[test]
+fn opencode_mcp_calls_always_reach_the_person() {
+    use agent_client_protocol::v1::schema::{PermissionOption, ToolCallUpdateFields, ToolKind};
+    let mut spec = reload_fallback_spec(HarnessKind::OpenCode);
+    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+    let mut socket = worker_socket(SubagentMcpRole::Parent);
+    socket.review_gate = true;
+    spec.subagent_mcp_socket = Some(socket);
+    let approvals = OwnedMcpApprovals::for_launch(&spec);
+    // `mj-agents` + `send_message` and `mj-agents_send` + `message` look alike.
+    for title in [
+        "mj-agents_spawn",
+        "mj-agents_send_message",
+        "mj-review_request_review",
+    ] {
+        let request = RequestPermissionRequest::new(
+            "native",
+            ToolCallUpdate::new(
+                "call",
+                ToolCallUpdateFields::new()
+                    .title(title)
+                    .kind(ToolKind::Other),
+            ),
+            vec![
+                PermissionOption::new("once", "Allow once", PermissionOptionKind::AllowOnce),
+                PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+            ],
+        );
+        assert!(approvals.response(&request).is_none(), "{title}");
+    }
 }
 
 #[test]
@@ -386,11 +449,24 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                 let guardian = policy == ExecutionPolicy::ConfiguredApprovals;
                 let offers_review = role.offers_review_server(true);
                 for request in [
-                    serde_json::to_value(new_session_request(&spec, true)).unwrap(),
-                    serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
-                        .unwrap(),
-                    serde_json::to_value(resume_session_request(&spec, SessionId::from("native")))
-                        .unwrap(),
+                    serde_json::to_value(new_session_request(
+                        &spec,
+                        &spec.additional_directories,
+                        true,
+                    ))
+                    .unwrap(),
+                    serde_json::to_value(load_session_request(
+                        &spec,
+                        &spec.additional_directories,
+                        SessionId::from("native"),
+                    ))
+                    .unwrap(),
+                    serde_json::to_value(resume_session_request(
+                        &spec,
+                        &spec.additional_directories,
+                        SessionId::from("native"),
+                    ))
+                    .unwrap(),
                 ] {
                     let servers = request["mcpServers"].as_array().unwrap();
                     if harness != HarnessKind::Claude {
@@ -478,14 +554,15 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                 }
                 if harness == HarnessKind::Dsh {
                     let approvals = OwnedMcpApprovals::for_launch(&spec);
+                    let offers = |tool: &str| role.tool_names().contains(&tool);
                     for (title, owned) in [
-                        ("mcp  mj-agents  spawn", true),
-                        ("mcp  mj-agents  list agents", true),
+                        ("mcp  mj-agents  spawn", offers("spawn")),
+                        ("mcp  mj-agents  list agents", offers("list_agents")),
                         ("mcp  mj-review  request review", offers_review),
                         ("mcp  mj-review  override review", offers_review),
                         ("mcp  mj-review  set review baseline", offers_review),
                         ("mcp  mj-review_  request review", false),
-                        ("mcp  mj-agents  handback", true),
+                        ("mcp  mj-agents  handback", offers("handback")),
                         ("mcp  mj-memory  trace file src/lib.rs", true),
                         // A configured reviewer server is not Mjolnir's,
                         // whatever its name.
@@ -493,6 +570,10 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                         ("mcp  mj-third-party  scan", false),
                         // `mj-agents_` only begins with an owned name.
                         ("mcp  mj-agents   spawn", false),
+                        ("mcp  mj-agents  x  spawn", false),
+                        ("mcp  mj-agents  spawn  x", false),
+                        ("mcp  mj-agents  delete", false),
+                        ("mcp  mj-memory  delete file x", false),
                         ("mcp  mj-agents  ", false),
                         ("Run rm -rf build", false),
                         ("write file mcp  mj-agents  spawn", false),
@@ -520,8 +601,12 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     );
                 }
                 spec.extra_mcp_servers.clear();
-                let without_memory =
-                    serde_json::to_value(new_session_request(&spec, false)).unwrap();
+                let without_memory = serde_json::to_value(new_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    false,
+                ))
+                .unwrap();
                 assert!(without_memory["mcpServers"].as_array().unwrap().is_empty());
                 let expected = (harness == HarnessKind::Claude && guardian)
                     .then(|| serde_json::json!(["Bash(gh:*)"]));
@@ -531,7 +616,12 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                     "{without_memory}"
                 );
                 spec.project_memory = None;
-                let absent = serde_json::to_value(new_session_request(&spec, true)).unwrap();
+                let absent = serde_json::to_value(new_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    true,
+                ))
+                .unwrap();
                 assert!(absent["mcpServers"].as_array().unwrap().is_empty());
                 assert_eq!(
                     absent.pointer("/_meta/claudeCode/options/allowedTools"),
@@ -554,17 +644,30 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
         for (method, request) in [
             (
                 "session/new",
-                serde_json::to_value(new_session_request(&spec, true)).unwrap(),
+                serde_json::to_value(new_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    true,
+                ))
+                .unwrap(),
             ),
             (
                 "session/load",
-                serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
-                    .unwrap(),
+                serde_json::to_value(load_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    SessionId::from("native"),
+                ))
+                .unwrap(),
             ),
             (
                 "session/resume",
-                serde_json::to_value(resume_session_request(&spec, SessionId::from("native")))
-                    .unwrap(),
+                serde_json::to_value(resume_session_request(
+                    &spec,
+                    &spec.additional_directories,
+                    SessionId::from("native"),
+                ))
+                .unwrap(),
             ),
         ] {
             // The protocol's optional field is serialized only when nonempty;
@@ -1048,7 +1151,12 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
     assert_eq!(server.name, "mj-memory");
     assert_eq!(server.command, Path::new("/worker/hel"));
     assert_eq!(server.args, ["worker", "memory-mcp"]);
-    let request = serde_json::to_value(new_session_request(&spec, true)).unwrap();
+    let request = serde_json::to_value(new_session_request(
+        &spec,
+        &spec.additional_directories,
+        true,
+    ))
+    .unwrap();
     assert_eq!(
         request["additionalDirectories"],
         serde_json::json!(["/workspace/api", "/profile/projects/abc/memory"])
@@ -2651,6 +2759,141 @@ async fn stubborn_mode_bridge(stream: tokio::io::DuplexStream) {
     }
 }
 
+/// A Muse bridge whose approval selector offers only `allowAll`: a Guardian
+/// session has no approval mode to run in. With `plan`, it also carries
+/// Plan on its separate `mode` selector.
+async fn allow_all_only_muse_bridge(stream: tokio::io::DuplexStream, plan: bool) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let mut options = serde_json::json!([
+        {"id": "approval_mode", "name": "Approvals", "type": "select",
+         "currentValue": "allowAll", "options": [{"value": "allowAll", "name": "Allow all"}]},
+        {"id": "auto_review", "name": "Auto-review", "type": "select",
+         "currentValue": "off", "options": [
+            {"value": "off", "name": "Off"}, {"value": "on", "name": "On"}
+        ]}
+    ]);
+    if plan {
+        options.as_array_mut().unwrap().push(serde_json::json!(
+            {"id": "mode", "name": "Mode", "category": "mode", "type": "select",
+             "currentValue": "default", "options": [
+                {"value": "default", "name": "Default"}, {"value": "plan", "name": "Plan"}
+            ]}
+        ));
+    }
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read).lines();
+    while let Some(line) = lines.next_line().await.expect("read bridge input") {
+        let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let Some(method) = message.get("method").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let id = message.get("id").cloned().unwrap_or_default();
+        let result = match method {
+            "initialize" => serde_json::json!({"protocolVersion": 1}),
+            "session/new" => serde_json::json!({"sessionId": "scripted", "configOptions": options}),
+            "session/set_config_option" => {
+                select_option(&mut options, &message["params"]);
+                serde_json::json!({"configOptions": options})
+            }
+            _ => serde_json::json!({}),
+        };
+        let response = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+        if write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+// Hard-won: 26a181b: a Guardian Muse session started with approvals off when promptUnmatched was not offered
+#[tokio::test]
+async fn a_guardian_muse_whose_bridge_offers_only_allow_all_fails_the_session() {
+    guardian_muse_offering_only_allow_all_fails(false).await;
+}
+
+/// Muse keeps Plan on its `mode` selector, apart from `approval_mode`, so a
+/// context restored in Plan must not stand in for the approval policy.
+// Hard-won: 46cea84: a Guardian Muse session restored in Plan started with approvals off
+#[tokio::test]
+async fn a_guardian_muse_restored_in_plan_still_needs_its_approval_mode() {
+    guardian_muse_offering_only_allow_all_fails(true).await;
+}
+
+async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let bridge = tokio::spawn(allow_all_only_muse_bridge(bridge_stream, plan));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(1);
+    let (event_tx, event_rx) = mpsc::channel(16);
+    let spec = LaunchSpec {
+        operator_away: Default::default(),
+        imported_logins: None,
+        bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
+        managed_subagent: false,
+        subagent_mcp_socket: None,
+        clear_context_request: None,
+        context_restore: plan.then(|| crate::acp::ContextReset {
+            request_id: "restore".into(),
+            selectors: Vec::new(),
+            mode: Some("plan".into()),
+        }),
+        goal_recovery: Default::default(),
+        command: "scripted".into(),
+        args: Vec::new(),
+        environment: BTreeMap::new(),
+        cwd: std::env::current_dir().unwrap(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: None,
+        native_session_may_have_history: false,
+        accepted_config: Default::default(),
+        initial_model: None,
+        harness: HarnessKind::Muse,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource::Direct {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
+        stall_policy: None,
+    };
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), driver)
+        .await
+        .expect("the session must stop instead of waiting for prompts")
+        .expect("the driver task must not panic")
+        .expect_err("a Guardian Muse session without an approval mode must fail");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("does not offer the promptUnmatched mode"),
+        "{message}"
+    );
+    drop(request_tx);
+    drop(event_rx);
+    bridge.abort();
+}
+
 // Hard-won: eed6c53: A harness could acknowledge a permission mode but run under a different, unsafe mode.
 #[tokio::test]
 async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() {
@@ -3608,6 +3851,15 @@ async fn prompt_echoing_bridge(
     stream: tokio::io::DuplexStream,
     observed: mpsc::UnboundedSender<String>,
 ) {
+    prompt_echoing_bridge_reporting(stream, observed, None).await;
+}
+
+/// `prompt_echoing_bridge` that names itself `agent_version` in `initialize`.
+async fn prompt_echoing_bridge_reporting(
+    stream: tokio::io::DuplexStream,
+    observed: mpsc::UnboundedSender<String>,
+    agent_version: Option<&str>,
+) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
@@ -3625,7 +3877,12 @@ async fn prompt_echoing_bridge(
         let response = match method {
             "initialize" => {
                 let _ = observed.send(method.to_owned());
-                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}})
+                let mut result = serde_json::json!({"protocolVersion": 1});
+                if let Some(version) = agent_version {
+                    result["agentInfo"] =
+                        serde_json::json!({"name": "opencode", "version": version});
+                }
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
             }
             "session/new" | "session/load" => {
                 let _ = observed.send(method.to_owned());
@@ -3648,6 +3905,93 @@ async fn prompt_echoing_bridge(
         {
             break;
         }
+    }
+}
+
+/// OpenCode before 2.2.6 reloads its tool registry 100 ms after an MCP server
+/// connects and signals nobody, so its first prompt waits 250 ms from the open
+/// (a prompt queued at open is held; a later prompt is not). A version that
+/// is missing or unparseable takes the same safe side. 2.2.6 and later wait
+/// for the tools themselves (anomalyco/opencode#60490) and get no hold.
+#[tokio::test(start_paused = true)]
+async fn the_first_prompt_of_an_older_opencode_waits_for_the_tool_registry_and_2_2_6_does_not() {
+    for (version, held) in [
+        (Some("2.2.1"), true),
+        (Some("2.2.5"), true),
+        (Some("not-a-version"), true),
+        (None, true),
+        (Some("2.2.6"), false),
+        (Some("2.3.0"), false),
+    ] {
+        let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+        let bridge = tokio::spawn(prompt_echoing_bridge_reporting(
+            bridge_stream,
+            observed_tx,
+            version,
+        ));
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+        let mut spec = reload_fallback_spec(HarnessKind::OpenCode);
+        spec.resume_session = None;
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let prompt = |request_id: &str| CommandRequest::Prompt {
+            request_id: request_id.into(),
+            prompt: vec![ContentBlock::Text(TextContent::new(request_id))],
+        };
+        request_tx.send(prompt("first")).await.unwrap();
+        let driver = tokio::spawn(async move {
+            drive(
+                transport,
+                spec,
+                &mut request_rx,
+                event_tx,
+                Arc::new(Mutex::new(None)),
+                false,
+            )
+            .await
+        });
+        let mut observe = async |expected: &str| {
+            loop {
+                let method = observed_rx
+                    .recv()
+                    .await
+                    .expect("the bridge keeps reporting");
+                if method == expected {
+                    return tokio::time::Instant::now();
+                }
+            }
+        };
+        let opened = observe("session/new").await;
+        let first = observe("session/prompt:first").await;
+        if held {
+            assert!(
+                first - opened >= Duration::from_millis(250),
+                "the first prompt reached OpenCode {version:?} {:?} after the open",
+                first - opened
+            );
+        } else {
+            assert_eq!(
+                first, opened,
+                "OpenCode {version:?} must not hold its first prompt"
+            );
+        }
+        wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(event, RuntimeEvent::PromptFinished { request_id, .. } if request_id == "first")
+        })
+        .await;
+        let sent = tokio::time::Instant::now();
+        request_tx.send(prompt("second")).await.unwrap();
+        let second = observe("session/prompt:second").await;
+        assert_eq!(second, sent, "a later prompt must not be delayed");
+        drop(request_tx);
+        tokio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        bridge.abort();
     }
 }
 
@@ -5733,6 +6077,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
 }
 
 #[cfg(unix)]
+// Hard-won: #1379: ENOENT from current_dir was reported as a missing bridge executable.
 #[tokio::test]
 async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
     let temp = tempfile::tempdir().unwrap();
@@ -5780,8 +6125,17 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         };
 
         let error = run(spec, request_rx, event_tx).await.unwrap_err();
-        assert!(format!("{error:#}").contains(&format!("launch ACP bridge {}", bridge.display())));
-        assert!(format!("{error:#}").contains(&format!("working directory {}", cwd.display())));
+        let rendered = format!("{error:#}");
+        if bridge == Path::new("sh") {
+            assert!(rendered.contains(&format!(
+                "working directory {} does not exist",
+                cwd.display()
+            )));
+            assert!(!rendered.contains("executable sh was not found"));
+        } else {
+            assert!(rendered.contains(&format!("executable {} was not found", bridge.display())));
+            assert!(rendered.contains(&format!("working directory {}", cwd.display())));
+        }
         assert!(matches!(
             event_rx.recv().await,
             Some(RuntimeEvent::SessionFault { message }) if message.contains("ACP runtime failed")

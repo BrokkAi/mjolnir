@@ -2122,6 +2122,80 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Compatible: limits `prompt_history` to prompts of top-level sessions
+    // that still exist, and adds a full-text index over it. The migration
+    // deletes the spawn instructions recorded for sub-agent children and the
+    // prompts of destroyed sessions. Triggers then keep both rules for every
+    // writer: a prompt is stored only while its session exists and is not a
+    // child, registering a child removes what was stored for it, and
+    // destroying a session removes its prompts. Writers are serialized, so a
+    // prompt racing a destroy lands either before it, and is removed, or
+    // after it, and is ignored.
+    // It also adds a nullable `command_id` with a unique index per session;
+    // older writers list their columns and leave it empty, which the index
+    // allows. Older readers ignore the index. Older writers' inserts, deletes and
+    // destroys fire the same triggers, so the table and the index follow their
+    // writes; every shipped build links a bundled SQLite compiled with FTS5, so
+    // they can run them. Fewer rows for older builds is a behaviour difference,
+    // not lost data they rely on. The compatibility floor stays where it is.
+    // A later migration that recreates `prompt_history`, `sessions` or
+    // `subagent_sessions`, as revision 77 recreated `prompt_history`, drops
+    // the triggers on that table and must create them again.
+    if version < 116 {
+        connection.execute_batch("BEGIN IMMEDIATE;")?;
+        // A prompt sent as a command is stored once per command, so a retried
+        // command does not record its prompt again.
+        if !legacy_schema::table_has_column(connection, "prompt_history", "command_id")? {
+            connection.execute_batch("ALTER TABLE prompt_history ADD COLUMN command_id TEXT;")?;
+        }
+        connection.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS prompt_history_command
+                 ON prompt_history(session_id, command_id) WHERE command_id IS NOT NULL;
+             DELETE FROM prompt_history
+                 WHERE session_id IN (SELECT child_session_id FROM subagent_sessions)
+                    OR session_id NOT IN (SELECT session_id FROM sessions);
+             CREATE TRIGGER IF NOT EXISTS prompt_history_top_level_only
+                 BEFORE INSERT ON prompt_history
+                 WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = new.session_id)
+                   OR EXISTS (SELECT 1 FROM subagent_sessions
+                              WHERE child_session_id = new.session_id)
+                 BEGIN SELECT RAISE(IGNORE); END;
+             CREATE TRIGGER IF NOT EXISTS prompt_history_child_registered
+                 AFTER INSERT ON subagent_sessions BEGIN
+                     DELETE FROM prompt_history WHERE session_id = new.child_session_id;
+                 END;
+             CREATE TRIGGER IF NOT EXISTS prompt_history_session_destroyed
+                 AFTER DELETE ON sessions BEGIN
+                     DELETE FROM prompt_history WHERE session_id = old.session_id;
+                 END;
+             CREATE VIRTUAL TABLE IF NOT EXISTS prompt_history_text USING fts5(
+                 text, content='prompt_history', content_rowid='history_id',
+                 tokenize='trigram');
+             CREATE TRIGGER IF NOT EXISTS prompt_history_text_insert
+                 AFTER INSERT ON prompt_history BEGIN
+                     INSERT INTO prompt_history_text(rowid, text)
+                         VALUES (new.history_id, new.text);
+                 END;
+             CREATE TRIGGER IF NOT EXISTS prompt_history_text_delete
+                 AFTER DELETE ON prompt_history BEGIN
+                     INSERT INTO prompt_history_text(prompt_history_text, rowid, text)
+                         VALUES ('delete', old.history_id, old.text);
+                 END;
+             CREATE TRIGGER IF NOT EXISTS prompt_history_text_update
+                 AFTER UPDATE OF text ON prompt_history BEGIN
+                     INSERT INTO prompt_history_text(prompt_history_text, rowid, text)
+                         VALUES ('delete', old.history_id, old.text);
+                     INSERT INTO prompt_history_text(rowid, text)
+                         VALUES (new.history_id, new.text);
+                 END;
+             INSERT INTO prompt_history_text(prompt_history_text) VALUES ('rebuild');
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (116, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 116;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2596,6 +2670,7 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
 /// Historical fixtures must remove review columns introduced afterward.
 #[cfg(test)]
 pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
+    restore_pre116_prompt_history(connection, version);
     if version < 114
         && legacy_schema::table_has_column(connection, "turn_review_state", "declined_findings")
             .unwrap()
@@ -2629,6 +2704,32 @@ pub(super) fn restore_review_state_schema(connection: &Connection, version: i64)
         connection
             .execute_batch("ALTER TABLE turn_review_state DROP COLUMN push_findings;")
             .unwrap();
+    }
+}
+
+/// Historical fixtures must remove revision 116's prompt-history triggers and
+/// index. Revision 77 recreates `prompt_history`, and SQLite refuses that
+/// rename while triggers on other tables still name the dropped table.
+#[cfg(test)]
+pub(super) fn restore_pre116_prompt_history(connection: &Connection, version: i64) {
+    if version < 116 {
+        connection
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS prompt_history_top_level_only;
+                 DROP TRIGGER IF EXISTS prompt_history_child_registered;
+                 DROP TRIGGER IF EXISTS prompt_history_session_destroyed;
+                 DROP TRIGGER IF EXISTS prompt_history_text_insert;
+                 DROP TRIGGER IF EXISTS prompt_history_text_delete;
+                 DROP TRIGGER IF EXISTS prompt_history_text_update;
+                 DROP TABLE IF EXISTS prompt_history_text;
+                 DROP INDEX IF EXISTS prompt_history_command;",
+            )
+            .unwrap();
+        if legacy_schema::table_has_column(connection, "prompt_history", "command_id").unwrap() {
+            connection
+                .execute_batch("ALTER TABLE prompt_history DROP COLUMN command_id;")
+                .unwrap();
+        }
     }
 }
 
@@ -3390,10 +3491,13 @@ mod reader_tests {
         create_baseline_schema(&connection).unwrap();
         migrate_schema(&connection).unwrap();
         connection
-            .execute(
+            .execute_batch(
                 "INSERT INTO session_contexts(session_id, bundle_id, created_at)
-                 VALUES ('old-session', 'project', '2026-01-01T00:00:00Z')",
-                [],
+                     VALUES ('old-session', 'project', '2026-01-01T00:00:00Z');
+                 INSERT INTO sessions(session_id, title, harness_kind, last_profile,
+                                      target_template_id, state, updated_at)
+                     VALUES ('old-session', 'Keep history', 'codex', 'codex', 'local',
+                             'error', '2026-01-01T00:00:00Z');",
             )
             .unwrap();
         connection
@@ -4143,6 +4247,141 @@ mod reader_tests {
                 .exists([&record.id])
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn prompt_history_keeps_top_level_prompts_and_its_index_follows_previous_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let connection = open_writer(&path).unwrap();
+        // Rewind to revision 115, then store what a revision-115 build kept:
+        // a top-level prompt, a child's spawn instructions and a destroyed
+        // session's prompt.
+        restore_pre116_prompt_history(&connection, 115);
+        connection
+            .execute_batch(
+                "DELETE FROM schema_migrations WHERE version >= 116;
+                 PRAGMA user_version = 115;",
+            )
+            .unwrap();
+        let session = |id: &str| {
+            format!(
+                "INSERT INTO session_contexts(session_id, bundle_id, created_at)
+                     VALUES ('{id}', 'project', 'now');
+                 INSERT INTO sessions(session_id, title, harness_kind, last_profile,
+                                      target_template_id, state, updated_at)
+                     VALUES ('{id}', '{id}', 'codex', 'codex', 'local', 'error', 'now');"
+            )
+        };
+        let prompt = |id: &str, ordinal: i64, text: &str| {
+            format!(
+                "INSERT INTO prompt_history(session_id, event_ordinal, submitted_at, text)
+                     VALUES ('{id}', {ordinal}, 'now', '{text}');"
+            )
+        };
+        connection
+            .execute_batch(&format!(
+                "{}{}{}
+                 INSERT INTO subagent_sessions(child_session_id, parent_session_id,
+                                               request_key, record_json)
+                     VALUES ('child', 'top', 'child', '{{}}');
+                 INSERT INTO session_contexts(session_id, bundle_id, created_at)
+                     VALUES ('destroyed', 'project', 'now');
+                 {}{}{}",
+                session("top"),
+                session("child"),
+                session("other"),
+                prompt("top", 1, "Fix the Parser"),
+                prompt("child", 1, "parser instructions for a child"),
+                prompt("destroyed", 1, "parser prompt of a destroyed session"),
+            ))
+            .unwrap();
+        drop(connection);
+        forget_verified_schema(&path);
+
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        state
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+            .expect("a revision-115 build still reads and writes the store");
+        let matching = |query: &str| -> Vec<String> {
+            connection
+                .prepare(
+                    "SELECT p.text FROM prompt_history_text f
+                     JOIN prompt_history p ON p.history_id = f.rowid
+                     WHERE prompt_history_text MATCH ?1 ORDER BY f.rowid",
+                )
+                .unwrap()
+                .query_map([query], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let stored = || -> i64 {
+            connection
+                .query_row("SELECT count(*) FROM prompt_history", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(matching("\"the parser\""), ["Fix the Parser"]);
+        assert_eq!(
+            stored(),
+            1,
+            "child and destroyed-session prompts are deleted"
+        );
+
+        // The writes a revision-115 build makes, in plain SQL.
+        connection
+            .execute_batch(&format!(
+                "{}{}
+                 UPDATE prompt_history SET text = 'renamed prompt'
+                     WHERE session_id = 'top' AND event_ordinal = 1;",
+                prompt("child", 2, "parser follow-up for a child"),
+                prompt("top", 2, "parser follow-up"),
+            ))
+            .unwrap();
+        assert_eq!(matching("\"parser\""), ["parser follow-up"]);
+        assert_eq!(matching("\"renamed\""), ["renamed prompt"]);
+        assert_eq!(stored(), 2, "a child's prompt is never stored");
+
+        // A prompt stored before its session became a child goes when it does.
+        connection
+            .execute_batch(&format!(
+                "{}{}
+                 INSERT INTO subagent_sessions(child_session_id, parent_session_id,
+                                               request_key, record_json)
+                     VALUES ('late', 'top', 'late', '{{}}');",
+                session("late"),
+                prompt("late", 1, "parser instructions stored early"),
+            ))
+            .unwrap();
+        assert_eq!(matching("\"parser\""), ["parser follow-up"]);
+
+        // Destroying a session removes its prompts and their index entries.
+        connection
+            .execute_batch(&format!(
+                "{}
+                 DELETE FROM sessions WHERE session_id = 'other';",
+                prompt("other", 1, "parser prompt of another session"),
+            ))
+            .unwrap();
+        assert_eq!(matching("\"parser\""), ["parser follow-up"]);
+        assert_eq!(stored(), 2);
+        // Hard-won: a58ad7eb8: a stale chat's abandoned prompt was stored after its session was destroyed
+        connection
+            .execute_batch(&format!(
+                "{}{}",
+                prompt("other", 2, "parser prompt after destroy"),
+                prompt("destroyed", 2, "parser prompt with only a context"),
+            ))
+            .unwrap();
+        assert_eq!(stored(), 2, "a destroyed session's prompt is not stored");
+        connection
+            .execute(
+                "INSERT INTO prompt_history_text(prompt_history_text) VALUES ('integrity-check')",
+                [],
+            )
+            .expect("the index agrees with prompt_history");
     }
 
     #[test]

@@ -8,6 +8,35 @@ pub(super) fn accept_live_history(live_history_enabled: &AtomicBool) {
     live_history_enabled.store(true, Ordering::Release);
 }
 
+/// How long after a session opens OpenCode needs before its tool registry has
+/// reloaded for the MCP servers it was given: its 100 ms debounce, doubled and
+/// rounded up.
+const OPENCODE_TOOL_REGISTRY_SETTLE: Duration = Duration::from_millis(250);
+
+/// Whether an OpenCode that named itself `agent_version` in `initialize` may
+/// still start a turn before its MCP tools are registered. OpenCode 2.2.6 and
+/// later wait for starting MCP servers before each model call
+/// (anomalyco/opencode#60490); an older one, such as the 2.2.1 in a container
+/// built from an older image, does not. A missing or unparseable version takes
+/// the safe side and counts as older.
+fn opencode_may_miss_first_prompt_tools(agent_version: Option<&str>) -> bool {
+    const FIXED_IN: [u64; 3] = [2, 2, 6];
+    let parsed = agent_version.and_then(|version| {
+        let mut parts = version.trim_start_matches('v').splitn(3, '.');
+        let mut next = |last: bool| {
+            let part = parts.next()?;
+            let digits = if last {
+                part.split(['-', '+']).next()?
+            } else {
+                part
+            };
+            digits.parse::<u64>().ok()
+        };
+        Some([next(false)?, next(false)?, next(true)?])
+    });
+    parsed.is_none_or(|version| version < FIXED_IN)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn serve_session(
     connection: &ConnectionTo<Agent>,
@@ -135,6 +164,12 @@ pub(super) async fn serve_session(
     )
     .await?;
 
+    let directories =
+        SessionDirectories::negotiate(spec, &initialized.agent_capabilities.session_capabilities);
+    if let Some(message) = directories.notice.clone() {
+        emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
+    }
+
     if spec.harness == HarnessKind::Claude && !background_subagents_supported {
         emit_runtime_event(events, RuntimeEvent::Warning {
             message: "This Claude adapter does not advertise backgroundSubagents. Foreground completion requires claude-agent-acp 0.95.0 or later; upgrade the container or worker to let prompts finish while background agents run.".into(),
@@ -224,7 +259,7 @@ pub(super) async fn serve_session(
         {
             // `session/resume` does not replay, so everything it sends is live.
             accept_live_history(live_history_enabled);
-            let request = resume_session_request(spec, session_id.clone());
+            let request = resume_session_request(spec, &directories.accepted, session_id.clone());
             offered_mcp_servers = request.mcp_servers.len();
             let resumed = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
@@ -232,7 +267,7 @@ pub(super) async fn serve_session(
                 .with_context(|| format!("resume ACP session {existing}"))
                 .map(|resumed| (resumed.meta, resumed.config_options, resumed.modes))
         } else {
-            let request = load_session_request(spec, session_id.clone());
+            let request = load_session_request(spec, &directories.accepted, session_id.clone());
             offered_mcp_servers = request.mcp_servers.len();
             let loaded = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
@@ -330,7 +365,7 @@ pub(super) async fn serve_session(
             // this, a fallback from a failed reload dropped every reply the new
             // session sent for the rest of the worker's life (R8-1).
             accept_live_history(live_history_enabled);
-            let request = new_session_request(spec, true);
+            let request = new_session_request(spec, &directories.accepted, true);
             offered_mcp_servers = request.mcp_servers.len();
             let created = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
@@ -354,6 +389,21 @@ pub(super) async fn serve_session(
                 false,
             )
         };
+    // OpenCode before 2.2.6 reloads its tool registry on a 100 ms debounce
+    // after an MCP server connects, and signals nobody when it is done. A
+    // prompt that starts a turn inside that window misses the `mj-agents` and
+    // `mj-memory` tools (measured on 2.2.1: prompts 0-80 ms after `tools/list`
+    // missed them almost always, prompts at 120 ms or later had them). So the
+    // first prompt to such a bridge waits until OPENCODE_TOOL_REGISTRY_SETTLE
+    // has passed since the open returned.
+    let mut first_prompt_not_before = (spec.harness == HarnessKind::OpenCode
+        && opencode_may_miss_first_prompt_tools(
+            initialized
+                .agent_info
+                .as_ref()
+                .map(|info| info.version.as_str()),
+        ))
+    .then(|| tokio::time::Instant::now() + OPENCODE_TOOL_REGISTRY_SETTLE);
 
     // An adapter that withholds the servers it was offered says so only in
     // its log. Checked after the open, because a Muse host that could not
@@ -396,7 +446,6 @@ pub(super) async fn serve_session(
     let enforcement = session_enforcement(spec);
     let mut config_options = config_options.unwrap_or_default();
     let mut modes = modes;
-    let mut plan_mode_transition = PlanModeTransition::default();
     // Grok Build publishes model selection through its legacy catalogue. Keep
     // any standard selectors it also returns while projecting model/effort
     // into the shape the rest of Hel reads.
@@ -509,65 +558,18 @@ pub(super) async fn serve_session(
             }
         }
     }
-    if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
-        let selector = enforcement.and_then(ExecutionEnforcement::acp_mode_selector);
-        let enforced = enforce_execution_mode(
-            connection,
-            &session_id,
-            spec.harness,
-            selector,
-            desired_mode,
-            &mut config_options,
-            &mut modes,
-        )
-        .await;
-        if let Err(error) = enforced {
-            // A new session the harness refuses the mode for keeps the
-            // harness's own mode rather than failing the worker, which left a
-            // resumed session suspended on every retry (R8-2). A reloaded
-            // session still fails: it has history, opened in this mode before.
-            let Some(refusal) = (!resumed).then(|| mode_refusal(&error)).flatten() else {
-                return Err(error);
-            };
-            tracing::warn!(
-                harness = ?spec.harness,
-                mode = desired_mode,
-                error = format!("{error:#}"),
-                "the harness refused the execution mode for a new session"
-            );
-            emit_runtime_event(
-                events,
-                RuntimeEvent::Warning {
-                    message: refused_mode_warning(
-                        spec.harness,
-                        selector,
-                        desired_mode,
-                        &refusal,
-                        modes.as_ref(),
-                        &config_options,
-                    ),
-                },
-            )
-            .await?;
-        }
-    }
-    // Muse's auto-review is off in every session muse-acp opens, so it is
-    // selected on every open, resumed or not.
-    if let Some(setting) = enforcement.and_then(ExecutionEnforcement::acp_setting) {
-        enforce_policy_setting(
-            connection,
-            &session_id,
-            spec.harness,
-            setting,
-            &mut config_options,
-        )
-        .await?;
-    }
     if let Some(mode) = spec
         .clear_context_request
         .as_ref()
         .or(spec.context_restore.as_ref())
         .and_then(|reset| reset.mode.as_ref())
+        // A saved mode counts only as evidence that Plan was on when policy owns it.
+        .filter(|mode| {
+            mode.as_str() == "plan"
+                || enforcement
+                    .and_then(ExecutionEnforcement::acp_mode)
+                    .is_none()
+        })
     {
         enforce_execution_mode(
             connection,
@@ -579,6 +581,66 @@ pub(super) async fn serve_session(
             &mut modes,
         )
         .await?;
+    }
+    // Every open selects the policy, so a loaded session cannot keep an
+    // earlier one. Only Plan carried over from a resumed session or a saved
+    // context stays on. Muse's auto-review is off in every session muse-acp
+    // opens, so the policy setting is selected on every open too.
+    // A cleared or restored context put Plan back above, through its saved
+    // mode or its saved selectors; a new session does not start in it.
+    let sync = if (resumed
+        || spec
+            .clear_context_request
+            .as_ref()
+            .or(spec.context_restore.as_ref())
+            .is_some())
+        && current_session_mode(&config_options, &modes).as_deref() == Some("plan")
+    {
+        PolicySync::IfDrifted
+    } else {
+        PolicySync::Always
+    };
+    if let Some(refusal) = reassert_execution_policy(
+        connection,
+        &session_id,
+        spec.harness,
+        enforcement,
+        &mut config_options,
+        &mut modes,
+        sync,
+    )
+    .await?
+    {
+        // A session the harness refuses the mode for stays usable rather than
+        // failing the worker, which left a resumed session suspended on every
+        // retry (R8-2). Claude takes its default mode, new or reloaded, so a
+        // restored mode such as bypassPermissions never survives. Another
+        // harness keeps its own mode for a new session that refused the
+        // request; a reloaded one fails, since it opened in this mode before,
+        // and so does one whose bridge does not offer the mode at all (a Muse
+        // listing only allowAll would run without approvals).
+        let message = match take_safe_mode(
+            connection,
+            &session_id,
+            spec.harness,
+            enforcement,
+            &mut config_options,
+            &mut modes,
+            &refusal,
+        )
+        .await?
+        {
+            Some(message) => message,
+            None if resumed || refusal.unoffered => return Err(refusal.error),
+            None => refused_policy_warning(
+                spec.harness,
+                enforcement,
+                &refusal,
+                modes.as_ref(),
+                &config_options,
+            ),
+        };
+        emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
     }
     let memory = if spec.clear_context_request.is_some() && spec.harness != HarnessKind::Claude {
         if let Some(memory) = spec.project_memory.clone() {
@@ -856,6 +918,9 @@ pub(super) async fn serve_session(
                     .await?;
                     continue;
                 }
+                if let Some(not_before) = first_prompt_not_before.take() {
+                    tokio::time::sleep_until(not_before).await;
+                }
                 let prompt = prompt_for_harness(spec.harness, prompt);
                 let mut updates_before = agent_output_count.get();
                 last_agent_message.clear();
@@ -933,7 +998,7 @@ pub(super) async fn serve_session(
                             approved_plan = Some(plan);
                             implementation_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                             emit_runtime_event(events, RuntimeEvent::Warning {
-                                message: "Plan approved; waiting for Claude to finish planning before restoring the pre-Plan mode.".into(),
+                                message: "Plan approved; waiting for Claude to finish planning before restoring the policy mode.".into(),
                             }).await?;
                         }
                         response = &mut prompt, if prompt_running => {
@@ -944,9 +1009,8 @@ pub(super) async fn serve_session(
                                     prompt_running = false;
                                     let implementation = approved_plan.take().expect("approved plan is present");
                                     mode_restoration = Some(Box::pin(restore_plan_execution_mode(connection, session_id.clone(), RestoredPlanMode {
-                                        config_options: config_options.clone(), modes: modes.clone(), plan: implementation.plan,
-                                        transition: plan_mode_transition.clone(),
-                                    }, implementation.permission_sent)));
+                                        config_options: config_options.clone(), modes: modes.clone(), plan: implementation.plan, warning: None,
+                                    }, implementation.permission_sent, enforcement)));
                                     continue;
                                 }
                                 emit_runtime_event(events, RuntimeEvent::Warning {
@@ -1157,7 +1221,7 @@ pub(super) async fn serve_session(
                         _ = async {
                             tokio::time::sleep_until(implementation_deadline.expect("implementation deadline branch is guarded")).await;
                         }, if implementation_deadline.is_some() => {
-                            let message = "Plan implementation timed out while finishing planning or restoring the pre-Plan mode; restarting the harness without submitting the continuation.";
+                            let message = "Plan implementation timed out while finishing planning or restoring the policy mode; restarting the harness without submitting the continuation.";
                             emit_runtime_event(events, RuntimeEvent::Warning { message: message.into() }).await?;
                             emit_runtime_event(events, RuntimeEvent::CommandInterrupted { request_id, message: message.into() , reason: mj_core::event_outcome::OutcomeReason::TimedOut }).await?;
                             return Ok(Some(SessionRestart::Resume(session_id.to_string())));
@@ -1415,9 +1479,11 @@ pub(super) async fn serve_session(
                             implementation_deadline = None;
                             match restored {
                                 Ok(state) => {
-                                    plan_mode_transition = state.transition.clone();
                                     config_options = state.config_options;
                                     modes = state.modes;
+                                    if let Some(message) = state.warning {
+                                        emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
+                                    }
                                     emit_runtime_event(events, RuntimeEvent::SessionConfigured { config_options: config_options.clone() }).await?;
                                     emit_runtime_event(events, RuntimeEvent::SessionModesConfigured { modes: modes.clone() }).await?;
                                     let plan = state.plan;
@@ -1430,7 +1496,7 @@ pub(super) async fn serve_session(
                                     prompt_running = true;
                                 }
                                 Err(error) => {
-                                    emit_runtime_event(events, RuntimeEvent::Warning { message: format!("Plan implementation stopped: could not restore the pre-Plan mode: {error:#}") }).await?;
+                                    emit_runtime_event(events, RuntimeEvent::Warning { message: format!("Plan implementation stopped: could not restore the policy mode: {error:#}") }).await?;
                                     emit_runtime_event(events, RuntimeEvent::PromptFinished { request_id, stop_reason: PROMPT_ERROR_STOP_REASON.into(), usage: None, diagnostic: None }).await?;
                                     break;
                                 }
@@ -1459,10 +1525,26 @@ pub(super) async fn serve_session(
                 key,
                 value,
             } => {
-                let previous_mode = (spec.harness == HarnessKind::Claude && key == "mode")
-                    .then(|| current_session_mode(&config_options, &modes))
-                    .flatten();
+                if !policy_permits(enforcement, &config_options, Some(&key), &value) {
+                    emit_runtime_event(
+                        events,
+                        RuntimeEvent::CommandRejected {
+                            reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
+                            request_id,
+                            message: POLICY_OWNED_MODE.into(),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+                let previous_model = session_model(&config_options);
                 let grok_model_change = grok_models.is_some() && grok::handles_config_key(&key);
+                // A model change, even one the bridge then refuses and rolls
+                // back, can move the bridge's mode, so the policy follows it.
+                let model_change =
+                    mj_core::acp::find_session_config_option(&config_options, &key).is_some_and(
+                        |option| option.category == Some(SessionConfigOptionCategory::Model),
+                    ) || key == "model";
                 let applied = apply_session_selector(
                     connection,
                     &session_id,
@@ -1475,8 +1557,17 @@ pub(super) async fn serve_session(
                 .await;
                 match applied {
                     Ok(value) => {
-                        if spec.harness == HarnessKind::Claude && key == "mode" {
-                            plan_mode_transition.mode_applied(&value, previous_mode);
+                        if model_change || previous_model != session_model(&config_options) {
+                            reconcile_execution_policy(
+                                connection,
+                                &session_id,
+                                spec.harness,
+                                enforcement,
+                                &mut config_options,
+                                &mut modes,
+                                events,
+                            )
+                            .await?;
                         }
                         spec.accepted_config
                             .lock()
@@ -1501,6 +1592,32 @@ pub(super) async fn serve_session(
                                 "Grok model change response was lost; reload the session to reconcile its model state",
                             ));
                         }
+                        if model_change {
+                            reconcile_execution_policy(
+                                connection,
+                                &session_id,
+                                spec.harness,
+                                enforcement,
+                                &mut config_options,
+                                &mut modes,
+                                events,
+                            )
+                            .await?;
+                            emit_runtime_event(
+                                events,
+                                RuntimeEvent::SessionConfigured {
+                                    config_options: config_options.clone(),
+                                },
+                            )
+                            .await?;
+                            emit_runtime_event(
+                                events,
+                                RuntimeEvent::SessionModesConfigured {
+                                    modes: modes.clone(),
+                                },
+                            )
+                            .await?;
+                        }
                         emit_runtime_event(
                             events,
                             RuntimeEvent::CommandRejected {
@@ -1515,38 +1632,25 @@ pub(super) async fn serve_session(
             }
             CommandRequest::RestoreExecutionMode { request_id } => {
                 let applied = async {
-                    let desired = match &plan_mode_transition {
-                        PlanModeTransition::Planning {
-                            restore_mode: Some(mode),
-                        } => Some(mode.clone()),
-                        PlanModeTransition::Planning { restore_mode: None } => {
-                            bail!("Claude's mode before Plan was not reported")
-                        }
-                        PlanModeTransition::ExplicitModeChange => None,
-                        PlanModeTransition::Inactive => {
-                            bail!("no pre-Plan mode was recorded for this session")
-                        }
-                    };
-                    if let Some(desired) = desired {
-                        enforce_execution_mode(
-                            connection,
-                            &session_id,
-                            spec.harness,
-                            None,
-                            &desired,
-                            &mut config_options,
-                            &mut modes,
-                        )
-                        .await
-                    } else {
-                        current_session_mode(&config_options, &modes)
-                            .context("the explicitly selected Claude mode was not reported")
-                    }
+                    let warning = leave_plan_for_policy(
+                        connection,
+                        &session_id,
+                        spec.harness,
+                        enforcement,
+                        &mut config_options,
+                        &mut modes,
+                    )
+                    .await?;
+                    current_session_mode(&config_options, &modes)
+                        .context("the policy mode was not reported")
+                        .map(|value| (value, warning))
                 }
                 .await;
                 match applied {
-                    Ok(value) => {
-                        plan_mode_transition = PlanModeTransition::default();
+                    Ok((value, warning)) => {
+                        if let Some(message) = warning {
+                            emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
+                        }
                         emit_runtime_event(
                             events,
                             RuntimeEvent::SessionModesConfigured {
@@ -1582,9 +1686,18 @@ pub(super) async fn serve_session(
                 request_id,
                 mode_id,
             } => {
-                let previous_mode = (spec.harness == HarnessKind::Claude)
-                    .then(|| current_session_mode(&config_options, &modes))
-                    .flatten();
+                if !policy_permits(enforcement, &config_options, None, &mode_id) {
+                    emit_runtime_event(
+                        events,
+                        RuntimeEvent::CommandRejected {
+                            reason: mj_core::event_outcome::OutcomeReason::CommandFailed,
+                            request_id,
+                            message: POLICY_OWNED_MODE.into(),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
                 let advertised = modes.as_ref().is_some_and(|state| {
                     state
                         .available_modes
@@ -1610,9 +1723,6 @@ pub(super) async fn serve_session(
                     Ok(()) => {
                         if let Some(state) = modes.as_mut() {
                             state.current_mode_id = mode_id.clone().into();
-                        }
-                        if spec.harness == HarnessKind::Claude {
-                            plan_mode_transition.mode_applied(&mode_id, previous_mode);
                         }
                         emit_runtime_event(
                             events,
@@ -1679,7 +1789,8 @@ pub(super) async fn serve_session(
                 let outcome = if let Some(outcome) = goal_outcome {
                     outcome
                 } else {
-                    match resolve_session_config_recovery(
+                    let previous_model = session_model(&config_options);
+                    let recovered = resolve_session_config_recovery(
                         connection,
                         &session_id,
                         spec,
@@ -1691,8 +1802,37 @@ pub(super) async fn serve_session(
                         &elicitation_id,
                         &response,
                     )
-                    .await?
-                    {
+                    .await?;
+                    // The answer can change the model like SetConfig does.
+                    if previous_model != session_model(&config_options) {
+                        reconcile_execution_policy(
+                            connection,
+                            &session_id,
+                            spec.harness,
+                            enforcement,
+                            &mut config_options,
+                            &mut modes,
+                            events,
+                        )
+                        .await?;
+                        // The answer published its own configuration before
+                        // the policy was restored.
+                        emit_runtime_event(
+                            events,
+                            RuntimeEvent::SessionConfigured {
+                                config_options: config_options.clone(),
+                            },
+                        )
+                        .await?;
+                        emit_runtime_event(
+                            events,
+                            RuntimeEvent::SessionModesConfigured {
+                                modes: modes.clone(),
+                            },
+                        )
+                        .await?;
+                    }
+                    match recovered {
                         Some(outcome) => outcome,
                         None => resolve_pending_elicitation(
                             pending_elicitations,

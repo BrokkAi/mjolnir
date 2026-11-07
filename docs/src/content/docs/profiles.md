@@ -26,12 +26,18 @@ then get an `ask_oracle` tool whatever their delegation choice. **Create** and
 **Move…** show an Oracle row when a model is set.
 
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
-requires a Claude, Codex, or DSH profile and a configured Straightforward task.
+requires a Claude, Codex, DSH, or OpenCode profile and a configured Straightforward task.
 DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
 **None** instead. A DSH session starts on Mjolnir when the last choice was
 Mjolnir and Straightforward is configured, and on None otherwise. Its choice
 becomes the remembered one on interactive creation only when it is Mjolnir, so choosing None for DSH
 does not change what the next Claude or Codex session starts with.
+OpenCode has no steering, so a child's report reaches an OpenCode parent when
+its current turn ends, not between its tool calls. An OpenCode older than 2.2.6
+(for example in a container built from an older image) loads its MCP tools
+shortly after it connects, so the worker holds its first prompt for 250 ms.
+Under configured approvals OpenCode asks the person before each `mj-agents`
+call; choose "always allow" to stop it asking for the rest of the session.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.
 
@@ -836,6 +842,14 @@ Mjolnir then adds its own files to the staged home:
 - for Muse, the permission profile in its settings;
 - for OpenCode under an unconstrained policy, the `"permission": "allow"`
   setting in `opencode.json`;
+- for every OpenCode session, permission rules in `OPENCODE_CONFIG_CONTENT`
+  that turn off OpenCode's `execute` tool, so the `mj-agents` tools are
+  ordinary tools named `mj-agents_spawn` and so on instead of reachable only
+  through scripts, and, unless the session uses OpenCode's own delegation
+  (Native), its own `subagent` tool. OpenCode names a tool
+  `<server>_<tool>`, so another server can carry the same name as a Mjolnir
+  tool; the worker therefore never answers OpenCode's permission requests,
+  and under configured approvals the person approves Mjolnir's tools too;
 - for DSH, the staged `AGENTS.md` in the session's `DSH_ACP_DATA_DIR` (with
   `DSH_ACP_SYSTEM_PROMPT` cleared), and dsh-acp's `permission_mode` on every
   session open: `ask` under configured approvals, `allow` under an

@@ -93,6 +93,9 @@ To see it working: set `[review] trigger = "push"`, start a Claude or Codex sess
 - Decision: a reviewer child's questions and permission requests follow the ordinary rule and go to the reviewed session's agent; there is no reviewer exception.
   Rationale: reviewers have legitimate reasons to ask, for example to run `gh` to read a ticket the change refers to. Independence and the turn-review prompt hold were weighed and accepted.
   Date/Author: 2026-10-24, Jonathan Ellis.
+- Decision: reviewer children are no longer put in plan mode; they run in their profile's ordinary mode, and nothing else enforces read-only. Supersedes the plan-mode premise of the handback decision above (the read-only hint stays accurate).
+  Rationale: Claude Code runs a `haiku` model setting as Sonnet in plan mode, so every Claude reviewer configured as Haiku ran on Sonnet (806 sessions on 2026-11-05 and 06). Pinning a concrete model id instead needed mj to predict Claude Code's provider resolution from environments it cannot fully see; the user chose to leave reviewers alone rather than force them read-only.
+  Date/Author: 2026-11-06, Jonathan Ellis.
 
 ## Outcomes & Retrospective
 

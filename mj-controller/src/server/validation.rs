@@ -322,15 +322,28 @@ pub(super) async fn live_session_config_options(
     state: &ServerState,
     session_id: &str,
     harness: mj_core::config::HarnessKind,
-) -> Option<Vec<ViewerConfigOption>> {
+) -> Option<(Vec<ViewerConfigOption>, Vec<String>)> {
     let backend = state.subagent.as_ref()?;
     let handle = backend.session_handle(session_id.to_owned()).await.ok()??;
     let snapshot = handle.view().snapshot?;
     let options = session_config_view(harness, &snapshot.operational);
     // An empty list is the absence of an answer, not an agent that offers
     // nothing, so it must not become the authority the request is refused by.
-    (!options.is_empty()).then_some(options)
+    let owned = state
+        .snapshot_rx
+        .borrow()
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.execution_enforcement)
+        .map(|enforcement| enforcement.owned_config_keys(&snapshot.operational.config_options))
+        .unwrap_or_default();
+    (!options.is_empty()).then_some((options, owned))
 }
+
+/// Refusal for a setting the target's permission policy owns.
+const POLICY_OWNED_SETTING: &str =
+    "The target's permission policy sets this setting. Use plan mode to enter or leave Plan.";
 
 /// Validate an action against the live session where that matters.
 ///
@@ -363,7 +376,21 @@ pub(super) async fn validate_action_live(
         }
         _ => None,
     };
-    validate_action_against(action, &state.snapshot_rx.borrow(), live.as_deref())?;
+    if let (ControllerAction::SetConfig { key, .. }, Some((_, owned))) = (action, &live)
+        && owned.contains(key)
+    {
+        return Err(ApiError::bad_request(POLICY_OWNED_SETTING));
+    }
+    validate_action_against(
+        action,
+        &state.snapshot_rx.borrow(),
+        live.as_ref().map(|(options, _)| options.as_slice()),
+    )?;
+    if let ControllerAction::Resume { workspace_id, .. }
+    | ControllerAction::ChangeWorkspace { workspace_id, .. } = action
+    {
+        require_listed_workspace(state, workspace_id).await?;
+    }
     require_worker_source(state, action).await
 }
 
@@ -576,7 +603,6 @@ fn validate_action_against(
             validate_public_id(profile_id)?;
             validate_public_id(target_id)?;
             let session = require_session_record(snapshot, session_id)?;
-            require_workspace(snapshot, workspace_id)?;
             require_profile(snapshot, profile_id)?;
             require_launchable_target(snapshot, target_id)?;
             if session
@@ -637,6 +663,9 @@ fn validate_action_against(
         } => {
             validate_public_id(session_id)?;
             let session = require_session_record(snapshot, session_id)?;
+            if session.policy_config_keys.contains(key) {
+                return Err(ApiError::bad_request(POLICY_OWNED_SETTING));
+            }
             if !session.capabilities.set_config {
                 return Err(ApiError::bad_request(
                     "this session cannot change configuration now",
@@ -691,7 +720,6 @@ fn validate_action_against(
                     "this session cannot change workspace now",
                 ));
             }
-            require_workspace(snapshot, workspace_id)?;
         }
         ControllerAction::SetContainerSettings { session_id, .. } => {
             validate_public_id(session_id)?;
@@ -849,13 +877,29 @@ pub(super) fn require_session_record<'a>(
         .ok_or_else(|| ApiError::not_found("unknown session"))
 }
 
-pub(super) fn require_workspace(snapshot: &ViewerSnapshot, id: &str) -> Result<(), ApiError> {
-    snapshot
-        .workspaces
-        .iter()
-        .any(|workspace| workspace.id == id)
-        .then_some(())
-        .ok_or_else(|| ApiError::bad_request("unknown workspace"))
+/// Refuse a workspace the store does not list.
+///
+/// The store owns which workspaces exist, and it lists `default` only while
+/// that workspace holds a session. The snapshot's copy of the list is
+/// republished on a few daemon actions, so it can lag behind the store; a
+/// session that has just landed in `default` made the lag a refusal (#1334).
+/// Every check that a workspace exists therefore asks the store here.
+async fn require_listed_workspace(state: &ServerState, id: &str) -> Result<(), ApiError> {
+    let backend = state
+        .subagent
+        .as_ref()
+        .ok_or_else(ApiError::controller_unavailable)?;
+    match backend.workspace(id.to_owned()).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(ApiError::bad_request("unknown workspace")),
+        Err(error) => {
+            tracing::warn!(error = format!("{error:#}"), "workspace lookup failed");
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read the workspace list",
+            ))
+        }
+    }
 }
 
 pub(super) fn require_profile<'a>(
