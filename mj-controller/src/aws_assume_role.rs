@@ -26,12 +26,15 @@ pub(crate) struct ScopedAwsCredentials {
 }
 
 /// What makes two requests the same credentials: the session (it is the role
-/// session name), the role and policies, and the host identity that assumes it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// session name), the role and policies, and the environment the AWS CLI runs
+/// in, because that selects the host identity that assumes the role (the AWS
+/// profile, but also `AWS_CONFIG_FILE`, `HOME` and the like). No `Debug`:
+/// the environment is not for logs.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ScopedKey {
     session_id: String,
     role: AwsRoleConfig,
-    host_profile: String,
+    environment: BTreeMap<String, String>,
 }
 
 struct ScopedEntry {
@@ -55,6 +58,21 @@ impl ScopedEntry {
 }
 
 impl ScopedAwsCredentials {
+    /// Drop expired credentials. Called on every use and on every periodic
+    /// credential sync pass, so the daemon holds a session's credentials for
+    /// at most their own lifetime after the session stops being synced, and no
+    /// expired secret at all once a pass has run.
+    pub(crate) fn sweep_expired(&self) {
+        let now = (self.now)();
+        sweep(
+            &mut self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            now,
+        );
+    }
+
     pub(crate) fn shared() -> Arc<Self> {
         static SHARED: OnceLock<Arc<ScopedAwsCredentials>> = OnceLock::new();
         Arc::clone(SHARED.get_or_init(|| Arc::new(Self::with_clock(Arc::new(SystemTime::now)))))
@@ -99,7 +117,7 @@ impl ScopedAwsCredentials {
                     .entry(ScopedKey {
                         session_id: session_id.to_owned(),
                         role: role.clone(),
-                        host_profile: host_profile.to_owned(),
+                        environment: source.environment.clone(),
                     })
                     .or_default(),
             )
@@ -139,16 +157,20 @@ impl ScopedAwsCredentials {
     }
 }
 
-/// Drop entries whose credentials have expired, and empty cells nobody holds,
-/// so the daemon keeps no expired secrets and no entry for a finished session.
-/// A cell another thread is minting into is left alone.
+/// Drop entries whose credentials have expired, and empty cells nobody holds.
+/// A cell another caller holds (it is minting into it, or waiting to) is left
+/// alone, expired or not: removing it would let that caller mint into a cell
+/// the map no longer knows. The map lock is held, so nobody can newly clone a
+/// cell while this counts them.
 fn sweep(entries: &mut BTreeMap<ScopedKey, Arc<Mutex<Option<ScopedEntry>>>>, now: SystemTime) {
-    entries.retain(|_, cell| match cell.try_lock() {
-        Ok(entry) => match entry.as_ref() {
-            Some(entry) => entry.expires_at > now,
-            None => Arc::strong_count(cell) > 1,
-        },
-        Err(_) => true,
+    entries.retain(|_, cell| {
+        if Arc::strong_count(cell) > 1 {
+            return true;
+        }
+        match cell.try_lock() {
+            Ok(entry) => entry.as_ref().is_some_and(|entry| entry.expires_at > now),
+            Err(_) => true,
+        }
     });
 }
 
@@ -532,6 +554,66 @@ mod tests {
             }
         });
         assert_eq!(aws.calls.load(Ordering::SeqCst), 1);
+    }
+
+    // Hard-won: 7e7806ea8: the cache key ignored the source environment, so credentials minted by one host identity were served after the identity changed.
+    #[test]
+    fn a_changed_credential_source_mints_again() {
+        let clock = TestClock::new();
+        let aws = FakeAws::new(&clock, Duration::from_secs(3600));
+        let cache = cache(&clock);
+        let mut source = source(role());
+        cache
+            .credentials_for(PROFILE, SESSION, &source, &aws)
+            .unwrap();
+        cache
+            .credentials_for(PROFILE, SESSION, &source, &aws)
+            .unwrap();
+        assert_eq!(aws.calls.load(Ordering::SeqCst), 1);
+        // The same AWS profile name now resolves through another config file.
+        source
+            .environment
+            .insert("AWS_CONFIG_FILE".into(), "/elsewhere/config".into());
+        cache
+            .credentials_for(PROFILE, SESSION, &source, &aws)
+            .unwrap();
+        assert_eq!(aws.calls.load(Ordering::SeqCst), 2);
+        let commands = aws.commands.lock().unwrap();
+        assert_eq!(
+            commands[1].env.get("AWS_CONFIG_FILE").map(String::as_str),
+            Some("/elsewhere/config")
+        );
+    }
+
+    // Hard-won: 7e7806ea8: the sweep removed an expired entry another caller still held, so that caller minted into a cell the map no longer knew.
+    #[test]
+    fn the_sweep_leaves_an_expired_entry_a_caller_still_holds() {
+        let clock = TestClock::new();
+        let aws = FakeAws::new(&clock, Duration::from_secs(900));
+        let cache = cache(&clock);
+        let source = source(role());
+        cache
+            .credentials_for(PROFILE, SESSION, &source, &aws)
+            .unwrap();
+        // A racing caller has cloned the cell and waits for its lock.
+        let held = Arc::clone(cache.entries.lock().unwrap().values().next().unwrap());
+        clock.advance(Duration::from_secs(901));
+        cache.sweep_expired();
+        assert_eq!(cache.entries.lock().unwrap().len(), 1, "held cells stay");
+        // That caller finds the expired entry in its own cell and mints again,
+        // into the cell the cache still holds.
+        drop(held);
+        cache
+            .credentials_for(PROFILE, SESSION, &source, &aws)
+            .unwrap();
+        assert_eq!(cache.entries.lock().unwrap().len(), 1);
+        assert_eq!(aws.calls.load(Ordering::SeqCst), 2);
+        // Once nobody holds it and it has expired, a pass removes it with no
+        // mint at all: no expired secret outlives the periodic sync.
+        clock.advance(Duration::from_secs(901));
+        cache.sweep_expired();
+        assert!(cache.entries.lock().unwrap().is_empty());
+        assert_eq!(aws.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

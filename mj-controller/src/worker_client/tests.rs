@@ -1719,6 +1719,84 @@ async fn role_scoped_sessions_receive_assumed_credentials_and_never_the_unscoped
     assert_eq!(calls_after, calls_before + 1);
 }
 
+// Hard-won: 7e7806ea8: per-session mints ran one after another, so slow AWS calls starved later sessions of their refresh window.
+#[cfg(unix)]
+#[tokio::test]
+async fn role_scoped_mints_for_one_profile_run_together() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const SESSIONS: usize = 4;
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = scratch.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let started = scratch.path().join("started");
+    // Each stand-in call announces itself and answers only once every
+    // session's call has started. Run one after another, the first call
+    // waits out its own bound and fails; run together, all four succeed.
+    let aws = bin.join("aws");
+    std::fs::write(
+        &aws,
+        format!(
+            "#!/bin/sh\necho x >> {started}\n\
+             tries=0\n\
+             while [ \"$(/usr/bin/wc -l < {started})\" -lt {SESSIONS} ]; do\n\
+               tries=$((tries + 1)); [ $tries -gt 200 ] && exit 3; /bin/sleep 0.05\n\
+             done\n\
+             exec /bin/cat \"$MJ_AWS_ASSUME_FIXTURE\"\n",
+            started = started.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/aws-sts-assume-role.json"
+    ))
+    .unwrap();
+    recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
+    let fixture = scratch.path().join("assumed.json");
+    std::fs::write(&fixture, serde_json::to_vec(&recorded).unwrap()).unwrap();
+    let targets = (0..SESSIONS)
+        .map(|index| {
+            let mut target = codex_sync_target(
+                home.path(),
+                &format!("concurrent-{index}"),
+                "2026-09-25T20:00:00Z",
+                &scratch.path().join(format!("received-{index}")),
+            );
+            target.skips_login_file_sync = true;
+            target.aws_credentials = Some(mj_core::aws_credentials::AwsCredentialSource {
+                environment: BTreeMap::from([
+                    ("PATH".into(), bin.to_string_lossy().into_owned()),
+                    ("AWS_PROFILE".into(), "bedrock".into()),
+                    (
+                        "MJ_AWS_ASSUME_FIXTURE".into(),
+                        fixture.to_string_lossy().into_owned(),
+                    ),
+                ]),
+                role: Some(mj_core::config::AwsRoleConfig {
+                    role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+                    session_policy: None,
+                    session_policy_arns: Vec::new(),
+                    duration_seconds: None,
+                    source_identity: false,
+                }),
+            });
+            target
+        })
+        .collect::<Vec<_>>();
+
+    let outcomes = reconcile_profile(&targets, None).await;
+
+    assert_eq!(outcomes.len(), SESSIONS, "{outcomes:?}");
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| outcome.outcome == Ok(vec![CredentialSyncAction::Pushed])),
+        "{outcomes:?}"
+    );
+}
+
 /// #1160: a sync that a session's auth failure asked for says whether it
 /// reached that session, even when the session's login already matched the
 /// profile's. That match is what shows the profile's own login is the one the

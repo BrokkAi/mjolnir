@@ -994,7 +994,7 @@ fn aws_scope_check(
         .filter(|(_, template)| {
             crate::aws_credentials::receives_synced_credentials(
                 profile,
-                crate::aws_credentials::template_keeps_own_credentials(template),
+                crate::aws_credentials::SessionHost::from(*template),
                 &mj_core::state::TargetRuntimeSettings::from(*template).environment,
             )
         })

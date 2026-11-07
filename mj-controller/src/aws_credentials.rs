@@ -25,39 +25,75 @@ fn has_credential_source(environment: &BTreeMap<String, String>) -> bool {
             .is_some_and(|value| value == "false")
 }
 
-/// Whether a session on this profile and target receives AWS credentials
-/// from the controller. One definition, used by launch, the sync, and
-/// `mj doctor`.
-///
-/// `target_keeps_own_credentials` is true for a raw local session, which
-/// reads the host's AWS files itself, and for an EC2 instance, which uses its
-/// instance role. Explicit credentials in the target's or the profile's
-/// environment also stay with their owner.
+/// Where a session runs, as far as AWS credentials care. Built from a
+/// session's locator or from a configured target template; both matches are
+/// exhaustive, so a new target kind must decide here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionHost {
+    /// The controller's own machine and user: the session reads the host's
+    /// AWS files itself.
+    RawLocal,
+    /// An EC2 instance, which uses its instance role.
+    Ec2,
+    /// A container or a remote machine, which has no AWS credentials unless
+    /// the controller delivers them.
+    Isolated,
+}
+
+impl SessionHost {
+    fn keeps_own_credentials(self) -> bool {
+        matches!(self, Self::RawLocal | Self::Ec2)
+    }
+}
+
+impl From<&TargetLocator> for SessionHost {
+    fn from(locator: &TargetLocator) -> Self {
+        match locator {
+            TargetLocator::LocalBare { .. } => Self::RawLocal,
+            TargetLocator::AwsEc2 { .. } => Self::Ec2,
+            TargetLocator::LocalPodman { .. }
+            | TargetLocator::LocalDocker { .. }
+            | TargetLocator::AppleContainer { .. }
+            | TargetLocator::SshBare { .. }
+            | TargetLocator::SshPodman { .. }
+            | TargetLocator::SshDocker { .. }
+            | TargetLocator::SshAppleContainer { .. } => Self::Isolated,
+        }
+    }
+}
+
+impl From<&mj_core::config::TargetTemplate> for SessionHost {
+    fn from(template: &mj_core::config::TargetTemplate) -> Self {
+        use mj_core::config::TargetTemplate as T;
+        match template {
+            T::LocalBare => Self::RawLocal,
+            T::AwsEc2 { .. } => Self::Ec2,
+            T::LocalPodman { .. }
+            | T::LocalDocker { .. }
+            | T::AppleContainer { .. }
+            | T::SshBare { .. }
+            | T::SshPodman { .. }
+            | T::SshDocker { .. }
+            | T::SshAppleContainer { .. } => Self::Isolated,
+        }
+    }
+}
+
+/// Whether a session on this profile and host receives AWS credentials from
+/// the controller. One definition, used by launch, the sync, and `mj doctor`.
+/// Explicit credentials in the target's or the profile's environment also stay
+/// with their owner.
 pub(crate) fn receives_synced_credentials(
     profile: &HarnessProfile,
-    target_keeps_own_credentials: bool,
+    host: SessionHost,
     target_environment: &BTreeMap<String, String>,
 ) -> bool {
     profile.auth_scheme() == AuthScheme::AwsCredentialChain
-        && !target_keeps_own_credentials
+        && !host.keeps_own_credentials()
         && !has_credential_source(target_environment)
         && !target_environment.contains_key("AWS_PROFILE")
         && !target_environment.contains_key("AWS_DEFAULT_PROFILE")
         && !has_credential_source(profile.environment.resolved())
-}
-
-pub(crate) fn locator_keeps_own_credentials(backend: &TargetLocator) -> bool {
-    matches!(
-        backend,
-        TargetLocator::LocalBare { .. } | TargetLocator::AwsEc2 { .. }
-    )
-}
-
-pub(crate) fn template_keeps_own_credentials(template: &mj_core::config::TargetTemplate) -> bool {
-    matches!(
-        template,
-        mj_core::config::TargetTemplate::LocalBare | mj_core::config::TargetTemplate::AwsEc2 { .. }
-    )
 }
 
 /// Explicit target credentials and EC2 instance roles stay target-owned.
@@ -66,11 +102,7 @@ pub(crate) fn source(
     backend: &TargetLocator,
     target_environment: &BTreeMap<String, String>,
 ) -> Result<Option<AwsCredentialSource>> {
-    if !receives_synced_credentials(
-        profile,
-        locator_keeps_own_credentials(backend),
-        target_environment,
-    ) {
+    if !receives_synced_credentials(profile, SessionHost::from(backend), target_environment) {
         return Ok(None);
     }
     selected_source(profile).map(Some)

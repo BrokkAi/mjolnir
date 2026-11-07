@@ -303,7 +303,7 @@ pub(super) async fn reconcile_profile_guarded(
     // Without a role, every session of the profile receives the same export,
     // so it is taken once per pass. With a role, each session receives
     // credentials of its own (the session id is the role session name), so
-    // they are minted per session below.
+    // they are minted per session.
     let unscoped_aws_credentials = match targets.iter().find_map(|target| {
         target
             .aws_credentials
@@ -324,6 +324,27 @@ pub(super) async fn reconcile_profile_guarded(
         }
         None => Ok(None),
     };
+    // Each role-scoped session's mint is an independent AWS call that can take
+    // seconds, so they run together: one slow call must not eat the refresh
+    // window of the sessions queued behind it. The cache also drops expired
+    // credentials here, so a stopped session's secrets do not outlive them.
+    crate::aws_assume_role::ScopedAwsCredentials::shared().sweep_expired();
+    let scoped_aws_credentials =
+        futures::future::join_all(targets.iter().map(scoped_aws_credentials)).await;
+    let aws_credentials = targets
+        .iter()
+        .zip(scoped_aws_credentials)
+        .map(|(target, scoped)| match (&target.aws_credentials, scoped) {
+            (None, _) => Ok(None),
+            (Some(source), scoped) if source.role.is_some() => {
+                scoped.map_err(|error| format!("{error:#}"))
+            }
+            (Some(_), _) => match &unscoped_aws_credentials {
+                Ok(credentials) => Ok(credentials.clone()),
+                Err(error) => Err(format!("{error:#}")),
+            },
+        })
+        .collect::<Vec<Result<Option<mj_core::aws_credentials::AwsCredentials>, String>>>();
     // Targets share a profile but can differ in host CLI access. Collect off
     // scheduler threads once per wire format, then derive both scoped trees.
     let skills = Arc::new(
@@ -336,20 +357,19 @@ pub(super) async fn reconcile_profile_guarded(
     let mut outcomes = BTreeMap::<String, CredentialSyncOutcome>::new();
     for pass in 0..2 {
         let mut pulled = false;
-        for target in targets {
-            let unscoped = match (&target.aws_credentials, &unscoped_aws_credentials) {
-                (Some(source), Ok(credentials)) if source.role.is_none() => credentials.as_ref(),
-                (Some(source), Err(error)) if source.role.is_none() => {
+        for (index, target) in targets.iter().enumerate() {
+            let aws_credentials = match &aws_credentials[index] {
+                Ok(credentials) => credentials.as_ref(),
+                Err(error) => {
                     outcomes.insert(
                         target.session_id.clone(),
                         CredentialSyncOutcome {
                             session_id: target.session_id.clone(),
-                            outcome: Err(format!("{error:#}")),
+                            outcome: Err(error.clone()),
                         },
                     );
                     continue;
                 }
-                _ => None,
             };
             let result = match gate {
                 Some(gate) => gate
@@ -386,13 +406,12 @@ pub(super) async fn reconcile_profile_guarded(
                         } else {
                             None
                         };
-                        let scoped = scoped_aws_credentials(target).await?;
                         reconcile_session(
                             relays,
                             target,
                             &skills,
                             github_token.as_deref(),
-                            scoped.as_ref().or(unscoped),
+                            aws_credentials,
                             &slopcop_login,
                         )
                         .await
@@ -410,20 +429,17 @@ pub(super) async fn reconcile_profile_guarded(
                         Ok(None)
                     };
                     match github_token {
-                        Ok(github_token) => match scoped_aws_credentials(target).await {
-                            Ok(scoped) => {
-                                reconcile_session(
-                                    relays,
-                                    target,
-                                    &skills,
-                                    github_token.as_deref(),
-                                    scoped.as_ref().or(unscoped),
-                                    &slopcop_login,
-                                )
-                                .await
-                            }
-                            Err(error) => Err(error),
-                        },
+                        Ok(github_token) => {
+                            reconcile_session(
+                                relays,
+                                target,
+                                &skills,
+                                github_token.as_deref(),
+                                aws_credentials,
+                                &slopcop_login,
+                            )
+                            .await
+                        }
                         Err(error) => Err(error),
                     }
                 }

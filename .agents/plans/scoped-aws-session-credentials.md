@@ -134,6 +134,16 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
   Rationale: the worker keeps what it already has (nothing is pushed on failure), the failure is reported at once instead of at expiry, and the code has no in-memory fallback path. This matches the failure-behavior decision above.
   Date/Author: 2026-11-07 / Claude.
 
+- Decision (review fixes, 2026-11-07): IMDSv2 is enforced on the instance by one rule, `ensure_imdsv2` in `mj-controller/src/controller/backend.rs`, called from `ec2_locator_after_launch`, which every path that adopts an EC2 instance passes through (fresh launch, a Move destination, and a `Created` Move destination found again after a restart). It reads `MetadataOptions.HttpTokens`; if it is not `required` it runs `aws ec2 modify-instance-metadata-options --instance-id <id> --http-tokens required` and reads again, failing (and so triggering the caller's cleanup) only if that fails. This replaces the earlier check of the `run-instances` response, which terminated an accepted instance and did not cover older records. The `modify` response shape is from the AWS CLI reference and is recorded in `aws-modify-instance-metadata-options.json`; it was not live-verified.
+  Rationale: terminating an accepted instance that may hold work is a worse outcome than fixing its setting, and a rule at one place cannot be skipped by a path.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (review fixes): a Move launch is replayed exactly as recorded. The stored argument vector already records whether the request carried `--metadata-options`; a record from an older daemon holds none, so it is sent without. Adding the option on a retry changes the parameters of an accepted client token, which EC2 refuses (IdempotentParameterMismatch), orphaning the instance.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (review fixes): per-session mints in a sync pass run concurrently (`join_all` over blocking tasks, no new cap); the cache key includes the credential source's whole environment; one `SessionHost` value, built from a locator or from a target template with exhaustive matches, decides whether a host keeps its own AWS credentials; the cache's sweep keeps any cell another caller holds and also runs at the start of every credential sync pass.
+  Date/Author: 2026-11-07 / Claude, from review.
+
 ## Outcomes & Retrospective
 
 Implemented through Milestone 6 on 2026-11-07. A Bedrock profile with `[profiles.<id>.aws] role_arn = ...` now gives each container or SSH session credentials assumed for it alone (role session name `mj-<session id>`), narrowed by a session policy, renewed after half their lifetime through the existing credential sync, with no relay or database change. A refused role fails the launch with AWS's error line and a remedy, or fails the running session's sync outcome while the worker keeps what it has; nothing falls back to the unscoped export. Profiles without a role behave as before, and `mj doctor` warns about them and probes a configured role with a real throwaway AssumeRole. Every EC2 launch (ordinary and Move) requires IMDSv2, verified in the launch response, and doctor warns about a launch template that allows IMDSv1.
@@ -331,3 +341,5 @@ Revision note (2026-11-06): initial version of the plan, written for parent revi
 Revision note (2026-11-07): recorded the user's acceptance of the five decisions and the Milestone 0 results (fixtures, CLI error shape, EC2 override left unproven, Move `--min-count` incompatibility, Bedrock action evidence). Reason: Milestone 0 complete; implementation continues from Milestone 1 after parent review.
 
 Revision note (2026-11-07, later): Milestones 1 to 6 implemented; Progress, Decision Log and Outcomes updated with the implementation decisions, deferred items and test results. Reason: implementation complete.
+
+Revision note (2026-11-07, review): seven review findings fixed (Move replay, in-place IMDSv2 enforcement on every adoption path, concurrent mints, cache key, single host predicate, sweep race, sweep from the sync pass). Reason: review of the first implementation.
