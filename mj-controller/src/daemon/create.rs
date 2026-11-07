@@ -431,7 +431,8 @@ impl RuntimeState {
         control: LifecycleControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
     ) -> Result<(RegisteredSession, Option<&'static str>, Option<String>)> {
-        let admission_started = std::time::Instant::now();
+        let mut admission_timing =
+            crate::launch_timing::LaunchPhaseTimer::new("", "admit and register session");
         tracing::info!(profile_id = %request.profile_id, target_id = %request.target_template_id,
             "session launch admission started");
         let mut request = request;
@@ -583,9 +584,8 @@ impl RuntimeState {
             ))
         })
         .await?;
-        tracing::info!(session_id = %registered.session.id,
-            elapsed_ms = admission_started.elapsed().as_millis(),
-            "session launch admission and registration ended");
+        admission_timing.set_session_id(&registered.session.id);
+        drop(admission_timing);
         let capacity_warning = [oracle_notice, _container_admission.warning.clone()]
             .into_iter()
             .flatten()

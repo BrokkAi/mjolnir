@@ -132,6 +132,32 @@ struct RepositorySetup {
     managed_checkout: Option<super::worktree::PreparedManagedCheckout>,
 }
 
+struct PreparedWorkerPayload {
+    backend: targets::TargetLocator,
+    worker_root: String,
+    launch: Option<mj_core::worker_launch::WorkerLaunchConfig>,
+}
+
+impl PreparedWorkerPayload {
+    fn prepare_harness(
+        self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<(targets::TargetLocator, String)> {
+        let _timing = LaunchPhaseTimer::new(session_id, "prepare harness after checkout");
+        if let Some(launch) = self.launch {
+            let syncing = StagedExecutor::new(executor, ProvisionStage::Syncing);
+            super::worker_binary::prepare_installed_managed_harness(
+                &syncing,
+                &self.backend,
+                &self.worker_root,
+                &launch,
+            )?;
+        }
+        Ok((self.backend, self.worker_root))
+    }
+}
+
 impl Controller {
     pub async fn provision_session_controlled_with_commit(
         &mut self,
@@ -165,9 +191,10 @@ impl Controller {
                 let setup = execute_concurrent_lanes(
                     || execute_repository_setup(session_id, &repositories, executor),
                     || self.install_worker_payload(session_id, executor),
-                );
+                )
+                .and_then(|((), payload)| payload.prepare_harness(session_id, executor));
                 let result = match setup {
-                    Ok(((), (backend, worker_root))) => {
+                    Ok((backend, worker_root)) => {
                         self.connect_and_start_worker(
                             session_id,
                             executor,
@@ -959,14 +986,24 @@ impl Controller {
         &self,
         session_id: &str,
         executor: &impl CommandExecutor,
-    ) -> Result<(targets::TargetLocator, String)> {
+    ) -> Result<PreparedWorkerPayload> {
         let _timing = LaunchPhaseTimer::new(session_id, "prepare worker payload");
         // Worker/profile installation is independent of repository cloning.
         let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
         let (backend, worker_root) = self.worker_placement(session_id)?;
-        self.prepare_worker_files(session_id, &backend, &worker_root, syncing)?;
+        let launch = self.stage_worker_files_for(
+            session_id,
+            &backend,
+            &worker_root,
+            syncing,
+            super::worker_binary::WorkerFilePreparation::Install,
+        )?;
         install_attached_resources(&self.state, session_id, &backend, &worker_root, syncing)?;
-        Ok((backend, worker_root))
+        Ok(PreparedWorkerPayload {
+            backend,
+            worker_root,
+            launch,
+        })
     }
 
     async fn connect_and_start_worker(

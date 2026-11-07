@@ -1964,9 +1964,10 @@ fn limits_a_rootless_podman_host_cannot_enforce_are_dropped_and_reported() {
     assert!(args.contains(&"--memory=8589934592".to_owned()), "{args:?}");
 }
 
-/// A held real Git checkout must not prevent runtime preparation from starting,
-/// and a preparation failure must join that checkout before rollback removes it.
+/// A held real Git checkout overlaps file staging. Harness preflight waits for
+/// the published checkout, and a preflight failure rolls back after both lanes.
 #[cfg(unix)]
+// Hard-won: 8a928a08b: harness preflight inspected an unfinished checkout.
 #[tokio::test]
 async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cleanup() {
     const NAME: &str =
@@ -2016,6 +2017,7 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
         preparation_started: std::sync::mpsc::Sender<()>,
         await_preparation: Mutex<std::sync::mpsc::Receiver<()>>,
         checkout_finished: std::sync::atomic::AtomicBool,
+        checkout: PathBuf,
     }
     impl CommandExecutor for OverlapExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
@@ -2027,20 +2029,31 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
                         .lock()
                         .unwrap()
                         .recv_timeout(bound)
-                        .context("runtime preparation did not overlap checkout")?;
+                        .context("worker file staging did not overlap checkout")?;
                     let result = targets::ProcessExecutor.execute(command);
                     self.checkout_finished
                         .store(true, std::sync::atomic::Ordering::Release);
                     result
                 }
-                "prepare exact managed harness before worker startup" => {
+                "install local worker ownership marker" => {
                     self.await_checkout
                         .lock()
                         .unwrap()
                         .recv_timeout(bound)
-                        .context("checkout did not overlap runtime preparation")?;
+                        .context("checkout did not overlap worker file staging")?;
                     self.preparation_started.send(())?;
-                    bail!("injected runtime preparation failure")
+                    targets::ProcessExecutor.execute(command)
+                }
+                "prepare exact managed harness before worker startup" => {
+                    assert!(
+                        self.checkout.is_dir(),
+                        "harness preflight needs the published checkout"
+                    );
+                    assert!(
+                        self.checkout_finished
+                            .load(std::sync::atomic::Ordering::Acquire)
+                    );
+                    bail!("injected harness preflight failure")
                 }
                 "start detached Mjolnir worker" => panic!("a failed setup must not start a worker"),
                 _ => targets::ProcessExecutor.execute(command),
@@ -2062,6 +2075,7 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
         preparation_started,
         await_preparation: Mutex::new(await_preparation),
         checkout_finished: std::sync::atomic::AtomicBool::new(false),
+        checkout: root.join(".mj/clones").join(&record.id),
     };
     let error = controller
         .provision_session_controlled_with_commit(
@@ -2073,7 +2087,7 @@ async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cle
         .await
         .unwrap_err();
     assert!(
-        format!("{error:#}").contains("injected runtime preparation failure"),
+        format!("{error:#}").contains("injected harness preflight failure"),
         "{error:#}"
     );
     assert!(

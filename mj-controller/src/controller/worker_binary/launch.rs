@@ -124,6 +124,24 @@ impl Controller {
         executor: &impl CommandExecutor,
         preparation: WorkerFilePreparation,
     ) -> Result<()> {
+        if let Some(launch) =
+            self.stage_worker_files_for(session_id, backend, worker_root, executor, preparation)?
+        {
+            prepare_installed_managed_harness(executor, backend, worker_root, &launch)?;
+        }
+        Ok(())
+    }
+
+    /// Return the pending harness preflight so a new checkout can finish first.
+    /// Existing callers complete that preflight through `prepare_worker_files_for`.
+    pub(in crate::controller) fn stage_worker_files_for(
+        &self,
+        session_id: &str,
+        backend: &targets::TargetLocator,
+        worker_root: &str,
+        executor: &impl CommandExecutor,
+        preparation: WorkerFilePreparation,
+    ) -> Result<Option<WorkerLaunchConfig>> {
         let _timing =
             crate::launch_timing::LaunchPhaseTimer::new(session_id, "prepare worker files");
         let owner = crate::worker_lifecycle::require(session_id)?;
@@ -313,9 +331,9 @@ impl Controller {
             if upgrade_retained_worker {
                 let worker = WorkerInstall::for_target(backend, executor)?;
                 install_worker_binary(executor, backend, session_id, &worker, "hel")?;
-                prepare_installed_managed_harness(executor, backend, worker_root, &launch)?;
+                return Ok(Some(launch));
             }
-            return Ok(());
+            return Ok(None);
         }
         let worker = WorkerInstall::for_target(backend, executor)?;
         install_worker_files(
@@ -334,7 +352,7 @@ impl Controller {
             self.install_build_cache_shim(session, backend, &launch, executor)
                 .context("install shared machine build cache configuration")?;
         }
-        prepare_installed_managed_harness(executor, backend, worker_root, &launch)
+        Ok(Some(launch))
     }
 
     /// Refresh and verify the shared-cache copy, then install marked launchers

@@ -23,28 +23,7 @@ pub async fn prepare_harness_launch(
     harness: HarnessKind,
     policy: HarnessRuntimePolicy,
     execution_policy: ExecutionPolicy,
-    spec: AcpSupervisorSpec,
-) -> Result<PreparedHarnessLaunch> {
-    prepare_harness(harness, policy, execution_policy, spec, true).await
-}
-
-/// Warm shared runtime packages while the controller materializes the checkout.
-/// Workspace discovery belongs to the worker's later, full launch preparation.
-pub(super) async fn prepare_harness_runtime(
-    harness: HarnessKind,
-    policy: HarnessRuntimePolicy,
-    execution_policy: ExecutionPolicy,
-    spec: AcpSupervisorSpec,
-) -> Result<PreparedHarnessLaunch> {
-    prepare_harness(harness, policy, execution_policy, spec, false).await
-}
-
-async fn prepare_harness(
-    harness: HarnessKind,
-    policy: HarnessRuntimePolicy,
-    execution_policy: ExecutionPolicy,
     mut spec: AcpSupervisorSpec,
-    prepare_workspace: bool,
 ) -> Result<PreparedHarnessLaunch> {
     let mut environment = mj_core::login_environment::with_overrides(&spec.environment).await?;
     link_build_cache_configuration(&environment).await?;
@@ -91,24 +70,22 @@ async fn prepare_harness(
     } else {
         None
     };
-    if prepare_workspace {
-        let (prepared_spec, prepared_environment) =
-            tokio::task::spawn_blocking(move || -> Result<_> {
-                let before = environment.clone();
-                super::tool_cache::prepare(&spec.cwd, &mut environment)?;
-                spec.environment.extend(
-                    environment
-                        .iter()
-                        .filter(|(name, value)| before.get(*name) != Some(*value))
-                        .map(|(name, value)| (name.clone(), value.clone())),
-                );
-                Ok((spec, environment))
-            })
-            .await
-            .context("build cache preparation task failed")??;
-        spec = prepared_spec;
-        environment = prepared_environment;
-    }
+    let (prepared_spec, prepared_environment) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let before = environment.clone();
+            super::tool_cache::prepare(&spec.cwd, &mut environment)?;
+            spec.environment.extend(
+                environment
+                    .iter()
+                    .filter(|(name, value)| before.get(*name) != Some(*value))
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
+            Ok((spec, environment))
+        })
+        .await
+        .context("build cache preparation task failed")??;
+    spec = prepared_spec;
+    environment = prepared_environment;
     let located = harness::locate(
         policy,
         harness,
@@ -127,42 +104,36 @@ async fn prepare_harness(
     if let Some(managed) = &managed {
         spec.harness_lease = Some(managed.lease_path.clone());
     }
-    let (spec, environment) = if prepare_workspace {
-        tokio::task::spawn_blocking(move || -> Result<_> {
-            let command = if spec.command.is_relative() && spec.command.components().count() > 1 {
-                spec.cwd.join(&spec.command)
+    let (spec, environment) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let command = if spec.command.is_relative() && spec.command.components().count() > 1 {
+            spec.cwd.join(&spec.command)
+        } else {
+            spec.command.clone()
+        };
+        spec.command = resolve_command(&command, &environment)?;
+        // Freeze the explicit provider selection as well as the bridge.
+        if harness == HarnessKind::Codex
+            && let Some(provider) = environment
+                .get("CODEX_PATH")
+                .filter(|path| !path.is_empty())
+        {
+            let provider = Path::new(provider);
+            let provider = if provider.is_relative() && provider.components().count() > 1 {
+                spec.cwd.join(provider)
             } else {
-                spec.command.clone()
+                provider.to_path_buf()
             };
-            spec.command = resolve_command(&command, &environment)?;
-            // Freeze the explicit provider selection as well as the bridge.
-            if harness == HarnessKind::Codex
-                && let Some(provider) = environment
-                    .get("CODEX_PATH")
-                    .filter(|path| !path.is_empty())
-            {
-                let provider = Path::new(provider);
-                let provider = if provider.is_relative() && provider.components().count() > 1 {
-                    spec.cwd.join(provider)
-                } else {
-                    provider.to_path_buf()
-                };
-                if let Some(provider) = find_command(&provider, &environment)? {
-                    let provider = provider.to_string_lossy().into_owned();
-                    spec.environment
-                        .insert("CODEX_PATH".into(), provider.clone());
-                    environment.insert("CODEX_PATH".into(), provider);
-                }
+            if let Some(provider) = find_command(&provider, &environment)? {
+                let provider = provider.to_string_lossy().into_owned();
+                spec.environment
+                    .insert("CODEX_PATH".into(), provider.clone());
+                environment.insert("CODEX_PATH".into(), provider);
             }
-            Ok((spec, environment))
-        })
-        .await
-        .context("harness executable resolution task failed")??
-    } else {
-        // Custom bridge/provider paths can live inside the unfinished checkout.
-        // Resolve them only in the real worker, after both setup lanes join.
-        (spec, environment)
-    };
+        }
+        Ok((spec, environment))
+    })
+    .await
+    .context("harness executable resolution task failed")??;
     Ok(PreparedHarnessLaunch {
         spec,
         environment,
@@ -306,68 +277,6 @@ use harness::find_command_path;
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn runtime_preparation_waits_until_launch_to_discover_workspace_build_tools() {
-        let root = tempfile::tempdir().unwrap();
-        let cwd = root.path().join("checkout");
-        let private = root.path().join("private-tools");
-        let home = root.path().join("home");
-        std::fs::create_dir(&home).unwrap();
-        let spec = AcpSupervisorSpec {
-            command: "./bridge.sh".into(),
-            args: Vec::new(),
-            environment: BTreeMap::from([
-                ("HOME".into(), home.to_string_lossy().into_owned()),
-                (
-                    "MJ_TOOL_CACHE_DIR".into(),
-                    root.path().join("shared").to_string_lossy().into_owned(),
-                ),
-                (
-                    "MJ_TOOL_CACHE_HOME".into(),
-                    private.to_string_lossy().into_owned(),
-                ),
-                ("MJ_TOOL_CACHE_PROJECT".into(), "checkout-race".into()),
-                ("GOFLAGS".into(), String::new()),
-                ("GOENV".into(), "off".into()),
-            ]),
-            excluded_environment: vec!["MJ_MBX_CONFIG_DIR".into(), "GOCACHE".into()],
-            cwd: cwd.clone(),
-            harness_lease: None,
-            node_lease: None,
-        };
-        // A custom bridge under Image needs no installation or provider access.
-        prepare_harness_runtime(
-            HarnessKind::Grok,
-            HarnessRuntimePolicy::Image,
-            ExecutionPolicy::ConfiguredApprovals,
-            spec.clone(),
-        )
-        .await
-        .unwrap();
-        assert!(!cwd.exists());
-        assert!(
-            !private.exists(),
-            "runtime warming must not inspect or configure the workspace"
-        );
-        std::fs::create_dir(&cwd).unwrap();
-        mj_core::test_hooks::install_fake_command(&cwd, "bridge.sh", "exit 0\n");
-        std::fs::write(cwd.join("go.mod"), "module checkout.test/example\n").unwrap();
-        let launch = prepare_harness_launch(
-            HarnessKind::Grok,
-            HarnessRuntimePolicy::Image,
-            ExecutionPolicy::ConfiguredApprovals,
-            spec,
-        )
-        .await
-        .unwrap();
-        assert!(launch.environment["GOFLAGS"].contains("-trimpath"));
-        assert_eq!(
-            Path::new(&launch.environment["GOCACHE"]),
-            root.path().join("shared/go")
-        );
-        assert!(private.is_dir());
-    }
 
     // Hard-won: 7da1ad2bc: a pre-native dsh-acp incorrectly skipped managed Node provisioning.
     #[tokio::test]
