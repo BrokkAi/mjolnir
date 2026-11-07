@@ -18,9 +18,10 @@ Miss patterns: a decision stated as a fact in a closing "Still open"/"Needs your
 
 ## Decisions (Jonathan, 2026-11-06)
 
+- A question the user saw and did not answer is set aside by the user's next message; if the agent still needs the answer, it must ask again in a later reply. S03 (a menu followed by an unrelated user question) therefore stays `none`, and the question locator's window (replies since the latest user message) matches the rule.
 - Any approval request needs the user, whether or not the user asked for that step. Asking permission for work the user already assigned stays `redundant_request`, so automatic continuation still applies (confirmed after review).
 - A menu of next steps was to count only when the user's instructions asked for it. Measured, Jev could not separate solicited from unsolicited menus (candidate c2 flagged 1 of 14 either way), so Jonathan's fallback applies: any menu, choice, or offer awaiting the user's answer needs the user. Exceptions: already authorized work (`redundant_request`), answered or rhetorical questions, questions addressed to another agent.
-- Existing fixtures relabeled under that rule: D02, E07, E08, N01, N02 (offers after a delivered result), O01 ("I'll stop here unless you want me to watch for it"), S03 (an earlier menu still unanswered after a side question). Only `input`, `action` and `wrong_actions` changed; `work` and `reply` are independent axes and keep their labels (a delivered answer that ends with an offer is still `finished` and `closing`). Each records the old label in `outcome.policy`.
+- Existing fixtures relabeled under that rule: D02, E07, E08, N01, N02 (offers after a delivered result), O01 ("I'll stop here unless you want me to watch for it"). Only `input`, `action` and `wrong_actions` changed; `work` and `reply` are independent axes and keep their labels (a delivered answer that ends with an offer is still `finished` and `closing`). Each records the old label in `outcome.policy`.
 
 ## Candidates
 
@@ -32,13 +33,14 @@ The corpus was split by session into development (90 fixtures) and held-out (65)
 | c2 | c1 + approval of outside operations always required | solicited menus still missed; dropped |
 | c3 | c1 + any question, menu, offer, or approval put to the user is required | dev recall 85%; R01-R03 (`redundant_request`) flipped to required |
 | c4 | c3 + the redundant-request exception takes precedence | false alerts back to baseline; carry-over questions fell from 32/36 to 26/36 |
-| c5 | c4 + an unanswered request in an earlier reply since the user's message still counts | adopted |
+| c5 | c4 + an unanswered request in an earlier reply since the user's message still counts | carry-over restored; S03 flagged |
+| c6 | c5 + a question asked before the user's latest message is set aside by it unless a later reply restates it | adopted |
 
-## Result of c5 (adopted)
+## Result of c6 (adopted)
 
-Held-out half, three repeats: 72/84 non-menu requests (86%, baseline 50/84), 0/93 false alerts (baseline 0/93), offers 12/15 (baseline 6/15). Development half plus existing suite, two repeats: existing required 103/104, carry-over questions 24/28 (baseline 32/42), false alerts on existing `none` 7/346 (baseline 11/519). Harmful actions fell on both corpora (3/375 vs 15/465; 9/464 vs 15/696); on the existing suite, correct `finished`, `continue`, and `wait` rates did not fall.
+Held-out half, three repeats: 72/84 non-menu requests (86%, baseline 50/84), 0/93 false alerts (baseline 0/93), offers 12/15 (baseline 6/15); identical to c5. Development half plus existing suite, two repeats: existing required 102/104, carry-over questions 24/28 (baseline 32/42), false alerts on existing `none` 4/346 (baseline 11/519; c5 7/346). The harmful-action and action-rate figures below were measured on c5. Harmful actions fell on both corpora (3/375 vs 15/465; 9/464 vs 15/696); on the existing suite, correct `finished`, `continue`, and `wait` rates did not fall.
 
-Remaining misses and alerts: L2308 (an evaluation lane's "decide whether the latency guard should be rerun" to its judge, 0.55 required), D15 (pausing for a pending SHA, 0.65), W16/W17 near the ratio; W01, D07 (long-standing) and W22 (1 of 2) false alerts.
+Remaining misses and alerts: L2308 (an evaluation lane's "decide whether the latency guard should be rerun" to its judge, 0.55 required), D15 (pausing for a pending SHA), W16/W17 near the ratio; W01, D07 (long-standing) and L2310 (1 of 2) false alerts. S03 still leans required (0.65-0.69) but stays below the ratio.
 
 ## Question locator
 
