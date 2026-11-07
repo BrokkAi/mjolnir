@@ -227,9 +227,12 @@ Claude Remote Control or claude.ai connectors.
 
 ## SSH host keys are trusted on first use
 
-Mjolnir's own SSH connections accept a host key they have never seen, record it
-in `known_hosts`, and refuse a key that later changes
-(`StrictHostKeyChecking=accept-new`). That covers its connections to SSH
+By default, Mjolnir's own SSH connections accept a host key they have never
+seen, record it in `known_hosts`, and refuse a key that later changes
+(`StrictHostKeyChecking=accept-new`). A machine's `extra_args`, an EC2
+machine's `ssh_args`, or a `GIT_SSH_COMMAND` set in the daemon's environment
+replaces that default for the connections it applies to, in either direction.
+The default covers its connections to SSH
 machines and EC2 instances, whose key is always new at first contact, and the
 Git fetches it runs for its clone cache and checkpoint checks, whether those run
 on the controller or on an SSH machine that hosts a target's containers. Someone
