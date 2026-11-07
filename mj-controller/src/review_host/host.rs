@@ -199,6 +199,22 @@ impl TurnReviewHost {
         self.begin_push(session_id, None).await.map(|_| ())
     }
 
+    /// Whether `session_id` has a review open. The host's own slots answer, so
+    /// callers never infer this from a copy of the review views. A session
+    /// with an open review is waiting for its verdict.
+    pub(crate) async fn has_open_review(&self, session_id: &str) -> Result<bool, String> {
+        let (reply, answer) = oneshot::channel();
+        self.events
+            .send(HostEvent::HasOpenReview {
+                session_id: session_id.to_owned(),
+                reply,
+            })
+            .map_err(|_| "the review host stopped".to_owned())?;
+        answer
+            .await
+            .map_err(|_| "the review host stopped".to_owned())?
+    }
+
     /// Hands a finished reviewer child to the host's closer. The host retries
     /// the close with backoff until it succeeds; callers must not close the
     /// child again themselves.

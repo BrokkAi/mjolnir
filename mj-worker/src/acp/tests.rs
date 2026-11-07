@@ -295,7 +295,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
             .map(|server| server["name"].as_str().unwrap_or_default().to_owned())
             .collect()
     };
-    for review_gate in [false, true] {
+    for review_tools in [false, true] {
         for (harness, profile_registration) in [
             (HarnessKind::Codex, false),
             (HarnessKind::Codex, true),
@@ -306,7 +306,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
             spec.harness = harness;
             let socket = spec.subagent_mcp_socket.as_mut().unwrap();
             socket.profile_registration = profile_registration;
-            socket.review_gate = review_gate;
+            socket.review_tools = review_tools;
             for request in [
                 serde_json::to_value(new_session_request(
                     &spec,
@@ -329,7 +329,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
             ] {
                 let expected = if profile_registration {
                     Vec::new()
-                } else if review_gate {
+                } else if review_tools {
                     vec!["mj-agents".to_owned(), "mj-review".to_owned()]
                 } else {
                     vec!["mj-agents".to_owned()]
@@ -342,7 +342,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
             }
         }
     }
-    spec.subagent_mcp_socket.as_mut().unwrap().review_gate = false;
+    spec.subagent_mcp_socket.as_mut().unwrap().review_tools = false;
 }
 
 /// OpenCode 2.2.6 titles an MCP call `<server>_<tool>`, and server names may
@@ -354,7 +354,7 @@ fn opencode_mcp_calls_always_reach_the_person() {
     let mut spec = reload_fallback_spec(HarnessKind::OpenCode);
     spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
     let mut socket = worker_socket(SubagentMcpRole::Parent);
-    socket.review_gate = true;
+    socket.review_tools = true;
     spec.subagent_mcp_socket = Some(socket);
     let approvals = OwnedMcpApprovals::for_launch(&spec);
     // `mj-agents` + `send_message` and `mj-agents_send` + `message` look alike.
@@ -418,7 +418,7 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                 let mut spec = reload_fallback_spec(harness);
                 spec.execution_policy = policy;
                 let mut socket = worker_socket(role);
-                socket.review_gate = true;
+                socket.review_tools = true;
                 spec.subagent_mcp_socket = Some(socket);
                 spec.project_memory = Some(ProjectMemoryLaunchConfig {
                     history_socket: Some("/worker/history.sock".into()),
@@ -447,7 +447,8 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                 .map(ReviewerMcpServer::new)
                 .collect();
                 let guardian = policy == ExecutionPolicy::ConfiguredApprovals;
-                let offers_review = role.offers_review_server(true);
+                // The launch's review_tools flag, not the role, decides.
+                let offers_review = true;
                 for request in [
                     serde_json::to_value(new_session_request(
                         &spec,
@@ -491,10 +492,17 @@ fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
                                 .map(|arg| arg.as_str().unwrap())
                                 .collect();
                             assert_eq!(&args[..2], ["worker", "subagent-mcp"]);
-                            assert_eq!(args.last(), Some(&"--review-server"));
                             assert!(args.contains(&"--socket"));
                             assert!(args.contains(&harness.id()));
-                            assert!(!args.contains(&"--role"));
+                            if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::FetchOnly) {
+                                assert_eq!(
+                                    args[args.len() - 3..],
+                                    ["--review-server", "--role", role.id()]
+                                );
+                            } else {
+                                assert_eq!(args.last(), Some(&"--review-server"));
+                                assert!(!args.contains(&"--role"));
+                            }
                         }
                     }
                     let owned_servers = 4 + usize::from(offers_review);
@@ -1203,7 +1211,7 @@ fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
         role,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
-        review_gate: false,
+        review_tools: false,
         profile_registration: false,
     }
 }
@@ -5589,7 +5597,7 @@ for line in sys.stdin:
             role: SubagentMcpRole::Parent,
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
-            review_gate: false,
+            review_tools: false,
             profile_registration: false,
         }),
         clear_context_request: None,

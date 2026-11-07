@@ -17,6 +17,10 @@ pub(crate) use policy::Services;
 enum ChildCompletion {
     Settled,
     RetryPark,
+    /// The child's own review is open, so its ended turn is not yet a missing
+    /// handback. The verdict wakes the child; this checks again if the review
+    /// ends without waking it (a cancel).
+    AwaitingReview,
 }
 
 /// First wait after a child completion fails or finds the child busy.
@@ -259,7 +263,7 @@ async fn run(
                 if let Some((id, ordinal)) = completion_ids.remove(&task_id) {
                     match result {
                         Ok(ChildCompletion::Settled) => { noticed.insert(id.clone(), ordinal); retry.remove(&id); }
-                        Ok(ChildCompletion::RetryPark) => {
+                        Ok(ChildCompletion::RetryPark | ChildCompletion::AwaitingReview) => {
                             let (next, _) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), None);
                             retry.insert(id, next);
                         }
@@ -320,7 +324,41 @@ async fn complete_child(
     };
     let outcome = observation
         .outcome
+        .clone()
         .context("child completion has no outcome")?;
+    // The review host owns whether a session's review is open. Asked once,
+    // before anything is decided about the ended turn. A reviewer child never
+    // requests review.
+    let review_open = if relation.kind == mj_core::subagent::SubagentKind::Worker {
+        state
+            .review_host()
+            .has_open_review(&child_id)
+            .await
+            .map_err(anyhow::Error::msg)?
+    } else {
+        false
+    };
+    settle_child(
+        &state,
+        &backend,
+        child_id,
+        relation,
+        observation.in_flight,
+        outcome,
+        review_open,
+    )
+    .await
+}
+
+async fn settle_child(
+    state: &RuntimeState,
+    backend: &ApiBackend,
+    child_id: String,
+    relation: mj_core::subagent::SubagentRecord,
+    in_flight: Vec<String>,
+    outcome: mj_core::state::MaterializedTurnOutcome,
+    review_open: bool,
+) -> Result<ChildCompletion> {
     if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
         let id = child_id.clone();
         let command_id = outcome.command_id.clone();
@@ -346,14 +384,14 @@ async fn complete_child(
     {
         return Ok(ChildCompletion::Settled);
     }
+    // A child that requested review and ended its turn is waiting for the
+    // verdict, not forgetting to hand back: no reminder, no notice, no park.
+    if review_open {
+        return Ok(ChildCompletion::AwaitingReview);
+    }
     if relation.noticed_turn != Some(outcome.completed_ordinal) {
         let reminded = backend
-            .remind_subagent_to_hand_back(
-                &child_id,
-                relation.handback_tool,
-                &outcome,
-                &observation.in_flight,
-            )
+            .remind_subagent_to_hand_back(&child_id, relation.handback_tool, &outcome, &in_flight)
             .await?;
         let id = child_id.clone();
         tokio::task::spawn_blocking(move || {
@@ -531,6 +569,102 @@ mod tests {
             complete_child(state.clone(), backend, "child".into(), observation)
                 .await
                 .unwrap(),
+            ChildCompletion::Settled
+        ));
+        assert_eq!(parks.0.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            crate::database::load_subagent("child")
+                .unwrap()
+                .unwrap()
+                .noticed_turn,
+            Some(10)
+        );
+    }
+
+    // A child that asked for review and ended its turn is waiting for the
+    // verdict. The completion loop must not treat that as a missing handback:
+    // no reminder, no notice, no park, until the review is gone.
+    #[tokio::test]
+    async fn a_child_with_an_open_review_is_not_reminded_noticed_or_parked() {
+        const CHILD: &str = "MJ_TEST_DELEGATION_OPEN_REVIEW";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "a_child_with_an_open_review_is_not_reminded_noticed_or_parked",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "delegation-open-review")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("open review").unwrap();
+        let parent = crate::daemon::tests::runtime_test_session(
+            "parent",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        let child = crate::daemon::tests::runtime_test_session(
+            "child",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        crate::database::save_session(&parent).unwrap();
+        let mut relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
+        relation.handback_tool = true;
+        crate::database::save_subagent_session(&child, &relation).unwrap();
+        let state = crate::daemon::tests::test_runtime_state();
+        let parks = Arc::new(BusyThenParked(AtomicUsize::new(1)));
+        let backend = Arc::new(ApiBackend::new(
+            state.session_manager.client(),
+            Arc::new(|_| None),
+            parks.clone(),
+        ));
+        state.install_report_backend(&backend);
+        let outcome = mj_core::state::MaterializedTurnOutcome {
+            answered_through: None,
+            diagnostic: None,
+            usage: None,
+            command_id: "turn".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: None,
+            completed_ordinal: 10,
+            completed_at_ms: 1,
+            outcome: mj_core::state::TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+        };
+        let stored = crate::database::load_subagent("child").unwrap().unwrap();
+        let settle = |review_open| {
+            settle_child(
+                &state,
+                &backend,
+                "child".into(),
+                stored.clone(),
+                Vec::new(),
+                outcome.clone(),
+                review_open,
+            )
+        };
+        assert!(matches!(
+            settle(true).await.unwrap(),
+            ChildCompletion::AwaitingReview
+        ));
+        assert_eq!(parks.0.load(Ordering::SeqCst), 1, "no park attempt");
+        assert_eq!(
+            crate::database::load_subagent("child")
+                .unwrap()
+                .unwrap()
+                .noticed_turn,
+            None
+        );
+        let report = crate::database::load_subagent_report("child").unwrap();
+        assert!(report.reminder.is_none() && report.reminder_failed_for.is_none());
+        // With the review gone, the same turn is judged as before.
+        assert!(matches!(
+            settle(false).await.unwrap(),
             ChildCompletion::Settled
         ));
         assert_eq!(parks.0.load(Ordering::SeqCst), 2);

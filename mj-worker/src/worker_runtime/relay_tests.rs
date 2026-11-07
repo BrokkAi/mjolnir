@@ -7938,6 +7938,55 @@ fn push_gate_startup_and_environment_follow_harness_and_primary_ownership() {
     }
 }
 
+// A child offered the review tools records where its work starts at launch,
+// without the push gate. Otherwise a repository with no default-branch merge
+// base would record the already-committed HEAD at its first request and refuse.
+#[test]
+fn a_review_enabled_child_is_pinned_at_launch_without_the_push_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = git_repository(&temp);
+    let mut launch = launch_config("/test/profile");
+    launch.cwd = repository.clone();
+    launch.session_id = "review-child".into();
+    launch.harness = HarnessKind::Codex;
+    launch.review_trigger = mj_core::config::ReviewTrigger::Push;
+    launch.environment.insert(
+        mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV.into(),
+        "1".into(),
+    );
+    let start = git(&repository, &["rev-parse", "HEAD"]);
+    assert!(launch.prepares_review() && !launch.review_gate());
+    let notices = super::harness_launch::prepare_review_gate(&launch).unwrap();
+    assert!(notices.is_empty());
+    assert!(!repository.join(".git/hooks/pre-push").exists());
+    assert!(
+        !super::harness_launch::primary_supervisor_spec(&launch)
+            .environment
+            .contains_key("MJ_REVIEW_GATE")
+    );
+    std::fs::write(repository.join("tracked.rs"), "fn main() { work(); }\n").unwrap();
+    git(&repository, &["commit", "-qam", "child work"]);
+    assert_eq!(
+        crate::review::capture::review_start_head(
+            &mj_checkpoint::archive::SystemGit,
+            &repository,
+            "review-child"
+        )
+        .unwrap(),
+        Some(start),
+        "the first review covers the commits made after the child started"
+    );
+    // A harness that cannot offer the tools records nothing and says nothing.
+    launch.session_id = "muse-child".into();
+    launch.harness = HarnessKind::Muse;
+    assert!(!launch.prepares_review());
+    assert!(
+        super::harness_launch::prepare_review_gate(&launch)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[test]
 fn push_gate_startup_reports_a_refused_hook_install_once() {
     let temp = tempfile::tempdir().unwrap();

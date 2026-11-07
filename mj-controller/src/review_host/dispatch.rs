@@ -42,6 +42,7 @@ impl HostState {
                     | HostEvent::OverridePush { .. }
                     | HostEvent::SetPushBase { .. }
                     | HostEvent::Resolve { .. }
+                    | HostEvent::HasOpenReview { .. }
                     | HostEvent::QuestionTarget { .. }
             )
         {
@@ -175,6 +176,11 @@ impl HostState {
                         .map(|_| (child_session_id, question_id));
                 let _ = reply.send(target);
             }
+            HostEvent::HasOpenReview { session_id, reply } => {
+                let _ = reply.send(Ok(self.reviews.contains_key(&session_id)
+                    || self.preparing.contains_key(&session_id)
+                    || self.pending_open.contains_key(&session_id)));
+            }
             HostEvent::CloseChild { child_session_id } => self.close_child(child_session_id),
             HostEvent::ChildEnded {
                 child_session_id,
@@ -264,6 +270,10 @@ impl HostState {
                             ))));
                         }
                         HostEvent::Resolve { reply, .. } => {
+                            let _ =
+                                reply.send(Err(format!("review startup recovery failed: {error}")));
+                        }
+                        HostEvent::HasOpenReview { reply, .. } => {
                             let _ =
                                 reply.send(Err(format!("review startup recovery failed: {error}")));
                         }

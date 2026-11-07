@@ -972,10 +972,11 @@ impl HarnessKind {
         )
     }
 
-    /// Whether a primary session on this harness can be held to push review:
-    /// the `--review-gate` flag on its `mj-agents` server, the push hook and
-    /// `MJ_REVIEW_GATE`. Separate from `supports_delegation_tools`, which
-    /// OpenCode satisfies without having the gate.
+    /// Whether a session on this harness is offered the review tools, and a
+    /// primary one can be held to push review: the `mj-review` server, the
+    /// push hook and `MJ_REVIEW_GATE`. Separate from
+    /// `supports_delegation_tools`, which OpenCode satisfies without having
+    /// the gate.
     pub const fn supports_review_gate(self) -> bool {
         matches!(self, Self::Claude | Self::Codex | Self::Dsh)
     }

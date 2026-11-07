@@ -1821,6 +1821,34 @@ async fn a_review_asked_for_while_the_open_one_waits_on_a_question_says_so() {
     host.shutdown().await.expect("shutdown the host");
 }
 
+/// The delegation loop asks the host, not a copy of its views, whether a
+/// child's review is open, and holds the child's completion while it is.
+#[tokio::test]
+async fn the_host_reports_a_session_with_a_running_review_as_open_until_it_closes() {
+    let session = session_id("openquery");
+    let session = session.as_str();
+    let mut manager = FakeManager::new(session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        armed(Some("reviewer")),
+        environment.clone(),
+    );
+    assert!(!host.has_open_review(session).await.unwrap());
+    open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+    assert!(host.has_open_review(session).await.unwrap());
+    assert!(!host.has_open_review("another-session").await.unwrap());
+    host.resolve(session, Resolution::Cancelled).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.has_open_review(session).await.unwrap() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a cancelled review closes");
+    host.shutdown().await.expect("shutdown the host");
+}
+
 /// A saved group's busy child remains owned after a daemon restart; its
 /// handback can race the startup sweep without losing coverage.
 #[tokio::test]

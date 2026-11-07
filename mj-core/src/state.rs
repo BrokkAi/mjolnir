@@ -2544,6 +2544,35 @@ impl State {
             .copied()
             .unwrap_or(true)
     }
+
+    /// The review choice that governs `session_id`. An ordinary sub-agent
+    /// reviews under the choice of the session that spawned it, followed up
+    /// the chain to a top-level session, so the parent's record stays the only
+    /// copy and a later change to it applies to its children. Every other
+    /// session uses its own record. Both the launch that offers the review
+    /// tools and the review host that picks reviewers ask this one function.
+    ///
+    /// Fails with the id of a missing ancestor record, or with the session
+    /// itself when the parent chain loops.
+    pub fn effective_review(
+        &self,
+        session_id: &str,
+    ) -> std::result::Result<Option<&crate::config::SessionReview>, String> {
+        let mut current = session_id;
+        // A chain longer than the relation table repeats a session.
+        for _ in 0..=self.subagents.len() {
+            match self.subagents.get(current) {
+                Some(child) if child.kind == crate::subagent::SubagentKind::Worker => {
+                    if !self.sessions.contains_key(&child.parent_session_id) {
+                        return Err(child.parent_session_id.clone());
+                    }
+                    current = &child.parent_session_id;
+                }
+                _ => return Ok(self.sessions.get(current).and_then(|s| s.review.as_ref())),
+            }
+        }
+        Err(session_id.to_owned())
+    }
 }
 
 /// The effective code checkout for one session, including who owns it.

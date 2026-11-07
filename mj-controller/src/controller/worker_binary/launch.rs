@@ -683,11 +683,22 @@ impl Controller {
             })
             .collect::<Result<Vec<_>>>()?;
         }
-        launch.review_trigger = if subagent.is_none() {
-            self.config
-                .review
-                .for_session(session.review.as_ref())
-                .trigger()
+        // Top-level sessions and ordinary sub-agents may request review. A
+        // reviewer or the oracle never does. The worker derives the review
+        // tools and the push gate from this one value. An ordinary sub-agent
+        // takes its parent's effective review choice.
+        launch.review_trigger = if subagent
+            .as_ref()
+            .is_none_or(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
+        {
+            match self.state.effective_review(session_id) {
+                Ok(choice) => self.config.review.for_session(choice).trigger(),
+                Err(missing) => {
+                    tracing::warn!(session_id, missing = %missing,
+                        "review choice cannot be resolved through the parent chain; launching without review tools");
+                    Default::default()
+                }
+            }
         } else {
             Default::default()
         };

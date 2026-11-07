@@ -69,18 +69,26 @@ impl RuntimeState {
             {
                 let installed = review_config.clone();
                 Arc::new(move |session_id: &str| {
-                    let session = committed_sessions.as_ref().and_then(|committed| {
-                        committed
-                            .borrow()
-                            .as_ref()
-                            .ok()
-                            .and_then(|committed| committed.state.sessions.get(session_id))
-                            .and_then(|session| session.review.clone())
+                    // An ordinary sub-agent reviews under its parent's choice; a
+                    // parent chain that cannot be followed reviews as Off, the
+                    // same as its launch, which offered no review tools.
+                    let choice = committed_sessions.as_ref().and_then(|committed| {
+                        committed.borrow().as_ref().ok().map(|committed| {
+                            committed
+                                .state
+                                .effective_review(session_id)
+                                .map(|choice| choice.cloned())
+                        })
                     });
+                    let choice = match choice {
+                        Some(Ok(choice)) => choice,
+                        Some(Err(_)) => Some(mj_core::config::SessionReview::Off),
+                        None => None,
+                    };
                     installed
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .for_session(session.as_ref())
+                        .for_session(choice.as_ref())
                 })
             },
             revisions.notifier(),
