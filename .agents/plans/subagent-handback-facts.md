@@ -1,0 +1,301 @@
+# Report checkable facts about a child's live work to its parent
+
+This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It must be maintained in accordance with `.agents/PLANS.md` (repository root relative), which defines the rules for ExecPlans. Status: design only, written 2026-11-06 for the user's review; nothing here is implemented, and the user has not yet confirmed the direction.
+
+## Purpose / Big Picture
+
+Mjolnir lets one agent session (the parent) start other agent sessions (children, also called sub-agents) and read their reports. A child ends its work by calling the `handback` tool, which delivers a short written report to the parent. Today that report is only the child's own words. Six open issues show how that goes wrong. In #1406 a child's handback claimed a commit and validation results that did not exist, because its turn ended while its own build was still running. In #1436 eight Codex children handed back a "checkpoint" during a 13 to 25 minute build. In #1426 and #1437 children reported "completed" while their own text said nothing was done. In #1350 a child launched a measurement run detached with `setsid nohup`, handed back, and the run was gone afterwards. In #1427 a long `cargo` build disappeared mid-compile with no exit status. In every case the parent could not tell, without logging into the child's machine, whether the report matched reality.
+
+After this change the daemon (defined below) still accepts every handback and never blocks a turn from ending. It attaches facts that the child's worker (defined below) observed by itself, so a parent can see a mismatch between what the child says and what is true. The facts are: which processes the child's agent started are still running, with command and elapsed time; the child's working tree, meaning the current HEAD commit and which files are uncommitted; and, after the child is parked (its worker stopped to free a slot), which processes the park stopped and which survived. The parent sees them in the `SubagentFinished` report message it already receives, in `list_agents`, and, only when a park actually stopped something, in one short follow-up message. A child's output stays what it is, the child's claim. The facts sit beside it, labelled as observations by Mjolnir.
+
+How to see it working: in an isolated instance, spawn a child that starts `setsid sleep 600` and hands back. The parent's report must contain a line such as "Running processes: 1 ... sleep 600, detached", plus the working-tree lines. After the park, `list_agents` and a follow-up message must say whether that `sleep` was stopped or survived. A golden test pins the rendered report; a test with a real detached process pins the end-to-end behaviour.
+
+## Progress
+
+- [x] (2026-11-06) Research the six issues, the pinned harnesses' background-process behaviour (Codex and Claude Code excerpts), and the code paths for reports, parking and the worker's relay protocol; write this plan.
+- [ ] Milestone 0: measure on real harnesses (prototype, no production code). Record the results under `Surprises & Discoveries`. Steps: (a) does a `setsid` orphan survive a park today, per harness and per target; (b) which processes an idle child holds per pinned harness, and whether `MJ_SESSION_ID` reaches tool-launched processes in Codex; (c) how long `git status` takes on the largest repository a child works in.
+- [ ] Milestone 1: shared fact types in `mj-core`, worker-side collector, new connection-only relay request `WorkFacts` at relay protocol 55.
+- [ ] Milestone 2: daemon collects facts when it builds a finish report, stores them in a new table, renders them in the report with the plain-text downgrade for older workers, and shows them in `list_agents`.
+- [ ] Milestone 3: park facts: snapshot before the stop, liveness check after, durable finish after a crash, follow-up message when something was stopped.
+- [ ] Milestone 4: goldens, the real-process tests, tool-description and documentation updates, upgrade regression, full validation, commit.
+- [ ] Decision point D1 (user): whether a park may be deferred while non-helper processes run. This plan implements reporting only and leaves D1 as a separate follow-up.
+
+## Surprises & Discoveries
+
+- Observation: A process started with `setsid` does not stay in the harness's process tree. When the shell that launched it exits, the kernel reparents it to PID 1. Everything that walks parent links therefore misses exactly the detached runs of #1350.
+  Evidence, run on the development host while writing this plan: `bash -c 'setsid nohup sleep 120 >/dev/null 2>&1 &'` then `ps -eo pid,ppid,pgid,sid,args` showed `sleep 120` with ppid 1, pgid and sid equal to its own pid. Its `/proc/<pid>/environ` still held `MJ_SESSION_ID`, because Claude Code passes that variable through to tool shells and the child inherits it.
+- Observation: Mjolnir's park script does not obviously kill such an orphan. `stop_worker_daemon_script` in `mj-controller/src/targets/worker_daemon.rs` snapshots "every process descended from the worker leader or in its process group" and kills only that snapshot (`hel_snapshot_tree`, `hel_kill_tree`). A reparented `setsid` orphan is in neither. So the premise "park kills the whole tree including setsid descendants" holds only for a `setsid` process whose launching shell is still alive at park time. What killed the run in #1350 is not established. Candidates are the harness itself terminating its tool processes, a container's process namespace ending, or the run failing for its own reasons. Milestone 0 must find out, and the facts in this plan are written to report what actually happened (stopped or survived) rather than to assume the park kills everything.
+- Observation: The daemon already sends the finish report before it parks. `complete_child` in `mj-controller/src/daemon/delegation.rs` calls `reconcile_parent_reports` (which enqueues the report) and then `park_subagent`. A busy park returns `ParkOutcome::Busy` and the completion is retried with backoff up to 30 seconds (`COMPLETION_BUSY_CAP`). This means a report-time fact cannot let the parent save a run from the park, because the park follows within about a second. It also means a deferral variant of the park (decision D1) would plug into machinery that already exists.
+- Observation: `SubagentRecord` in `mj-core/src/subagent.rs` is `#[serde(deny_unknown_fields)]`. A new field there would make an older daemon fail to read the stored row, so park facts must not go into it. `SubagentFinishedReport` is not `deny_unknown_fields`, so an added optional field is safe for older readers of the stored outbox row.
+- Observation: Codex never reports what is still running. Its `terminate_all_processes` runs only on shutdown or an explicit clean command; at turn end it only records a metric of background terminals (`core/src/tasks/mod.rs`, from the research excerpts in `.mj/agents/205faa1d733e0a9bf05210488efe31a4/codex-excerpts.txt`). Claude Code 2.1.308 kills a synchronous sub-agent's background shells at its final response, but keeps them across turn ends in open-input (ACP) sessions and wakes the model on completion (`.mj/agents/8be3990413d22078160af36c09f2924f/claude-code-background-excerpts.md`). Neither tells the parent. This is why the worker has to observe the processes itself.
+- Observation: `CpuUsage` is the existing precedent for a worker-owned, connection-only measurement: a background task samples the worker's process tree and publishes through a watch channel (`mj-worker/src/cpu_usage.rs`, `mj-worker/src/worker_runtime/unix.rs` near line 2137), the request is never journaled, and `RelayRequest::minimum_protocol` gates it (`RELAY_CPU_USAGE_PROTOCOL = 29` in `mj-core/src/relay.rs`). Its Linux collector (`mj-worker/src/cpu_usage/linux.rs`) already reads `/proc`. The new request follows it.
+
+## Decision Log
+
+- Decision: Accept every handback and never refuse or block a turn from ending. Add facts only.
+  Rationale: The user's stated direction. A refusal gives a child that is blocked for a legitimate reason no way to say so, and the issues show children that already knew they were violating the brief. Observations let the parent judge.
+  Date/Author: 2026-11-06 / planning agent, from the user's direction.
+
+- Decision: The worker owns the facts. The daemon asks for them once per finish and stores the answer; it never recomputes them from its own copy of the inputs.
+  Rationale: `AGENTS.md` "Concurrency" requires one owner per fact. The worker owns the harness process tree and the child's working directory; the daemon owns only reports and lifecycle. A recorded fact is immutable, like the report that carries it, so a retry or a daemon restart cannot produce a second, different answer for the same finish.
+  Date/Author: 2026-11-06 / planning agent.
+
+- Decision: Facts are connection-only. They are not journaled in the relay journal and are not added to the worker's relay snapshot.
+  Rationale: Journal observations have a digest and a persisted format that older workers and controllers must read (`mj-core/src/relay/snapshot/digest.rs`). Process lists are volatile and are meaningless after replay. The `CpuUsage` request is the precedent.
+  Date/Author: 2026-11-06 / planning agent.
+
+- Decision: Identify the agent's processes as the union of (a) the live process tree under the harness and (b) any process on the machine whose environment carries this session's `MJ_SESSION_ID`, then subtract helpers. Do not rely on parent links alone.
+  Rationale: The Surprises section shows parent links miss detached runs, which are the case that matters most. `MJ_SESSION_ID` is set by the controller for every harness session (`mj-controller/src/controller/worker_binary/launch.rs`, near line 1072) and is inherited by descendants. Whether Codex's tool shells keep it is verified in Milestone 0. If a pinned harness scrubs it, Milestone 1 must add a harness-independent marker rather than silently reporting an empty list (reporting "unavailable" with the reason is the fallback behaviour; an empty list that is not true is the failure to avoid).
+  Date/Author: 2026-11-06 / planning agent.
+
+- Decision: Helpers are excluded by what they are, plus a baseline taken when the harness is ready. Excluded are Mjolnir's own executable (any `hel worker ...` or `mj` process), the ACP supervisor and bridge command, the pinned harness executable, and every process that already existed, by PID and start time, when the harness first reported ready. The baseline is held by the worker for the lifetime of the harness it describes and is retaken whenever the harness restarts.
+  Rationale: A positive definition of "started by a tool call" is not available from either harness (Codex and Claude Code give no such marker, and `BASH_ENV` hooks only reach bash). MCP servers (the user's own included) start with the session, so a ready-time baseline removes them without a name list. Anything the baseline misses is reported, so the error direction is over-reporting, which the parent can read, rather than silently hiding a run. The acceptance test is that an idle child on each pinned harness reports zero processes (Milestone 0 measures this; Milestone 1 tunes it).
+  Date/Author: 2026-11-06 / planning agent.
+
+- Decision: Report limits are a reading budget, not a safety cap: counts are always exact; the report shows at most 5 processes and 8 changed paths, command text cut at 160 characters. The process list kept for the park's later liveness check is complete (PID and process start identity only).
+  Rationale: The user requires a short report for a child with hundreds of processes or thousands of dirty files. These numbers limit how much the parent has to read; they guard against no failure, so no timeout or admission cap accompanies them (`AGENTS.md` forbids speculative caps). The values are choices of presentation; tests show the counts stay exact.
+  Date/Author: 2026-11-06 / planning agent.
+
+- Decision: Facts for processes and for the working tree are collected in independent parts. A part that cannot be collected is reported as unavailable with a reason (for example "the worker predates this feature", "not a Git repository", "this platform does not expose process environments"). It is never rendered as zero.
+  Rationale: `AGENTS.md` asks for "unknown" versus "empty" to be distinguishable. A parent that reads "Running processes: 0" must be able to trust it.
+  Date/Author: 2026-11-06 / planning agent.
+
+- Decision: No timeout on the worker's Git collection. If Milestone 0 measures a real limit, set a cap from that measurement and say so in a comment; until then a hung Git delays that one child's report and nothing else.
+  Rationale: `AGENTS.md` forbids caps on speculation and says a timeout covers only the work it names. The collection runs off the worker's connection loop (see Interfaces), so it cannot block turn handling or other requests, and the daemon task that waits for it is one per child and is rebuilt from durable state if the daemon restarts.
+  Date/Author: 2026-11-06 / planning agent.
+
+- Decision: Report park results in two places: the stored per-child row (shown by `list_agents` while the child is parked), and one follow-up mailbox message that is sent only if the park stopped at least one non-helper process, and woken (`wake: true`) in that case.
+  Rationale: The finish report is built before the park, so it can only say what a park will stop (Surprises). A killed run is news that the parent cannot otherwise find out, so it should wake an idle parent; a park that stopped nothing sends nothing, so the common case adds no traffic. The user may prefer `wake: false`; that is a one-word change recorded here.
+  Date/Author: 2026-11-06 / planning agent. Open to the user.
+
+- Decision (DEFERRED TO THE USER, D1): Default behaviour is to report. Deferring a park while non-helper processes run is a separate choice, described in `Context and Orientation` under "Decision point D1", and is not implemented by this plan.
+  Rationale: The user's inclination is not to refuse handback; deferring a park does not refuse a handback but keeps a live slot, so it has a cost the user should weigh.
+  Date/Author: 2026-11-06 / planning agent.
+
+- Decision: Do not add an automatic continuation ("you are not done, continue") for #1436 here.
+  Rationale: Outside the user's stated direction. The facts make the condition visible to a parent; an automatic continuation could later key off the same recorded fact. Listed under Outcomes as a candidate follow-up.
+  Date/Author: 2026-11-06 / planning agent.
+
+## Outcomes & Retrospective
+
+Not started. Write this section at the end of Milestone 4 and again after the user decides D1. It should say, per issue, what the parent can now see: #1406 (HEAD unchanged and a running build are visible), #1436 (visible, not prevented), #1426 and #1437 (a clean tree and an unchanged HEAD are visible; the missing blocker is not), #1350 (what the park stopped or spared is visible), #1427 (not explained by this change unless Milestone 0 finds its cause).
+
+## Context and Orientation
+
+This section explains the repository for a reader who has only this file and the working tree. The repository is a Rust workspace named Mjolnir; the command line is `mj`. All paths below are relative to the repository root.
+
+A session is one agent conversation. The daemon (command `mj daemon-run`, code in `mj-controller`) is the long-running control process: it owns the SQLite database, session records, lifecycle operations (starting, parking, closing sessions), and the mailbox that delivers messages between sessions. Each session also has a worker (`mj-worker`, run as `hel worker run --root ...`), one process per session that runs the agent harness, the program that actually talks to the model (Codex, Claude Code and others; a thin adapter called a bridge speaks the Agent Client Protocol, or ACP, to it). The worker keeps running when no daemon is attached. `AGENTS.md` section "Control plane and data plane" states the rules: a daemon task must be short and bounded or resumable from durable state, and the daemon must not hold anything a worker or the database cannot give back. The relay is the connection between daemon and worker: requests are the `RelayRequest` enum in `mj-core/src/relay/protocol.rs`, answered with `RelayResponsePayload`, and gated by `RelayRequest::minimum_protocol`. The relay protocol version is a single number, `RELAY_PROTOCOL_VERSION` in `mj-core/src/relay.rs`, currently 54. A daemon talking to an older worker must degrade without breaking the worker.
+
+A handback is the child's `handback` tool call, which stores its report. The finish report is the `SubagentFinishedReport` struct in `mj-core/src/mailbox.rs`, carried by the `MailboxEventBody::SubagentFinished` mailbox event. It is built in `reconcile_parent_reports` (`mj-controller/src/server_runtime/api.rs`, near line 1663) and stored by `enqueue_subagent_reports` (`mj-controller/src/database/delegation.rs`) in the mailbox outbox table (`mailbox_outbox`) together with a marker on the child's record, in one transaction. The outbox delivers the event to the parent's worker (`mj-controller/src/mailbox_outbox.rs`). The parent's worker renders the event into text for the model with `render_mailbox_event` in `mj-core/src/mailbox.rs`. A worker older than the event's `minimum_relay_protocol` cannot render a new shape, so the outbox first replaces the body with a `PlainText` rendering made by the daemon: this is `downgrade_review_or_report` in `mj-controller/src/mailbox_outbox.rs`. Relay protocol 54 added exactly this for reports (`RELAY_SUBAGENT_REPORT_STATE_PROTOCOL`); the test `a_child_report_that_is_not_a_finish_reaches_older_workers_as_text` in that file is the model for ours.
+
+Parking: a finished child gives its processes back so that the target does not run out of process slots (#1161). `complete_child` in `mj-controller/src/daemon/delegation.rs` first reconciles the report, then calls `park_subagent`, which runs `Controller::park_subagent_worker` in `mj-controller/src/controller/subagent_park.rs`. That function leases the worker's connection while the worker reports nothing running or queued (`IdleWorkspaceLease::acquire_for_upgrade`), runs the stop script from `stop_worker_daemon_script` in `mj-controller/src/targets/worker_daemon.rs` through the target's command executor, then saves the child's record as `Parked`. A parked child keeps its record, relay journal and the harness's native session id; the next `send_message` starts it again. `list_agents` and the report show `parked: true` (`mark_parked` in `api.rs`). Today the tool descriptions in `mj-worker/src/subagent_mcp.rs` and `mj-core/src/subagent.rs` say a parked child "holds no processes", which does not say what happens to processes the child detached.
+
+A helper process is one of the processes the harness needs in order to run, as opposed to work the agent started. Examples are the ACP supervisor, the bridge, the harness's own executable, MCP servers (programs that give the harness extra tools, including Mjolnir's own `hel worker memory-mcp` and `subagent-mcp`), and Mjolnir's own commands. A work process is anything else the session started. A detached process is a work process that is no longer a descendant of the harness because its parent exited and the kernel gave it to PID 1; typically it was started with `setsid`, `nohup` or `&` followed by the shell exiting.
+
+A golden test renders a whole user-facing output and compares it with a checked-in file; the helper is `mj_core::golden::assert_golden`, and the existing mailbox golden is `mj-core/tests/golden/mailbox-events.txt`, used by the test at `mj-core/src/mailbox.rs` near line 1118 (set `MJ_UPDATE_GOLDEN=1` to regenerate).
+
+The testing rules in `AGENTS.md` apply: any test build of the daemon or `mj` must use a named isolated instance (`--instance <name>`), with `MJ_CONFIG_DIR`, `MJ_DATA_DIR` and `MJ_SESSION_ID` unset; `cargo test` runs outside the restricted sandbox; run `cargo test -p <crate> <filter>` per round and the full `cargo clippy --all-targets -- -D warnings` plus the touched crates' full suites once at the end; add only golden, end-to-end, integration or tricky-condition tests, and mark a test that pins a defect found after the code was believed done with a `// Hard-won:` comment.
+
+### Decision point D1: should a park wait while work is still running?
+
+By default this plan only reports. The alternative is to defer the park while the child has non-helper processes. The code already supports a deferral: `ParkOutcome::Busy` makes `complete_child` retry with backoff up to 30 seconds, so a new `ParkOutcome::Deferred` could ride on it, and the worker's idle reservation (`ReserveIdle`) is the single place that could decide it atomically. The trade-off for the user: a deferred park keeps a live slot for as long as the processes run, and `AGENTS.md` and the spawn tool description both depend on finished children freeing slots; on a container target the pids limit (#1161) is the reason parking exists. Deferral would also change what `list_agents` says ("parked" would no longer follow a finish). What deferral buys is that #1350's run survives. The facts in this plan tell the user, from real measurements, how often a park stops work; Milestone 0 and the first weeks of reports are the evidence for choosing. The user decides; this plan does not implement D1.
+
+## Plan of Work
+
+The work is four milestones after a measurement step. Each milestone is independently verifiable.
+
+### Milestone 0: measure before building (prototype, no production code)
+
+Goal: replace three assumptions with evidence. Write a throwaway script outside the repository tree (for example under the plan author's scratch directory), run it in an isolated instance (`mj --instance handback-facts-probe`), and record results in `Surprises & Discoveries`. The probes are these. First, with a bare-local child and with a container child, on Claude and on Codex, have the child run `setsid nohup sleep 600 >/dev/null 2>&1 &`, hand back, and wait for the park; then list processes on the target and note whether the `sleep` survived. This answers whether the premise of #1350 holds in each environment and whether the park stop script or the harness kills it. Second, for each pinned harness (listed in `mj-core/src/harness_runtime.rs`) start an idle child and list every process that carries its `MJ_SESSION_ID` in `/proc/<pid>/environ`, to see which helpers must be excluded and that a baseline taken at readiness leaves zero; and from a Codex child run `setsid sleep 600` and confirm the orphan keeps `MJ_SESSION_ID`. Third, time `git status --porcelain=v2 -z` and `git rev-parse HEAD` in the largest working tree a child uses. Acceptance for the milestone: the Surprises section states the three findings with evidence, and the Decision Log is updated if a finding changes a decision (in particular the identification rule if Codex scrubs the variable).
+
+### Milestone 1: fact types and the worker collector
+
+Create `mj-core/src/work_facts.rs` (add `pub mod work_facts;` in `mj-core/src/lib.rs`) holding the serializable types listed under Interfaces. They derive `Serialize`, `Deserialize`, `Debug`, `Clone`, `PartialEq`, `Eq`, with `#[serde(default, skip_serializing_if = ...)]` on optional parts so the stored shape is additive.
+
+Add `RelayRequest::WorkFacts` to `mj-core/src/relay/protocol.rs` with method name `"work_facts"`, add `RELAY_WORK_FACTS_PROTOCOL: u32 = 55` to `mj-core/src/relay.rs`, set `RELAY_PROTOCOL_VERSION` to it, and return it from `minimum_protocol`. Add `RelayResponsePayload::WorkFacts { facts: WorkFacts }`. Extend the protocol history comment above the constants. Add `RelayClient::work_facts` in `mj-controller/src/worker_client/relay.rs`, patterned on `cpu_usage`: for a worker below 55 it returns `WorkFacts::unavailable("the worker predates work facts (relay protocol N)")` instead of failing.
+
+In `mj-worker`, add `src/work_facts.rs` with platform modules patterned on `src/cpu_usage.rs` (`linux.rs` reads `/proc/<pid>/stat`, `/proc/<pid>/environ`, `/proc/<pid>/cmdline`; `macos.rs` uses `ps` through the shared helpers in `mj-core/src/subprocess.rs`; other platforms return an unavailable reason). A scan lists every process whose environment holds this session's `MJ_SESSION_ID` or that descends from the harness process, removes helpers and the baseline (see the Decision Log), and records for each remaining process its PID, a start identity (the same boot-id-and-start-ticks token `PROCESS_BIRTH_SCRIPT` in `mj-core/src/subprocess.rs` produces, so identities compare across the worker and the park scripts), elapsed seconds, sanitized command text, and whether it is detached (parent is 1 or outside the harness tree). Sanitize command text with `mj_core::transcript::sanitize_terminal_text` and `mj_core::redact::redact_secrets`, because command lines can carry tokens. The worktree part runs Git for the child's working directory through the shared helper (`mj_core::subprocess::run_bounded` or `run_with_input`; do not hand-roll pipe handling, and drive the output with a test larger than 64 KB), with `GIT_OPTIONAL_LOCKS=0` so it takes no index lock: `git rev-parse HEAD`, the branch or detached state, the HEAD subject line, and `git status --porcelain=v2 -z`, counting paths by status.
+
+The worker keeps the baseline: when the harness first reports ready (the same event the daemon observes as native readiness) the worker records the set of identities alive at that moment, in memory, and drops it when the harness process ends. Find the exact hook by reading `mj-worker/src/acp/launch.rs` and `mj-worker/src/acp/session.rs`; the `CpuSampler` setup near `mj-worker/src/worker_runtime/unix.rs` line 854 shows how a worker task is created, aborted and has its failure reported rather than dropped.
+
+Serve the request in `mj-worker/src/worker_runtime/unix.rs` next to the `RelayRequest::CpuUsage` branch (near line 2137). The collection runs in `tokio::task::spawn_blocking` (`/proc` scans and Git are blocking), and the connection loop awaits it with the same disconnect-aware `select!` the `HistoryQuery` branch uses, so a daemon that goes away cancels the wait. The request must never run on the loop's own thread, and must never touch the relay journal or lock the relay state mutex across the collection (copy what is needed first). Add the method to `mj-worker/src/relay/requests.rs` where `CpuUsage` is classified as connection-only.
+
+Acceptance: a worker unit test builds a fixture process tree of more than 300 processes including a reparented `setsid` process and a helper, and checks exact counts, a 5-entry shown list, and that the helper and baseline are excluded; a Git fixture with 5,000 dirty paths yields an exact count and 8 shown; a test that an unreachable Git reports an unavailable reason and not zero. Run `cargo test -p mj-worker work_facts`.
+
+### Milestone 2: collect at report time, store, render, list
+
+The daemon asks once per finish. In `reconcile_parent_reports` (`mj-controller/src/server_runtime/api.rs`), after it has decided which children are ready and before `enqueue_subagent_reports` is called, collect the child's facts: use the session manager's `RelayConnectionJob` mechanism (see `InstallGithubTokenJob` in `mj-controller/src/session_manager/handle.rs` for the shape) so the session actor remains the single owner of the worker connection, with one job per ready child run concurrently (collect with `futures::future::join_all` or a `JoinSet`, not serially). If the child's worker cannot be reached (it was parked by an earlier completion, or it died) the facts are `unavailable("the worker could not be reached: <error>")`; the report is still enqueued. Because the reconcile runs inside the delegation completion task, which is cancellable at daemon handoff and rebuilt from durable state at startup, the wait needs no extra bookkeeping; a restart simply asks again before any report row exists. Add the `facts: Option<WorkFacts>` field to `SubagentFinishedReport` with `#[serde(default, skip_serializing_if = "Option::is_none")]`; `None` means no collection was attempted (reports stored before this change, oracle reports, and "message not delivered" reports, which are not finishes).
+
+Persistence. Add one table in a new migration in `mj-controller/src/database/schema.rs` (the next free revision after the current `SCHEMA_VERSION`, which is 116 at the time of writing; advance `SCHEMA_VERSION` in `mj-controller/src/database.rs`): `subagent_work_facts(child_session_id TEXT PRIMARY KEY, finish_json TEXT NOT NULL, park_json TEXT)`. Classify it as compatible in a comment beside the migration, with this reason: it is an additive table that older daemons never read or write, no existing column, JSON shape or constraint changes, and `minimum_compatible_version` is not raised. `enqueue_subagent_reports` writes the `finish_json` row (replacing any previous row, and clearing `park_json`) in the same transaction as the outbox row and the `reported_finish` marker. The outbox event carries a copy of the facts, which is correct because a report is a statement about one finish and must not change afterwards; `list_agents` reads the table. There is one recording point and both readers render the same recorded facts. Delete the row when the child is destroyed (find the existing child-deletion path in `mj-controller/src/database/sessions.rs` and add it there).
+
+Rendering. In `describe_mailbox_event` (`mj-core/src/mailbox.rs`, the `SubagentFinished` arm) add facts lines after the `State` and `Parked` lines and before the child's own output, so the observations come first and the claim last. The block begins with a fixed label saying these lines are Mjolnir's observation and not the child's claim. For each unavailable part print the reason. Keep the rendering free of wall-clock times (print elapsed durations only) so goldens are stable. The transcript one-line summary appends "; N processes still running" only when N is above zero. Example of the intended rendering (indented, not a code fence):
+
+    Mjolnir: child task Run suites finished (c092ee57-...).
+    State: completed
+    Parked: false
+    Mjolnir observed this when the child's turn ended; it is not the child's own claim.
+    Running processes started by the child's agent: 2
+      pid 41022, up 4m12s: cargo nextest run --workspace
+      pid 41301, up 4m10s, detached from the harness: rustc --crate-name brokk_analysis ...
+    Mjolnir parks a finished child after sending this report; parking stops the processes listed above unless they are detached.
+    Working tree /work/task: HEAD 1a2b3c4 "Fix parser"; branch task/8019-finish
+    Uncommitted changes: 3 paths (2 modified, 1 untracked)
+      M src/lib.rs
+      M src/parse.rs
+      ? notes.txt
+    Report directory: /work/task/.mj/agents/c092ee57
+    <the child's own report text>
+
+Wording of the "parking stops" line depends on Milestone 0's finding about orphans; the text printed must be true for each environment, and when the finding differs by target kind the wording is chosen from the target. Update that line in the Decision Log when Milestone 0 reports.
+
+Protocol and compatibility. Raise `minimum_relay_protocol` in `MailboxEventBody` (same file) so a `SubagentFinished` with `facts: Some(_)` needs `RELAY_WORK_FACTS_PROTOCOL` (55); the existing 54 arm keeps handling `!finished` and `promptable`. `downgrade_review_or_report` in `mj-controller/src/mailbox_outbox.rs` already converts any `SubagentFinished` below its minimum into a `PlainText` event whose text the daemon rendered itself, so an older parent worker shows the same facts as text without parsing the new field; no change to that function is needed beyond relying on the updated minimum. Add a test beside `a_child_report_that_is_not_a_finish_reaches_older_workers_as_text` that checks protocols 54 and 55: 54 gets plain text containing the facts lines, 55 keeps the structured body. The deserializer for `MailboxEvent` rejects unknown fields on the envelope but not on the report, so older daemons or workers that read a stored report ignore `facts`.
+
+`list_agents`: in the `ListAgents` arm in `mj-controller/src/server_runtime/api.rs` (near line 1100) read the child's row through the daemon's committed state (the same way startup groups are read, to avoid a store connection per call) and add a `facts` object to the entry: the finish facts, and the park facts when parked, with `observed_secs_ago` computed at list time. For a child with no row, add nothing. `list_agents` must never call a worker: it stays a read of recorded state.
+
+Acceptance: golden test for the rendered report (see Validation), the compatibility test, and `cargo test -p mj-core mailbox` and `cargo test -p mj-controller mailbox_outbox`.
+
+### Milestone 3: what a park stopped
+
+Park facts are produced in `stop_idle_subagent_worker` in `mj-controller/src/controller/subagent_park.rs`, inside the idle lease and before the stop script runs, because the worker is gone afterwards. The order of operations, each step durable before the next:
+
+First, while holding the idle lease, ask the worker for fresh facts with the same request. Second, write `park_json` as `{phase: "stopping", snapshot: the full list of (pid, start identity) pairs plus the shown entries and counts}` into the child's `subagent_work_facts` row (create the row if the child was never reported, for example after a failed start). Third, run the stop script exactly as today. Fourth, run one new check script through the same executor that reads the identities on standard input (there can be hundreds of lines, possibly more than a 64 KB pipe buffer holds, so use the shared helper in `mj-core/src/subprocess.rs` that drains output while feeding input, never a hand-rolled write-then-read) and prints the PIDs whose start identity still matches a live, non-zombie process, using `mj_process_birth` from `PROCESS_BIRTH_SCRIPT`. Fifth, record `{phase: "done", stopped: <count and shown>, survived: <count and shown>}` and save the child's record as `Parked`, as today.
+
+Failure and restart: if the daemon crashes after the second step and before the fifth, startup recovery finds a row in `phase: "stopping"` whose child is `Parked`, runs the fourth step from the stored identities, and finishes. A child whose record is still `Running` with a `"stopping"` row was not parked (the stop never happened or failed): discard the `park_json` so the row does not describe a park that did not occur. This is the "resumable from durable state at daemon startup" rule in `AGENTS.md`. Find where recovery of parked children and lifecycle intents already runs (search `recovery_observer` and `load_worker_restart` in `mj-controller/src/daemon/`) and attach this there; do not create a second recovery loop.
+
+Notification. When the finished record has `stopped.count > 0` or `survived.count > 0`, enqueue one mailbox event to the parent, using a new `MailboxEventBody::SubagentParked { child_session_id, task_name, child_name, stopped, survived }` variant, key derived from the parent, child and the park's finish identity so a retry cannot duplicate it, `wake: true`. It is the only new mailbox body. Its `minimum_relay_protocol` is 55 and it must be added to `downgrade_review_or_report`'s match so older workers get text. Rendered text, as an example: "Mjolnir parked child task Run suites (c092ee57-...). Parking stopped 1 process the child had left running: pid 41022, up 4m30s: cargo nextest run --workspace. 1 more process survived the park (detached): pid 41301 ... . send_message resumes the child but does not restart stopped processes." `list_agents` shows the same under `facts.park`.
+
+The park must not fail because fact collection failed: if the fresh facts request errors, record `park_json` as `{phase: "done", unavailable: <reason>}` and continue with the stop as today. That is not a fallback hiding a primary design failure; it is the reporting of a failed observation, and the park's own purpose is unchanged.
+
+Acceptance: the tricky-condition test and end-to-end test in Validation; `cargo test -p mj-controller subagent_park`.
+
+### Milestone 4: tests, descriptions, documentation, validation, commit
+
+Update the two tool-description strings that say a parked child "holds no processes" (`mj-worker/src/subagent_mcp.rs` and `mj-core/src/subagent.rs`; search for `holds no processes`) so they tell the truth as measured in Milestone 0 and say that reports and `list_agents` carry observed facts and that a child must not end its turn while a run it needs is in flight. Update the bundled `mj` skill reference and the human documentation under `docs/src/content/docs/` (`cli-reference.md` and `api-reference.md` mention reports and `list_agents`) only where they describe the report or the `list_agents` entry. Run the full validation, then commit and push to `origin/master` per `AGENTS.md`, staging only the files changed.
+
+## Concrete Steps
+
+All commands run from the repository root of the implementer's worktree. Use an isolated instance for every daemon, `mj` or end-to-end run.
+
+Milestone 0 probe, example shape (adapt the profile and harness names to the local configuration):
+
+    env -u MJ_CONFIG_DIR -u MJ_DATA_DIR -u MJ_SESSION_ID cargo build -p mj-cli -p mj-worker
+    env -u MJ_CONFIG_DIR -u MJ_DATA_DIR -u MJ_SESSION_ID target/debug/mj --instance handback-facts-probe daemon status
+
+Use the existing live-harness scripts in `tests/e2e/` (for example `tests/e2e/parent_report_notifications.py` and `tests/e2e/delegation.py`) as launchers; each takes `--mj`, `--worker`, `--root` under `/home/jonathan/.cache/mjolnir/build`, and a named `--instance`.
+
+Per-milestone test commands (outside the restricted sandbox):
+
+    cargo test -p mj-worker work_facts
+    cargo test -p mj-core mailbox
+    cargo test -p mj-controller mailbox_outbox subagent_park delegation
+    cargo test -p mj-controller database::schema
+
+Final validation, once, after the last round:
+
+    cargo clippy --all-targets -- -D warnings
+    cargo test -p mj-core -p mj-worker -p mj-controller
+
+and the isolated upgrade regressions for any change to the relay protocol or the schema (find them with `ls tests/e2e/` and `rg -n "upgrade" tests/e2e mj-controller/src/upgrade*`; `AGENTS.md` requires these to stay green). To regenerate the golden after reviewing the diff: `MJ_UPDATE_GOLDEN=1 cargo test -p mj-core --features golden mailbox`.
+
+## Validation and Acceptance
+
+Behaviour a person can verify, in an isolated instance with a real worker. Start the daemon with `target/debug/mj --instance handback-facts daemon start`, start a parent session, and have it spawn a child on a bare-local target with the instruction "run `setsid nohup sleep 600 >/dev/null 2>&1 &`, create an uncommitted file `notes.txt`, then hand back saying everything is committed". Expected: the parent receives a report whose observed section lists one running process whose command is `sleep 600`, marked detached, shows `Uncommitted changes: 1 path (1 untracked)` with `? notes.txt`, and gives the HEAD commit, while the child's own text claims otherwise. Then `list_agents` shows the child parked with `facts.finish` and, depending on Milestone 0, either a follow-up message saying the park stopped the `sleep`, or `facts.park.survived` containing it and no follow-up message about stopped processes. If the daemon is killed between the park's stop and its record (test hook), the next daemon finishes the record: the follow-up message appears exactly once.
+
+Tests, in priority order as `AGENTS.md` requires. The golden: one rendered `SubagentFinished` with facts through `render_mailbox_events`, covering a finish with processes, a finish with a clean tree, a finish with an unavailable part and a park follow-up message, compared against a checked-in file. Extend the existing `mailbox-events` golden (`mj-core/tests/golden/mailbox-events.txt`, built by the test near `mj-core/src/mailbox.rs` line 1118) rather than adding a separate family of files, per `AGENTS.md`. The end-to-end test: a new opt-in `tests/e2e/handback_facts.py`, patterned on `tests/e2e/parent_report_notifications.py` (real `mj` binary, daemon in an isolated `--instance`, real worker, real harness), that runs the scenario above and asserts the report text, the `list_agents` entry and the park message, and runs on both Claude and Codex because Milestone 0 shows they differ. The tricky-condition test, in `mj-controller/src/controller/subagent_park.rs`'s test module (pattern: its `RacingStop` executor and `register_child` helper, and the `IsolatedTest` runner): drive the park stop script through a real shell executor against a fixture whose fake harness (a script as used by the worker tests near `mj-worker/src/worker_runtime/unix.rs` line 3004) leaves one real `setsid` process, which has been reparented to PID 1, and one still-parented process; assert the pre-stop snapshot contains both, the check script reports exactly the survivors, and the final record matches. Also assert, with more than 64 KB of identities on the check script's standard input, that the call neither deadlocks nor truncates. Add `// Hard-won:` markers only for tests that pin a defect found after the code was believed done. The compatibility test for protocols 54 and 55 in `mailbox_outbox.rs` and a schema test for the migration (the `schema_migrations` test pattern near `mj-controller/src/database/schema.rs` line 4578) complete the set. No unit tests of single computed results beyond these.
+
+## Idempotence and Recovery
+
+Every step of the implementation is additive and can be rerun. The migration creates a table only if absent and is recorded in `schema_migrations` like its neighbours; never edit an applied migration, and use a new revision for any later change. Facts recording is keyed by child and finish identity, so a daemon restart re-collects before the report row exists and never rewrites a recorded row; the park record is resumable as described in Milestone 3. If the worker collection fails, the report is still sent with an unavailable reason, so no report is lost or delayed beyond the collection itself. Rolling back means reverting the commit: the extra table is ignored by older daemons, stored reports with a `facts` field deserialize on older readers because `SubagentFinishedReport` allows unknown fields, and the only persisted shape older code cannot read, the `SubagentParked` mailbox body, is produced only by the new daemon for the new daemon's outbox. Do not downgrade a daemon over a newer store.
+
+## Artifacts and Notes
+
+Evidence gathered while planning, preserved so a reader does not repeat it.
+
+The reparenting experiment, run on the development host (Linux, WSL):
+
+    $ bash -c 'setsid nohup sleep 120 >/dev/null 2>&1 & echo launched'
+    $ ps -eo pid,ppid,pgid,sid,stat,args | grep "[s]leep 120"
+    2407498       1 2407498 2407498 Ss  sleep 120
+
+The orphan is outside any walk from the harness; it is found only through its environment.
+
+The existing sequence in `complete_child` (`mj-controller/src/daemon/delegation.rs`, near line 366): `state.reconcile_parent_reports(&relation.parent_session_id).await?;` then `match backend.park_subagent(&child_id).await? { ParkOutcome::Busy => RetryPark, ... }`. The report goes out first; facts collected inside the reconcile are therefore "what is running at turn end", and park facts are a later, separate fact.
+
+Issue evidence for the facts chosen. #1406's mismatches (files modified but not committed, a build still running under the child's process tree, a stale report file) are exactly an uncommitted-paths count, a HEAD commit, and a running-process list. #1350's mismatch (a run in its own session vanished) is a process list plus a park result. #1426 and #1437 have no running process and no change; the facts show a clean tree and an unchanged HEAD, which is what a parent needs to skip reading a long report.
+
+## Interfaces and Dependencies
+
+No new dependencies: use `serde`, `tokio`, `anyhow` and the shared helpers already in the workspace (`mj_core::subprocess`, `mj_core::redact`, `mj_core::transcript::sanitize_terminal_text`). Do not create a new workspace crate.
+
+In `mj-core/src/work_facts.rs` define, all `Serialize + Deserialize + Debug + Clone + PartialEq + Eq`:
+
+    pub struct WorkFacts {
+        pub observed_at_ms: u64,
+        pub processes: Observed<ProcessFacts>,
+        pub worktree: Observed<WorktreeFacts>,
+    }
+
+    pub enum Observed<T> {
+        Known(T),
+        Unavailable { reason: String },
+    }
+
+    pub struct ProcessFacts {
+        pub running: u32,
+        pub shown: Vec<RunningProcess>,
+        pub omitted: u32,
+        // pid and start identity of every counted process, for the park's later liveness check.
+        pub identities: Vec<ProcessIdentity>,
+    }
+
+    pub struct RunningProcess {
+        pub pid: u32,
+        pub elapsed_secs: u64,
+        pub command: String,
+        pub detached: bool,
+    }
+
+    pub struct ProcessIdentity { pub pid: u32, pub start: String }
+
+    pub struct WorktreeFacts {
+        pub directory: String,
+        pub head: Option<HeadCommit>,
+        pub branch: Option<String>,
+        pub changed: u32,
+        pub modified: u32,
+        pub untracked: u32,
+        pub shown: Vec<ChangedPath>,
+        pub omitted: u32,
+    }
+
+    pub struct HeadCommit { pub sha: String, pub subject: String }
+    pub struct ChangedPath { pub status: String, pub path: String }
+
+    pub struct ParkFacts {
+        pub phase: ParkPhase,            // Stopping | Done
+        pub snapshot: Observed<ProcessFacts>,
+        pub stopped: u32,
+        pub survived: u32,
+        pub survived_shown: Vec<RunningProcess>,
+    }
+
+    pub const SHOWN_PROCESSES: usize = 5;
+    pub const SHOWN_PATHS: usize = 8;
+    pub const COMMAND_CHARS: usize = 160;
+
+    impl WorkFacts {
+        pub fn unavailable(reason: impl Into<String>) -> Self;
+        pub fn render_lines(&self) -> Vec<String>;
+    }
+
+The constants are presentation limits only; a comment on them says so. `render_lines` is the single renderer used by the report, the park message and `list_agents`, so that the three surfaces cannot disagree.
+
+In `mj-core/src/mailbox.rs`: add `pub facts: Option<crate::work_facts::WorkFacts>` to `SubagentFinishedReport`, a `SubagentParked` body variant as described, and extend `minimum_relay_protocol`, `describe_mailbox_event` and the `mailbox-events` golden.
+
+In `mj-core/src/relay/protocol.rs` and `mj-core/src/relay.rs`: `RelayRequest::WorkFacts`, `RelayResponsePayload::WorkFacts { facts: WorkFacts }`, `RELAY_WORK_FACTS_PROTOCOL = 55`, `RELAY_PROTOCOL_VERSION = RELAY_WORK_FACTS_PROTOCOL`.
+
+In `mj-worker/src/work_facts.rs`: `pub async fn collect(session: &HarnessProcesses, directory: &Path) -> WorkFacts`, where `HarnessProcesses` holds the harness process ID and the ready-time baseline (owned by the worker's harness supervision code, dropped with the harness). It runs both parts concurrently and always returns; it never panics on a vanished process.
+
+In `mj-controller/src/worker_client/relay.rs`: `pub async fn work_facts(&mut self) -> Result<WorkFacts>`. In `mj-controller/src/database/delegation.rs`: the `subagent_work_facts` write inside `enqueue_subagent_reports`, plus `load_work_facts(child) -> Option<StoredWorkFacts>` and `record_park_facts(child, ParkFacts)`. In `mj-controller/src/targets/worker_daemon.rs`: `pub fn liveness_check_script() -> String`, which reads `pid start` lines from standard input and prints each pid whose start identity still matches a non-zombie process.
+
+Note on revision history: this file was first written on 2026-11-06 as a design for the user's review (no implementation, no earlier revision to reconcile).
