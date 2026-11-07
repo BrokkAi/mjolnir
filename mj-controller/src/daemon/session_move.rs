@@ -3,6 +3,9 @@
 use super::*;
 use mj_core::state::MoveOperation;
 
+/// Only this static safety refusal is intended for the worker's quota journal.
+pub(super) const QUOTA_MOVE_SAFETY_REFUSAL: &str = "quota_move_safety";
+
 pub(super) fn load_controller_for_resume(request: &ResumeSessionRequest) -> Result<Controller> {
     let mut controller = Controller::load()?;
     if let Some(operation) = crate::database::load_move_operation(&request.session_id)?
@@ -209,11 +212,14 @@ impl RuntimeState {
         .into_iter()
         .filter_map(|(blocked, reason)| blocked.then_some(reason))
         .collect();
-        ensure!(
-            blockers.is_empty(),
-            "Cannot switch profiles automatically: {}",
-            blockers.join("; ")
-        );
+        if !blockers.is_empty() {
+            return Err(Refusal::precondition(format!(
+                "Cannot switch profiles automatically: {}",
+                blockers.join("; ")
+            ))
+            .with_code(QUOTA_MOVE_SAFETY_REFUSAL)
+            .into());
+        }
         Ok(MoveSessionRequest {
             preparation,
             queue: Some(mj_core::state::ResumeQueueDisposition::Start),

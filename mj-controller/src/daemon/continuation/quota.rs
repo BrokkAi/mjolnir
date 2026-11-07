@@ -327,14 +327,13 @@ pub(super) async fn prepare(
                         });
                     }
                     Err(error) => {
-                        tracing::info!(session=id, profile=%candidate.profile_id, error=%format!("{error:#}"), "quota Move preparation refused");
                         refused = true;
-                        append_bounded(
+                        preparation_refused(
                             &mut fallback.notice,
-                            &format!(
-                                " Automatic Move to profile {} was refused: {error:#}.",
-                                candidate.profile_id
-                            ),
+                            id,
+                            &candidate.profile_id,
+                            &error,
+                            &format!("quota-move-prepare-{id}-{}", turn.completed_ordinal),
                         );
                     }
                 }
@@ -350,6 +349,34 @@ pub(super) async fn prepare(
         }
     }
     Ok(Plan::Wait(fallback))
+}
+
+fn public_failure(error: &anyhow::Error, reference: &str) -> String {
+    // General configuration refusals can contain parser source lines. Only
+    // the quota safety check's explicit code certifies journal-safe text.
+    mj_core::refusal::Refusal::of(error)
+        .filter(|refusal| {
+            refusal.code() == Some(crate::daemon::session_move::QUOTA_MOVE_SAFETY_REFUSAL)
+        })
+        .map(|refusal| refusal.message().to_owned())
+        .unwrap_or_else(|| format!("details are in the daemon log under reference {reference}"))
+}
+
+pub(super) fn preparation_refused(
+    notice: &mut String,
+    session: &str,
+    profile: &str,
+    error: &anyhow::Error,
+    reference: &str,
+) {
+    tracing::info!(session, profile, reference, error=%format!("{error:#}"), "quota Move preparation refused");
+    append_bounded(
+        notice,
+        &format!(
+            " Automatic Move to profile {profile} was refused: {}.",
+            public_failure(error, reference)
+        ),
+    );
 }
 
 /// The longest notice the worker accepts in a `SetQuotaRecovery` (checked in
@@ -459,9 +486,12 @@ pub(super) async fn schedule(
         } = plan
             && let Err(error) = (env.start_quota_move)(*request, reason, continuation).await
         {
+            let reference = format!("quota-move-start-{id}-{}", fallback.completed_command_id);
+            tracing::warn!(session=id, profile=%destination, %reference, error=%format!("{error:#}"), "quota Move admission refused");
             append_bounded(
                 &mut fallback.notice,
-                &format!(" Could not start the Move to profile {destination}: {error:#}."),
+                &format!(" Could not start the Move to profile {destination}: {}.",
+                    public_failure(&error, &reference)),
             );
             handle
                 .submit(
