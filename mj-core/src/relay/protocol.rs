@@ -870,6 +870,10 @@ fn review_base_changed_default() -> bool {
     true
 }
 
+fn work_facts_worktree_default() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod project_memory_wire_tests {
     use super::*;
@@ -904,8 +908,4 @@ mod project_memory_wire_tests {
         gzip.truncate(gzip.len() / 2);
         assert!(ProjectMemoryWireTree::Gzip { gzip }.decode().is_err());
     }
-}
-
-fn work_facts_worktree_default() -> bool {
-    true
 }
