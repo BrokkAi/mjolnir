@@ -16,7 +16,7 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
 - [x] (2026-11-06) Milestone 0: measure on real harnesses (prototype, no production code). Done for Claude on a bare-local target; Codex was blocked by an exhausted subscription and the container target by a host without Podman or Docker (see `Surprises & Discoveries`). Steps: (a) does a `setsid` orphan survive a park today, per harness and per target; (b) which processes an idle child holds per pinned harness, and whether `MJ_SESSION_ID` reaches tool-launched processes in Codex; (c) how long `git status` takes on the largest repository a child works in.
 - [x] (2026-11-06, commit "Observe a session's running work...") Milestone 1: shared fact types in `mj-core`, worker-side collector, new connection-only relay request `WorkFacts` at relay protocol 55 (origin/master was at 54 when this was implemented).
 - [x] (2026-11-06) Milestone 2: daemon collects facts when it builds a finish report, stores them in a new table, renders them in the report with the plain-text downgrade for older workers, and shows them in `list_agents`.
-- [ ] Milestone 3: park facts: snapshot before the stop, liveness check after, durable finish after a crash, follow-up message when something was stopped.
+- [x] (2026-11-06) Milestone 3: park facts (implemented without the plan's durable "stopping" phase and startup recovery; see the Decision Log): snapshot before the stop, liveness check after, durable finish after a crash, follow-up message when something was stopped.
 - [ ] Milestone 4: goldens, the real-process tests, tool-description and documentation updates, upgrade regression, full validation, commit.
 - [x] (2026-11-06) Decision point D1 (user): decided. A park is not deferred; this plan implements reporting only (Decision Log).
 
@@ -106,6 +106,15 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
 
 - Decision: The helper baseline is a time, not a set of identities. The worker records the instant its harness session was last configured (`harness_ready_ms`, set by `DurableRelay` when `acp_ready` turns true, cleared when it turns false, kept across a second configuration of an open session). A descendant of the worker that started at or before that instant is a helper; so is any process running Mjolnir's own executable or a program under a managed harness or Node cache directory. A descendant that started after it is the agent's. Detached processes (outside the worker's tree, carrying the marker) are never helpers by time, so an orphan left by an earlier worker life is still reported.
   Rationale: This replaces the plan's "set of identities taken when the harness first reported ready". A scan at the ready instant would race the first prompt, and a baseline taken after a worker restart would hide orphans left by the previous life. A recorded instant is a single fact written by the one owner of `acp_ready`, needs no scan inside the relay's lock, and cannot race. Milestone 0 measured the idle helper set (supervisor, bridge, harness, Mjolnir's MCP server), all covered by these rules.
+  Date/Author: 2026-11-06 / implementing agent.
+
+
+- Decision: Park facts have no durable "stopping" phase and no startup recovery. The park asks the worker for processes while holding the idle lease, runs the stop script, runs the liveness check, and then records the park's facts and its mailbox event in one transaction (`record_park_outcome`) before saving the child's record as parked. `list_agents` shows park facts only while the child's record says parked.
+  Rationale: This replaces plan Milestone 3's snapshot written before the stop plus recovery from it. The plan wanted the check to be resumable after a crash, but a park is already a short, bounded lifecycle operation that leaves the child running when it fails, and the existing worker recovery restarts a worker the stop script killed. One transaction for the facts and the notification makes "recorded but not told" and "told twice" unrepresentable (the event key names the parent, child and the finish the park followed), and removes a second recovery loop, a phase flag that must agree with the child's record, and a stale-row cleanup. A crash before the transaction records nothing, which is the same as a park that did not complete. A failed record is logged and the park proceeds, because the worker is already stopped.
+  Date/Author: 2026-11-06 / implementing agent.
+
+- Decision: The park message is sent for any park with news: a stopped process, a survivor, or processes that were running whose fate could not be checked.
+  Rationale: Milestone 0 showed that survivors are the common case on Claude; a parent that is told nothing would believe detached runs were killed.
   Date/Author: 2026-11-06 / implementing agent.
 
 

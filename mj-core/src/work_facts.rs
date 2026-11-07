@@ -111,26 +111,22 @@ pub struct ChangedPath {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ParkPhase {
-    /// The snapshot is durable and the stop may be running or may have run.
-    Stopping,
-    /// The liveness check ran and `stopped` and `survived` are settled.
-    Done,
-}
-
-/// What a park did to the processes the child's agent had left running.
+/// What a park did to the processes the child's agent had left running. It is
+/// recorded in one write with the park and its notification, so it exists only
+/// for a park whose stop script ran to its check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParkFacts {
-    pub phase: ParkPhase,
     /// The processes seen just before the stop script ran.
     pub snapshot: Observed<ProcessFacts>,
-    /// Counted once `phase` is `Done`.
+    /// Counted from the check after the stop; zero when `unverified`.
     #[serde(default)]
     pub stopped: u32,
     #[serde(default)]
     pub survived: u32,
+    /// The check after the stop could not run, and why. The counts mean
+    /// nothing then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unverified: Option<String>,
     /// The part of `snapshot.shown` that no longer ran after the stop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stopped_shown: Vec<RunningProcess>,
@@ -140,41 +136,146 @@ pub struct ParkFacts {
 }
 
 impl ParkFacts {
-    /// A park that began with the snapshot and has not been checked yet.
-    pub fn stopping(snapshot: Observed<ProcessFacts>) -> Self {
-        Self {
-            phase: ParkPhase::Stopping,
+    /// Settle a park from the pids that still ran after the stop. A snapshot
+    /// that was not observable settles with nothing counted.
+    pub fn settled(snapshot: Observed<ProcessFacts>, survivors: &[u32]) -> Self {
+        let mut park = Self {
             snapshot,
             stopped: 0,
             survived: 0,
+            unverified: None,
             stopped_shown: Vec::new(),
             survived_shown: Vec::new(),
-        }
-    }
-
-    /// Settle a park from the pids that still ran after the stop. A snapshot
-    /// that was not observable settles with nothing counted.
-    pub fn settled(mut self, survivors: &[u32]) -> Self {
-        self.phase = ParkPhase::Done;
-        if let Observed::Known(processes) = &self.snapshot {
+        };
+        if let Observed::Known(processes) = &park.snapshot {
             let alive = |pid: u32| survivors.contains(&pid);
             let survived = processes
                 .identities
                 .iter()
                 .filter(|identity| alive(identity.pid))
                 .count();
-            self.survived = u32::try_from(survived).unwrap_or(u32::MAX);
-            self.stopped = processes.running.saturating_sub(self.survived);
+            park.survived = u32::try_from(survived).unwrap_or(u32::MAX);
+            park.stopped = processes.running.saturating_sub(park.survived);
             let (survived_shown, stopped_shown) = processes
                 .shown
                 .iter()
                 .cloned()
                 .partition(|process| alive(process.pid));
-            self.survived_shown = survived_shown;
-            self.stopped_shown = stopped_shown;
+            park.survived_shown = survived_shown;
+            park.stopped_shown = stopped_shown;
         }
-        self
+        park
     }
+
+    /// A park whose check after the stop could not run.
+    pub fn unverified(snapshot: Observed<ProcessFacts>, reason: impl Into<String>) -> Self {
+        let mut park = Self::settled(snapshot, &[]);
+        park.stopped = 0;
+        park.stopped_shown.clear();
+        park.unverified = Some(reason.into());
+        park
+    }
+
+    /// The number of processes the stop was about, when they were observed.
+    fn observed_running(&self) -> u32 {
+        self.snapshot
+            .known()
+            .map_or(0, |processes| processes.running)
+    }
+
+    /// Whether the park changed anything a parent needs to hear about: it
+    /// stopped a process, one survived, or what happened to processes that
+    /// were running could not be checked.
+    pub fn is_news(&self) -> bool {
+        self.stopped > 0
+            || self.survived > 0
+            || (self.unverified.is_some() && self.observed_running() > 0)
+    }
+
+    /// The lines of a `list_agents` entry.
+    pub fn render_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        match (&self.snapshot, &self.unverified) {
+            (Observed::Unavailable { reason }, _) => lines.push(format!(
+                "Park: the processes could not be observed before the stop ({reason})"
+            )),
+            (Observed::Known(processes), _) if processes.running == 0 => {
+                lines.push("Park: no processes were running".into());
+            }
+            (Observed::Known(processes), Some(reason)) => lines.push(format!(
+                "Park: what happened to {} processes could not be checked ({reason})",
+                processes.running
+            )),
+            (Observed::Known(_), None) => {
+                lines.push(format!(
+                    "Park: {} stopped, {} survived",
+                    self.stopped, self.survived
+                ));
+            }
+        }
+        lines.extend(process_lines(
+            Some("stopped"),
+            &self.stopped_shown,
+            self.stopped,
+        ));
+        lines.extend(process_lines(
+            Some("survived"),
+            &self.survived_shown,
+            self.survived,
+        ));
+        lines
+    }
+
+    /// The body of the message that tells a parent what a park did.
+    pub fn message_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        let plural = |count: u32| if count == 1 { "process" } else { "processes" };
+        if let Some(reason) = &self.unverified {
+            lines.push(format!(
+                "The park ran, but what happened to the {} processes the child's agent had left running could not be checked: {reason}.",
+                self.observed_running()
+            ));
+            lines.extend(self.snapshot.known().into_iter().flat_map(|processes| {
+                processes
+                    .shown
+                    .iter()
+                    .map(|process| format!("  {}", render_process(process)))
+            }));
+        }
+        if self.stopped > 0 {
+            lines.push(format!(
+                "Parking stopped {} {} the child's agent had left running:",
+                self.stopped,
+                plural(self.stopped)
+            ));
+            lines.extend(process_lines(None, &self.stopped_shown, self.stopped));
+        }
+        if self.survived > 0 {
+            lines.push(format!(
+                "{} {} survived the park and {} still running:",
+                self.survived,
+                plural(self.survived),
+                if self.survived == 1 { "is" } else { "are" }
+            ));
+            lines.extend(process_lines(None, &self.survived_shown, self.survived));
+        }
+        lines
+    }
+}
+
+/// Listed processes, each labelled with `verb` when there is one, and the
+/// count of those not listed.
+fn process_lines(verb: Option<&str>, shown: &[RunningProcess], count: u32) -> Vec<String> {
+    let label = verb.map(|verb| format!("{verb}: ")).unwrap_or_default();
+    let mut lines: Vec<String> = shown
+        .iter()
+        .map(|process| format!("  {label}{}", render_process(process)))
+        .collect();
+    let omitted = count.saturating_sub(u32::try_from(shown.len()).unwrap_or(u32::MAX));
+    if omitted > 0 {
+        lines.push(format!("  and {omitted} more"));
+    }
+    lines
 }
 
 impl WorkFacts {
@@ -215,38 +316,6 @@ impl WorkFacts {
     /// Number of running processes, when they were observed.
     pub fn running_processes(&self) -> Option<u32> {
         self.processes.known().map(|processes| processes.running)
-    }
-}
-
-impl ParkFacts {
-    /// Whether the park changed anything a parent needs to hear about.
-    pub fn is_news(&self) -> bool {
-        self.phase == ParkPhase::Done && (self.stopped > 0 || self.survived > 0)
-    }
-
-    pub fn render_lines(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        match (&self.snapshot, self.phase) {
-            (Observed::Unavailable { reason }, _) => lines.push(format!(
-                "Park: the processes could not be observed before the stop ({reason})"
-            )),
-            (Observed::Known(_), ParkPhase::Stopping) => {
-                lines.push("Park: stopping; the result is not recorded yet".into())
-            }
-            (Observed::Known(_), ParkPhase::Done) => {
-                lines.push(format!(
-                    "Park: {} stopped, {} survived",
-                    self.stopped, self.survived
-                ));
-                for process in &self.stopped_shown {
-                    lines.push(format!("  stopped: {}", render_process(process)));
-                }
-                for process in &self.survived_shown {
-                    lines.push(format!("  survived: {}", render_process(process)));
-                }
-            }
-        }
-        lines
     }
 }
 

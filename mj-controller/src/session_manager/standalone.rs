@@ -25,6 +25,11 @@ impl StandaloneSession {
         self.client.cpu_usage().await
     }
 
+    /// What the worker observes about its agent's processes and working tree.
+    pub async fn work_facts(&mut self) -> Result<mj_core::work_facts::WorkFacts> {
+        self.client.work_facts().await
+    }
+
     pub fn set_project_memory_target(&mut self, target: Option<ProjectMemorySyncTarget>) {
         self.project_memory = target;
     }

@@ -939,6 +939,9 @@ fn export_spec_schema_mismatch_is_detected_from_the_parse_error() {
 }
 pub(crate) const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
 pub(crate) const LATCH_RELAY_MAX_PROTOCOL: &str = "MJ_TEST_LATCH_RELAY_MAX_PROTOCOL";
+/// A file holding the work facts the stand-in relay answers with; without it
+/// the request is refused as a worker that cannot observe would refuse it.
+pub(crate) const LATCH_RELAY_WORK_FACTS: &str = "MJ_TEST_LATCH_RELAY_WORK_FACTS";
 pub(crate) const LATCH_RECORD_SUBAGENT_ADMISSION: &str = "MJ_TEST_LATCH_RECORD_SUBAGENT_ADMISSION";
 pub(crate) const LATCH_DROP_ADMISSION_CLOSE_REPLY: &str =
     "MJ_TEST_LATCH_DROP_ADMISSION_CLOSE_REPLY";
@@ -1066,6 +1069,10 @@ fn latch_relay_child_serves_stdio() {
                     worker_build: None,
                 })
             }
+            mj_core::relay::RelayRequest::WorkFacts => std::env::var_os(LATCH_RELAY_WORK_FACTS)
+                .map(|path| mj_core::relay::RelayResponsePayload::WorkFacts {
+                    facts: serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap(),
+                }),
             mj_core::relay::RelayRequest::PollSubagentQueue { .. }
             | mj_core::relay::RelayRequest::SubagentRequests => {
                 subagent_connection_response(&request).map(|response| match response.body {
@@ -1523,6 +1530,7 @@ pub(crate) fn latch_relay_target(
     }
     for key in [
         LATCH_RELAY_MAX_PROTOCOL,
+        LATCH_RELAY_WORK_FACTS,
         LATCH_RECORD_SUBAGENT_ADMISSION,
         LATCH_DROP_ADMISSION_CLOSE_REPLY,
     ] {

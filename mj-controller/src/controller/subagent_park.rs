@@ -18,6 +18,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 
 use mj_core::state::SessionState;
+use mj_core::work_facts::{Observed, ParkFacts, ProcessFacts};
 
 use super::worker_binary::{
     refresh_installed_worker_binary, replace_installed_worker_launch_config, start_worker_durably,
@@ -56,6 +57,52 @@ pub enum ParkOutcome {
     /// The child is not a running sub-agent any more (it is closing, already
     /// parked, or gone), so there was nothing to park.
     NotRunning,
+}
+
+/// After the stop script ran, which of the processes seen before it still run.
+/// The identities go to the target on standard input, through an executor that
+/// drains output while it writes, because a park can list more processes than
+/// one pipe buffer holds.
+fn check_survivors(
+    executor: &(impl CommandExecutor + Sync),
+    backend: &targets::TargetLocator,
+    before_stop: Observed<ProcessFacts>,
+) -> ParkFacts {
+    let Observed::Known(processes) = &before_stop else {
+        return ParkFacts::settled(before_stop, &[]);
+    };
+    if processes.identities.is_empty() {
+        return ParkFacts::settled(before_stop, &[]);
+    }
+    let input = processes
+        .identities
+        .iter()
+        .map(|identity| format!("{} {}\n", identity.pid, identity.start))
+        .collect::<String>();
+    let command = targets::locator_command(
+        backend,
+        vec!["sh".into(), "-c".into(), targets::liveness_check_script()],
+    )
+    .purpose("check which processes survived a park")
+    .with_sensitive_stdin(input.into_bytes());
+    match executor.execute(&command) {
+        Ok(output) if output.status == 0 => {
+            let survivors = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.trim().parse::<u32>().ok())
+                .collect::<Vec<_>>();
+            ParkFacts::settled(before_stop, &survivors)
+        }
+        Ok(output) => {
+            let reason = format!(
+                "the check exited with status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            ParkFacts::unverified(before_stop, reason)
+        }
+        Err(error) => ParkFacts::unverified(before_stop, format!("{error:#}")),
+    }
 }
 
 /// An executor for stopping what a failed unpark started. The unpark's own
@@ -169,8 +216,37 @@ impl Controller {
             if !lease.verify_for_upgrade().await? {
                 return Ok(ParkOutcome::Busy);
             }
+            // What the agent left running, asked of the worker that is about to
+            // be stopped. A failed question does not stop the park: it is
+            // recorded as an observation that could not be made.
+            let before_stop = match failure {
+                None => Some(match lease.work_facts().await {
+                    Ok(facts) => facts.processes,
+                    Err(error) => Observed::unavailable(format!(
+                        "the worker could not be asked before the stop: {error:#}"
+                    )),
+                }),
+                Some(_) => None,
+            };
             stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
                 .context("stop the sub-agent's worker")?;
+            if let Some(before_stop) = before_stop {
+                let park = check_survivors(executor, &backend, before_stop);
+                // One write records the park's facts and, when they are news,
+                // the parent's message. The worker is already stopped, so a
+                // failure here must not undo the park.
+                if let Err(error) = crate::database::record_park_outcome(
+                    session_id.to_owned(),
+                    session.message_name(),
+                    park,
+                ) {
+                    tracing::warn!(
+                        session_id,
+                        error = format!("{error:#}"),
+                        "could not record what the park did to the sub-agent's processes"
+                    );
+                }
+            }
             let mut record = session.clone();
             record.state = if failure.is_some() {
                 SessionState::Error
@@ -968,6 +1044,189 @@ mod tests {
         assert!(stored.subagents.contains_key(LATCH_RELAY_SESSION));
         assert!(control.session(LATCH_RELAY_SESSION).await.is_err());
         let _targets = refresher.await.unwrap();
+        shutdown.shutdown().await.unwrap();
+    }
+
+    /// Stands in for the target with a stop that succeeds and a check that
+    /// names the processes still running.
+    struct ScriptedTarget {
+        survivors: &'static str,
+        purposes: Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for ScriptedTarget {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            let stdout = if command.purpose == "check which processes survived a park" {
+                self.survivors.as_bytes().to_vec()
+            } else {
+                Vec::new()
+            };
+            Ok(CommandOutput {
+                status: 0,
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    fn facts_with_two_processes() -> mj_core::work_facts::WorkFacts {
+        use mj_core::work_facts::*;
+        let process = |pid: u32, command: &str, detached: bool| RunningProcess {
+            pid,
+            elapsed_secs: 270,
+            command: command.into(),
+            detached,
+        };
+        WorkFacts {
+            observed_at_ms: 1,
+            processes: Observed::Known(ProcessFacts {
+                running: 2,
+                shown: vec![
+                    process(5001, "cargo nextest run", false),
+                    process(5002, "sleep 600", true),
+                ],
+                omitted: 0,
+                identities: vec![
+                    ProcessIdentity {
+                        pid: 5001,
+                        start: "boot:5001".into(),
+                    },
+                    ProcessIdentity {
+                        pid: 5002,
+                        start: "boot:5002".into(),
+                    },
+                ],
+            }),
+            worktree: Observed::unavailable("not needed here"),
+        }
+    }
+
+    /// The parent is told once what a park stopped and what survived, woken
+    /// for it, and the same facts are recorded for `list_agents`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_park_records_what_it_stopped_and_spared_and_tells_the_parent_once() {
+        const FACTS_FILE: &str = "MJ_TEST_PARK_FACTS_FILE";
+        if std::env::var_os(MARKER).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let facts = directory.path().join("facts.json");
+            std::fs::write(
+                &facts,
+                serde_json::to_vec(&facts_with_two_processes()).unwrap(),
+            )
+            .unwrap();
+            let worker = directory.path().join("worker-source");
+            std::fs::write(&worker, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "a_park_records_what_it_stopped_and_spared_and_tells_the_parent_once",
+            ))
+            .env(MARKER, "1")
+            .env(FACTS_FILE, &facts)
+            .env(
+                crate::controller::checkpoint::tests::LATCH_RELAY_WORK_FACTS,
+                &facts,
+            )
+            .env("MJ_WORKER_BINARY", worker)
+            .env("MJ_INSTANCE", "durable-unpark-test")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        register_child(root.path());
+        let crate::session_manager::SessionManagerChannels {
+            session_cpu: _,
+            targets,
+            control,
+            updates: _updates,
+            shutdown,
+        } = crate::session_manager::spawn_session_manager().unwrap();
+        targets
+            .send(vec![latch_relay_target(
+                root.path(),
+                None,
+                ReleaseSupport::Supported,
+                false,
+            )])
+            .unwrap();
+        control
+            .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+            .await
+            .unwrap();
+        let refresher = tokio::spawn(async move {
+            while crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap()
+                != Some(SessionState::Parked)
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            targets.send_replace(Vec::new());
+            targets
+        });
+        let executor = ScriptedTarget {
+            survivors: "5002\n",
+            purposes: Mutex::new(Vec::new()),
+        };
+        let outcome = loaded_controller()
+            .park_subagent_worker(LATCH_RELAY_SESSION, &executor, &control)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ParkOutcome::Parked);
+        let purposes = executor.purposes.lock().unwrap().clone();
+        // The facts are asked of the worker before the stop and checked after.
+        assert_eq!(
+            purposes,
+            [
+                "stop Mjolnir worker daemon",
+                "check which processes survived a park"
+            ]
+        );
+
+        let recorded = crate::database::load_work_facts(&[LATCH_RELAY_SESSION.to_owned()]).unwrap();
+        let park = recorded[LATCH_RELAY_SESSION]
+            .park
+            .as_ref()
+            .expect("park facts recorded");
+        assert_eq!((park.stopped, park.survived), (1, 1));
+        assert_eq!(park.stopped_shown[0].pid, 5001);
+        assert_eq!(park.survived_shown[0].pid, 5002);
+
+        let events = crate::database::pending_mailbox_events(10).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let event: mj_core::mailbox::MailboxEvent =
+            serde_json::from_str(&events[0].event_json).unwrap();
+        assert!(event.wake);
+        let text = mj_core::mailbox::render_mailbox_event(&event);
+        assert!(text.contains("Parking stopped 1 process"), "{text}");
+        assert!(
+            text.contains("pid 5001, up 4m30s: cargo nextest run"),
+            "{text}"
+        );
+        assert!(
+            text.contains("1 process survived the park and is still running"),
+            "{text}"
+        );
+        assert!(
+            text.contains("pid 5002, up 4m30s, detached from the harness: sleep 600"),
+            "{text}"
+        );
+
+        // The same finish parked again, as after a restart that came before
+        // the record said parked, does not tell the parent a second time.
+        crate::database::record_park_outcome(
+            LATCH_RELAY_SESSION.into(),
+            "map the parser".into(),
+            mj_core::work_facts::ParkFacts::settled(park.snapshot.clone(), &[]),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::database::pending_mailbox_events(10).unwrap().len(),
+            1
+        );
+
+        let targets = refresher.await.unwrap();
+        drop(targets);
         shutdown.shutdown().await.unwrap();
     }
 

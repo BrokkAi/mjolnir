@@ -1174,7 +1174,13 @@ impl ApiBackend {
                         mark_parked(&mut entry, record.as_ref());
                         mark_promptable(&mut entry, &state, progress, record.as_ref());
                         if let Some(recorded) = recorded_facts.get(&relation.child_session_id) {
-                            entry["facts"] = work_facts_entry(recorded, now_ms);
+                            entry["facts"] = work_facts_entry(
+                                recorded,
+                                record.as_ref().is_some_and(|record| {
+                                    record.state == mj_core::state::SessionState::Parked
+                                }),
+                                now_ms,
+                            );
                         }
                         entry
                     })
@@ -2396,7 +2402,11 @@ fn wait_agent_entry(
 /// The `facts` object of a `list_agents` entry: the lines of the observation
 /// recorded with the child's latest finish report, and of what the park after
 /// it did, each rendered by the same code as the mailbox report.
-fn work_facts_entry(recorded: &crate::database::StoredWorkFacts, now_ms: u64) -> serde_json::Value {
+fn work_facts_entry(
+    recorded: &crate::database::StoredWorkFacts,
+    parked: bool,
+    now_ms: u64,
+) -> serde_json::Value {
     let mut facts = serde_json::Map::new();
     if let Some(finish) = &recorded.finish {
         facts.insert(
@@ -2407,7 +2417,9 @@ fn work_facts_entry(recorded: &crate::database::StoredWorkFacts, now_ms: u64) ->
             }),
         );
     }
-    if let Some(park) = &recorded.park {
+    // A park's result describes the park the child is in now: once the child
+    // runs again the row says nothing about it.
+    if let Some(park) = recorded.park.as_ref().filter(|_| parked) {
         facts.insert(
             "park".into(),
             serde_json::json!({"lines": park.render_lines()}),

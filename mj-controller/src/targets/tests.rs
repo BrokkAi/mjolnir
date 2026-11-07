@@ -3023,6 +3023,131 @@ fn stop_worker_script_kills_a_matching_daemon_and_is_idempotent() {
     assert_eq!(liveness.stdout, b"dead\n");
 }
 
+/// What a park does to work the agent left behind, with real processes and the
+/// real scripts: the stop script takes the harness and what is still under it,
+/// and leaves a `setsid` process whose launching shell exited, which is the
+/// case of issue 1350. The check script then names exactly the survivor, even
+/// when its input is far larger than a pipe buffer.
+#[cfg(unix)]
+#[test]
+fn a_park_stops_the_harness_tree_and_spares_a_detached_orphan_which_the_check_names() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::Builder::new()
+        .prefix("hel-park-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let worker_root = directory.path().canonicalize().unwrap().join("worker");
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let pids = worker_root.join("pids");
+    // The stand-in harness starts one process it keeps (still parented) and
+    // one detached through a subshell that exits at once, then idles.
+    let fake_hel = worker_root.join("hel");
+    std::fs::write(
+        &fake_hel,
+        format!(
+            "#!/bin/sh\nsleep 300 &\necho \"kept $!\" >> '{pids}'\n\
+             (setsid sleep 300 >/dev/null 2>&1 & echo \"orphan $!\" >> '{pids}')\n\
+             while true; do sleep 1; done\n",
+            pids = pids.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_hel, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = worker_root.to_str().unwrap();
+    // The worker leads its own process group, as a real one does. Sharing the
+    // test runner's group would make the stop script's KILL phase signal the
+    // runner too.
+    use std::os::unix::process::CommandExt;
+    let mut harness = std::process::Command::new("sh")
+        .arg(&fake_hel)
+        .args(["worker", "run", "--root", root, "--config", "launch.json"])
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start fake worker");
+    std::fs::write(
+        worker_root.join("worker.pid"),
+        format!("{}\n", harness.id()),
+    )
+    .unwrap();
+    let recorded = || -> std::collections::BTreeMap<String, u32> {
+        std::fs::read_to_string(&pids)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let (name, pid) = line.split_once(' ')?;
+                Some((name.to_owned(), pid.parse().ok()?))
+            })
+            .collect()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while recorded().len() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture processes did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let (kept, orphan) = (recorded()["kept"], recorded()["orphan"]);
+    // Before the stop, as the worker would report them.
+    let mut identities: Vec<(u32, String)> = [kept, orphan]
+        .into_iter()
+        .map(|pid| {
+            (
+                pid,
+                mj_core::subprocess::process_birth_identity(pid).unwrap(),
+            )
+        })
+        .collect();
+    // Far more input than a pipe holds, mostly processes that never existed
+    // or were recycled: they must neither stall the check nor be named.
+    for index in 0..8000_u32 {
+        identities.push((4_000_000 + index, format!("boot-that-never-was:{index}")));
+    }
+    identities.push((kept, "boot-that-never-was:recycled".into()));
+    let input: String = identities
+        .iter()
+        .map(|(pid, start)| format!("{pid} {start}\n"))
+        .collect();
+    assert!(
+        input.len() > 128 * 1024,
+        "the input must outgrow a pipe buffer"
+    );
+
+    let stopped = std::process::Command::new("sh")
+        .args(["-c", &stop_worker_daemon_script(root)])
+        .output()
+        .expect("run stop script");
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let _ = harness.wait();
+
+    let mut check = std::process::Command::new("sh");
+    check.args(["-c", &liveness_check_script()]);
+    let output = mj_core::subprocess::run_with_input(&mut check, input.as_bytes()).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let survivors: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.parse().unwrap())
+        .collect();
+    // The still-parented process died with the harness; the orphan did not.
+    // The recycled-pid line for `kept` would name it if only pids were compared.
+    let _ = std::process::Command::new("kill")
+        .arg(orphan.to_string())
+        .status();
+    assert_eq!(survivors, [orphan], "kept {kept}, orphan {orphan}");
+}
+
 /// Resume reuses a bare target's worker root, so anything left writing
 /// there and any stale relay state has to go before the restore seeds it.
 // Hard-won: 2e7f5ec9: closing a bare session left stale relay state that broke the next resume.

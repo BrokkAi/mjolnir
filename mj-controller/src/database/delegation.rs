@@ -276,23 +276,82 @@ pub(crate) fn load_work_facts(children: &[String]) -> Result<BTreeMap<String, St
     Ok(facts)
 }
 
-/// Record what a park did to the child's processes, creating the row when the
-/// child was never reported (a failed start, for example). `None` removes a
-/// record of a park that did not happen.
-pub(crate) fn record_park_facts(
+/// Record what a park did to the child's processes, and, when that is news
+/// for the parent, the mailbox event that says so, in one transaction. The
+/// event's key names the parent, the child and the finish the park followed,
+/// so a second park of the same finish (a child restarted before its record
+/// said parked) cannot tell the parent twice. A crash before this write
+/// records nothing, and the child's record still says it is running.
+pub(crate) fn record_park_outcome(
     child: String,
-    park: Option<mj_core::work_facts::ParkFacts>,
+    child_name: String,
+    park: mj_core::work_facts::ParkFacts,
 ) -> Result<()> {
-    submit_database_write("record park facts", move |connection| {
-        let park = park.map(|park| serde_json::to_string(&park)).transpose()?;
-        connection.execute(
+    let enqueued = submit_database_write("record park outcome", move |connection| {
+        let transaction = connection.transaction()?;
+        let stored: String = transaction.query_row(
+            "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+            [&child],
+            |row| row.get(0),
+        )?;
+        let relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&stored)?;
+        transaction.execute(
             "INSERT INTO subagent_work_facts(child_session_id, finish_json, park_json)
              VALUES (?1, NULL, ?2)
              ON CONFLICT(child_session_id) DO UPDATE SET park_json=excluded.park_json",
-            params![child, park],
+            params![child, serde_json::to_string(&park)?],
         )?;
-        Ok(())
-    })
+        let mut enqueued = false;
+        if park.is_news() {
+            let key = subagent_parked_key(&relation)?;
+            let already_enqueued: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
+                [&key],
+                |row| row.get(0),
+            )?;
+            if !already_enqueued {
+                let event = mj_core::mailbox::MailboxEvent {
+                    key: key.clone(),
+                    source: "mjolnir".into(),
+                    wake: true,
+                    created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
+                    body: mj_core::mailbox::MailboxEventBody::SubagentParked {
+                        child_session_id: child.clone(),
+                        task_name: relation.task_name.clone(),
+                        child_name: Some(child_name),
+                        park: Box::new(park),
+                    },
+                };
+                super::mailbox::enqueue_mailbox_event_with(
+                    &transaction,
+                    &key,
+                    &relation.parent_session_id,
+                    &serde_json::to_string(&event)?,
+                    true,
+                    false,
+                )?;
+                enqueued = true;
+            }
+        }
+        transaction.commit()?;
+        Ok(enqueued)
+    })?;
+    if enqueued {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(())
+}
+
+fn subagent_parked_key(relation: &mj_core::subagent::SubagentRecord) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!(
+        "subagent-parked-{}",
+        mj_core::hex::lower_hex(Sha256::digest(serde_json::to_vec(&(
+            &relation.parent_session_id,
+            &relation.child_session_id,
+            &relation.reported_finish,
+        ))?))
+    ))
 }
 
 fn subagent_report_key(

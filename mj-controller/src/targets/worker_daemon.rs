@@ -57,6 +57,46 @@ hel_recorded_worker() {{
     )
 }
 
+/// A POSIX shell script that reads `pid identity` lines on standard input, as
+/// recorded before a park, and prints the pid of each process that still runs
+/// under the same identity. A process that is a zombie has stopped, and a
+/// recycled pid carries another identity, so neither is printed. The caller
+/// feeds it through an executor that writes stdin while it drains stdout: a
+/// park can list hundreds of processes, more than a pipe holds.
+pub fn liveness_check_script() -> String {
+    format!(
+        r#"{process_birth_script}
+# On Linux each line is answered by shell builtins alone, so thousands of
+# processes cost no forks; other systems ask `ps` for each one.
+if [ -r /proc/sys/kernel/random/boot_id ] && [ -r /proc/self/stat ]; then
+    read -r mj_boot < /proc/sys/kernel/random/boot_id || exit 1
+    mj_linux=1
+else
+    mj_linux=
+fi
+while read -r mj_pid mj_start; do
+    [ -n "$mj_pid" ] || continue
+    case "$mj_pid" in *[!0-9]*) continue ;; esac
+    if [ -n "$mj_linux" ]; then
+        [ -r "/proc/$mj_pid/stat" ] || continue
+        read -r mj_line < "/proc/$mj_pid/stat" || continue
+        # After the command name: state is field 1, start time is field 20.
+        mj_line=${{mj_line##*) }}
+        set -- $mj_line
+        [ "$mj_boot:${{20}}" = "$mj_start" ] || continue
+        case "$1" in Z*) continue ;; esac
+    else
+        mj_current=$(mj_process_birth "$mj_pid" 2>/dev/null) || continue
+        [ "$mj_current" = "$mj_start" ] || continue
+        mj_state=$(ps -o stat= -p "$mj_pid" 2>/dev/null | awk '{{print $1}}')
+        case "$mj_state" in Z* | '') continue ;; esac
+    fi
+    printf '%s\n' "$mj_pid"
+done"#,
+        process_birth_script = mj_core::subprocess::PROCESS_BIRTH_SCRIPT,
+    )
+}
+
 /// Report whether the exact session worker is alive without signaling it.
 /// A successful probe prints one stable token; transport or shell failures
 /// stay distinguishable from a confirmed absent worker.
