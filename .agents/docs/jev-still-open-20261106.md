@@ -66,6 +66,20 @@ Remaining misses and alerts: L2308 (an evaluation lane's "decide whether the lat
 
 The locator (`mj-core/src/activity/question_locator.json`) picks the reply that holds the open request so the dashboard and viewer can scroll to it. Its wording excluded replies that "offer optional extras", which the input rule now counts, so an alert raised by an offer would have had no target (found in review). The adopted wording counts offers and menus that wait for the user's answer and closing status items that name the user, and narrows the exclusion to decisions the user already made. L fixtures with a required label now carry `outcome.request_message_ids` (their request replies inside the locator window: 90 fixtures, 76 with two or more replies). Two repeats on all locator-eligible fixtures after the evidence correction: L 145/166 correct versus 123/166; W 63/64 versus 58/64. Remaining misses are the trimmed reports (L0303, L2208), ambiguous cases (L0301, L2106, L2710), and implicit report-backs (L2311, L3011).
 
+## Current-turn prompt tail (2026-11-07)
+
+`user_prompt_tail` carried the prompt that started the turn whatever its origin, so after a mailbox wake, a child report, a continuation or a parent's message to a child, Jev saw Mjolnir's text in a field labeled as the user's. Three variants on the 110 fixtures whose turn was started by a generated prompt (three repeats, adopted wording): the current text; A, blank; B, the person's latest message.
+
+| | Current | A (blank) | B (person's message) |
+|---|---:|---:|---:|
+| Required detected | 77/93 | 80/93 | 75/93 |
+| False alerts | 6/216 | 1/216 | 0/216 |
+| Harmful actions | 6/309 | 1/309 | 0/309 |
+| Labeled action as expected | 95/249 | 109/249 | 104/249 |
+| Child sessions, action as expected | 49/168 | 61/168 | 61/168 |
+
+A was adopted: `TurnContext::reset` keeps the tail only when `is_user_authored_message` accepts the turn's command id and text, and the extractor and `--refresh` mirror it. It also cleared the long-standing W01 and W176 false alerts; B lost W17, whose open request is in the generated report rather than the older user message. Sixteen further affected fixtures that the first scan missed (their turn prompt lay more than 400 transcript rows back) showed the same pattern: recall 9/12 both, no false alerts, actions 14/39 to 17/39. Refreshing changed 93 transcript fixtures; recorded worker-decision fixtures keep the evidence the worker sent.
+
 ## Limits
 
 - The bundled questions grew by 813 bytes. Released workers size evidence with their own bundle, so a maximal request through the updated proxy can exceed 64 KiB by that much; the proxy checks total size only on item routes.

@@ -87,7 +87,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "y: for example cJSON/fmt copies under /tmp or /workspace, commandline (C#), the colormath Kotlin checkout, and any local Python, Java or Scala corpora; search /tmp and /workspace. Report counts per language and add the result to the policy description as a documented limit.\n4. Merge origin/master (533c270c1b) into the engine branch and origin/main (4e968f4, which includes #70 \"manifest v3 host format admission\") into the packs branch. Do not rebase. Adapt the manifest entries if the format changed, refresh locks, and commit.\n5. Rerun the golden case, the existing tests that use callable-signature (search tests/ and crates/ for callable-signature or callable_signature, and run those suites with a nextest filter), clippy -D warnings on bifrost-rql, the fmt check, the drift check and all pack gates. Build the CLI and show the end-to-end JSON/SARIF table for the claimed languages.\nDo not push. Report: commits, which path you took in step 2 or 3 and the evidence, the per-language table, test results and log paths.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The refreshed engine build is still running with the current mbx shim; I’m waiting on that result before launching the CLI census, so I don’t duplicate the expensive compile. In parallel, I’ve kept the engine and pack merges isolated and will finish the policy evidence and gates once the binary is available.",
     "completion": {
       "stop_reason": "EndTurn",

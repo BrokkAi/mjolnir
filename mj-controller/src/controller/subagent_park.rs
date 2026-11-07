@@ -568,6 +568,7 @@ mod tests {
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                aws: None,
                 ..mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, home)
             },
         );

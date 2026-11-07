@@ -67,7 +67,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "ield is emitted for the receiver form only.\nVALIDATION (canonical env: `env -u JAVA_HOME -u RUSTUP_TOOLCHAIN BIFROST_OPEN_PACKS_DISABLE=1 BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 XDG_CACHE_HOME=$(mktemp -d) eatmydata nice -n 10 cargo nextest run --max-fail 100 ...`; do not redirect target/):\n- the new tests;\n- the semantic and semantic-packs crate libs, and the store lib with --features test-support;\n- the pack validation tests;\n- the Python mirror check if the model changed;\n- the tools lib `-E 'test(jvm_closer_goldens)'` under the push-tests features (`python3 scripts/merge-nextest.py push-tests ...`);\n- grep goldens for Debug renderings of any struct you change (`grep -rl '<StructName> {' tests/fixtures/golden`) and run the tests that render them;\n- Clippy -D warnings on the touched crates, fmt, `git diff --check`, `node scripts/check-pack-authoring-drift.mjs`, and the open-core projection dry run at HEAD.\nLogs under /tmp/8672-s2/. Report the head, the identity values, the seam location and all log paths.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The compile pass found two Java `Parameter` constructors that needed the new field; those are fixed and committed. The projection reports no blockers. I’m waiting for the Rust builds to finish so I can confirm the producer and catalog tests.",
     "completion": {
       "stop_reason": "EndTurn",

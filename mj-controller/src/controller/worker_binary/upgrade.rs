@@ -503,7 +503,7 @@ fn prepare_container_harness_for_upgrade(
     Ok(())
 }
 
-pub(super) fn prepare_installed_managed_harness(
+pub(in crate::controller) fn prepare_installed_managed_harness(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,

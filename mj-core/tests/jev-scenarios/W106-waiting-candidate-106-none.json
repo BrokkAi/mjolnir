@@ -242,7 +242,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "nd scan. If the same read already answers \"complete, no such member\" for the plain class, use that answer directly so the plain and present cases go through one path.\nKeep your failing hardwon test. It becomes the regression test for the fix: `#[hardwon(\"e71efa3bcf02: review found a late C.__init__ write left a keyword label Absent\")]` (use the real 12-character sha of e71efa3bcf). Add one more golden line: a base class with a late `Base.__init__ = ...` write, then `Sub(x=1)` where Sub has no __init__. Expected: not Absent.\nOn 2c: thanks for finding that the obligation comes from the unconditional package_path:dynamic_uninspected gap. Do not change it. I will file an issue.\nValidation: the two golden tests, then `--test suite_usages --test suite_semantic -E 'test(/python/)'` and clippy on brokk-bifrost-store (through the wrapper). For every golden line that moves, give the cause in one line. Hand back the updated /tmp/py-switch-logs/review-e71/fixtures/final.patch with the untracked files included, as before.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The broader Python run has 265 of 266 tests passed; the remaining deferred single-writer golden is still running. No failures have appeared. I’ll start clippy once it finishes.",
     "completion": {
       "stop_reason": "EndTurn",

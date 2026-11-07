@@ -1517,6 +1517,10 @@ article > h3 {
   text-overflow: ellipsis;
 }
 
+#conversation-move-failure {
+  overflow-wrap: anywhere;
+}
+
 .conversation-transition {
   margin: auto 0;
   padding: 24px;

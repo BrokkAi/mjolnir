@@ -103,6 +103,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        aws: None,
         codex_profile: None,
     }
 }
@@ -133,6 +134,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        aws: None,
         codex_profile: None,
         ..HarnessProfile::new(kind, home.to_path_buf())
     };
@@ -3213,6 +3215,7 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        aws: None,
         codex_profile: codex_profile.map(str::to_owned),
         ..HarnessProfile::new(kind, home.to_path_buf())
     };
@@ -3446,6 +3449,7 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,
+            aws: None,
             codex_profile: None,
             ..HarnessProfile::new(HarnessKind::Claude, home)
         };
@@ -3501,4 +3505,19 @@ fn a_profile_models_allow_list_round_trips_and_is_omitted_when_empty() {
         Config::load_from(&path).unwrap().profiles["ds8bit"].models,
         [listed]
     );
+}
+
+#[test]
+fn an_aws_role_table_on_a_profile_that_cannot_use_it_does_not_refuse_sessions() {
+    let home = tempfile::tempdir().unwrap();
+    let mut profile = HarnessProfile::new(HarnessKind::Claude, home.path());
+    profile.aws = Some(AwsRoleConfig {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        session_policy: None,
+        session_policy_arns: Vec::new(),
+        duration_seconds: None,
+        source_identity: false,
+    });
+    assert_ne!(profile.auth_scheme(), AuthScheme::AwsCredentialChain);
+    profile.ensure_ready("claude").unwrap();
 }

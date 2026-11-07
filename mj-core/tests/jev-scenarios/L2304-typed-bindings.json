@@ -522,7 +522,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The resolution session asked whether two of its new lanes in `rust/semantic.rs` would collide with my work. They won't, and I told them so: I'm not editing that file, and my campaign is closed with no active lanes. Their lanes:\n\n- **#5220:** one shared argument layout for built-in formatting macros, so that the panic and assert macros become sinks.\n- **#5221:** a shared proof helper for generic external receivers, such as `Option<T>`.\n\nI also passed on the two rules that cost me in that file:\n- Bumping the Rust adapter version changes some ids in the member-dispatch golden. That golden has to be re-blessed in the same PR.\n- A shared helper called from framework code has to go through a `LanguageSupport` method. Otherwise it fails the reach-in gate that broke master in #5180.\n\nThey now own the stock Rust cleartext-logging rule end to end, along with #5215, #5222 and #5223. Their #4964 fix is up as PR #5219.\n\nNothing on my side needs your input. The decision on typed bindings for #4967 and #4968, from my previous message, is still open.",
     "completion": {
       "stop_reason": "EndTurn",

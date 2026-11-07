@@ -326,35 +326,21 @@ fn current_daemon_pid(data_dir: &Path) -> Option<u32> {
 /// PID is `None` when it cannot be parsed, which keeps the file eligible for
 /// pruning as before this change.
 fn parse_log_filename(name: &str) -> Option<(ProcessKind, Option<u32>)> {
-    let (name, crashed) = mj_core::logging::without_crashed_mark(name);
-    let stem = name.strip_prefix("mj-")?.strip_suffix(".log")?;
-    let parts: Vec<&str> = stem.split('-').collect();
-    match parts.as_slice() {
-        [kind, _timestamp, pid] => {
-            let kind = match *kind {
-                "daemon" if crashed => ProcessKind::CrashedDaemon,
-                "daemon" => ProcessKind::Daemon,
-                _ if crashed => return None,
-                "tui" => ProcessKind::Tui,
-                "cli" => ProcessKind::Cli,
-                _ => return None,
-            };
-            Some((kind, pid.parse::<u32>().ok()))
-        }
-        [_timestamp, pid] => Some((ProcessKind::Cli, pid.parse::<u32>().ok())),
-        _ => None,
-    }
+    let name = mj_core::logging::parse_log_name(name)?;
+    let kind = match (name.kind.as_deref(), name.crashed) {
+        (Some("daemon"), true) => ProcessKind::CrashedDaemon,
+        (Some("daemon"), false) => ProcessKind::Daemon,
+        (_, true) => return None,
+        (Some("tui"), false) => ProcessKind::Tui,
+        (Some("cli") | None, false) => ProcessKind::Cli,
+        (Some(_), false) => return None,
+    };
+    Some((kind, name.pid))
 }
 
 /// The start timestamp in a managed log filename, in either format.
 fn log_timestamp(name: &str) -> Option<String> {
-    let (name, _) = mj_core::logging::without_crashed_mark(name);
-    let stem = name.strip_prefix("mj-")?.strip_suffix(".log")?;
-    let parts: Vec<&str> = stem.split('-').collect();
-    match parts.as_slice() {
-        [_, timestamp, _] | [timestamp, _] => Some((*timestamp).to_owned()),
-        _ => None,
-    }
+    mj_core::logging::parse_log_name(name).map(|name| name.started)
 }
 
 pub(crate) fn daemon_log_path(data_dir: &Path, pid: u32) -> Result<Option<PathBuf>> {

@@ -17,6 +17,13 @@ pub(crate) use policy::Services;
 enum ChildCompletion {
     Settled,
     RetryPark,
+    /// The child's own review is open, so its ended turn is not yet a missing
+    /// handback. The verdict wakes the child; this checks again if the review
+    /// ends without waking it (a cancel).
+    AwaitingReview,
+    /// The daemon began handing off before the completion could be admitted;
+    /// the next daemon settles the child.
+    Draining,
 }
 
 /// First wait after a child completion fails or finds the child busy.
@@ -26,46 +33,6 @@ const COMPLETION_RETRY_BASE: Duration = Duration::from_secs(1);
 const COMPLETION_FAILURE_CAP: Duration = Duration::from_secs(300);
 /// A busy child is polled more often: it is working, not failing.
 const COMPLETION_BUSY_CAP: Duration = Duration::from_secs(30);
-
-/// The most completions that run at once. Reviewers, oracles and workers share
-/// it, so nothing that waits on a worker may hold one of its slots.
-const COMPLETION_POOL: usize = 32;
-
-#[derive(Debug, PartialEq, Eq)]
-enum CompletionStep {
-    /// Ask the child's worker what it left, in a task of its own.
-    CollectFacts(String, u64),
-    /// Report the finish and park: runs in the bounded pool, briefly.
-    Complete(String, u64),
-}
-
-/// What to start next for the finished children, each with the turn that
-/// completed. A child whose facts for that turn are not stored yet collects
-/// them first, with no limit on how many do so at once; only a child whose
-/// facts are stored takes a pool slot, so children waiting on their workers can
-/// never occupy the slots other completions need. `skip` says which children
-/// are already settled, running or waiting out a retry.
-fn completion_steps(
-    finished: &[(String, u64)],
-    skip: impl Fn(&str, u64) -> bool,
-    facts_done: &BTreeMap<String, u64>,
-    running_completions: usize,
-) -> Vec<CompletionStep> {
-    let mut steps = Vec::new();
-    let mut free = COMPLETION_POOL.saturating_sub(running_completions);
-    for (child, ordinal) in finished {
-        if skip(child, *ordinal) {
-            continue;
-        }
-        if facts_done.get(child) != Some(ordinal) {
-            steps.push(CompletionStep::CollectFacts(child.clone(), *ordinal));
-        } else if free > 0 {
-            free -= 1;
-            steps.push(CompletionStep::Complete(child.clone(), *ordinal));
-        }
-    }
-    steps
-}
 
 /// When one child outcome's completion may run again, and how it has been
 /// going. Settling the child forgets it; a later outcome starts afresh.
@@ -155,14 +122,6 @@ async fn run(
     let mut observations = BTreeMap::<String, DelegationObservation>::new();
     let mut completions = tokio::task::JoinSet::new();
     let mut completion_ids = BTreeMap::<tokio::task::Id, (String, u64)>::new();
-    // What each finished child's worker observed is collected by a task of its
-    // own per child, outside the bounded completion pool: a child waiting on its
-    // worker (an idle checkpoint, a slow Git read) must not hold one of the
-    // completion slots every other child, reviewer and oracle needs. The
-    // completion that follows a child's facts runs in the pool, briefly.
-    let mut fact_tasks = tokio::task::JoinSet::new();
-    let mut fact_ids = BTreeMap::<tokio::task::Id, (String, u64)>::new();
-    let mut facts_done = BTreeMap::<String, u64>::new();
     let mut noticed = BTreeMap::<String, u64>::new();
     let mut retry = BTreeMap::<String, CompletionRetry>::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -219,58 +178,29 @@ async fn run(
                 });
                 identities.insert(task.id(), id);
             }
-            let finished = observations
-                .iter()
-                .filter_map(|(child, observation)| {
-                    Some((
-                        child.clone(),
-                        observation.outcome.as_ref()?.completed_ordinal,
-                    ))
-                })
-                .collect::<Vec<_>>();
-            let steps = completion_steps(
-                &finished,
-                |child, ordinal| {
-                    noticed.get(child) == Some(&ordinal)
-                        || completion_ids.values().any(|(id, _)| id == child)
-                        || fact_ids.values().any(|(id, _)| id == child)
-                        || retry.get(child).is_some_and(|retry| {
-                            retry.ordinal == ordinal && retry.at > Instant::now()
-                        })
-                },
-                &facts_done,
-                completion_ids.len(),
-            );
-            for step in steps {
-                match step {
-                    // In this child's own task and with no admission: a
-                    // replaced daemon asks again before any report exists.
-                    CompletionStep::CollectFacts(child, ordinal) => {
-                        let state = state.clone();
-                        let child_id = child.clone();
-                        let task = fact_tasks.spawn(async move {
-                            state.collect_finish_facts_once(&child_id, ordinal).await
-                        });
-                        fact_ids.insert(task.id(), (child, ordinal));
-                    }
-                    CompletionStep::Complete(child, ordinal) => {
-                        let Ok(work) =
-                            crate::upgrade::activity_unless_draining("delegation child completion")
-                        else {
-                            continue;
-                        };
-                        let Some(observation) = observations.get(&child).cloned() else {
-                            continue;
-                        };
-                        let child_id = child.clone();
-                        let backend = backend.clone();
-                        let state = state.clone();
-                        let task = completions.spawn(async move {
-                            complete_child(state, backend, child_id, observation, work).await
-                        });
-                        completion_ids.insert(task.id(), (child, ordinal));
-                    }
+            for (child, observation) in &observations {
+                if completion_ids.len() >= 32 {
+                    break;
                 }
+                let Some(outcome) = observation.outcome.as_ref() else {
+                    continue;
+                };
+                if noticed.get(child) == Some(&outcome.completed_ordinal)
+                    || completion_ids.values().any(|(id, _)| id == child)
+                    || retry.get(child).is_some_and(|retry| {
+                        retry.ordinal == outcome.completed_ordinal && retry.at > Instant::now()
+                    })
+                {
+                    continue;
+                }
+                let child_id = child.clone();
+                let backend = backend.clone();
+                let state = state.clone();
+                let observation = observation.clone();
+                let task = completions.spawn(async move {
+                    complete_child(state, backend, child_id, observation).await
+                });
+                completion_ids.insert(task.id(), (child.clone(), outcome.completed_ordinal));
             }
         }
         tokio::select! {
@@ -285,7 +215,6 @@ async fn run(
                     dispatch.retire(&id);
                     observations.remove(&id);
                     retry.remove(&id);
-                    facts_done.remove(&id);
                     // A parked child loses its observer and gets a new one
                     // when `send_message` starts it again. That observer first
                     // reports the turn this loop already settled; forgetting
@@ -322,28 +251,6 @@ async fn run(
                     }
                 }
             }
-            completed = fact_tasks.join_next_with_id(), if !fact_tasks.is_empty() => {
-                let Some(completed) = completed else { continue };
-                let (task_id, result) = match completed {
-                    Ok((id, result)) => (id, result),
-                    Err(error) => (error.id(), Err(anyhow::Error::from(error))),
-                };
-                if let Some((id, ordinal)) = fact_ids.remove(&task_id) {
-                    match result {
-                        Ok(()) => {
-                            facts_done.insert(id, ordinal);
-                        }
-                        Err(error) => {
-                            let failure = format!("{error:#}");
-                            let (next, report) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), Some(failure.clone()));
-                            if report {
-                                tracing::warn!(child_session_id = %id, error = %failure, retry_in_seconds = (next.at - Instant::now()).as_secs(), "collecting a finished child's facts failed; retrying with backoff");
-                            }
-                            retry.insert(id, next);
-                        }
-                    }
-                }
-            }
             completed = completions.join_next_with_id(), if !completions.is_empty() => {
                 let Some(completed) = completed else { continue };
                 let (task_id, result) = match completed {
@@ -353,7 +260,7 @@ async fn run(
                 if let Some((id, ordinal)) = completion_ids.remove(&task_id) {
                     match result {
                         Ok(ChildCompletion::Settled) => { noticed.insert(id.clone(), ordinal); retry.remove(&id); }
-                        Ok(ChildCompletion::RetryPark) => {
+                        Ok(ChildCompletion::RetryPark | ChildCompletion::AwaitingReview | ChildCompletion::Draining) => {
                             let (next, _) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), None);
                             retry.insert(id, next);
                         }
@@ -383,7 +290,6 @@ async fn run(
     }
     jobs.abort_all();
     completions.abort_all();
-    fact_tasks.abort_all();
     while let Some(result) = jobs.join_next().await {
         if let Err(error) = result
             && !error.is_cancelled()
@@ -406,7 +312,6 @@ async fn complete_child(
     backend: Arc<ApiBackend>,
     child_id: String,
     observation: DelegationObservation,
-    work: crate::upgrade::Work,
 ) -> Result<ChildCompletion> {
     let id = child_id.clone();
     let relation =
@@ -416,7 +321,38 @@ async fn complete_child(
     };
     let outcome = observation
         .outcome
+        .clone()
         .context("child completion has no outcome")?;
+    // The review host owns whether a session's review is open. Asked once,
+    // before anything is decided about the ended turn, and before taking the
+    // handoff admission: during startup the host defers the answer until its
+    // interrupted-review sweep ends, and a handoff must not wait on reviews.
+    let review_open = state.child_awaits_review(&child_id).await;
+    let Ok(work) = crate::upgrade::activity_unless_draining("delegation child completion") else {
+        return Ok(ChildCompletion::Draining);
+    };
+    settle_child(
+        &state,
+        &backend,
+        work,
+        relation,
+        observation.in_flight,
+        outcome,
+        review_open,
+    )
+    .await
+}
+
+async fn settle_child(
+    state: &RuntimeState,
+    backend: &ApiBackend,
+    work: crate::upgrade::Work,
+    relation: mj_core::subagent::SubagentRecord,
+    in_flight: Vec<String>,
+    outcome: mj_core::state::MaterializedTurnOutcome,
+    review_open: bool,
+) -> Result<ChildCompletion> {
+    let child_id = relation.child_session_id.clone();
     if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
         let id = child_id.clone();
         let command_id = outcome.command_id.clone();
@@ -442,14 +378,14 @@ async fn complete_child(
     {
         return Ok(ChildCompletion::Settled);
     }
+    // A child that requested review and ended its turn is waiting for the
+    // verdict, not forgetting to hand back: no reminder, no notice, no park.
+    if review_open {
+        return Ok(ChildCompletion::AwaitingReview);
+    }
     if relation.noticed_turn != Some(outcome.completed_ordinal) {
         let reminded = backend
-            .remind_subagent_to_hand_back(
-                &child_id,
-                relation.handback_tool,
-                &outcome,
-                &observation.in_flight,
-            )
+            .remind_subagent_to_hand_back(&child_id, relation.handback_tool, &outcome, &in_flight)
             .await?;
         let id = child_id.clone();
         tokio::task::spawn_blocking(move || {
@@ -460,14 +396,17 @@ async fn complete_child(
             return Ok(ChildCompletion::Settled);
         }
     }
-    let _work = work;
+    // Reconciliation asks the review host about sibling children, which can
+    // wait on the startup sweep: it runs outside the handoff admission, which
+    // is taken again for the park.
+    drop(work);
     // Park only once the parent has been told, or when this ending is not news.
     // The report and the marker that covers this ending are written together,
     // so the marker, read after the reconcile, says which it is. A finish that
     // is news but not yet covered is asked again: the readers' snapshot may not
-    // have caught up with the observation (the session actor runs ahead of it),
-    // or the report is held for its facts. The retry backs off and ends when the
-    // report is enqueued; no path parks a child whose parent has not heard of it.
+    // have caught up with the observation (the session actor runs ahead of it).
+    // The retry backs off and ends when the report is enqueued; no path parks a
+    // child whose parent has not heard of it.
     match backend
         .reconcile_child_report(
             &relation.parent_session_id,
@@ -501,6 +440,9 @@ async fn complete_child(
             return Ok(ChildCompletion::RetryPark);
         }
     }
+    let Ok(_work) = crate::upgrade::activity_unless_draining("delegation child park") else {
+        return Ok(ChildCompletion::Draining);
+    };
     match backend.park_subagent(&child_id).await? {
         crate::controller::ParkOutcome::Busy => Ok(ChildCompletion::RetryPark),
         crate::controller::ParkOutcome::Parked | crate::controller::ParkOutcome::NotRunning => {
@@ -565,9 +507,9 @@ mod tests {
     struct BusyThenParked(AtomicUsize);
     impl ExportRuntime for BusyThenParked {
         fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
-            matches!(session_id, "parent" | "child").then(|| {
+            (session_id == "parent").then(|| {
                 crate::daemon::tests::runtime_test_session(
-                    session_id,
+                    "parent",
                     "workspace",
                     mj_core::state::SessionState::Running,
                 )
@@ -588,350 +530,6 @@ mod tests {
                 })
             })
         }
-    }
-
-    /// The session actor's view of the child: connected and idle after `turn`,
-    /// which is what a delegation observation is made from.
-    async fn publish_idle_child(
-        manager: &crate::daemon::tests::TestRemoteManager,
-        turn: &mj_core::state::MaterializedTurnOutcome,
-    ) {
-        let mut view = crate::daemon::tests::ready_startup_view();
-        view.snapshot
-            .as_mut()
-            .unwrap()
-            .materialized
-            .last_turn_outcome = Some(turn.clone());
-        manager
-            .publisher
-            .publish("child".into(), view)
-            .await
-            .unwrap();
-    }
-
-    /// A child's stored last turn: what the readers' snapshot knows of it.
-    fn store_finished_turn(
-        child: &str,
-        command_id: &str,
-        completed_ordinal: u64,
-    ) -> mj_core::state::MaterializedTurnOutcome {
-        let turn = mj_core::state::MaterializedTurnOutcome {
-            answered_through: None,
-            diagnostic: None,
-            usage: None,
-            command_id: command_id.into(),
-            accepted_ordinal: Some(1),
-            turn_start_position: None,
-            completed_ordinal,
-            completed_at_ms: 1,
-            outcome: mj_core::state::TurnOutcomeKind::Completed {
-                stop_reason: "end_turn".into(),
-            },
-        };
-        let mut conversation = mj_core::state::MaterializedSession::empty(child);
-        conversation.applied_event_ordinal = completed_ordinal;
-        conversation.applied_event_digest = format!("{completed_ordinal:064x}");
-        conversation.last_turn_outcome = Some(turn.clone());
-        crate::database::save_materialized_session(&conversation).unwrap();
-        turn
-    }
-
-    /// The worker owns acceptance: a scan whose answer says the worker had
-    /// accepted newer work makes the scan unfit for that finish (it may show the
-    /// new work's processes), whatever the store and the actor's view say yet.
-    /// It is stored as unavailable, with that reason; an answer that does not say
-    /// is an unknown, which is unavailable too; and with no newer work the scan
-    /// stands.
-    #[tokio::test]
-    async fn observations_the_worker_says_newer_work_may_have_changed_are_not_the_finishs() {
-        const CHILD: &str = "MJ_TEST_DELEGATION_PROCESS_SCAN_RACE";
-        if std::env::var_os(CHILD).is_none() {
-            let root = tempfile::tempdir().unwrap();
-            IsolatedTest::new(test_name(
-                module_path!(),
-                "observations_the_worker_says_newer_work_may_have_changed_are_not_the_finishs",
-            ))
-            .env(CHILD, "1")
-            .env("MJ_INSTANCE", "delegation-process-scan-race")
-            .isolated_store(root.path())
-            .run();
-            return;
-        }
-        use mj_core::work_facts::{
-            ChangedPath, Observed, ProcessFacts, ProcessIdentity, RunningProcess, WorktreeFacts,
-        };
-        let _writer = crate::database::install_isolated_test_writer();
-        let workspace = crate::database::create_workspace("process scan race").unwrap();
-        let parent = crate::daemon::tests::runtime_test_session(
-            "parent",
-            &workspace.id,
-            mj_core::state::SessionState::Running,
-        );
-        let child = crate::daemon::tests::runtime_test_session(
-            "child",
-            &workspace.id,
-            mj_core::state::SessionState::Running,
-        );
-        crate::database::save_session(&parent).unwrap();
-        crate::database::save_subagent_session(
-            &child,
-            &crate::daemon::tests::runtime_test_subagent("child", "parent"),
-        )
-        .unwrap();
-        // The processes and the working tree are answered by two requests, each
-        // with the newest work the worker had accepted when it answered.
-        let scan = |processes_accepted: Option<u64>, tree_accepted: Option<u64>| async move {
-            crate::daemon::views::FinishScan {
-                processes: crate::daemon::views::Observation {
-                    value: Observed::Known(ProcessFacts {
-                        unattributed: 0,
-                        running: 1,
-                        shown: vec![RunningProcess {
-                            pid: 41301,
-                            elapsed_secs: 5,
-                            command: "cargo build".into(),
-                            detached: false,
-                        }],
-                        omitted: 0,
-                        identities: vec![ProcessIdentity {
-                            pid: 41301,
-                            start: "boot:1".into(),
-                        }],
-                    }),
-                    accepted_ordinal: processes_accepted,
-                },
-                tree: crate::daemon::views::Observation {
-                    value: Observed::Known(WorktreeFacts {
-                        directory: "/work/task".into(),
-                        head: None,
-                        branch: None,
-                        changed: 1,
-                        modified: 0,
-                        untracked: 1,
-                        shown: vec![ChangedPath {
-                            status: "?".into(),
-                            path: "notes.txt".into(),
-                        }],
-                        omitted: 0,
-                    }),
-                    accepted_ordinal: tree_accepted,
-                },
-            }
-        };
-        let state = crate::daemon::tests::test_runtime_state();
-        let stored = || {
-            let facts = crate::database::load_work_facts(&["child".to_owned()]).unwrap()["child"]
-                .finish
-                .clone()
-                .unwrap();
-            (facts.processes, facts.worktree)
-        };
-        // Nothing newer was accepted (the newest work is the finish's own turn):
-        // both parts stand, and are stored together.
-        state
-            .collect_finish_facts_from("child", 9, scan(Some(8), Some(8)))
-            .await
-            .unwrap();
-        let (processes, tree) = stored();
-        assert!(matches!(processes, Observed::Known(_)));
-        assert!(matches!(tree, Observed::Known(_)));
-
-        // The worker accepted a prompt after the finish, while the store and the
-        // actor's view know nothing of it yet: what each part saw is not the
-        // finish's, whichever of the two answers says so.
-        state
-            .collect_finish_facts_from("child", 10, scan(Some(12), Some(8)))
-            .await
-            .unwrap();
-        let (processes, tree) = stored();
-        assert!(
-            matches!(
-                &processes,
-                Observed::Unavailable { reason }
-                    if reason.contains("started new work before its processes were read")
-            ),
-            "{processes:?}"
-        );
-        assert!(matches!(tree, Observed::Known(_)));
-        state
-            .collect_finish_facts_from("child", 11, scan(Some(8), Some(15)))
-            .await
-            .unwrap();
-        let (processes, tree) = stored();
-        assert!(matches!(processes, Observed::Known(_)));
-        assert!(
-            matches!(
-                &tree,
-                Observed::Unavailable { reason }
-                    if reason.contains("started new work before its working tree was read")
-            ),
-            "{tree:?}"
-        );
-
-        // A worker that does not say is an unknown.
-        state
-            .collect_finish_facts_from("child", 12, scan(None, None))
-            .await
-            .unwrap();
-        let (processes, tree) = stored();
-        for part in [format!("{processes:?}"), format!("{tree:?}")] {
-            assert!(
-                part.contains("did not say whether the child had accepted new work"),
-                "{part}"
-            );
-        }
-    }
-
-    // A completion is decided from the readers' snapshot, which refreshes after
-    // the write that makes a turn durable returns, while the observation comes
-    // from the session actor and can run ahead of it. Behind the observation the
-    // snapshot says nothing yet: no report, no park, and the completion asks
-    // again. Once it has caught up the report is still held until the finish's
-    // facts are collected, and the child is parked only after the report is
-    // enqueued, once.
-    #[tokio::test]
-    async fn a_child_is_not_parked_until_the_parent_has_its_report() {
-        const CHILD: &str = "MJ_TEST_DELEGATION_PARK_AFTER_REPORT";
-        if std::env::var_os(CHILD).is_none() {
-            let root = tempfile::tempdir().unwrap();
-            IsolatedTest::new(test_name(
-                module_path!(),
-                "a_child_is_not_parked_until_the_parent_has_its_report",
-            ))
-            .env(CHILD, "1")
-            .env("MJ_INSTANCE", "delegation-park-after-report")
-            .isolated_store(root.path())
-            .run();
-            return;
-        }
-        let _writer = crate::database::install_isolated_test_writer();
-        let workspace = crate::database::create_workspace("park after report").unwrap();
-        let parent = crate::daemon::tests::runtime_test_session(
-            "parent",
-            &workspace.id,
-            mj_core::state::SessionState::Running,
-        );
-        let child = crate::daemon::tests::runtime_test_session(
-            "child",
-            &workspace.id,
-            mj_core::state::SessionState::Running,
-        );
-        crate::database::save_session(&parent).unwrap();
-        crate::database::save_subagent_session(
-            &child,
-            &crate::daemon::tests::runtime_test_subagent("child", "parent"),
-        )
-        .unwrap();
-        let manager = crate::daemon::tests::TestRemoteManager::for_session("child").await;
-        let state = crate::daemon::tests::test_runtime_state_with_manager(&manager);
-        // Every park attempt succeeds, so a park can only be refused by the rule.
-        let parks = Arc::new(BusyThenParked(AtomicUsize::new(1)));
-        let backend = Arc::new(ApiBackend::new(
-            state.session_manager.client(),
-            Arc::new(|_| None),
-            parks.clone(),
-        ));
-        state.install_report_backend(&backend);
-
-        // The snapshot holds the child's earlier turn; the observation is the
-        // turn after it.
-        let earlier = store_finished_turn("child", "earlier-turn", 5);
-        let newer = mj_core::state::MaterializedTurnOutcome {
-            command_id: "turn".into(),
-            completed_ordinal: 10,
-            ..earlier
-        };
-        publish_idle_child(&manager, &newer).await;
-        let observation = DelegationObservation {
-            requests: Vec::new(),
-            completed: Vec::new(),
-            in_flight: Vec::new(),
-            credential_signal: None,
-            outcome: Some(newer),
-        };
-        let complete = || {
-            complete_child(
-                state.clone(),
-                backend.clone(),
-                "child".into(),
-                observation.clone(),
-                crate::upgrade::activity("test completion").unwrap(),
-            )
-        };
-        let told = || crate::database::pending_mailbox_events(10).unwrap().len();
-        assert!(matches!(
-            complete().await.unwrap(),
-            ChildCompletion::RetryPark
-        ));
-        assert_eq!(parks.0.load(Ordering::SeqCst), 1, "no park while behind");
-        assert_eq!(told(), 0, "nothing is reported from a snapshot behind");
-
-        // The snapshot catches up, but the finish's facts are not collected:
-        // the report is held, and so is the park.
-        store_finished_turn("child", "turn", 10);
-        assert!(matches!(
-            complete().await.unwrap(),
-            ChildCompletion::RetryPark
-        ));
-        assert_eq!(parks.0.load(Ordering::SeqCst), 1, "no park while held");
-        assert_eq!(told(), 0, "no report before its facts");
-
-        // The facts are stored: the report is enqueued, and then the child is
-        // parked.
-        crate::database::record_finish_facts(
-            "child".into(),
-            10,
-            mj_core::work_facts::WorkFacts::unavailable("not needed here"),
-        )
-        .unwrap();
-        assert!(matches!(
-            complete().await.unwrap(),
-            ChildCompletion::Settled
-        ));
-        assert_eq!(parks.0.load(Ordering::SeqCst), 2, "parked once, after");
-        assert_eq!(told(), 1, "the parent has its report");
-        let marker = crate::database::load_subagent("child")
-            .unwrap()
-            .unwrap()
-            .reported_finish
-            .expect("the report's marker is written with it");
-        assert!(marker.covers(10));
-    }
-
-    #[test]
-    fn children_waiting_for_their_facts_never_occupy_the_completion_pool() {
-        let finished = (0..100)
-            .map(|index| (format!("child-{index:03}"), 7))
-            .collect::<Vec<_>>();
-        // Nobody's facts are stored: every child starts collecting, none takes
-        // a completion slot, however many there are.
-        let steps = completion_steps(&finished, |_, _| false, &BTreeMap::new(), 0);
-        assert_eq!(steps.len(), 100);
-        assert!(
-            steps
-                .iter()
-                .all(|step| matches!(step, CompletionStep::CollectFacts(_, 7)))
-        );
-        // Of children whose facts are stored, the pool still limits how many
-        // complete at once, and the ones still collecting do not count in it.
-        let facts_done = finished
-            .iter()
-            .skip(10)
-            .map(|(child, ordinal)| (child.clone(), *ordinal))
-            .collect::<BTreeMap<_, _>>();
-        let steps = completion_steps(&finished, |_, _| false, &facts_done, 4);
-        let completing = steps
-            .iter()
-            .filter(|step| matches!(step, CompletionStep::Complete(..)))
-            .count();
-        let collecting = steps
-            .iter()
-            .filter(|step| matches!(step, CompletionStep::CollectFacts(..)))
-            .count();
-        assert_eq!((completing, collecting), (COMPLETION_POOL - 4, 10));
-        // A child that is settled, running or waiting is left alone.
-        let steps = completion_steps(&finished, |child, _| child != "child-050", &facts_done, 0);
-        assert_eq!(steps, [CompletionStep::Complete("child-050".into(), 7)]);
     }
 
     // Hard-won: 5bb43721a: child completion wrote a redundant notice to the parent.
@@ -965,8 +563,7 @@ mod tests {
         crate::database::save_session(&parent).unwrap();
         let relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
         crate::database::save_subagent_session(&child, &relation).unwrap();
-        let manager = crate::daemon::tests::TestRemoteManager::for_session("child").await;
-        let state = crate::daemon::tests::test_runtime_state_with_manager(&manager);
+        let state = crate::daemon::tests::test_runtime_state();
         let parks = Arc::new(BusyThenParked(AtomicUsize::new(0)));
         // The parent has no actor. Durable report enqueue must not need one
         // or prevent either park attempt.
@@ -976,62 +573,43 @@ mod tests {
             parks.clone(),
         ));
         state.install_report_backend(&backend);
-        // The finish's facts are stored before its completion runs, as the
-        // child's own task does.
-        crate::database::record_finish_facts(
-            "child".into(),
-            10,
-            mj_core::work_facts::WorkFacts::unavailable("not needed here"),
-        )
-        .unwrap();
-        // The readers' snapshot holds the turn the observation reports.
-        let turn = store_finished_turn("child", "turn", 10);
-        publish_idle_child(&manager, &turn).await;
         let observation = DelegationObservation {
             requests: Vec::new(),
             completed: Vec::new(),
             in_flight: Vec::new(),
             credential_signal: None,
-            outcome: Some(turn),
+            outcome: Some(mj_core::state::MaterializedTurnOutcome {
+                answered_through: None,
+                diagnostic: None,
+                usage: None,
+                command_id: "turn".into(),
+                accepted_ordinal: Some(1),
+                turn_start_position: None,
+                completed_ordinal: 10,
+                completed_at_ms: 1,
+                outcome: mj_core::state::TurnOutcomeKind::Completed {
+                    stop_reason: "end_turn".into(),
+                },
+            }),
         };
         assert!(matches!(
             complete_child(
                 state.clone(),
                 backend.clone(),
                 "child".into(),
-                observation.clone(),
-                crate::upgrade::activity_unless_draining("test completion").unwrap(),
+                observation.clone()
             )
             .await
             .unwrap(),
             ChildCompletion::RetryPark
         ));
         assert!(matches!(
-            complete_child(
-                state.clone(),
-                backend,
-                "child".into(),
-                observation,
-                crate::upgrade::activity_unless_draining("test completion").unwrap(),
-            )
-            .await
-            .unwrap(),
+            complete_child(state.clone(), backend, "child".into(), observation)
+                .await
+                .unwrap(),
             ChildCompletion::Settled
         ));
         assert_eq!(parks.0.load(Ordering::SeqCst), 2);
-        // The child's own facts task asks once for this finish (this child has
-        // no worker, so they are stored as unknown, with why), and asking again
-        // for the same finish changes nothing.
-        state.collect_finish_facts("child", 11).await.unwrap();
-        state.collect_finish_facts("child", 11).await.unwrap();
-        let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
-        let recorded = &recorded["child"];
-        assert_eq!(recorded.finish_ordinal, Some(11));
-        assert!(matches!(
-            &recorded.finish.as_ref().unwrap().processes,
-            mj_core::work_facts::Observed::Unavailable { reason }
-                if reason.contains("worker") || reason.contains("session")
-        ));
         assert_eq!(
             crate::database::load_subagent("child")
                 .unwrap()
@@ -1039,5 +617,237 @@ mod tests {
                 .noticed_turn,
             Some(10)
         );
+    }
+
+    // A child that asked for review and ended its turn is waiting for the
+    // verdict. The completion loop must not treat that as a missing handback:
+    // no reminder, no notice, no park, until the review is gone.
+    #[tokio::test]
+    async fn a_child_with_an_open_review_is_not_reminded_noticed_or_parked() {
+        const CHILD: &str = "MJ_TEST_DELEGATION_OPEN_REVIEW";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "a_child_with_an_open_review_is_not_reminded_noticed_or_parked",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "delegation-open-review")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("open review").unwrap();
+        let parent = crate::daemon::tests::runtime_test_session(
+            "parent",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        let child = crate::daemon::tests::runtime_test_session(
+            "child",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        crate::database::save_session(&parent).unwrap();
+        let mut relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
+        relation.handback_tool = true;
+        crate::database::save_subagent_session(&child, &relation).unwrap();
+        let state = crate::daemon::tests::test_runtime_state();
+        let parks = Arc::new(BusyThenParked(AtomicUsize::new(1)));
+        let backend = Arc::new(ApiBackend::new(
+            state.session_manager.client(),
+            Arc::new(|_| None),
+            parks.clone(),
+        ));
+        state.install_report_backend(&backend);
+        let outcome = mj_core::state::MaterializedTurnOutcome {
+            answered_through: None,
+            diagnostic: None,
+            usage: None,
+            command_id: "turn".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: None,
+            completed_ordinal: 10,
+            completed_at_ms: 1,
+            outcome: mj_core::state::TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+        };
+        let stored = crate::database::load_subagent("child").unwrap().unwrap();
+        let settle = |review_open| {
+            settle_child(
+                &state,
+                &backend,
+                crate::upgrade::activity_unless_draining("test completion").unwrap(),
+                stored.clone(),
+                Vec::new(),
+                outcome.clone(),
+                review_open,
+            )
+        };
+        assert!(matches!(
+            settle(true).await.unwrap(),
+            ChildCompletion::AwaitingReview
+        ));
+        assert_eq!(parks.0.load(Ordering::SeqCst), 1, "no park attempt");
+        assert_eq!(
+            crate::database::load_subagent("child")
+                .unwrap()
+                .unwrap()
+                .noticed_turn,
+            None
+        );
+        let report = crate::database::load_subagent_report("child").unwrap();
+        assert!(report.reminder.is_none() && report.reminder_failed_for.is_none());
+        // With the review gone, the same turn is judged as before.
+        assert!(matches!(
+            settle(false).await.unwrap(),
+            ChildCompletion::Settled
+        ));
+        assert_eq!(parks.0.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            crate::database::load_subagent("child")
+                .unwrap()
+                .unwrap()
+                .noticed_turn,
+            Some(10)
+        );
+    }
+
+    struct ParkedParents;
+    impl ExportRuntime for ParkedParents {
+        fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
+            session_id.starts_with("parent").then(|| {
+                crate::daemon::tests::runtime_test_session(
+                    session_id,
+                    "workspace",
+                    mj_core::state::SessionState::Running,
+                )
+            })
+        }
+        fn checkpoint_now(
+            &self,
+            _: String,
+        ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+            Box::pin(async { anyhow::bail!("a park does not checkpoint") })
+        }
+        fn park_subagent(self: Arc<Self>, _: String) -> BoxFuture<'static, Result<ParkOutcome>> {
+            Box::pin(async { Ok(ParkOutcome::Parked) })
+        }
+    }
+
+    // After a failed review-host startup recovery its open-review answer is an
+    // error. Delegation decides what that means: a child that cannot request
+    // review never asks, and one that can settles as having no open review.
+    #[tokio::test]
+    async fn children_settle_when_the_review_host_failed_its_startup_recovery() {
+        const CHILD: &str = "MJ_TEST_DELEGATION_REVIEW_HOST_FAILED";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "children_settle_when_the_review_host_failed_its_startup_recovery",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "delegation-review-host-failed")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("host failed").unwrap();
+        let mut controller = crate::controller::Controller {
+            config: Default::default(),
+            state: Default::default(),
+        };
+        for (parent_id, child_id, review) in [
+            (
+                "parent-off",
+                "child-off",
+                mj_core::config::SessionReview::Off,
+            ),
+            (
+                "parent-push",
+                "child-push",
+                mj_core::config::SessionReview::Push {
+                    reviewers: Some(vec![mj_core::config::SubagentChoice {
+                        model: "review-model".into(),
+                        effort: None,
+                    }]),
+                },
+            ),
+        ] {
+            let mut parent = crate::daemon::tests::runtime_test_session(
+                parent_id,
+                &workspace.id,
+                mj_core::state::SessionState::Running,
+            );
+            parent.review = Some(review);
+            let child = crate::daemon::tests::runtime_test_session(
+                child_id,
+                &workspace.id,
+                mj_core::state::SessionState::Running,
+            );
+            crate::database::save_session(&parent).unwrap();
+            let relation = crate::daemon::tests::runtime_test_subagent(child_id, parent_id);
+            crate::database::save_subagent_session(&child, &relation).unwrap();
+            controller.state.sessions.insert(parent_id.into(), parent);
+            controller.state.sessions.insert(child_id.into(), child);
+            controller
+                .state
+                .subagents
+                .insert(child_id.into(), relation.into());
+        }
+        let state = crate::daemon::tests::test_runtime_state_with(controller);
+        assert!(state.child_can_request_review("child-push"));
+        assert!(!state.child_can_request_review("child-off"));
+        state
+            .review_host()
+            .fail_startup_recovery("the sweep could not read the store");
+        assert!(
+            state
+                .review_host()
+                .has_open_review("child-push")
+                .await
+                .is_err(),
+            "the host answers with an error once its recovery failed"
+        );
+        let backend = Arc::new(ApiBackend::new(
+            state.session_manager.client(),
+            Arc::new(|_| None),
+            Arc::new(ParkedParents),
+        ));
+        state.install_report_backend(&backend);
+        for child in ["child-off", "child-push"] {
+            let observation = DelegationObservation {
+                requests: Vec::new(),
+                completed: Vec::new(),
+                in_flight: Vec::new(),
+                credential_signal: None,
+                outcome: Some(mj_core::state::MaterializedTurnOutcome {
+                    answered_through: None,
+                    diagnostic: None,
+                    usage: None,
+                    command_id: "turn".into(),
+                    accepted_ordinal: Some(1),
+                    turn_start_position: None,
+                    completed_ordinal: 10,
+                    completed_at_ms: 1,
+                    outcome: mj_core::state::TurnOutcomeKind::Completed {
+                        stop_reason: "end_turn".into(),
+                    },
+                }),
+            };
+            assert!(
+                matches!(
+                    complete_child(state.clone(), backend.clone(), child.into(), observation)
+                        .await
+                        .unwrap(),
+                    ChildCompletion::Settled
+                ),
+                "{child} settles"
+            );
+        }
     }
 }

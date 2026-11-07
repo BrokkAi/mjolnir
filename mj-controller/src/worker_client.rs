@@ -16,9 +16,9 @@ use crate::targets::{CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SshSessionLease, ssh_
 use mj_core::config::harness_authentication_marker;
 use mj_core::credentials::{
     CredentialSnapshot, CredentialSyncAction, CredentialSyncHandle, CredentialSyncOutcome,
-    CredentialSyncResult, CredentialSyncTarget, SYNC_INTERVAL, SyncAction, SyncTrigger, enqueue,
-    profiles_with_targets, read_credential_file, reconcile, validate_credential_payload,
-    write_credential_file,
+    CredentialSyncResult, CredentialSyncTarget, SYNC_INTERVAL, StepFailure, SyncAction, SyncStep,
+    SyncTrigger, enqueue, profiles_with_targets, read_credential_file, reconcile,
+    validate_credential_payload, write_credential_file,
 };
 use mj_core::elicitation::ElicitationResponse;
 use mj_core::relay::{
@@ -151,6 +151,9 @@ pub struct RelayClient {
     /// Why this connection can no longer be used, once a call gave up on a
     /// reply that is still in flight. See [`RelayClient::exchange`].
     abandoned: Option<String>,
+    /// Set while a job runs under a gate admission: a lifecycle operation that
+    /// cancels the admission cancels the job's exchanges too.
+    cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
     next_request: u64,
     connection_nonce: u64,
     protocol_version: u32,

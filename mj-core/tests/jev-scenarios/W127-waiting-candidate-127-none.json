@@ -112,7 +112,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "ntities as patch describes.\nActual baseline available .agents/scratch/4678/baseline-results.txt and baseline-json/**: exact C positive run Inconclusive CapabilityIncomplete(field_memory), one definite complete finding/witness; caller AND callee overwrite yield false findings; separate fields/objects negative incomplete. Need regression fixtures all pass meaningfully after combined work. C++ receiver also assignments gap.\nUse ONLY authorized plain cargo fallback: env -u MBX_CACHE_DIR -u MBX_SHIMS_DIR -u MBX_SUMMARY JAVA_HOME= BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 eatmydata /usr/local/cargo/bin/cargo ... Original mbx compiler wrapper stalled >12min with no compiler; don't invoke it. No target or global cache changes. You may run focused flow library validation after editing (not required broad suites parent delegates), report only failures with test names/reason/log. No commit. Finish source changes rather than another preparation handback. Return exact changed paths, validation, versions and uncertainties.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "All 14 selected planner/client tests pass, including the origin-budget regression and existing copy/move and backward-flow checks. Clippy is the remaining local check; it is waiting for the shared target lock.",
     "completion": {
       "stop_reason": "EndTurn",

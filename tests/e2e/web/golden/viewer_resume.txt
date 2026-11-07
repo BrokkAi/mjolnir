@@ -124,6 +124,12 @@ Not Found
 controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":null,"text":"Suspended testlocal · alphaJan 1, 1970","value":"","disabled":false},{"id":null,"text":"Archived pomegranate workmjolnir · /tmp/project · 3 messagesSep 17the single word is hello","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false},{"id":null,"text":"Choose profilealphabeta","value":"beta","disabled":false},{"id":null,"text":"Choose targetlocalremote","value":"remote","disabled":false},{"id":null,"text":"Restore","value":"","disabled":false}]
 request: GET /api/v1/wiki/search [""]
 action: POST /api/v1/wiki/archive/restore [{"id":"archived-one","body":{"workspace_id":"test","profile_id":"beta","target_id":"remote"}}]
+=== failed Move remains visible in the conversation without a worker ===
+the move did not finish while resuming the destination. Source suspended with a verified checkpoint. Retry Move or resume with the source settings. The daemon log records the reason under reference failed-move
+
+Retry move
+=== missing checkpoint shows the public checkout recovery instructions ===
+the move did not finish. The Move's checkpoint archive is missing, so the Move cannot be retried and Resume cannot restore the session. The environment and checkout in /home/agent/projects/recovery/workspaces/0123456789abcdef0123456789abcdef/checkouts/project are retained; copy out anything you need, then destroy the session. The daemon log records the reason under reference missing-checkpoint-move
 === bare destination leaves Resume ready without conversion questions (390x844) ===
 Back to sessions
 Suspended test

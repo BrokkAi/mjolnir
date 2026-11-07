@@ -207,7 +207,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "I’m making an implementation checkpoint now. Validation is still open, including the macro regression and the golden output. The final commit will include any remaining corrections and close the plan.",
     "completion": {
       "stop_reason": "EndTurn",

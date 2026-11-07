@@ -282,6 +282,21 @@ def is_generated_prompt_text(text):
     return text.lstrip().startswith("[HARNESS NOTE:") or text.strip() == PARENT_WAIT_PROMPT_TEXT
 
 
+def turn_prompt_tail_text(items, end_index):
+    """The prompt `user_prompt_tail` carries: the turn's prompt, or nothing when Mjolnir submitted it.
+
+    Mirrors `mj_transcript::turn_context::TurnContext::reset`.
+    """
+    for index in range(end_index, -1, -1):
+        item = items[index]
+        if item["kind"] == "user" and item["text"].strip():
+            command_id = (item.get("stable_id") or "").removeprefix("user:")
+            if is_generated_prompt(command_id) or is_generated_prompt_text(item["text"]):
+                return ""
+            return item["text"]
+    return ""
+
+
 def build_authorization(items, end_index):
     """Whole user and assistant messages up to the reply, under production rules.
 
@@ -383,10 +398,7 @@ def fixture_from_transcript(args, connection):
         if not candidates:
             fail("no agent reply within three minutes before that time")
     index, reply = candidates[-1]
-    prompt = next(
-        (items[i]["text"] for i in range(index, -1, -1) if items[i]["kind"] == "user" and items[i]["text"].strip()),
-        "",
-    )
+    prompt = turn_prompt_tail_text(items, index)
     evidence = {
         "authorization": build_authorization(items, index),
         "harness": harness,
@@ -418,7 +430,7 @@ def fixture_from_transcript(args, connection):
 
 
 def refresh(ids, connection, directory):
-    """Rebuild `evidence.authorization` of transcript fixtures under the current rules.
+    """Rebuild `evidence.authorization` and `user_prompt_tail` of transcript fixtures under the current rules.
 
     A fixture that cannot be rebuilt is reported and left unchanged; the others
     still refresh, and the exit status is nonzero.
@@ -440,9 +452,12 @@ def refresh(ids, connection, directory):
             problems.append(f"{identity}: no agent reply at position {source['reply_position']} in the current transcript")
             continue
         authorization = build_authorization(items, index)
-        if authorization == fixture["evidence"].get("authorization"):
+        prompt_tail = tail(turn_prompt_tail_text(items, index), USER_TAIL)
+        evidence = fixture["evidence"]
+        if authorization == evidence.get("authorization") and prompt_tail == evidence.get("user_prompt_tail"):
             continue
-        fixture["evidence"]["authorization"] = authorization
+        evidence["authorization"] = authorization
+        evidence["user_prompt_tail"] = prompt_tail
         scan_credentials(fixture)
         paths[0].write_text(json.dumps(fixture, indent=2, ensure_ascii=False) + "\n")
         print(paths[0])
@@ -456,7 +471,7 @@ def main():
     parser.add_argument("--title")
     parser.add_argument("--category")
     parser.add_argument("--refresh", nargs="+", metavar="ID",
-                        help="rebuild the authorization history of existing transcript fixtures, keeping their labels")
+                        help="rebuild the authorization history and prompt tail of existing transcript fixtures, keeping their labels")
     parser.add_argument("--decision", help="worker decision id (assessment-<session>-<ordinal> or an activity id)")
     parser.add_argument("--session", help="session id or unique prefix")
     parser.add_argument("--at", help="local time of the agent reply, YYYY-MM-DD HH:MM:SS (America/Chicago)")

@@ -72,12 +72,16 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         Ok(output(
             br#"{"LaunchTemplates":[{"LaunchTemplateId":"lt-0123456789abcdef0","LaunchTemplateName":"mjolnir","CreateTime":"2026-01-01T00:00:00+00:00","CreatedBy":"arn:aws:iam::123456789012:user/doctor","DefaultVersionNumber":7,"LatestVersionNumber":7}]}"#,
         )),
+        // `--query ...MetadataOptions.HttpTokens --output text` of a template
+        // version that allows IMDSv1.
+        Ok(output(b"optional\n")),
     ]);
     let aws_check = aws_target_check(
         "production",
         None,
         "us-east-2",
         "lt-0123456789abcdef0",
+        Some("7"),
         &aws,
     );
     let aws_commands = aws.commands.borrow();
@@ -102,6 +106,12 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         aws_commands[2]
             .args
             .contains(&"--launch-template-ids".to_owned())
+    );
+    assert!(
+        aws_commands[3]
+            .args
+            .windows(2)
+            .any(|args| args == ["--versions", "7"])
     );
     drop(aws_commands);
 
@@ -2004,5 +2014,187 @@ fn the_default_local_target_gets_a_github_check() {
             .map(|check| check.id.as_str())
             .collect::<Vec<_>>(),
         ["github.local-bare.localhost"]
+    );
+}
+
+#[test]
+fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = |role: Option<mj_core::config::AwsRoleConfig>| HarnessProfile {
+        environment: [
+            ("CLAUDE_CODE_USE_BEDROCK".to_owned(), "1".to_owned()),
+            ("AWS_PROFILE".to_owned(), "work".to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+        aws: role,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
+    };
+    let role = mj_core::config::AwsRoleConfig {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        session_policy: None,
+        session_policy_arns: Vec::new(),
+        duration_seconds: None,
+        source_identity: false,
+    };
+    let containers: BTreeMap<String, TargetTemplate> = [(
+        "podman".to_owned(),
+        TargetTemplate::LocalPodman {
+            container: container("ghcr.io/example/dev:1"),
+        },
+    )]
+    .into_iter()
+    .collect();
+    let local_only: BTreeMap<String, TargetTemplate> =
+        [("localhost".to_owned(), TargetTemplate::LocalBare)]
+            .into_iter()
+            .collect();
+    let recorded = include_str!("../../tests/fixtures/aws-sts-assume-role.json");
+    let granted = {
+        let mut output: serde_json::Value = serde_json::from_str(recorded).unwrap();
+        output["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
+        serde_json::to_vec(&output).unwrap()
+    };
+    let denied = include_str!("../../tests/fixtures/aws-sts-assume-role-access-denied.txt");
+
+    let mut checks = Vec::new();
+    // No role: sessions on the container target get the host's credentials.
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(None),
+        &containers,
+        &AlwaysFailingExecutor,
+    ));
+    // No role, but only raw local sessions, which read the host's files anyway.
+    assert!(
+        aws_scope_check(
+            "bedrock",
+            &profile(None),
+            &local_only,
+            &AlwaysFailingExecutor
+        )
+        .is_empty()
+    );
+    // A role the host's login can assume.
+    let ok = FakeExecutor::new([Ok(output(&granted))]);
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(role.clone())),
+        &containers,
+        &ok,
+    ));
+    let probe = ok.commands.borrow();
+    let name = probe[0]
+        .args
+        .windows(2)
+        .find(|args| args[0] == "--role-session-name")
+        .map(|args| args[1].clone())
+        .unwrap();
+    assert!(
+        name.strip_prefix("mj-").is_some_and(|id| id.len() == 32
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+        "{name}"
+    );
+    drop(probe);
+    // A role the host's login cannot assume.
+    let refused = FakeExecutor::new([Ok(failed(denied))]);
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(role.clone())),
+        &containers,
+        &refused,
+    ));
+    // A role on a profile that only runs raw local sessions has no effect.
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(role.clone())),
+        &local_only,
+        &AlwaysFailingExecutor,
+    ));
+    let mixed_role = role;
+
+    let mixed: BTreeMap<String, TargetTemplate> = [
+        (
+            "podman".to_owned(),
+            TargetTemplate::LocalPodman {
+                container: container("ghcr.io/example/dev:1"),
+            },
+        ),
+        ("localhost".to_owned(), TargetTemplate::LocalBare),
+        (
+            "own-identity".to_owned(),
+            TargetTemplate::LocalDocker {
+                container: ContainerTemplate {
+                    environment: [("AWS_PROFILE".to_owned(), "team".to_owned())]
+                        .into_iter()
+                        .collect(),
+                    ..container("ghcr.io/example/dev:1")
+                },
+            },
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let granted_again = FakeExecutor::new([Ok(output(&granted))]);
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(mixed_role)),
+        &mixed,
+        &granted_again,
+    ));
+
+    // A table on a profile that does not use the AWS chain has no effect;
+    // sessions run, and doctor says so.
+    let not_bedrock = HarnessProfile {
+        aws: Some(mj_core::config::AwsRoleConfig {
+            role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+            session_policy: None,
+            session_policy_arns: Vec::new(),
+            duration_seconds: None,
+            source_identity: false,
+        }),
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
+    };
+    checks.extend(aws_scope_check(
+        "claude",
+        &not_bedrock,
+        &containers,
+        &AlwaysFailingExecutor,
+    ));
+
+    // A role on a Codex profile whose provider configuration cannot be read:
+    // unknown is not "not Bedrock", so doctor asks the same question launch and
+    // the sync do, and reports the read error instead of dismissing the role.
+    let unreadable = tempfile::tempdir().unwrap();
+    std::fs::write(
+        unreadable.path().join("config.toml"),
+        "model_provider = [unterminated",
+    )
+    .unwrap();
+    let unreadable_profile = HarnessProfile {
+        aws: Some(mj_core::config::AwsRoleConfig {
+            role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+            session_policy: None,
+            session_policy_arns: Vec::new(),
+            duration_seconds: None,
+            source_identity: false,
+        }),
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, unreadable.path().to_path_buf())
+    };
+    checks.extend(aws_scope_check(
+        "codex-bedrock",
+        &unreadable_profile,
+        &containers,
+        &AlwaysFailingExecutor,
+    ));
+
+    let mut rendered = Vec::new();
+    render_human(&checks, &mut rendered).expect("render doctor checks");
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "doctor-aws-scope-checks",
+        &String::from_utf8(rendered).unwrap(),
     );
 }

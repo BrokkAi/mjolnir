@@ -77,6 +77,12 @@ pub trait ExportRuntime: Send + Sync {
         Default::default()
     }
 
+    /// Whether a child that can request review is still waiting for its
+    /// verdict. A child's handback or ended turn is not final until it is not.
+    fn child_awaits_review(&self, _child_session_id: String) -> BoxFuture<'_, bool> {
+        Box::pin(async { false })
+    }
+
     fn queue_startup(
         self: Arc<Self>,
         _session_id: String,
@@ -286,8 +292,8 @@ impl ExportRuntime for RuntimeState {
         self.with_config(|config| config.subagents.clone())
     }
 
-    fn ensure_finish_facts(self: Arc<Self>, session_id: String, completed_ordinal: u64) {
-        RuntimeState::ensure_finish_facts_collected(&self, session_id, completed_ordinal);
+    fn child_awaits_review(&self, child_session_id: String) -> BoxFuture<'_, bool> {
+        Box::pin(async move { RuntimeState::child_awaits_review(self, &child_session_id).await })
     }
 
     fn queue_startup(
@@ -1286,6 +1292,13 @@ impl ApiBackend {
                 .await?
                 .filter(|record| record.handback_tool)
                 .context("handback is only for a Mjolnir sub-agent that was given the tool")?;
+                // Refusing here means no report exists to release before the
+                // child has read and addressed its verdict.
+                ensure!(
+                    record.kind != mj_core::subagent::SubagentKind::Worker
+                        || !self.exports.child_awaits_review(child_id.clone()).await,
+                    "your review has no verdict yet; wait for it, address it, then hand back"
+                );
                 let maximum = match record.kind {
                     mj_core::subagent::SubagentKind::Worker
                     | mj_core::subagent::SubagentKind::Oracle => {
@@ -1742,6 +1755,10 @@ impl ApiBackend {
                 ChildDisposition::NotNews("a close of the child was requested")
             } else if matches!(child.state.as_str(), "stopping" | "stopped") {
                 ChildDisposition::NotNews("the child is stopping or stopped")
+            } else if self.exports.child_awaits_review(id.clone()).await {
+                // A child whose review is open is still pending: it may end
+                // turns while it waits, and handback refuses until the verdict.
+                ChildDisposition::NotNews("the child awaits its review's verdict")
             } else {
                 match &child.identity {
                     None => ChildDisposition::NotFinished,

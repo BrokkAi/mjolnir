@@ -4965,6 +4965,7 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     let mut session = snapshot.sessions[0].clone();
     session.lifecycle = ViewerLifecycleCategory::Failed;
     session.move_recovery = Some(crate::server::ViewerMoveRecovery {
+        failure_notice: None,
         oracle: None,
         oracle_choice: None,
         operation_id: "move-a".into(),

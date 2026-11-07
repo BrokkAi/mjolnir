@@ -352,7 +352,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "#7860 is up as draft PR #10434, stacked on #10215, at `22784b6586` (v743/v742).\n- GitHub checks the net change, so the branch pushed once the workflow edit was reverted. The PR body says the nightly filter line lands separately.\n- I recorded an override for the review's one finding (the dropped nightly filter), with that reason.\n- Its default-feature build passes. The other spot checks and the full validation against #7643's head continue, and the PR goes Ready when they finish.\n\n#7643 (PR #10215) is waiting on its last two checks, the indexed-JDK step and the default-feature build, before I update its body and mark it Ready.\n\nOne thing needs you. The nightly property-stress filter line (`/tmp/java-parity/7860/nightly-filter.patch`, which adds `-p brokk-bifrost-rust-analysis`) has to be pushed with a token that has GitHub's `workflow` scope; this host's token doesn't have it. Until it lands, the new `substitution_properties` test runs only at its per-push case count.",
     "completion": {
       "stop_reason": "EndTurn",

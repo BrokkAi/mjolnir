@@ -57,7 +57,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "ad.\n\nWrite:\n - patches to /tmp/diffroots/pairs/<corpus>-<class>.patch (git format-patch or git diff output that `git apply` accepts on the base);\n - /tmp/diffroots/pairs/plan.json in exactly this format:\n   {\"corpora\": [{\"name\": \"flask\", \"language\": \"python\", \"source\": \"/tmp/diffroots/flask\", \"pairs\": [\n     {\"name\": \"given\", \"class\": \"given\", \"base\": \"<full sha>\", \"head\": \"<full sha>\"},\n     {\"name\": \"d-callee\", \"class\": \"d\", \"base\": \"<full sha>\", \"patch\": \"/tmp/diffroots/pairs/flask-d.patch\", \"expect_new_in\": [\"src/flask/caller.py\"]}]}]}\n   Use full 40-character shas. Names: a-comment, b-signature, c-ten-files, d-callee (and given for flask). `expect_new_in` only for (d).\n - /tmp/diffroots/pairs/pairs.md: per pair, files changed, lines changed, why it is in its class, and for (d) the policy id, caller path, the new finding id and the verification command.\n\nHand back a concise summary (under 50 lines): the plan path, the table of pairs, the (d) verification results, and anything you could not do. Stop there.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The four `d` scans are running with independent throwaway analyzer caches and the required pinned rules. The Flask run is taking longer than expected because the policy evaluates the full corpus; once it completes, I’ll inspect only the selected policy’s new findings and retain the exact run command and finding IDs in `pairs.md`.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -349,6 +349,7 @@ mod tests {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             models: Default::default(),
             legacy_subagents: None,
             ..mj_core::config::HarnessProfile::new(HarnessKind::OpenCode, home)

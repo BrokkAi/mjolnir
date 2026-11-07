@@ -62,7 +62,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "ss marker or step that fires although the path is proven at that position (for example a marker on a hop whose quality is proven, or a nondefinitive-binding latch on a binding that is definitive for this subject);\n(B) a real unproven relation that the ruling's constructors do not issue: say which issuer would need to exist (Handoff or Guard, or a kind the ruling excluded such as MoveOrAlias or exceptional exit), and what positive evidence that site actually has;\n(C) a correct exclusion, where the plan's expectation for that test is wrong; cite the plan line and the evidence.\nKeep each case open until the trace decides it. For near_miss, read the Rust fixture and say in one sentence what the near miss is and why it is not a certain path.\n\nHandback: attribution.md in your report directory (per test: alternatives table, first loss with source location, A/B/C with evidence, and the pre-change certainty and reasons). Confirm that the instrumentation is reverted (`git status --short` empty). Return a short summary.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The pre-change snapshot confirms the Go findings were `Possible` with `typestate-incomplete-analysis` as their certainty reason. I’m waiting for the path-origin run to tie each loss to its constructor site.",
     "completion": {
       "stop_reason": "EndTurn",

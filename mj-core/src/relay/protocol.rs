@@ -202,7 +202,16 @@ pub enum RelayRequest {
     AwsCredentialsState,
     InstallAwsCredentials {
         data: String,
+        /// Which role and session Mjolnir issued these credentials for, kept
+        /// beside the secret. Sent only to workers at protocol 55 or later.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<crate::aws_credentials::AwsCredentialScope>,
     },
+    /// Delete the session's AWS credentials.
+    RemoveAwsCredentials,
+    /// The scope recorded beside the session's AWS credentials, if any, and
+    /// the AWS profile the session was staged with.
+    AwsCredentialsScope,
     /// The host's slopcop login, like the GitHub token, stays on the control
     /// connection, outside the journal.
     SlopcopLoginState,
@@ -407,6 +416,8 @@ impl RelayRequest {
             Self::RemoveGithubToken => "remove_github_token",
             Self::AwsCredentialsState => "aws_credentials_state",
             Self::InstallAwsCredentials { .. } => "install_aws_credentials",
+            Self::RemoveAwsCredentials => "remove_aws_credentials",
+            Self::AwsCredentialsScope => "aws_credentials_scope",
             Self::SlopcopLoginState => "slopcop_login_state",
             Self::InstallSlopcopLogin { .. } => "install_slopcop_login",
             Self::RemoveSlopcopLogin => "remove_slopcop_login",
@@ -433,6 +444,9 @@ impl RelayRequest {
         match self {
             Self::AwsCredentialsState | Self::InstallAwsCredentials { .. } => {
                 super::RELAY_AWS_CREDENTIALS_PROTOCOL
+            }
+            Self::RemoveAwsCredentials | Self::AwsCredentialsScope => {
+                super::RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL
             }
             Self::SlopcopLoginState
             | Self::InstallSlopcopLogin { .. }
@@ -673,6 +687,15 @@ pub enum RelayResponsePayload {
         present: bool,
         fingerprint: String,
         freshness_epoch_ms: Option<i64>,
+    },
+    /// The scope recorded beside a session's AWS credentials, and the AWS
+    /// profile the session was staged with (the section name in its AWS
+    /// configuration, which survives the credentials being withdrawn). Not
+    /// secret.
+    AwsCredentialsScope {
+        scope: Option<crate::aws_credentials::AwsCredentialScope>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
     },
     /// Base64 of a session's credential file. Sent only on the connection
     /// socket, never recorded.

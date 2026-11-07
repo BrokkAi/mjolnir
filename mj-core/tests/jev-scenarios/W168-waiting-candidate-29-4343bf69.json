@@ -312,7 +312,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "s a callable, combine csharp_method_applicability_unmodeled (registered as Provider in read_ledger), with evidence naming the method group and the owner's explicit base list, if any. Callable targets come from a CallableReference without a C# call obligation; C# produces none until M6. Non-callable targets return Complete.\n- Remove the helper you added to the Type positive paths. A Type lookup cannot select a method, so it doesn't apply there.\n- Keep the planned golden: shapes (a) to (d) plus the non-method control, with proven membership, under the trial, tagged hardwon. (a) to (c) become incomplete with the reason, and (d) stays incomplete.\n- Identity: the substrate token -7314-csharp-method-applicability-open only.\n- Validation as in the brief. The trait change is shared code JVM compiles against, so run the JVM selection (jvm-analysis lib and the JVM closer goldens) as well, to prove the default no-op. I'll ask the coordinator whether it needs a lifecycle lane.\nHand back the head and the shared-file list.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The implementation is checkpointed locally at `e6b1243a7b`; it has not been pushed. The store check, formatting, and pack drift passed. The C# golden and JVM validation remain pending because the root test build was still waiting on shared mbx compilation. Details are in [REPORT.md](/workspace/28c4a33bde5b6bc0b4f4d45aa56e46bd/bifrost-dev/.mj/lanes/logs/c1-4e/applicability/REPORT.md).",
     "completion": {
       "stop_reason": "EndTurn",

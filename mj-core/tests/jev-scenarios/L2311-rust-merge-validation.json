@@ -352,7 +352,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "olchain has linted your code yet, and master has gained Rust changes since your merge base, including #5936 (Rust tuple-let initialization). So:\n1. Wait until #5940 has landed on master. Check `gh pr view 5940 --json state`, with a few minutes between checks. Do not compile in the meantime.\n2. Then merge origin/master once. It brings #5940's toolchain pin to 1.99.1 and its lint fixes. Keep 0192 unless master has taken it.\n3. Run the same single combined nextest invocation as your 1094-test run, on the merged tree. This is the semantic-conflict check, and it rebuilds on 1.99.1 anyway.\n4. Run Clippy once, on 1.99.1, which is now the pinned default: `cargo clippy -p brokk-bifrost-core -p brokk-bifrost-analysis --all-targets -- -D warnings`, plus -p for any other crate you edited. Fix any lint in your own code; master's baseline is clean after #5940.\n5. Run fmt, drift and classification, commit, and hand back the SHA.\nIf #5940 is rejected or has not landed within about an hour, tell me rather than waiting longer.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "#5940 is still open and in progress after one hour. Stopped as requested; no merges or builds ran.\n\nClean HEAD remains `38ea56be29443c2dee0cb38a3fe72a86172a45aa`. Post-merge tests and Clippy remain owed.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -262,7 +262,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Merge review passed. I’m waiting for the targeted integration checks, then I’ll commit the merge and push `master`.",
     "completion": {
       "stop_reason": "EndTurn",

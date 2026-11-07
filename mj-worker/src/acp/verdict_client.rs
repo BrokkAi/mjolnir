@@ -545,7 +545,7 @@ mod tests {
 
     fn evidence() -> TurnEvidence {
         let context = TurnContext::default();
-        context.reset("Implement the requested feature");
+        context.reset(None, "Implement the requested feature");
         context.evidence(
             mj_core::config::HarnessKind::Claude,
             TurnPhase::Running,

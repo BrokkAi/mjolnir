@@ -332,7 +332,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Read /workspace/640af377fdec87f01cba51033f6e79ed/test-audit/note-golden-names.txt.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The renamed symbol goldens all pass under their new roots. The import/navigation golden is still compiling and running; once it finishes, I’ll finish the patch export and reconcile the handback counts, logs, and any open design findings.",
     "completion": {
       "stop_reason": "EndTurn",

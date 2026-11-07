@@ -372,7 +372,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "New #8834 lifecycle build assignment. Read /tmp/lanes/jvm-gates/8834-r1/REQUEST.md and execute BUILD ONLY. Exact candidate22ed7cad4e0b92214d0cca6f9f3c551d70ba7be8 vs exact merge-base7ff2f635245e811b2b2b80cbffbe2a47b4544b76, both fetched/verified in parentrepo. Earlier /8834 gate CANCELLED before candidate build, cannot carry. Fresh archives/normal mbx measure CLI artifacts, immediate compiler-artifact copy, hashes/commands/actual exits. Follow same successful build procedure as your7728-r7/8973-r1, but these exact identities. No product/Git/source/target/config changes, tests/captures/cloud/cleanup. Read request constraints. Return BUILD.md+inputs; don't start later phases. Owner saved manual logs are being audited independently to avoid unnecessary reruns.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Base A finished with exit 0 and the required files were emitted. Its load rose above 100 during the capture, so I’m recording that limitation and waiting for the next below-100 start sample before candidate capture.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -87,7 +87,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "ated deep copies for the four ContextPlanMemos, the ContextPlanCell and JvmExternalProviderBlueprint.registered (new copy methods on those types are fine; take them at the same instant as the table clone); (c) since envelope restore (:1126) delegates remapping to the payload, make the JVM payload's remap_shared_names walk the identity-table fields you classify as Remap (SelectedContextIdentities :910 and the nested JVM fields :1030) as well as the payload gap fields, and keep the existing context-set remap (:2396) for bridges and Go bindings; (d) the snapshot-taking and restore methods with the preconditions in the brief; (e) estimated_heap_bytes. Commit points: when it compiles with Clippy clean and the store lib passes, stop and report, even if a detail is open; list open details explicitly. Stop earlier only for an input that is neither keyable nor covered, or a payload value that is not a pure function of the key, with the file:line evidence. Same env, validation and no-commit rules as the original brief.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Added independent-lock cloning for the preparation memos, cell and provider-registration set. Clippy is clean; store lib tests passed: 973 passed, 2 skipped.\n\nSlice B remains incomplete: the key, snapshot payload, remapping, capture/restore methods and weigher are still open. Report handed back; no commits made.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -620,7 +620,7 @@ fn a_routine_checkpoint_keeps_a_journaled_retry_assessment() {
     start(&mut relay, "original-prompt");
     finish(&mut relay, "original-prompt", "temporary failure", "error");
     let context = mj_transcript::turn_context::TurnContext::default();
-    context.reset("Implement");
+    context.reset(None, "Implement");
     let evidence = context.evidence(
         HarnessKind::Codex,
         mj_core::activity::verdict::TurnPhase::Running,
