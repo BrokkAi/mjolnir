@@ -231,26 +231,25 @@ Mjolnir's SSH connections accept a host key they have never seen, record it in
 `known_hosts`, and refuse a key that later changes
 (`StrictHostKeyChecking=accept-new`). This applies to SSH machines, to EC2
 instances, whose key is always new at first contact, and to the Git-over-SSH
-clones and fetches Mjolnir runs on the controller and on targets. Someone who
-can intercept a first connection can present their own key, and it is trusted
-from then on.
+fetches Mjolnir runs on the controller, such as its clone cache and checkpoint
+checks. Someone who can intercept a first connection can present their own key,
+and it is trusted from then on. Git commands that run on a target, inside a
+container or on an SSH machine, use that target's own SSH settings and
+`known_hosts` instead; with OpenSSH's defaults they refuse an unknown key
+rather than trust it.
 
 A key that is already in `known_hosts` is checked, not trusted anew. To avoid
 first-use trust:
 
 - Before the first connection, add each host's key to the `known_hosts` file of
-  the user that connects: on the controller, and on each SSH machine for the
-  Git remotes it clones. Take the expected fingerprint from a source you trust,
-  such as the SSH key fingerprints your Git host publishes, and compare it with
-  the key you add. `ssh-keyscan` only reports what the network presents, so it
-  is not a check by itself.
+  the user that runs Mjolnir on the controller. Take the expected fingerprint
+  from a source you trust, such as the SSH key fingerprints your Git host
+  publishes, and compare it with the key you add. `ssh-keyscan` only reports
+  what the network presents, so it is not a check by itself.
 - To refuse unknown keys outright on an SSH machine, add
   `"-o", "StrictHostKeyChecking=yes"` to its `extra_args`; Mjolnir puts
   `extra_args` first, so it wins. EC2 machines take the same option in
   `ssh_args`. This covers Mjolnir's connection to the machine, not Git.
-- Containers and fresh EC2 instances start without your `known_hosts`, so Git
-  over SSH inside them trusts the first key it sees. Use HTTPS remotes there if
-  that matters to you.
 
 ## Isolated sessions use independent network clones
 
