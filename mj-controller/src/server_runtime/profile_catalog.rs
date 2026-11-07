@@ -191,6 +191,24 @@ struct Inner {
 }
 
 impl Inner {
+    /// Whether every non-Failed entry of `identity` carries a settled
+    /// digest, all identical: the identity's served answers all describe
+    /// one home state, so nothing is left retrying. A still-failing entry
+    /// keeps its older digest and leaves the identity pending.
+    fn converged_at_one_digest(&self, identity: &str) -> bool {
+        let mut digests = self
+            .entries
+            .iter()
+            .filter(|((entry_identity, _), entry)| {
+                entry_identity == identity && !matches!(entry, Entry::Failed { .. })
+            })
+            .map(|(key, _)| self.home_settled.get(key));
+        match digests.next() {
+            Some(first) => first.is_some_and(|first| digests.all(|digest| digest == Some(first))),
+            None => true,
+        }
+    }
+
     /// The `models` allow-list of the profile `identity` names: the live
     /// configuration's when it has that profile, else the latest draft's.
     /// Read at publication, so an edit applies without rediscovery.
@@ -970,10 +988,22 @@ impl ProfileCatalog {
         // A failed re-probe records nothing, so the identity stays stale and
         // the next pass tries again; bound how often the re-probe repeats,
         // matching the expiry refresh cadence for persistent failures.
+        // Launches and failed re-probes arm the window; nothing else touches
+        // it, so concurrent probes cannot disagree about it. An identity
+        // observed converged this pass has nothing left to retry: clear its
+        // window before deciding what launches, so a genuinely new edit
+        // re-probes on the next pass instead of waiting the window out.
+        let watched: BTreeSet<&str> = identities_by_home
+            .values()
+            .flat_map(|identities| identities.iter().map(String::as_str))
+            .collect();
         let now = tokio::time::Instant::now();
         let retry_wait = self.home_edit_retry_wait();
         let due: Vec<String> = {
-            let inner = self.lock();
+            let mut inner = self.lock();
+            inner.home_edit_retry_after.retain(|identity, _| {
+                watched.contains(identity.as_str()) && !converged.contains(identity)
+            });
             stale
                 .iter()
                 .filter(|identity| {
@@ -997,21 +1027,13 @@ impl ProfileCatalog {
             inner.home_stats.insert(home, files);
         }
         // Homes no profile uses anymore stop being watched, and identities
-        // no definition serves stop being settled or throttled. A converged
-        // identity's failure history no longer matters.
-        let watched: BTreeSet<&str> = identities_by_home
-            .values()
-            .flat_map(|identities| identities.iter().map(String::as_str))
-            .collect();
+        // no definition serves stop being settled or throttled.
         inner
             .home_stats
             .retain(|home, _| identities_by_home.contains_key(home));
         inner
             .home_settled
             .retain(|key, _| watched.contains(key.0.as_str()));
-        inner.home_edit_retry_after.retain(|identity, _| {
-            watched.contains(identity.as_str()) && !converged.contains(identity)
-        });
         for identity in launched_identities {
             inner
                 .home_edit_retry_after
@@ -1098,7 +1120,8 @@ impl ProfileCatalog {
                 // The re-probe failed: the entry keeps its pre-edit copy and
                 // the identity stays stale. Re-arm the retry window so the
                 // next pass waits it out instead of re-probing the identity
-                // every poll; only a success discharges it.
+                // every poll. The window is cleared by the home watch when
+                // it observes every served entry settled, never by a probe.
                 inner.home_edit_retry_after.insert(
                     key.0.clone(),
                     tokio::time::Instant::now() + self.home_edit_retry_wait(),
@@ -1112,10 +1135,14 @@ impl ProfileCatalog {
             if let Some(digest) = digest {
                 inner.home_settled.insert(key.clone(), digest);
             }
-            // A success converged the entry: discharge the failed-reprobe
-            // throttle so a genuinely new edit re-probes on the next pass
-            // instead of waiting out the retry window. A failure keeps it.
-            inner.home_edit_retry_after.remove(&key.0);
+            // Discharge the failed-reprobe window only when this success
+            // leaves the identity at one digest: a still-failing sibling
+            // keeps its older digest and the window's bound, whatever order
+            // the probes complete in. The home watch also clears the window
+            // for identities it observes converged.
+            if inner.converged_at_one_digest(&key.0) {
+                inner.home_edit_retry_after.remove(&key.0);
+            }
             let choices = outcome.choices;
             inner
                 .entries
@@ -1259,9 +1286,11 @@ impl ProfileCatalog {
                             if let Some(digest) = outcome.home_digest {
                                 inner.home_settled.insert(key.clone(), digest);
                             }
-                            // See drive_refresh: a success discharges the
-                            // failed-reprobe throttle; a failure keeps it.
-                            inner.home_edit_retry_after.remove(&key.0);
+                            // See drive_refresh: discharge the window only at
+                            // one digest, so a failing sibling keeps the bound.
+                            if inner.converged_at_one_digest(&key.0) {
+                                inner.home_edit_retry_after.remove(&key.0);
+                            }
                             inner
                                 .entries
                                 .insert(key.clone(), Entry::Ready(outcome.choices.clone()));
