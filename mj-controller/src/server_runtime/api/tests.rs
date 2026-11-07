@@ -4763,6 +4763,7 @@ fn observed_work() -> mj_core::work_facts::WorkFacts {
         observed_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap() - 5_000,
         processes: Observed::Known(ProcessFacts {
             unattributed: 0,
+            worker: None,
             running: 1,
             shown: vec![RunningProcess {
                 pid: 41301,
@@ -4803,8 +4804,8 @@ async fn finish_report_and_listing(
 ) -> (
     Option<mj_core::mailbox::SubagentFinishedReport>,
     serde_json::Value,
+    Arc<ApiBackend>,
 ) {
-    let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
     let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
     conversation.applied_event_ordinal = 9;
@@ -4844,7 +4845,7 @@ async fn finish_report_and_listing(
         .await;
     assert!(!listing.is_error, "{}", listing.message);
     let listing: serde_json::Value = serde_json::from_str(&listing.message).unwrap();
-    (report, listing["agents"][0].clone())
+    (report, listing["agents"][0].clone(), backend)
 }
 
 /// The finish report carries what the child's worker saw, the same lines
@@ -4856,8 +4857,9 @@ async fn a_finish_report_carries_what_the_worker_observed_and_list_agents_repeat
     ) {
         return;
     }
+    let _writer = crate::database::install_isolated_test_writer();
     let observed = observed_work();
-    let (report, child) = finish_report_and_listing(Some(observed.clone())).await;
+    let (report, child, _backend) = finish_report_and_listing(Some(observed.clone())).await;
     assert_eq!(report.unwrap().facts.as_ref(), Some(&observed));
     let lines = observed.render_lines();
     let listed: Vec<String> =
@@ -4873,6 +4875,67 @@ async fn a_finish_report_carries_what_the_worker_observed_and_list_agents_repeat
     assert!(child["facts"].get("park").is_none(), "{child}");
 }
 
+// Hard-won: 49a8da78c: a `git status` that never ended withheld the finish
+// report and discarded the process facts, so the parent could wait forever.
+/// The finish report is built from the process facts alone, with the working
+/// tree pending; `list_agents` shows the tree once its read arrives, and the
+/// report already sent is not rewritten. A tree for another finish, or a part
+/// already known, is not replaced.
+#[tokio::test]
+async fn a_pending_working_tree_does_not_withhold_the_report_and_arrives_in_list_agents() {
+    if !isolated_parked_test(
+        "a_pending_working_tree_does_not_withhold_the_report_and_arrives_in_list_agents",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut observed = observed_work();
+    let tree = observed.worktree.clone();
+    observed.worktree = mj_core::work_facts::Observed::Pending;
+    let (report, child, backend) = finish_report_and_listing(Some(observed.clone())).await;
+    let report = report.expect("a finish with process facts and a pending tree is reported");
+    let text = report.facts.as_ref().unwrap().render_lines().join("\n");
+    assert!(text.contains("pid 41301"), "{text}");
+    assert!(text.contains("Working tree: still being read"), "{text}");
+    let listed = child["facts"]["finish"]["lines"].to_string();
+    assert!(listed.contains("still being read"), "{listed}");
+
+    // Another finish's tree changes nothing; this one's arrives.
+    crate::database::record_finish_worktree("child-1".into(), 8, tree.clone()).unwrap();
+    let still = crate::database::load_work_facts(&["child-1".to_owned()]).unwrap();
+    assert!(matches!(
+        still["child-1"].finish.as_ref().unwrap().worktree,
+        mj_core::work_facts::Observed::Pending
+    ));
+    crate::database::record_finish_worktree("child-1".into(), 9, tree.clone()).unwrap();
+    // A known part is never replaced.
+    crate::database::record_finish_worktree(
+        "child-1".into(),
+        9,
+        mj_core::work_facts::Observed::unavailable("late"),
+    )
+    .unwrap();
+    let listing = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "observe-again".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            },
+        )
+        .await;
+    let listing: serde_json::Value = serde_json::from_str(&listing.message).unwrap();
+    let listed = listing["agents"][0]["facts"]["finish"]["lines"].to_string();
+    assert!(listed.contains("notes.txt"), "{listed}");
+    assert!(!listed.contains("still being read"), "{listed}");
+    // The report that was sent said the tree was pending, and still does.
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].event_json.contains("\"pending\""));
+}
+
 // Hard-won: a430ee620: the report reconcile awaited every ready child's worker,
 // so one slow Git read or a child inside an idle checkpoint delayed every
 // sibling's report, every other parent's reports and all mailbox delivery.
@@ -4885,7 +4948,8 @@ async fn a_report_reconcile_never_asks_a_worker_and_waits_for_no_childs_facts() 
     {
         return;
     }
-    let (report, child) = finish_report_and_listing(None).await;
+    let _writer = crate::database::install_isolated_test_writer();
+    let (report, child, _backend) = finish_report_and_listing(None).await;
     assert!(
         report.is_none(),
         "a finish with no stored facts was reported before its completion task stored them"

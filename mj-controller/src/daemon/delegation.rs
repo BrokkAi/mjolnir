@@ -163,6 +163,9 @@ async fn run(
     let mut fact_tasks = tokio::task::JoinSet::new();
     let mut fact_ids = BTreeMap::<tokio::task::Id, (String, u64)>::new();
     let mut facts_done = BTreeMap::<String, u64>::new();
+    // The working tree, which has no fixed duration, is read after the report
+    // can be built, by another task of the same child, and nothing waits for it.
+    let mut tree_tasks = tokio::task::JoinSet::new();
     let mut noticed = BTreeMap::<String, u64>::new();
     let mut retry = BTreeMap::<String, CompletionRetry>::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -330,7 +333,16 @@ async fn run(
                 };
                 if let Some((id, ordinal)) = fact_ids.remove(&task_id) {
                     match result {
-                        Ok(()) => { facts_done.insert(id, ordinal); }
+                        Ok(()) => {
+                            let state = state.clone();
+                            let child_id = id.clone();
+                            tree_tasks.spawn(async move {
+                                if let Err(error) = state.collect_finish_worktree(&child_id, ordinal).await {
+                                    tracing::warn!(child_session_id = %child_id, error = format!("{error:#}"), "could not record a finished child's working tree");
+                                }
+                            });
+                            facts_done.insert(id, ordinal);
+                        }
                         Err(error) => {
                             let failure = format!("{error:#}");
                             let (next, report) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), Some(failure.clone()));
@@ -342,6 +354,7 @@ async fn run(
                     }
                 }
             }
+            _ = tree_tasks.join_next(), if !tree_tasks.is_empty() => {}
             completed = completions.join_next_with_id(), if !completions.is_empty() => {
                 let Some(completed) = completed else { continue };
                 let (task_id, result) = match completed {
@@ -382,6 +395,7 @@ async fn run(
     jobs.abort_all();
     completions.abort_all();
     fact_tasks.abort_all();
+    tree_tasks.abort_all();
     while let Some(result) = jobs.join_next().await {
         if let Err(error) = result
             && !error.is_cancelled()

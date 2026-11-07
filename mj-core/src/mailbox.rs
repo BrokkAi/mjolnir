@@ -974,6 +974,27 @@ mod tests {
             ParkFacts::settled(Observed::Known(processes), &survivors)
         }
 
+        pub fn tree_pending() -> WorkFacts {
+            WorkFacts {
+                worktree: Observed::Pending,
+                ..busy()
+            }
+        }
+
+        pub fn park_with_an_earlier_exit() -> ParkFacts {
+            let busy = busy();
+            let Observed::Known(listed) = busy.processes else {
+                unreachable!()
+            };
+            // At the park only the second and third listed processes still ran.
+            let mut at_park = listed.clone();
+            at_park.identities = listed.identities[1..3].to_vec();
+            at_park.shown = listed.shown[1..3].to_vec();
+            at_park.running = 2;
+            at_park.omitted = 0;
+            ParkFacts::settled(Observed::Known(at_park), &[41301]).with_finish(&listed)
+        }
+
         pub fn park_unverified() -> ParkFacts {
             let busy = busy();
             let Observed::Known(processes) = busy.processes else {
@@ -1037,6 +1058,7 @@ mod tests {
                 observed_at_ms: 1,
                 processes: Observed::Known(ProcessFacts {
                     unattributed: 2,
+                    worker: None,
                     running: 9,
                     shown,
                     omitted: 6,
@@ -1060,6 +1082,7 @@ mod tests {
                 observed_at_ms: 1,
                 processes: Observed::Known(ProcessFacts {
                     unattributed: 0,
+                    worker: None,
                     running: 0,
                     shown: Vec::new(),
                     omitted: 0,
@@ -1224,9 +1247,13 @@ mod tests {
             finish_with_facts("child-4", "Run suites", fact_fixture::busy()),
             finish_with_facts("child-5", "Fix lexer", fact_fixture::clean()),
             finish_with_facts("child-6", "Index files", fact_fixture::unobserved()),
+            // The working tree is still being read; the report is not held for it.
+            finish_with_facts("child-9", "Build docs", fact_fixture::tree_pending()),
             // What the park after a finish did to the processes listed in it.
             parked("child-4", "Run suites", fact_fixture::park_settled()),
             parked("child-7", "Check cache", fact_fixture::park_unverified()),
+            // A process the finish listed had exited before the park began.
+            parked("child-9", "Build docs", fact_fixture::park_with_an_earlier_exit()),
             // The finish listed processes, and the park could not observe them.
             parked(
                 "child-8",

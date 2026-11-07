@@ -8038,6 +8038,85 @@ async fn a_slow_working_tree_read_on_one_connection_never_delays_processes_on_an
     assert!(line.contains("work_facts"), "{line}");
 }
 
+// Hard-won: 49a8da78c: the Git read ran on a blocking thread whose handle was
+// dropped when the requester went away, so a stalled `git status` kept running,
+// and each handoff that asked again added another scan.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_disconnect_kills_the_git_read_it_started() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+    ));
+    let pid_file = temp.path().join("git.pid");
+    let stalled_git = temp.path().join("stalled-git");
+    std::fs::write(
+        &stalled_git,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 60\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stalled_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (wake, _wakes) = mpsc::channel(1);
+    let (fatal, _errors) = mpsc::channel(1);
+    let (server, client) = tokio::net::UnixStream::pair().unwrap();
+    let task = tokio::spawn(unix::serve_client_with_memory(
+        server,
+        relay.clone(),
+        wake,
+        Err("no credentials".into()),
+        unix::ConnectionRuntime {
+            work: Some(crate::work_facts::WorkObserver {
+                session_id: SESSION_ID.into(),
+                worker_pid: std::process::id(),
+                directory: temp.path().to_path_buf(),
+                git: stalled_git.into(),
+                harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
+            }),
+            ..Default::default()
+        },
+        fatal,
+    ));
+    let mut client = BufReader::new(client);
+    let request = RelayRequestEnvelope {
+        request_id: "facts".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::WorkFacts {
+            processes: false,
+            worktree: true,
+        },
+    };
+    let mut bytes = serde_json::to_vec(&request).unwrap();
+    bytes.push(b'\n');
+    client.get_mut().write_all(&bytes).await.unwrap();
+    let pid = loop {
+        if let Ok(text) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = text.trim().parse::<i32>()
+        {
+            break pid;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0
+        && !std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| stat.rsplit(')').next().is_some_and(|rest| rest.trim_start().starts_with('Z')));
+    assert!(alive(pid), "the Git read was not running");
+    drop(client);
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .expect("the connection did not end")
+        .unwrap()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while alive(pid) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(!alive(pid), "the Git read outlived its requester");
+}
+
 #[test]
 fn push_gate_startup_and_environment_follow_harness_and_primary_ownership() {
     for harness in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Muse] {

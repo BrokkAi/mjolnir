@@ -183,6 +183,33 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
   Date/Author: 2026-11-07 / implementing agent, from review.
 
 
+- Decision (third review, 2026-11-07): Delivery is decoupled from the Git read. The child's facts task stores the process facts as soon as the worker answers (within the ordinary request deadline, else "unavailable: <reason>") with the working tree as a new third state, `Observed::Pending`; the report is built at once. A second task of the same child reads the tree on its own connection with no deadline and fills it in (`record_finish_worktree`, which changes nothing for another finish and never replaces a known part); `list_agents` shows it once it arrives, and the report already sent says "still being read". After a daemon restart the facts task finds the stored facts and the tree task reads again. A reconcile that skips a child logs why (debug, because the sweep repeats).
+  Rationale: This corrects my own earlier direction (facts before the report, no deadline on Git), which made a stalled `git status` withhold the report and discard the process facts and left the parent waiting with nothing to act on. The report is a statement about the moment it was recorded; a part still being read says so.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (third review): The worker owns its Git child. `run_git` runs through `mj_core::subprocess::run_bounded` (own process group, killed and reaped when the future is dropped) with no deadline and no output limit while the caller stays connected, and `collect` awaits it directly instead of handing it to a blocking thread. The worktree part is async.
+  Rationale: A dropped `spawn_blocking` handle left `git` running after the requester disconnected, so repeated handoffs accumulated scans. Test `a_disconnect_kills_the_git_read_it_started`.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (third review): Startup recovery takes only child ids from its read and reloads the pending park inside the child's park lifecycle (`settle_unfinished_park_of`).
+  Rationale: A stale snapshot captured before the lifecycle could overwrite a newer park's outcome.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (third review): Changed paths, branch names, the HEAD subject and the directory are stored exactly as Git reported them; terminal controls are removed and long values cut (160 characters) only when rendering (`display_text`). Process command lines are still redacted and cut at collection, because they can carry tokens.
+  Rationale: The command redactor turned ordinary file names of 24 or more token characters into `[redacted]` and collapsed whitespace in stored paths.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (third review): The park follow-up accounts for every process the finish report listed. `record_park_outcome` compares the finish report's stored process identities with the park's pre-stop snapshot (`ParkFacts::with_finish`): a listed process that is in no snapshot is reported as having exited before the park (`exited_before`), a process in the snapshot is reported as no longer running or surviving after it; a process that started after the finish is in the snapshot's own account.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (third review, reinstates the worker identity the second review removed, for a different purpose): The marker records the worker's identity (`ProcessFacts.worker`, pid and start time) again, and startup decides a marker on a child still recorded as running from observable facts: the recorded worker is gone and the worker liveness probe says `dead` (no other worker lives for the session), so the daemon died between the stop and saving the parked record: the child is saved as parked and the park's outcome recorded with its message. If the recorded worker lives, or a different worker lives for the session, or no worker is recorded, the marker is dropped without a message. A child recorded as parked is settled as before.
+  Rationale: Dropping every marker whose child was still recorded as running discarded real parks. The two things the second review rightly rejected (a gone worker alone as proof, and a restarted worker producing a false message) are both decided by the probe: a worker restarted by the actor makes the probe say alive. Tests `a_crash_between_the_stop_and_the_parked_record_settles_with_a_message` and `a_restarted_worker_drops_the_marker_and_sends_nothing`.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (third review): The macOS reader reports `Marker::Unreadable` for a same-user process whose `ps -E` line shows no environment appended to its command (`classify_marker`, which is tested on Linux); other users' processes stay absent. It is still not built or run on macOS.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+
 ## Outcomes & Retrospective
 
 Review round (2026-11-07): see the Decision Log entries marked "review fix". After them, live Claude runs 5 and 6 of `tests/e2e/handback_facts.py` passed, clippy was clean, and the isolated upgrade regressions in `mj-cli/tests/daemon_startup.rs` passed (21 of 21).

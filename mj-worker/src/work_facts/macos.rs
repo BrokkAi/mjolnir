@@ -39,28 +39,65 @@ fn ps(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-const LISTING: &[&str] = &["-axww", "-o", "pid=,ppid=,etime=,stat=,command="];
+const LISTING: &[&str] = &["-axww", "-o", "pid=,ppid=,uid=,etime=,stat=,command="];
+
+/// Whether a process's environment carries the session marker, from the line
+/// `ps -E` printed for it. `ps -E` appends a process's environment to its
+/// command; for a process of the same user whose environment it cannot show it
+/// prints the command alone, which is the case reported as unreadable rather
+/// than as an absent marker (the Linux reader does the same for a refused
+/// read). A process of another user is not this session's and stays absent.
+pub(super) fn classify_marker(
+    environment_line: Option<&str>,
+    command: &str,
+    same_user: bool,
+    wanted: &str,
+) -> Marker {
+    let Some(line) = environment_line else {
+        return Marker::Absent;
+    };
+    // The line is `pid command... ENV=value ...`.
+    let words: Vec<&str> = line.split_whitespace().skip(1).collect();
+    if words.contains(&wanted) {
+        Marker::Present
+    } else if same_user && words.join(" ") == command {
+        Marker::Unreadable
+    } else {
+        Marker::Absent
+    }
+}
 
 pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReader)> {
     let wanted = format!("MJ_SESSION_ID={session_id}");
-    let marked: std::collections::BTreeSet<u32> = ps(&["-axwwE", "-o", "pid=,command="])?
-        .lines()
-        .filter(|line| line.split_whitespace().any(|word| word == wanted))
-        .filter_map(|line| line.split_whitespace().next()?.parse().ok())
-        .collect();
+    let environment_lines: std::collections::BTreeMap<u32, String> =
+        ps(&["-axwwE", "-o", "pid=,command="])?
+            .lines()
+            .filter_map(|line| {
+                Some((
+                    line.split_whitespace().next()?.parse().ok()?,
+                    line.to_owned(),
+                ))
+            })
+            .collect();
+    let me = unsafe { libc::geteuid() };
     let listing = ps(LISTING)?;
     let mut rows = Vec::new();
     let mut commands = std::collections::BTreeMap::new();
     for line in listing.lines() {
         let mut fields = line.split_whitespace();
-        let (Some(pid), Some(ppid), Some(etime), Some(stat)) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
+        let (Some(pid), Some(ppid), Some(uid), Some(etime), Some(stat)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
             continue;
         };
-        let (Ok(pid), Ok(ppid), Some(elapsed)) = (
+        let (Ok(pid), Ok(ppid), Ok(uid), Some(elapsed)) = (
             pid.parse::<u32>(),
             ppid.parse::<u32>(),
+            uid.parse::<u32>(),
             parse_elapsed_secs(etime),
         ) else {
             continue;
@@ -69,17 +106,19 @@ pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReade
         if ppid == std::process::id() && command == own_ps_command(LISTING) {
             continue;
         }
+        let marker = classify_marker(
+            environment_lines.get(&pid).map(String::as_str),
+            &command,
+            uid == me,
+            &wanted,
+        );
         commands.insert(pid, command);
         rows.push(ProcRow {
             pid,
             ppid,
             age_ms: elapsed.saturating_mul(1000),
             zombie: stat.starts_with('Z'),
-            marker: if marked.contains(&pid) {
-                Marker::Present
-            } else {
-                Marker::Absent
-            },
+            marker,
         });
     }
     let reader = ProcessReader::new(move |row| {
@@ -96,4 +135,47 @@ pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReade
         }
     });
     Ok((rows, reader))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hard-won: 49a8da78c: the macOS reader never reported an unreadable
+    // environment, so a same-user process `ps -E` could not show was taken for
+    // another session's and left out.
+    #[test]
+    fn a_same_user_process_whose_environment_ps_cannot_show_is_unreadable() {
+        let wanted = "MJ_SESSION_ID=abc";
+        let command = "/usr/bin/tool --flag";
+        assert_eq!(
+            classify_marker(
+                Some("  41 /usr/bin/tool --flag HOME=/h MJ_SESSION_ID=abc"),
+                command,
+                true,
+                wanted
+            ),
+            Marker::Present
+        );
+        assert_eq!(
+            classify_marker(
+                Some("  41 /usr/bin/tool --flag HOME=/h"),
+                command,
+                true,
+                wanted
+            ),
+            Marker::Absent
+        );
+        // No environment appended to a same-user process: it could not be read.
+        assert_eq!(
+            classify_marker(Some("  41 /usr/bin/tool --flag"), command, true, wanted),
+            Marker::Unreadable
+        );
+        // Another user's process is not this session's.
+        assert_eq!(
+            classify_marker(Some("  41 /usr/bin/tool --flag"), command, false, wanted),
+            Marker::Absent
+        );
+        assert_eq!(classify_marker(None, command, true, wanted), Marker::Absent);
+    }
 }

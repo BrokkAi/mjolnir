@@ -297,6 +297,60 @@ pub(crate) fn record_finish_facts(
     })
 }
 
+/// Record the working-tree part of the facts of the finish that completed turn
+/// `ordinal`, which was stored as pending: the Git read has no fixed duration,
+/// and the report was built without it. Nothing changes if the child has since
+/// finished again (its facts belong to another turn), and the part is never
+/// replaced once it is known.
+pub(crate) fn record_finish_worktree(
+    child: String,
+    ordinal: u64,
+    worktree: mj_core::work_facts::Observed<mj_core::work_facts::WorktreeFacts>,
+) -> Result<()> {
+    submit_database_write("record finish working tree", move |connection| {
+        let transaction = connection.transaction()?;
+        let row: Option<(Option<u64>, Option<String>)> = transaction
+            .query_row(
+                "SELECT finish_ordinal, finish_json FROM subagent_work_facts WHERE child_session_id=?1",
+                [&child],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((Some(stored), Some(json))) = row else {
+            return Ok(());
+        };
+        if stored != ordinal {
+            return Ok(());
+        }
+        let mut facts: mj_core::work_facts::WorkFacts = serde_json::from_str(&json)?;
+        if !matches!(facts.worktree, mj_core::work_facts::Observed::Pending) {
+            return Ok(());
+        }
+        facts.worktree = worktree;
+        transaction.execute(
+            "UPDATE subagent_work_facts SET finish_json=?2 WHERE child_session_id=?1",
+            params![child, serde_json::to_string(&facts)?],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })
+}
+
+/// The unfinished park of one child, if it still has one.
+pub(crate) fn load_unfinished_park(child: &str) -> Result<Option<mj_core::work_facts::ParkFacts>> {
+    let connection = open_reader(&database_path())?;
+    let park: Option<String> = connection
+        .query_row(
+            "SELECT park_json FROM subagent_work_facts
+             WHERE child_session_id=?1 AND json_extract(park_json, '$.pending') = 1",
+            [child],
+            |row| row.get(0),
+        )
+        .optional()?;
+    park.map(|park| Ok(serde_json::from_str(&park)?))
+        .transpose()
+}
+
 /// Write the pre-stop snapshot of a park with its unfinished marker, before
 /// the irreversible stop, so a daemon that dies between the stop and its
 /// outcome can settle the park from this row at startup.
@@ -374,11 +428,19 @@ pub(crate) fn record_park_outcome(
             )
             .optional()?
             .flatten();
-        let promised = finish_json
+        let finish = finish_json
             .map(|text| serde_json::from_str::<mj_core::work_facts::WorkFacts>(&text))
-            .transpose()?
+            .transpose()?;
+        let promised = finish
+            .as_ref()
             .and_then(|facts| facts.running_processes())
             .is_some_and(|running| running > 0);
+        // Each process the finish report listed gets an account: running
+        // before the park and after it, or already gone before it.
+        let park = match finish.as_ref().and_then(|facts| facts.processes.known()) {
+            Some(listed) => park.with_finish(listed),
+            None => park,
+        };
         transaction.execute(
             "INSERT INTO subagent_work_facts(child_session_id, finish_json, park_json)
              VALUES (?1, NULL, ?2)

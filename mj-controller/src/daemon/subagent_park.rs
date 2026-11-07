@@ -182,7 +182,10 @@ impl RuntimeState {
                     return;
                 }
             };
-            for (child_session_id, park) in parks {
+            // Only the children are taken from this read: a child may be
+            // unparked, finish again and be parked again before its turn at the
+            // lifecycle, so the pending park is read again inside it.
+            for (child_session_id, _) in parks {
                 let state = state.clone();
                 tokio::spawn(async move {
                     // Another operation on the child (a restart that recovery
@@ -192,18 +195,13 @@ impl RuntimeState {
                     let mut pause = Duration::from_millis(250);
                     let settled = loop {
                         let attempt = state
-                            .run_lifecycle(child_session_id.clone(), LifecycleKind::Park, {
-                                let park = park.clone();
-                                move |_state, session_id, _cancelled| async move {
-                                    let controller = blocking(Controller::load).await?;
-                                    let executor =
-                                        CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);
-                                    controller
-                                        .settle_unfinished_park(&session_id, park, &executor)
-                                        .await?;
-                                    Ok(DaemonLifecycleResult::Done)
-                                }
-                            })
+                            .run_lifecycle(
+                                child_session_id.clone(),
+                                LifecycleKind::Park,
+                                move |_state, session_id, _cancelled| {
+                                    settle_unfinished_park_of(session_id)
+                                },
+                            )
                             .await;
                         match attempt {
                             Err(error) if error.is::<SessionLifecycleBusy>() => {
@@ -302,5 +300,106 @@ impl RuntimeState {
             }
             self.remove_completed_lifecycle(&pending);
         }
+    }
+}
+
+/// Settle one child's unfinished park, inside its park lifecycle. The pending
+/// park is read here, not taken from the startup read: while this waited its
+/// turn the child may have been unparked, finished again and been parked
+/// again, and a snapshot taken at startup would overwrite that newer outcome.
+async fn settle_unfinished_park_of(session_id: String) -> Result<DaemonLifecycleResult> {
+    let Some(park) = blocking({
+        let session_id = session_id.clone();
+        move || crate::database::load_unfinished_park(&session_id)
+    })
+    .await?
+    else {
+        // Settled, or replaced by a newer park's outcome, in the meantime.
+        return Ok(DaemonLifecycleResult::Done);
+    };
+    let controller = blocking(Controller::load).await?;
+    let executor = CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);
+    controller
+        .settle_unfinished_park(&session_id, park, &executor)
+        .await?;
+    Ok(DaemonLifecycleResult::Done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::controller::test_support::{IsolatedTest, test_name};
+    use mj_core::work_facts::{Observed, ParkFacts, ProcessFacts, ProcessIdentity, RunningProcess};
+
+    // Hard-won: 49a8da78c: startup captured the pending park before the child's
+    // lifecycle was acquired; a child unparked, finished again and parked again
+    // meanwhile had its newer outcome overwritten from the stale snapshot.
+    #[tokio::test]
+    async fn settling_reads_the_pending_park_inside_the_lifecycle_not_at_startup() {
+        const CHILD: &str = "MJ_TEST_SETTLE_RELOAD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "settling_reads_the_pending_park_inside_the_lifecycle_not_at_startup",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "settle-reload")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("settle reload").unwrap();
+        let parent = crate::daemon::tests::runtime_test_session(
+            "parent",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        let child = crate::daemon::tests::runtime_test_session(
+            "child",
+            &workspace.id,
+            mj_core::state::SessionState::Parked,
+        );
+        crate::database::save_session(&parent).unwrap();
+        crate::database::save_subagent_session(
+            &child,
+            &crate::daemon::tests::runtime_test_subagent("child", "parent"),
+        )
+        .unwrap();
+        let identity = ProcessIdentity {
+            pid: 4_000_001,
+            start: "boot-that-never-was:1".into(),
+        };
+        let snapshot = |running: u32| {
+            Observed::Known(ProcessFacts {
+                unattributed: 0,
+                worker: None,
+                running,
+                shown: vec![RunningProcess {
+                    pid: identity.pid,
+                    elapsed_secs: 1,
+                    command: "sleep 1".into(),
+                    detached: false,
+                }],
+                omitted: 0,
+                identities: vec![identity.clone()],
+            })
+        };
+        // The park startup saw...
+        crate::database::record_park_started("child".into(), ParkFacts::started(snapshot(1)))
+            .unwrap();
+        let stale = crate::database::load_unfinished_parks().unwrap();
+        assert_eq!(stale.len(), 1);
+        // ...and the newer park that was recorded before the lifecycle came up.
+        let newer = ParkFacts::settled(snapshot(1), &[identity.pid]);
+        assert_eq!(newer.survived, 1);
+        crate::database::record_park_outcome("child".into(), "child".into(), newer.clone())
+            .unwrap();
+
+        settle_unfinished_park_of("child".into()).await.unwrap();
+
+        let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
+        assert_eq!(recorded["child"].park.as_ref(), Some(&newer));
     }
 }

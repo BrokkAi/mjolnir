@@ -19,12 +19,17 @@ pub const SHOWN_PATHS: usize = 8;
 /// Characters of a command line kept in a rendering.
 pub const COMMAND_CHARS: usize = 160;
 
-/// One part of the facts: observed, or not observable and why.
+/// One part of the facts: observed, not observable and why, or not read yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", content = "value", rename_all = "snake_case")]
 pub enum Observed<T> {
     Known(T),
-    Unavailable { reason: String },
+    Unavailable {
+        reason: String,
+    },
+    /// Being read: the part has no fixed duration (a Git read of a large
+    /// tree), and what was observed so far was recorded without waiting for it.
+    Pending,
 }
 
 impl<T> Observed<T> {
@@ -37,7 +42,7 @@ impl<T> Observed<T> {
     pub fn known(&self) -> Option<&T> {
         match self {
             Self::Known(value) => Some(value),
-            Self::Unavailable { .. } => None,
+            Self::Unavailable { .. } | Self::Pending => None,
         }
     }
 }
@@ -66,6 +71,12 @@ pub struct ProcessFacts {
     /// are work the agent detached, is unknown. They are not in `running`.
     #[serde(default)]
     pub unattributed: u32,
+    /// The worker that observed them. A park records it before its stop: a
+    /// daemon that finds the park unfinished asks whether this process still
+    /// lives, and whether another worker owns the session, to tell a stop that
+    /// ran from one that did not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<ProcessIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +156,15 @@ pub struct ParkFacts {
     /// The part of `snapshot.shown` that still ran after the stop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub survived_shown: Vec<RunningProcess>,
+    /// Processes the finish report listed that were not running when the park
+    /// began: they exited before it. The finish report promised the parent an
+    /// account of each process it listed, and a process that is in no
+    /// snapshot would otherwise go unaccounted for.
+    #[serde(default)]
+    pub exited_before: u32,
+    /// The listed ones among them that the finish report showed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exited_before_shown: Vec<RunningProcess>,
 }
 
 impl ParkFacts {
@@ -159,6 +179,8 @@ impl ParkFacts {
             unverified: None,
             gone_shown: Vec::new(),
             survived_shown: Vec::new(),
+            exited_before: 0,
+            exited_before_shown: Vec::new(),
         };
         if let Observed::Known(processes) = &park.snapshot {
             let alive = |pid: u32| survivors.contains(&pid);
@@ -192,6 +214,31 @@ impl ParkFacts {
         park
     }
 
+    /// Account for the processes the finish report listed against the ones this
+    /// park saw: those not in its pre-stop snapshot had exited before the park.
+    /// A park whose snapshot is unavailable cannot say, and records nothing.
+    #[must_use]
+    pub fn with_finish(mut self, finish: &ProcessFacts) -> Self {
+        let Observed::Known(snapshot) = &self.snapshot else {
+            return self;
+        };
+        let seen = |identity: &ProcessIdentity| snapshot.identities.contains(identity);
+        let exited: Vec<u32> = finish
+            .identities
+            .iter()
+            .filter(|identity| !seen(identity))
+            .map(|identity| identity.pid)
+            .collect();
+        self.exited_before = u32::try_from(exited.len()).unwrap_or(u32::MAX);
+        self.exited_before_shown = finish
+            .shown
+            .iter()
+            .filter(|process| exited.contains(&process.pid))
+            .cloned()
+            .collect();
+        self
+    }
+
     /// A park whose check after the stop could not run.
     pub fn unverified(snapshot: Observed<ProcessFacts>, reason: impl Into<String>) -> Self {
         let mut park = Self::settled(snapshot, &[]);
@@ -219,6 +266,7 @@ impl ParkFacts {
             && (promised
                 || self.gone > 0
                 || self.survived > 0
+                || self.exited_before > 0
                 || (self.unverified.is_some() && self.observed_running() > 0))
     }
 
@@ -232,6 +280,9 @@ impl ParkFacts {
             (Observed::Unavailable { reason }, _) => lines.push(format!(
                 "Park: the processes could not be observed before the stop ({reason})"
             )),
+            (Observed::Pending, _) => {
+                lines.push("Park: the processes were not read before the stop".into());
+            }
             (Observed::Known(processes), _) if processes.running == 0 => {
                 lines.push("Park: no processes were running".into());
             }
@@ -252,6 +303,12 @@ impl ParkFacts {
             &self.survived_shown,
             self.survived,
         ));
+        if self.exited_before > 0 {
+            lines.push(format!(
+                "  {} listed in the finish report had exited before the park",
+                self.exited_before
+            ));
+        }
         lines
     }
 
@@ -262,6 +319,13 @@ impl ParkFacts {
         let mut lines = Vec::new();
         let plural = |count: u32| if count == 1 { "process" } else { "processes" };
         match (&self.snapshot, &self.unverified) {
+            (Observed::Pending, _) => {
+                lines.push(
+                    "The processes listed in the finish report were not read when the park began. Parking stops the harness and the processes under it; a detached process may keep running, so check on them yourself if they matter."
+                        .into(),
+                );
+                return lines;
+            }
             (Observed::Unavailable { reason }, _) => {
                 lines.push(format!(
                     "The processes listed in the finish report could not be checked when the park began: {reason}. Parking stops the harness and the processes under it; a detached process may keep running, so check on them yourself if they matter."
@@ -270,9 +334,14 @@ impl ParkFacts {
             }
             (Observed::Known(processes), _) if processes.running == 0 => {
                 lines.push(
-                    "None of the processes listed in the finish report was still running when the park began."
+                    "None of the processes listed in the finish report was still running when the park began; they had exited before it:"
                         .into(),
                 );
+                lines.extend(process_lines(
+                    None,
+                    &self.exited_before_shown,
+                    self.exited_before,
+                ));
                 return lines;
             }
             (Observed::Known(processes), Some(reason)) => {
@@ -309,6 +378,18 @@ impl ParkFacts {
                 if self.survived == 1 { "is" } else { "are" }
             ));
             lines.extend(process_lines(None, &self.survived_shown, self.survived));
+        }
+        if self.exited_before > 0 {
+            lines.push(format!(
+                "{} {} the finish report listed had already exited before the park began:",
+                self.exited_before,
+                plural(self.exited_before)
+            ));
+            lines.extend(process_lines(
+                None,
+                &self.exited_before_shown,
+                self.exited_before,
+            ));
         }
         lines
     }
@@ -354,12 +435,18 @@ impl WorkFacts {
             Observed::Unavailable { reason } => lines.push(format!(
                 "Running processes started by the child's agent: unavailable ({reason})"
             )),
+            Observed::Pending => lines
+                .push("Running processes started by the child's agent: still being read".into()),
         }
         match &self.worktree {
             Observed::Known(tree) => lines.extend(render_worktree(tree)),
             Observed::Unavailable { reason } => {
                 lines.push(format!("Working tree: unavailable ({reason})"));
             }
+            Observed::Pending => lines.push(
+                "Working tree: still being read when this was written; list_agents shows it once it arrives"
+                    .into(),
+            ),
         }
         lines
     }
@@ -421,19 +508,35 @@ fn render_processes(label: &str, processes: &ProcessFacts) -> Vec<String> {
     lines
 }
 
+/// Text from the machine as a reader sees it: terminal controls removed and a
+/// long value cut. Paths, branch names and subjects are stored exactly as Git
+/// reported them; only this rendering changes them.
+fn display_text(text: &str) -> String {
+    let clean = crate::transcript::sanitize_terminal_text(text);
+    let clean = clean.replace(['\n', '\t'], " ");
+    if clean.chars().count() <= COMMAND_CHARS {
+        return clean;
+    }
+    let cut: String = clean.chars().take(COMMAND_CHARS).collect();
+    format!("{cut}…")
+}
+
 fn render_worktree(tree: &WorktreeFacts) -> Vec<String> {
     let head = match &tree.head {
         Some(head) => {
             let short: String = head.sha.chars().take(7).collect();
-            format!("HEAD {short} {:?}", head.subject)
+            format!("HEAD {short} {:?}", display_text(&head.subject))
         }
         None => "no commits yet".to_owned(),
     };
     let branch = match &tree.branch {
-        Some(branch) => format!("branch {branch}"),
+        Some(branch) => format!("branch {}", display_text(branch)),
         None => "detached HEAD".to_owned(),
     };
-    let mut lines = vec![format!("Working tree {}: {head}; {branch}", tree.directory)];
+    let mut lines = vec![format!(
+        "Working tree {}: {head}; {branch}",
+        display_text(&tree.directory)
+    )];
     if tree.changed == 0 {
         lines.push("Uncommitted changes: none".into());
         return lines;
@@ -458,7 +561,7 @@ fn render_worktree(tree: &WorktreeFacts) -> Vec<String> {
     lines.extend(
         tree.shown
             .iter()
-            .map(|path| format!("  {} {}", path.status, path.path)),
+            .map(|path| format!("  {} {}", path.status, display_text(&path.path))),
     );
     if tree.omitted > 0 {
         lines.push(format!("  and {} more", tree.omitted));
@@ -482,6 +585,7 @@ mod tests {
         };
         let snapshot = Observed::Known(ProcessFacts {
             unattributed: 0,
+            worker: None,
             running: 2,
             shown: vec![process(10), process(11)],
             omitted: 0,
@@ -501,7 +605,10 @@ mod tests {
         assert!(!text.contains("Parking stopped"), "{text}");
         assert!(!text.contains("stopped by"), "{text}");
         assert!(text.contains("no longer running"), "{text}");
-        assert!(text.contains("cannot tell whether the park stopped"), "{text}");
+        assert!(
+            text.contains("cannot tell whether the park stopped"),
+            "{text}"
+        );
         assert_eq!((park.gone, park.survived), (1, 1));
     }
 }

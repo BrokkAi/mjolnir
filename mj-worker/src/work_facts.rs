@@ -141,7 +141,15 @@ pub(crate) fn select_processes(
             detached: *detached,
         })
         .collect();
+    let worker = rows
+        .iter()
+        .find(|row| row.pid == ctx.worker_pid)
+        .map(|row| ProcessIdentity {
+            pid: row.pid,
+            start: describe(row).identity,
+        });
     ProcessFacts {
+        worker,
         unattributed,
         running,
         omitted: running.saturating_sub(u32::try_from(shown.len()).unwrap_or(u32::MAX)),
@@ -170,7 +178,10 @@ fn command_text(raw: &str) -> String {
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
+// Compiled for tests everywhere so its parsing is tested here; it is run, and
+// built outside tests, on macOS only.
+#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod macos;
 
 fn scan_processes(observer: &WorkObserver) -> Observed<ProcessFacts> {
@@ -221,7 +232,7 @@ impl ProcessReader {
 }
 
 /// What `git status` and `git log` say about `directory`.
-fn read_worktree(git: &std::ffi::OsStr, directory: &Path) -> Observed<WorktreeFacts> {
+async fn read_worktree(git: &std::ffi::OsStr, directory: &Path) -> Observed<WorktreeFacts> {
     let status = match run_git(
         git,
         directory,
@@ -235,7 +246,9 @@ fn read_worktree(git: &std::ffi::OsStr, directory: &Path) -> Observed<WorktreeFa
             // report a tree with new files as clean.
             "--untracked-files=all",
         ],
-    ) {
+    )
+    .await
+    {
         Ok(output) => output,
         Err(reason) => return Observed::unavailable(reason),
     };
@@ -247,19 +260,29 @@ fn read_worktree(git: &std::ffi::OsStr, directory: &Path) -> Observed<WorktreeFa
             git,
             directory,
             &["log", "-1", "--format=%s", "--no-show-signature"],
-        ) {
-            head.subject = command_text(String::from_utf8_lossy(&subject).trim());
+        )
+        .await
+        {
+            // Exactly as Git reported it: redaction and cutting are for the
+            // rendering, which cannot tell a long branch name from a secret.
+            head.subject = String::from_utf8_lossy(&subject).trim().to_owned();
         }
     }
     Observed::Known(facts)
 }
 
-fn run_git(
+/// Run Git as a child the observation owns: in a process group of its own,
+/// killed and reaped when this future is dropped (the requester disconnected,
+/// or the worker is stopping), so a stalled Git never outlives its question and
+/// repeated requests cannot pile scans up. While the caller stays connected it
+/// waits with no deadline and no limit on the output, because neither has a
+/// source: a `git status` takes as long as the tree needs.
+async fn run_git(
     git: &std::ffi::OsStr,
     directory: &Path,
     args: &[&str],
 ) -> std::result::Result<Vec<u8>, String> {
-    let mut command = std::process::Command::new(git);
+    let mut command = tokio::process::Command::new(git);
     // `GIT_OPTIONAL_LOCKS=0` keeps this read from taking the index lock a
     // concurrent `git commit` of the agent's would need.
     command
@@ -268,10 +291,13 @@ fn run_git(
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0");
-    let output = match mj_core::subprocess::run_with_input(&mut command, &[]) {
-        Ok(output) => output,
-        Err(error) => return Err(format!("could not run git: {error:#}")),
-    };
+    let output =
+        match mj_core::subprocess::run_bounded(&mut command, usize::MAX, std::time::Duration::MAX)
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => return Err(format!("could not run git: {error:#}")),
+        };
     if output.status.success() {
         return Ok(output.stdout);
     }
@@ -327,7 +353,8 @@ fn parse_status(text: &str, directory: &Path) -> WorktreeFacts {
         if shown.len() < SHOWN_PATHS {
             shown.push(ChangedPath {
                 status,
-                path: command_text(path),
+                // Exactly as Git reported it; the rendering sanitizes and cuts.
+                path: path.to_owned(),
             });
         }
     }
@@ -386,11 +413,9 @@ pub async fn collect(observer: &WorkObserver, processes: bool, worktree: bool) -
         Observed::unavailable("the processes were not requested")
     };
     let worktree = if worktree {
-        let git = observer.git.clone();
-        let directory = observer.directory.clone();
-        tokio::task::spawn_blocking(move || read_worktree(&git, &directory))
-            .await
-            .unwrap_or_else(|error| Observed::unavailable(format!("Git read failed: {error}")))
+        // Awaited here, not handed to a blocking thread: the Git child belongs
+        // to this future and is killed when it is dropped.
+        read_worktree(&observer.git, &observer.directory).await
     } else {
         Observed::unavailable("the working tree was not requested")
     };
@@ -544,8 +569,8 @@ mod tests {
     // Git writes more than a pipe holds when thousands of paths are dirty, so
     // a collector that writes before it reads, or that stops at the first
     // buffer, shows up here.
-    #[test]
-    fn worktree_counts_thousands_of_dirty_paths_exactly_and_shows_eight() {
+    #[tokio::test]
+    async fn worktree_counts_thousands_of_dirty_paths_exactly_and_shows_eight() {
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path();
         git(directory, &["init", "-q", "-b", "task"]);
@@ -563,7 +588,7 @@ mod tests {
             )
             .unwrap();
         }
-        let Observed::Known(facts) = read_worktree("git".as_ref(), directory) else {
+        let Observed::Known(facts) = read_worktree("git".as_ref(), directory).await else {
             panic!("worktree unavailable");
         };
         assert_eq!(facts.changed, 5001);
@@ -577,21 +602,19 @@ mod tests {
         assert_eq!(head.subject, "Fix parser, with unicode: naïve");
     }
 
-    #[test]
-    fn a_directory_that_is_not_a_repository_is_unavailable_not_clean() {
+    #[tokio::test]
+    async fn a_directory_that_is_not_a_repository_is_unavailable_not_clean() {
         let temp = tempfile::tempdir().unwrap();
-        match read_worktree("git".as_ref(), temp.path()) {
+        match read_worktree("git".as_ref(), temp.path()).await {
             Observed::Unavailable { reason } => {
                 assert!(reason.contains("not a git repository"), "{reason}")
             }
-            Observed::Known(facts) => {
-                panic!("reported {facts:?} for a directory outside any repository")
-            }
+            other => panic!("reported {other:?} for a directory outside any repository"),
         }
     }
 
-    #[test]
-    fn renames_and_paths_with_spaces_are_one_change_each() {
+    #[tokio::test]
+    async fn renames_and_paths_with_spaces_are_one_change_each() {
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path();
         git(directory, &["init", "-q"]);
@@ -603,7 +626,7 @@ mod tests {
         git(directory, &["add", "."]);
         git(directory, &["commit", "-qm", "first"]);
         git(directory, &["mv", "old name.txt", "new name.txt"]);
-        let Observed::Known(facts) = read_worktree("git".as_ref(), directory) else {
+        let Observed::Known(facts) = read_worktree("git".as_ref(), directory).await else {
             panic!("worktree unavailable");
         };
         assert_eq!(facts.changed, 1);
@@ -704,8 +727,8 @@ mod tests {
     // Hard-won: a195a62bc: `status.showUntrackedFiles=no` in a repository's
     // configuration made a tree with new files read as clean, and untracked
     // directories were reported as one path.
-    #[test]
-    fn untracked_directories_are_expanded_whatever_the_repository_configures() {
+    #[tokio::test]
+    async fn untracked_directories_are_expanded_whatever_the_repository_configures() {
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path();
         git(directory, &["init", "-q"]);
@@ -713,7 +736,7 @@ mod tests {
         std::fs::create_dir(directory.join("newdir")).unwrap();
         std::fs::write(directory.join("newdir/a.txt"), "a\n").unwrap();
         std::fs::write(directory.join("newdir/b.txt"), "b\n").unwrap();
-        let Observed::Known(facts) = read_worktree("git".as_ref(), directory) else {
+        let Observed::Known(facts) = read_worktree("git".as_ref(), directory).await else {
             panic!("worktree unavailable");
         };
         assert_eq!((facts.changed, facts.untracked), (2, 2));
@@ -770,5 +793,25 @@ mod tests {
         child.wait().unwrap();
         assert_eq!(seen, Marker::Unreadable);
         assert_eq!(own, Marker::Absent);
+    }
+    // Hard-won: 49a8da78c: changed paths went through the command redactor, so a
+    // file named with 24 or more token characters was stored as `[redacted]`,
+    // and long ones were cut and had their whitespace collapsed at storage.
+    #[tokio::test]
+    async fn a_real_long_path_is_stored_exactly_as_git_reported_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path();
+        git(directory, &["init", "-q"]);
+        let long = "src/a-very-long-ordinary-file-name-with-more-than-twenty-four-characters.rs";
+        let spaced = "docs/notes  with   spaces.md";
+        std::fs::create_dir_all(directory.join("src")).unwrap();
+        std::fs::create_dir_all(directory.join("docs")).unwrap();
+        std::fs::write(directory.join(long), "").unwrap();
+        std::fs::write(directory.join(spaced), "").unwrap();
+        let Observed::Known(facts) = read_worktree("git".as_ref(), directory).await else {
+            panic!("worktree unavailable");
+        };
+        let paths: Vec<_> = facts.shown.iter().map(|path| path.path.as_str()).collect();
+        assert_eq!(paths, [spaced, long]);
     }
 }

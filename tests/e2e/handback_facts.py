@@ -160,8 +160,18 @@ After spawning, end your turn with a one-line status. Each time a message from M
         sleeping = [p for p in processes["shown"] if "sleep 600" in p["command"]]
         assert sleeping and sleeping[0]["detached"], processes
         sleep_pid = sleeping[0]["pid"]
-        assert facts["worktree"]["status"] == "known", facts
-        tree = facts["worktree"]["value"]
+        # The report is built from the process facts without waiting for the
+        # working tree: it carries the tree if Git was quick, or says it is
+        # still being read. Either way the stored facts get the tree.
+        assert facts["worktree"]["status"] in ("known", "pending"), facts
+
+        def stored_finish():
+            rows = query("SELECT finish_json FROM subagent_work_facts WHERE child_session_id=?", [child])
+            finish = json.loads(rows[0][0]) if rows and rows[0][0] else None
+            return finish if finish and finish["worktree"]["status"] == "known" else None
+
+        stored = eventually("working tree stored", stored_finish, timeout=120)
+        tree = stored["worktree"]["value"]
         assert tree["untracked"] >= 1 and any(p["path"] == "notes.txt" for p in tree["shown"]), tree
         # The child's claim and Mjolnir's observation disagree, and both are in the text.
         text = subprocess.run(
@@ -183,7 +193,7 @@ After spawning, end your turn with a one-line status. Each time a message from M
             assert sleep_pid in stopped and sleep_pid not in survived, park
             outcome = "stopped"
         recorded = query("SELECT finish_json, park_json FROM subagent_work_facts WHERE child_session_id=?", [child])
-        assert recorded and json.loads(recorded[0][0]) == facts, recorded
+        assert recorded and json.loads(recorded[0][0])["processes"] == facts["processes"], recorded
         assert json.loads(recorded[0][1]) == park, recorded
         print(f"PASS ({args.harness}): the park {outcome} the detached sleep; report and park message match the process table", flush=True)
     finally:

@@ -1726,6 +1726,13 @@ impl ApiBackend {
                             .filter(|recorded| recorded.finish_ordinal == Some(*completed_ordinal))
                             .and_then(|recorded| recorded.finish.clone());
                         let Some(facts) = recorded else {
+                            // Not a dead end: the child's own task stores the
+                            // facts and reconciles again.
+                            tracing::debug!(
+                                child_session_id = %id,
+                                completed_ordinal,
+                                "a finished child's report waits for its work facts to be stored"
+                            );
                             continue;
                         };
                         work_facts.insert(id, facts);
