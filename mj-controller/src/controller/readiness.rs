@@ -596,6 +596,8 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
     let mut probe_began = started;
     // When the latest probe that told us about the worker began.
     let mut last_probe_began: Option<tokio::time::Instant> = None;
+    // The deadline a final probe was started for, so each deadline gets one.
+    let mut final_probe_for: Option<tokio::time::Instant> = None;
     // Results the select below took from a set, to settle in a fixed order.
     let mut woke_attempt = None;
     let mut woke_probe = None;
@@ -670,9 +672,20 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
             }
         }
         let now = tokio::time::Instant::now();
-        // A probe still running at the deadline may be reporting progress that
-        // extends it, so it is waited for, up to the ceiling. No probe starts
-        // after the deadline.
+        // The decision at the deadline needs a current look at the worker: the
+        // last probe may predate a step or the socket. With no probe running,
+        // one final probe starts; it, or a probe still running, is waited for up
+        // to the ceiling, and progress it reports extends the deadline.
+        if now >= deadline
+            && now < ceiling
+            && probes.is_empty()
+            && final_probe_for != Some(deadline)
+        {
+            final_probe_for = Some(deadline);
+            probe_began = now;
+            first_attempt = false;
+            probes.spawn(probe.inspect(probe_cancelled.clone()));
+        }
         if now >= deadline && (probes.is_empty() || now >= ceiling) {
             if !attempts.is_empty() {
                 last_error = Some(anyhow::anyhow!(
@@ -1753,6 +1766,38 @@ mod tests {
             not_started_until: Some(50),
             progressing: true,
             ..FakeStartingWorker::accepting_after(81)
+        };
+        let started = tokio::time::Instant::now();
+
+        let relay =
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap();
+
+        assert_eq!(relay, "relay");
+        assert!(
+            started.elapsed() > WORKER_STARTUP_CONNECT_TIMEOUT,
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The record appears after the last regular probe and before the
+    /// deadline, with no probe running when the deadline comes. A final probe
+    /// must see it, so the wait is extended instead of failing on stale state.
+    // Hard-won: 681fc64d1: the wait failed at the deadline on the last sampled state, without looking again
+    #[tokio::test(start_paused = true)]
+    async fn startup_connect_takes_a_final_probe_at_the_deadline() {
+        let executor = CancellableProcessExecutor::new(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        ));
+        // Attempts fail every 0.5 s and instant probes run every 3 s, the last
+        // regular one at 27 s. The record appears with attempt 58, at about
+        // 28.5 s; the worker accepts with attempt 90, at about 44.5 s.
+        let mut worker = FakeStartingWorker {
+            not_started_until: Some(58),
+            progressing: true,
+            ..FakeStartingWorker::accepting_after(90)
         };
         let started = tokio::time::Instant::now();
 
