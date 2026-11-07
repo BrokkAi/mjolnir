@@ -193,9 +193,9 @@ def stop_and_resume(lab, tmux, evidence, session_id, dialogs_only=False):
     absent(tmux, "Suspend session?")
     lab.wait_snapshot(lambda value: any(row["id"] == session_id and row["state"] == "suspended" for row in value["sessions"]), "session suspended with recovery copy")
     record(tmux, evidence, "stop-command-dismissed", "Close palette; reopen, Enter on Suspend session, confirm", "Closing the palette retains the session; running the command and confirming suspends it")
-    from tui_review_discovery import exercise_offline_save
+    from tui_review_discovery import exercise_offline_cancel
     if not dialogs_only:
-        exercise_offline_save(lab, tmux, evidence)
+        exercise_offline_cancel(lab, tmux, evidence)
     tmux.send_prefix("g")
     # A suspended session is on the Mjolnir tab, the second of the picker.
     tmux.wait_for("Running sessions")

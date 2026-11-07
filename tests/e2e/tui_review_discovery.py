@@ -17,7 +17,7 @@ def expect_no_adapter_traffic(lab, offset):
         raise ScenarioFailure(f"review settings reached an agent adapter: {messages}")
 
 
-def exercise_offline_save(lab, tmux, evidence):
+def exercise_offline_cancel(lab, tmux, evidence):
     """With the session stopped there is no worker to ask, yet choices remain."""
     original = lab.snapshot()["review_config"]
     offset = len(requests(lab))

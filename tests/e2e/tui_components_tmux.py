@@ -514,8 +514,8 @@ def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
     Where the sidebar ends and the support panes start depends on the
     terminal width and on how wide their tables are, so the probe compares
     states instead of fixing columns: in every state Targets and Profiles
-    share a column; the narrow and wide sidebars differ; and restoring the
-    wide one restores the whole layout.
+    share a column; the narrow and wide sidebars differ; and returning to the
+    narrow one restores the whole layout.
     """
     tmux.resize(200, 40)
     tmux.wait_until(
@@ -536,26 +536,34 @@ def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
             quota.find("╭ Profiles "),
         )
 
+    # The dashboard starts with the standard sidebar. Every click below asks
+    # for a different size from the one showing, so a layout that has not
+    # changed yet cannot be mistaken for the click's result.
+    tmux.wait_until(lambda: -1 not in layout(), "support panes drawn before the first click")
+    before = layout()
     states: dict[str, tuple[int, int, int]] = {}
-    before: tuple[int, int, int] | None = None
-    for glyph, label in [("▄", "wide"), ("▁", "narrow"), ("▄", "wide-again")]:
+    for glyph, label in [("▁", "narrow"), ("▄", "wide"), ("▁", "narrow-again")]:
         screen = tmux.capture().splitlines()
         y = next(i for i, line in enumerate(screen) if "▁" in line)
         tmux.mouse_click(screen[y].index(glyph), y)
         previous: list[tuple[int, int, int]] = []
+        accepted: list[tuple[int, int, int]] = []
 
         def settled() -> bool:
-            # The same, complete layout on two reads in a row, and, after the
-            # first click, a different one from before the click: two reads of
-            # the old layout on a slow host are not the click's result. The
-            # first click may ask for the layout already showing.
+            # The same, complete layout on two reads in a row, and a different
+            # one from before the click: two reads of the old layout on a slow
+            # host are not the click's result. The layout it accepts is the
+            # one recorded, not a later read.
             current = layout()
             stable = bool(previous) and previous[-1] == current
             previous.append(current)
-            return stable and -1 not in current and (before is None or current != before)
+            if stable and -1 not in current and current != before:
+                accepted.append(current)
+                return True
+            return False
 
         tmux.wait_until(settled, f"support panes settled with {label} sidebar")
-        states[label] = before = layout()
+        states[label] = before = accepted[-1]
         edge, targets_x, quota_x = states[label]
         if targets_x != quota_x:
             raise ScenarioFailure(f"Targets and Profiles are not aligned in {label}: {states}")
@@ -568,8 +576,14 @@ def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
         )
     if states["narrow"][0] >= states["wide"][0]:
         raise ScenarioFailure(f"the narrow sidebar is not narrower than the wide one: {states}")
-    if states["wide-again"] != states["wide"]:
-        raise ScenarioFailure(f"restoring the wide sidebar did not restore the layout: {states}")
+    if states["narrow-again"] != states["narrow"]:
+        raise ScenarioFailure(f"returning to the narrow sidebar did not restore the layout: {states}")
+    # Leave the dashboard as it was found: the steps that follow use the
+    # standard sidebar.
+    screen = tmux.capture().splitlines()
+    y = next(i for i, line in enumerate(screen) if "▁" in line)
+    tmux.mouse_click(screen[y].index("▄"), y)
+    tmux.wait_until(lambda: layout() == states["wide"], "standard sidebar restored")
 
 
 def run_workflow(
