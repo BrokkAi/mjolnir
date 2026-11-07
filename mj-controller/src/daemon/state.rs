@@ -158,23 +158,28 @@ impl RuntimeState {
         &self.review_host
     }
 
-    /// Whether `child_id` can request review: an ordinary worker child whose
-    /// effective review choice triggers review, the fact launch uses to offer
-    /// the review tools. Nothing else ever has a review to wait for.
+    /// Whether `child_id` can request review: an ordinary worker child that
+    /// launch offers the review tools, by the same rule launch uses.
     pub(super) fn child_can_request_review(&self, child_id: &str) -> bool {
         let owner = self.owner();
         let controller = owner.controller();
-        controller
+        let worker = controller
             .state
             .subagents
             .get(child_id)
-            .is_some_and(|relation| relation.kind == mj_core::subagent::SubagentKind::Worker)
-            && controller
-                .config
-                .review
-                .for_session(controller.state.effective_review_or_off(child_id))
-                .trigger()
-                == mj_core::config::ReviewTrigger::Push
+            .is_some_and(|relation| relation.kind == mj_core::subagent::SubagentKind::Worker);
+        let Some(session) = controller.state.sessions.get(child_id) else {
+            return false;
+        };
+        worker
+            && mj_core::worker_launch::offers_review_tools(
+                controller
+                    .config
+                    .review
+                    .for_session(controller.state.effective_review_or_off(child_id))
+                    .trigger(),
+                session.harness_kind,
+            )
     }
 
     /// Whether `child_id` is still waiting for its review's verdict, so its
@@ -191,12 +196,21 @@ impl RuntimeState {
     pub(crate) async fn child_awaits_review(&self, child_id: &str) -> bool {
         match self.review_host().has_open_review(child_id).await {
             Ok(open) => open,
-            Err(error) => {
+            Err(crate::review_host::OpenReviewUnknown::RecoveryFailed(error)) => {
                 if self.child_can_request_review(child_id) {
                     tracing::warn!(child_session_id = child_id, %error,
                         "cannot tell whether the child's review is open; settling it as having none");
                 }
                 false
+            }
+            // A stopped host says nothing about the review; keep the child
+            // waiting, so its completion retries on the busy backoff.
+            Err(crate::review_host::OpenReviewUnknown::HostStopped) => {
+                tracing::warn!(
+                    child_session_id = child_id,
+                    "the review host stopped; holding the child's completion"
+                );
+                true
             }
         }
     }

@@ -203,17 +203,21 @@ impl TurnReviewHost {
     /// Whether `session_id` has a review open. The host's own slots answer, so
     /// callers never infer this from a copy of the review views. A session
     /// with an open review is waiting for its verdict.
-    pub(crate) async fn has_open_review(&self, session_id: &str) -> Result<bool, String> {
+    pub(crate) async fn has_open_review(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, OpenReviewUnknown> {
         let (reply, answer) = oneshot::channel();
         self.events
             .send(HostEvent::HasOpenReview {
                 session_id: session_id.to_owned(),
                 reply,
             })
-            .map_err(|_| "the review host stopped".to_owned())?;
+            .map_err(|_| OpenReviewUnknown::HostStopped)?;
         answer
             .await
-            .map_err(|_| "the review host stopped".to_owned())?
+            .map_err(|_| OpenReviewUnknown::HostStopped)?
+            .map_err(OpenReviewUnknown::RecoveryFailed)
     }
 
     /// Puts the host in the state a failed startup recovery leaves it in.
@@ -340,4 +344,13 @@ impl TurnReviewHost {
             .ok()?;
         result.await.ok().flatten()
     }
+}
+
+/// Why the host could not say whether a session has an open review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OpenReviewUnknown {
+    /// Its startup recovery failed and it did not restore this session.
+    RecoveryFailed(String),
+    /// The host task is gone.
+    HostStopped,
 }

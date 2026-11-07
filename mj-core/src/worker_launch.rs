@@ -433,8 +433,7 @@ impl WorkerLaunchConfig {
     /// review: top-level sessions and ordinary sub-agents, never reviewers or
     /// the oracle. This is the one owner of that fact.
     pub fn review_tools(&self) -> bool {
-        self.review_trigger == crate::config::ReviewTrigger::Push
-            && self.harness.supports_review_gate()
+        offers_review_tools(self.review_trigger, self.harness)
     }
 
     /// Whether launch must prepare review state in the workspace: the session
@@ -641,6 +640,16 @@ impl ProfileConfig {
         }
         self
     }
+}
+
+/// Whether a session with this review trigger on this harness is offered the
+/// mj-review tools. Launch and the daemon's completion checks share this one
+/// rule.
+pub fn offers_review_tools(
+    trigger: crate::config::ReviewTrigger,
+    harness: crate::config::HarnessKind,
+) -> bool {
+    trigger == crate::config::ReviewTrigger::Push && harness.supports_review_gate()
 }
 
 #[cfg(test)]
