@@ -115,9 +115,13 @@ harness and account, not by Mjolnir.
 Mjolnir stores what agents print as they printed it. Transcripts, checkpoints,
 and worker diagnostics keep any secret that appears in agent output, for
 example after an agent runs `env` or reads a token file, and the dashboard and
-web viewer show it. Only the evidence sent to the Jev classifier has long
-token-like strings replaced before it leaves the machine or is written to
-`jev-decisions/`.
+web viewer show it. The evidence sent to the Jev classifier, and its local copy
+in `jev-decisions/`, first has every unbroken run of 24 or more letters,
+digits, `-`, `_`, `.`, or `+` replaced. That catches many API keys and tokens
+but not every credential: an AWS secret key containing `/`, or a short access
+key ID, passes through. A secret an agent prints can therefore still reach the
+hosted classifier; turn Jev off, as described above, to keep turn text on this
+machine.
 
 ## Sessions are not isolated from each other's agents
 
