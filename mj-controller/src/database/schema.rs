@@ -2219,20 +2219,15 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
-    // Breaking: the new table is additive, but a finished child's report now
-    // carries what Mjolnir observed (`facts`), which is persisted in
-    // `mailbox_outbox.event_json`. A revision-117 daemon may not read that body
-    // and would skip the row, so it must not write or read this store once such
-    // an event can exist; uncertainty is treated as breaking. The table also
-    // cascades from `sessions`, which older writers do not know to rely on.
+    // Breaking: no table changes, but a sub-agent's prompt outcome now carries
+    // what its worker observed (`work_facts`), stored in the materialized
+    // session's `last_turn_outcome_json`, which a revision-117 daemon decodes
+    // with `deny_unknown_fields` and would refuse; and a finished child's report
+    // carries the facts in `mailbox_outbox.event_json`. A revision-117 daemon must
+    // not write or read this store once either exists.
     if version < 118 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
-             CREATE TABLE IF NOT EXISTS subagent_work_facts (
-                 child_session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
-                 finish_ordinal INTEGER,
-                 finish_json TEXT CHECK(finish_json IS NULL OR json_valid(finish_json))
-             ) STRICT;
              UPDATE schema_compatibility SET minimum_compatible_version = 118 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (118, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
@@ -3679,11 +3674,6 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
-        if version < 118 {
-            connection
-                .execute_batch("DROP TABLE IF EXISTS subagent_work_facts;")
-                .unwrap();
-        }
         if version < 111 {
             connection
                 .execute_batch(
@@ -4249,7 +4239,7 @@ mod reader_tests {
     }
 
     #[test]
-    fn work_facts_migration_raises_the_floor_and_its_table_follows_its_session() {
+    fn outcome_facts_migration_raises_the_floor() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         let record = super::super::tests::session("facts-upgrade", "project");
@@ -4259,26 +4249,11 @@ mod reader_tests {
         let state = read_schema_state(&connection).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(118));
-        // A revision-117 build is refused, as a store with facts in reports needs.
+        // A revision-117 build is refused: its decoder of a stored outcome
+        // rejects the field a sub-agent's worker adds.
         let refused = state.ensure_supported_by(117).unwrap_err();
         assert!(format!("{refused:#}").contains("118"), "{refused:#}");
         state.ensure_supported_by(118).unwrap();
-        connection
-            .execute(
-                "INSERT INTO subagent_work_facts(child_session_id, finish_ordinal, finish_json)
-                 VALUES (?1, 9, '{}')",
-                [&record.id],
-            )
-            .unwrap();
-        connection
-            .execute("DELETE FROM sessions WHERE session_id=?1", [&record.id])
-            .unwrap();
-        let rows: i64 = connection
-            .query_row("SELECT count(*) FROM subagent_work_facts", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(rows, 0, "destroying a session removes its facts");
     }
 
     #[test]

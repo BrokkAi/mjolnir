@@ -313,7 +313,7 @@ impl MailboxEventBody {
             // A worker before 55 does not render observed work facts, so a
             // report that carries them reaches it as text rendered here.
             Self::SubagentFinished { report } if report.facts.is_some() => {
-                crate::relay::RELAY_WORK_FACTS_PROTOCOL
+                crate::relay::RELAY_FINISH_FACTS_PROTOCOL
             }
             // A worker before 54 heads every report "finished" and does not
             // know `promptable`, so such a report reaches it rendered here.
@@ -939,7 +939,7 @@ mod tests {
                 directory: "/work/task".into(),
                 head: Some(HeadCommit {
                     sha: "1a2b3c4d5e6f".into(),
-                    subject: "Fix parser".into(),
+                    subject: Observed::Known("Fix parser".into()),
                 }),
                 branch: Some("task/8019-finish".into()),
                 changed: total,

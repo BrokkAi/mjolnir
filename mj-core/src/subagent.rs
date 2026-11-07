@@ -2004,6 +2004,7 @@ mod tests {
 
     fn finished(command_id: &str, stop_reason: &str) -> crate::state::MaterializedTurnOutcome {
         crate::state::MaterializedTurnOutcome {
+            work_facts: None,
             answered_through: None,
             diagnostic: None,
             usage: None,

@@ -1374,6 +1374,7 @@ mod settled_task_tests {
             .record_command_completed(
                 "api-turn-20",
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
@@ -1476,6 +1477,7 @@ mod settled_task_tests {
             .record_command_completed(
                 "original-prompt",
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "EndTurn".into(),
                     usage: None,

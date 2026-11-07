@@ -637,7 +637,7 @@ mod tests {
                 report: Box::new(report),
             },
         };
-        let current = mj_core::relay::RELAY_WORK_FACTS_PROTOCOL;
+        let current = mj_core::relay::RELAY_FINISH_FACTS_PROTOCOL;
         for protocol in [current - 1, current] {
             let mut delivered = event.clone();
             super::downgrade_review_or_report(&mut delivered, protocol);

@@ -105,7 +105,6 @@ impl RuntimeState {
                 })
             })),
             report_backend: std::sync::OnceLock::new(),
-            fact_collections: Mutex::new(BTreeMap::new()),
             credential_targets: Arc::new(tokio::sync::watch::channel(Vec::new()).0),
             recent_launch: tokio::sync::watch::channel(None).0,
             recent_launch_update: Mutex::new(()),

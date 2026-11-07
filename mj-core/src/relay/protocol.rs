@@ -155,17 +155,6 @@ pub enum RelayRequest {
     },
     /// Connection-only CPU measurement; never journaled.
     CpuUsage,
-    /// Connection-only observation of the processes this session's agent left
-    /// running (unless `processes` is false) and of its working tree (unless
-    /// `worktree` is false); never journaled. A worker answers one connection's
-    /// requests in order, so the two parts are asked on connections of their
-    /// own: a slow Git read must not hold the processes.
-    WorkFacts {
-        #[serde(default = "work_facts_part_default")]
-        processes: bool,
-        #[serde(default = "work_facts_part_default")]
-        worktree: bool,
-    },
     /// Report non-secret metadata for this session's harness credentials.
     /// The runtime handles credential requests on the connection and never
     /// passes them through the durable relay.
@@ -405,7 +394,6 @@ impl RelayRequest {
             Self::InstallAttachment { .. } => "install_attachment",
             Self::ReadAttachment { .. } => "read_attachment",
             Self::CpuUsage => "cpu_usage",
-            Self::WorkFacts { .. } => "work_facts",
             Self::CredentialState => "credential_state",
             Self::ReadCredentials => "read_credentials",
             Self::InstallCredentials { .. } => "install_credentials",
@@ -452,7 +440,6 @@ impl RelayRequest {
             | Self::InstallSlopcopLogin { .. }
             | Self::RemoveSlopcopLogin => super::RELAY_SLOPCOP_LOGIN_PROTOCOL,
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
-            Self::WorkFacts { .. } => super::RELAY_WORK_FACTS_PROTOCOL,
             Self::DrainMailbox { .. } | Self::AckMailbox { .. } => 33,
             Self::ReserveIdle { .. } => 21,
             Self::HistoryQuery { .. }
@@ -672,17 +659,6 @@ pub enum RelayResponsePayload {
     CpuUsage {
         usage: Option<crate::cpu_usage::SessionCpuUsage>,
     },
-    WorkFacts {
-        facts: crate::work_facts::WorkFacts,
-        /// The journal ordinal of the newest work the worker had accepted (a
-        /// prompt, or a turn the harness started itself), sampled after the
-        /// observation completed. The worker owns acceptance, so this is how a
-        /// caller tells an observation of a finish from one that newer work may
-        /// have changed: it is newer than the finish when this exceeds the
-        /// finish's ordinal. `None` from a worker that does not say.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        accepted_ordinal: Option<u64>,
-    },
     CredentialState {
         present: bool,
         fingerprint: String,
@@ -901,10 +877,6 @@ pub fn read_bounded_line(
 }
 
 fn review_base_changed_default() -> bool {
-    true
-}
-
-fn work_facts_part_default() -> bool {
     true
 }
 

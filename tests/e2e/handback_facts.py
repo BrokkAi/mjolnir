@@ -5,8 +5,8 @@ A real parent spawns a real child that starts a detached `setsid sleep`, leaves
 an uncommitted file and hands back claiming everything is committed. The test
 checks, against the machine's own process table, that the parent's report lists
 the sleep as running and detached and the file as uncommitted, in the one
-message (the report waits for both observations), and that the recorded facts
-row agrees with it. With `--kill-daemon-at-handback` the daemon is killed
+message (the worker observes both when the turn ends and publishes them with
+the turn's outcome), and that the stored outcome carries the same facts. With `--kill-daemon-at-handback` the daemon is killed
 between the child's handback and its report, and the next daemon's report must
 still carry the real facts. It runs on whichever harness `--harness` names.
 
@@ -172,16 +172,18 @@ After spawning, end your turn with a one-line status. Each time a message from M
 
         if args.kill_daemon_at_handback:
             # The child has handed back; its turn has not ended and no report
-            # exists. Killing the daemon here leaves the finish to the next one.
+            # exists. Killing the daemon here leaves the finish to the next one,
+            # which reads the facts from the outcome its worker published.
             eventually("handback recorded", lambda: query(
                 "SELECT 1 FROM subagent_handbacks WHERE child_session_id=? AND handback_command_id IS NOT NULL",
                 [child]), timeout=600)
             for pid in daemon_pids():
                 os.kill(pid, 9)
             eventually("daemon gone", lambda: not daemon_pids(), timeout=30)
-            stored = query("SELECT 1 FROM subagent_work_facts WHERE child_session_id=?", [child])
+            rows = query("SELECT last_turn_outcome_json FROM materialized_sessions WHERE session_id=?", [child])
+            recorded = bool(rows and rows[0][0])
             reported = events("subagent-finished-")
-            print(f"daemon killed at handback; facts already stored: {bool(stored)}; "
+            print(f"daemon killed at handback; turn outcome already recorded: {recorded}; "
                   f"report already sent: {bool(reported)}", flush=True)
             assert not reported, "the window was missed: the report was already sent"
             # Any ordinary command starts the next daemon, whose reconcile and
@@ -195,16 +197,16 @@ After spawning, end your turn with a one-line status. Each time a message from M
         sleeping = [p for p in processes["shown"] if "sleep 600" in p["command"]]
         assert sleeping and sleeping[0]["detached"], processes
         sleep_pid = sleeping[0]["pid"]
-        # The report waits for both observations: the processes and the working
-        # tree arrive in the one message, as observed (or unavailable with why,
-        # which this run must not see).
+        # The processes and the working tree arrive in the one message, as the
+        # worker observed them (or unavailable with why, which this run must not see).
         assert facts["worktree"]["status"] == "known", facts
         tree = facts["worktree"]["value"]
         assert tree["untracked"] >= 1 and any(p["path"] == "notes.txt" for p in tree["shown"]), tree
-        # The recorded facts row is the same observation.
-        recorded = query("SELECT finish_json FROM subagent_work_facts WHERE child_session_id=?", [child])
-        assert recorded and json.loads(recorded[0][0])["processes"] == facts["processes"], recorded
-        assert json.loads(recorded[0][0])["worktree"] == facts["worktree"], recorded
+        # The facts are part of the outcome record that ended the turn: the same
+        # observation is stored with it.
+        rows = query("SELECT last_turn_outcome_json FROM materialized_sessions WHERE session_id=?", [child])
+        outcome = json.loads(rows[0][0]) if rows and rows[0][0] else None
+        assert outcome and outcome.get("work_facts") == facts, (outcome, facts)
         # The child's claim and Mjolnir's observation disagree, and both are in the text.
         text = subprocess.run(
             mj + ["transcript", "--session", parent, "--limit", "1000"],

@@ -37,6 +37,7 @@ fn view(id: &str, completed: bool) -> ManagedSessionView {
     ];
     if completed {
         materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
+            work_facts: None,
             answered_through: None,
             diagnostic: None,
             usage: None,

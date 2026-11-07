@@ -1571,6 +1571,7 @@ pub(crate) mod test_support {
             .record_command_completed(
                 command_id,
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,

@@ -493,6 +493,7 @@ mod tests {
                 command: None,
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
@@ -1177,6 +1178,7 @@ mod tests {
             unreachable!()
         };
         *outcome = RelayCommandOutcome::Prompt {
+            work_facts: None,
             diagnostic: None,
             stop_reason: "provider_error".into(),
             usage: None,
@@ -1461,6 +1463,7 @@ mod tests {
                     command_id: "prompt-1".into(),
                     command: Some(RelayCommandKind::Prompt),
                     outcome: RelayCommandOutcome::Prompt {
+                        work_facts: None,
                         stop_reason: "Cancelled".into(),
                         usage: None,
                         diagnostic: None,
@@ -1474,6 +1477,7 @@ mod tests {
                     command_id: "prompt-1".into(),
                     command: Some(RelayCommandKind::Prompt),
                     outcome: RelayCommandOutcome::Prompt {
+                        work_facts: None,
                         stop_reason: "QuotaLimit".into(),
                         usage: None,
                         diagnostic: None,

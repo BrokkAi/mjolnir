@@ -324,6 +324,10 @@ pub struct MaterializedTurnOutcome {
     pub completed_ordinal: u64,
     pub completed_at_ms: i64,
     pub outcome: TurnOutcomeKind,
+    /// What the child's worker observed when this turn ended (see
+    /// `RelayCommandOutcome::Prompt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_facts: Option<crate::work_facts::WorkFacts>,
 }
 
 impl MaterializedTurnOutcome {

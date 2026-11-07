@@ -1,13 +1,5 @@
 use super::*;
 
-/// What a worker observed, and the newest work it had accepted when it
-/// answered (see `RelayResponsePayload::WorkFacts`).
-#[derive(Clone, Debug)]
-pub struct WorkObservation {
-    pub facts: mj_core::work_facts::WorkFacts,
-    pub accepted_ordinal: Option<u64>,
-}
-
 impl RelayClient {
     pub async fn cpu_usage(&mut self) -> Result<Option<mj_core::cpu_usage::SessionCpuUsage>> {
         if !RelayRequest::CpuUsage.supported_at(self.protocol_version) {
@@ -16,61 +8,6 @@ impl RelayClient {
         match self.call(RelayRequest::CpuUsage).await? {
             RelayResponsePayload::CpuUsage { usage } => Ok(usage),
             _ => bail!("relay returned an unexpected CPU usage response"),
-        }
-    }
-
-    /// The facts the session's worker observes, each part only when asked for,
-    /// with the newest work the worker had accepted when it answered. A worker
-    /// that predates the request answers with facts that say so: that is an
-    /// unknown, never a zero. Subject to the ordinary request deadline, so for
-    /// the processes, which a scan answers at once; see
-    /// [`Self::work_facts_unbounded`] for the Git read.
-    pub async fn work_facts(&mut self, processes: bool, worktree: bool) -> Result<WorkObservation> {
-        self.work_facts_within(processes, worktree, self.request_timeout)
-            .await
-    }
-
-    /// As [`Self::work_facts`], with no deadline: a `git status` of a large tree
-    /// takes as long as it takes, and a guessed limit would abandon this
-    /// connection while Git kept running. The caller owns the wait; dropping
-    /// the connection cancels it.
-    pub async fn work_facts_unbounded(
-        &mut self,
-        processes: bool,
-        worktree: bool,
-    ) -> Result<WorkObservation> {
-        self.work_facts_within(processes, worktree, Duration::MAX)
-            .await
-    }
-
-    async fn work_facts_within(
-        &mut self,
-        processes: bool,
-        worktree: bool,
-        timeout: Duration,
-    ) -> Result<WorkObservation> {
-        let request = RelayRequest::WorkFacts {
-            processes,
-            worktree,
-        };
-        if !request.supported_at(self.protocol_version) {
-            return Ok(WorkObservation {
-                facts: mj_core::work_facts::WorkFacts::unavailable(format!(
-                    "the worker predates work facts (relay protocol {})",
-                    self.protocol_version
-                )),
-                accepted_ordinal: None,
-            });
-        }
-        match self.call_with_timeout(request, timeout).await? {
-            RelayResponsePayload::WorkFacts {
-                facts,
-                accepted_ordinal,
-            } => Ok(WorkObservation {
-                facts,
-                accepted_ordinal,
-            }),
-            _ => bail!("relay returned an unexpected work facts response"),
         }
     }
 

@@ -105,7 +105,9 @@ pub struct WorktreeFacts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeadCommit {
     pub sha: String,
-    pub subject: String,
+    /// The commit's subject, or why it is unavailable: it is read beside the
+    /// status and is the subject of this commit only if Git still says HEAD is it.
+    pub subject: Observed<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,7 +234,15 @@ fn render_worktree(tree: &WorktreeFacts) -> Vec<String> {
     let head = match &tree.head {
         Some(head) => {
             let short: String = head.sha.chars().take(7).collect();
-            format!("HEAD {short} {:?}", display_text(&head.subject))
+            match &head.subject {
+                Observed::Known(subject) => format!("HEAD {short} {:?}", display_text(subject)),
+                Observed::Unavailable { reason } => {
+                    format!(
+                        "HEAD {short} (subject unavailable: {})",
+                        display_text(reason)
+                    )
+                }
+            }
         }
         None => "no commits yet".to_owned(),
     };

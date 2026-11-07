@@ -170,7 +170,7 @@ pub(crate) fn enqueue_subagent_reports(
         let transaction = connection.transaction()?;
         let mut inserted = false;
         for (identity, report) in reports {
-            let child_id = &report.child_session_id.clone();
+            let child_id = &report.child_session_id;
             let stored: String = transaction.query_row(
                 "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1 AND parent_session_id=?2",
                 params![child_id, parent], |row| row.get(0),
@@ -225,87 +225,6 @@ pub(crate) fn enqueue_subagent_reports(
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
     }
     Ok(())
-}
-
-/// The facts recorded for one child: those collected for its latest finish.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct StoredWorkFacts {
-    /// The completed turn the finish facts describe.
-    pub finish_ordinal: Option<u64>,
-    pub finish: Option<mj_core::work_facts::WorkFacts>,
-}
-
-/// The recorded facts of each listed child that has any, in one read.
-pub(crate) fn load_work_facts(children: &[String]) -> Result<BTreeMap<String, StoredWorkFacts>> {
-    let connection = open_reader(&database_path())?;
-    let mut finishes = connection.prepare(
-        "SELECT finish_ordinal, finish_json FROM subagent_work_facts WHERE child_session_id=?1",
-    )?;
-    let mut facts = BTreeMap::new();
-    for child in children {
-        let row = finishes
-            .query_row([child], |row| {
-                Ok((
-                    row.get::<_, Option<u64>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            })
-            .optional()?;
-        if let Some((ordinal, finish_json)) = row {
-            facts.insert(
-                child.clone(),
-                StoredWorkFacts {
-                    finish_ordinal: ordinal,
-                    finish: finish_json
-                        .map(|text| serde_json::from_str(&text))
-                        .transpose()?,
-                },
-            );
-        }
-    }
-    Ok(facts)
-}
-
-/// Record what the child's worker observed for the finish that completed turn
-/// `ordinal`, the processes and the working tree together, and return the facts
-/// that are stored for it. Facts only move forward, decided on the writer thread:
-/// they are written when no stored finish has an ordinal at or after this one.
-/// When two collections reach one finish, whichever is first decides and the
-/// other reads its answer; and a late collection for an older finish never
-/// replaces a newer one's, so its answer is `None`.
-pub(crate) fn record_finish_facts(
-    child: String,
-    ordinal: u64,
-    facts: mj_core::work_facts::WorkFacts,
-) -> Result<Option<mj_core::work_facts::WorkFacts>> {
-    submit_database_write("record finish facts", move |connection| {
-        let transaction = connection.transaction()?;
-        let existing: Option<(Option<u64>, Option<String>)> = transaction
-            .query_row(
-                "SELECT finish_ordinal, finish_json FROM subagent_work_facts
-                 WHERE child_session_id=?1",
-                [&child],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((Some(at), Some(json))) = existing
-            && at >= ordinal
-        {
-            return Ok((at == ordinal)
-                .then(|| serde_json::from_str(&json))
-                .transpose()?);
-        }
-        transaction.execute(
-            "INSERT INTO subagent_work_facts(child_session_id, finish_ordinal, finish_json)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(child_session_id) DO UPDATE SET
-                 finish_ordinal = excluded.finish_ordinal,
-                 finish_json = excluded.finish_json",
-            params![child, ordinal, serde_json::to_string(&facts)?],
-        )?;
-        transaction.commit()?;
-        Ok(Some(facts))
-    })
 }
 
 fn subagent_report_key(

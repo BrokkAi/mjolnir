@@ -314,13 +314,18 @@ impl ProcessReader {
     }
 }
 
-/// What `git status` and `git log` say about `directory`.
+/// What `git status` and `git log` say about `directory`. The two reads run
+/// together, so the tree costs the slower of them and not their sum. The log read
+/// asks for HEAD with its id (`%H`), and its subject is used only when that id is
+/// the one `status` reported: a commit made between the two reads would otherwise
+/// give the id of one commit the subject of another, and the subject is then
+/// unavailable, with that reason.
 async fn read_worktree(
     children: &ObserverChildren,
     git: &std::ffi::OsStr,
     directory: &Path,
 ) -> Observed<WorktreeFacts> {
-    let status = match run_git(
+    let status = run_git(
         children,
         git,
         directory,
@@ -334,38 +339,44 @@ async fn read_worktree(
             // report a tree with new files as clean.
             "--untracked-files=all",
         ],
-    )
-    .await
-    {
+    );
+    let head = run_git(
+        children,
+        git,
+        directory,
+        &[
+            "log",
+            "-1",
+            "--format=%H%x00%s",
+            "--no-show-signature",
+            "HEAD",
+            "--",
+        ],
+    );
+    let (status, head) = tokio::join!(status, head);
+    let status = match status {
         Ok(output) => output,
         Err(reason) => return Observed::unavailable(reason),
     };
     let mut facts = parse_status(&String::from_utf8_lossy(&status), directory);
-    if let Some(head) = &mut facts.head {
-        // A subject that cannot be read leaves the commit id, which is the
-        // fact; an empty subject is not an error.
-        // Of the commit `status` reported, not of whatever HEAD is by now: a
-        // commit made between the two reads would otherwise give the id of one
-        // commit the subject of another.
-        if let Ok(subject) = run_git(
-            children,
-            git,
-            directory,
-            &[
-                "log",
-                "-1",
-                "--format=%s",
-                "--no-show-signature",
-                &head.sha,
-                "--",
-            ],
-        )
-        .await
-        {
-            // Exactly as Git reported it: redaction and cutting are for the
-            // rendering, which cannot tell a long branch name from a secret.
-            head.subject = String::from_utf8_lossy(&subject).trim().to_owned();
-        }
+    if let Some(commit) = &mut facts.head {
+        commit.subject = match head {
+            Ok(output) => {
+                let text = String::from_utf8_lossy(&output);
+                match text.split_once('\0') {
+                    // Exactly as Git reported it: redaction and cutting are for the
+                    // rendering, which cannot tell a long branch name from a secret.
+                    Some((sha, subject)) if sha == commit.sha => {
+                        Observed::Known(subject.trim_end_matches('\n').to_owned())
+                    }
+                    Some(_) => {
+                        Observed::unavailable("HEAD moved while the working tree was being read")
+                    }
+                    None => Observed::unavailable("git log gave no subject"),
+                }
+            }
+            Err(reason) => Observed::unavailable(reason),
+        };
     }
     Observed::Known(facts)
 }
@@ -483,7 +494,7 @@ fn parse_status(text: &str, directory: &Path) -> WorktreeFacts {
         directory: directory.display().to_string(),
         head: head_sha.map(|sha| HeadCommit {
             sha,
-            subject: String::new(),
+            subject: Observed::unavailable("the subject was not read"),
         }),
         branch,
         changed,
@@ -512,33 +523,40 @@ fn change_record(rest: &str, leading: usize) -> (String, &str) {
     (letter.to_string(), path)
 }
 
-/// Observe the processes when `processes` asks for them, then the working tree
-/// when `worktree` does. Always returns: a part that fails says why, and a part
-/// not asked for says so.
-///
-/// The processes are read first and Git started after, in one order: the
-/// collector's own `git` children are descendants of the worker that started
-/// after the harness was configured, which is how the agent's work is told
-/// apart, so a scan that ran beside Git could report the observer's own
-/// subprocesses as the agent's work. The Git read has no fixed duration; the
-/// caller that asks for it does so on a connection of its own and waits for it
-/// or goes away.
-pub async fn collect(observer: &WorkObserver, processes: bool, worktree: bool) -> WorkFacts {
-    let processes = if processes {
+/// What a sub-agent's worker observes of its agent's work when a turn ends: the
+/// processes under the worker or carrying the session's marker, and the working
+/// tree. The two are read together. A scan never reports the observer's own Git
+/// children (they are registered as they start). The Git reads have no fixed
+/// duration; the caller that waits for them can cancel by dropping this future,
+/// which kills them.
+pub async fn capture(observer: &WorkObserver) -> WorkFacts {
+    let scan = {
         let observer = observer.clone();
-        tokio::task::spawn_blocking(move || scan_processes(&observer))
-            .await
-            .unwrap_or_else(|error| Observed::unavailable(format!("process scan failed: {error}")))
-    } else {
-        Observed::unavailable("the processes were not requested")
+        async move {
+            tokio::task::spawn_blocking(move || scan_processes(&observer))
+                .await
+                .unwrap_or_else(|error| {
+                    Observed::unavailable(format!("process scan failed: {error}"))
+                })
+        }
     };
-    let worktree = if worktree {
-        // Awaited here, not handed to a blocking thread: the Git child belongs
-        // to this future and is killed when it is dropped.
-        read_worktree(&observer.children, &observer.git, &observer.directory).await
-    } else {
-        Observed::unavailable("the working tree was not requested")
-    };
+    // Awaited here, not handed to a blocking thread: the Git children belong to
+    // this future and are killed when it is dropped.
+    capture_from(
+        scan,
+        read_worktree(&observer.children, &observer.git, &observer.directory),
+    )
+    .await
+}
+
+/// The two observations of a capture, run together: the scan of the processes
+/// (blocking work, on the blocking pool) beside the Git reads. The time added to
+/// a turn's end is the slower of the two, not their sum.
+async fn capture_from(
+    processes: impl std::future::Future<Output = Observed<ProcessFacts>>,
+    worktree: impl std::future::Future<Output = Observed<WorktreeFacts>>,
+) -> WorkFacts {
+    let (processes, worktree) = tokio::join!(processes, worktree);
     WorkFacts {
         observed_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0),
         processes,
@@ -722,7 +740,10 @@ mod tests {
         assert_eq!(facts.branch.as_deref(), Some("task"));
         let head = facts.head.unwrap();
         assert_eq!(head.sha.len(), 40);
-        assert_eq!(head.subject, "Fix parser, with unicode: naïve");
+        assert_eq!(
+            head.subject,
+            Observed::Known("Fix parser, with unicode: naïve".into())
+        );
     }
 
     #[tokio::test]
@@ -819,7 +840,7 @@ mod tests {
             harness_ready_ms: Arc::new(AtomicI64::new(mj_core::clock::epoch_millis() - 1)),
             children: ObserverChildren::default(),
         };
-        let facts = collect(&observer, true, true).await;
+        let facts = capture(&observer).await;
         let Observed::Known(processes) = &facts.processes else {
             panic!("{:?}", facts.processes);
         };
@@ -882,23 +903,6 @@ mod tests {
         assert_eq!(pids, [12], "{processes:?}");
     }
 
-    #[tokio::test]
-    async fn a_request_for_processes_only_runs_no_git_at_all() {
-        let temp = tempfile::tempdir().unwrap();
-        let observer = WorkObserver {
-            session_id: "no-git".into(),
-            worker_pid: std::process::id(),
-            directory: temp.path().to_path_buf(),
-            git: "/nonexistent/git-must-not-run".into(),
-            harness_ready_ms: Arc::new(AtomicI64::new(0)),
-            children: ObserverChildren::default(),
-        };
-        let facts = collect(&observer, false, false).await;
-        assert!(matches!(
-            &facts.worktree,
-            Observed::Unavailable { reason } if reason.contains("not requested")
-        ));
-    }
     #[tokio::test]
     async fn untracked_directories_are_expanded_whatever_the_repository_configures() {
         let temp = tempfile::tempdir().unwrap();
@@ -984,55 +988,108 @@ mod tests {
         let paths: Vec<_> = facts.shown.iter().map(|path| path.path.as_str()).collect();
         assert_eq!(paths, [spaced, long]);
     }
-    #[cfg(target_os = "linux")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_scan_during_another_requests_git_read_does_not_report_it() {
+
+    /// The scan and the Git reads of a capture overlap: each waits on a barrier
+    /// that only the other side releases, so the capture finishes only if both
+    /// run at once. (The outer deadline only turns a regression into a failure
+    /// instead of a hang.)
+    #[tokio::test]
+    async fn a_capture_runs_the_scan_and_the_tree_read_together() {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let scan = {
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                Observed::unavailable("a fake scan")
+            }
+        };
+        let tree = async move {
+            barrier.wait().await;
+            Observed::unavailable("a fake tree read")
+        };
+        let facts =
+            tokio::time::timeout(std::time::Duration::from_secs(30), capture_from(scan, tree))
+                .await
+                .expect("the two reads did not run together");
+        assert!(facts.processes.known().is_none() && facts.worktree.known().is_none());
+    }
+
+    /// A fake `git` for the tree read: `status` and `log` each announce that
+    /// they started and then wait for the other to have started, so the reads
+    /// can only finish if they run together.
+    #[cfg(unix)]
+    fn rendezvous_git(directory: &Path, status_sha: &str, log_sha: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().unwrap();
-        let pid_file = temp.path().join("git.pid");
-        let slow_git = temp.path().join("fake-git-in-flight");
+        let git = directory.join("rendezvous-git");
         std::fs::write(
-            &slow_git,
+            &git,
             format!(
-                "#!/bin/sh\necho $$ > '{}'\nsleep 31 &\nwait\n",
-                pid_file.display()
+                r#"#!/bin/sh
+dir="$2"; command="$3"
+wait_for() {{
+  i=0
+  while [ ! -f "$dir/$1" ]; do
+    i=$((i+1)); [ "$i" -gt 1000 ] && exit 3
+    sleep 0.01
+  done
+}}
+case "$command" in
+  status) touch "$dir/status.started"; wait_for log.started
+          printf '# branch.oid {status_sha}\000# branch.head main\000' ;;
+  log) touch "$dir/log.started"; wait_for status.started
+       printf '{log_sha}\000The subject\n' ;;
+  *) exit 2 ;;
+esac
+"#
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&slow_git, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let observer = WorkObserver {
-            session_id: format!("in-flight-{}", std::process::id()),
-            worker_pid: std::process::id(),
-            directory: temp.path().to_path_buf(),
-            git: slow_git.into(),
-            harness_ready_ms: Arc::new(AtomicI64::new(mj_core::clock::epoch_millis() - 1)),
-            children: ObserverChildren::default(),
-        };
-        let reading = tokio::spawn({
-            let observer = observer.clone();
-            async move { collect(&observer, false, true).await }
-        });
-        while !std::fs::read_to_string(&pid_file)
-            .is_ok_and(|text| text.trim().parse::<u32>().is_ok())
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        // The park's request: processes only, while the tree read runs.
-        let facts = collect(&observer, true, false).await;
-        let Observed::Known(processes) = &facts.processes else {
-            panic!("{:?}", facts.processes);
-        };
-        let reported: Vec<_> = processes
-            .shown
-            .iter()
-            .filter(|process| {
-                process.command.contains("fake-git-in-flight")
-                    || process.command.contains("sleep 31")
-            })
-            .collect();
-        reading.abort();
-        assert!(reported.is_empty(), "{reported:?}");
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_status_and_the_subject_reads_run_together_and_agree_on_the_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let sha = "1".repeat(40);
+        let git = rendezvous_git(temp.path(), &sha, &sha);
+        let Observed::Known(tree) =
+            read_worktree(&ObserverChildren::default(), git.as_os_str(), temp.path()).await
+        else {
+            panic!("the status and the log did not run together");
+        };
+        assert_eq!(
+            tree.head.unwrap().subject,
+            Observed::Known("The subject".into())
+        );
+    }
+
+    /// A commit made between the two reads would give the id of one commit the
+    /// subject of another: the subject is then unavailable, with that reason, and
+    /// the commit id from `status` stays.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_subject_read_for_a_different_commit_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let git = rendezvous_git(temp.path(), &"1".repeat(40), &"2".repeat(40));
+        let Observed::Known(tree) =
+            read_worktree(&ObserverChildren::default(), git.as_os_str(), temp.path()).await
+        else {
+            panic!("the tree was unavailable");
+        };
+        let head = tree.head.unwrap();
+        assert_eq!(head.sha, "1".repeat(40));
+        assert!(
+            matches!(
+                &head.subject,
+                Observed::Unavailable { reason } if reason.contains("HEAD moved")
+            ),
+            "{:?}",
+            head.subject
+        );
+    }
+
     // `ps etime` is whole seconds while the harness's readiness age is in
     // milliseconds, so a process that started near readiness reads younger or
     // older than it is. Uncertainty reports the process: one that started within

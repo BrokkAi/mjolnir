@@ -201,8 +201,10 @@ async fn run_relay_coordinator(
         BTreeMap::new(),
         shell_events,
     );
-    unix::run_relay_coordinator_with_verdict(relay, events, wakes, commands, shells, None, None)
-        .await
+    unix::run_relay_coordinator_with_verdict(
+        relay, events, wakes, commands, shells, None, None, None,
+    )
+    .await
 }
 
 fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error>) {
@@ -6885,6 +6887,7 @@ async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
         .record_command_completed(
             "capacity-original",
             crate::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "error".into(),
                 usage: None,
@@ -7981,318 +7984,258 @@ async fn cpu_usage_answers_from_the_sampler_without_journaling() {
     task.await.unwrap().unwrap();
 }
 
-#[tokio::test]
-async fn work_facts_answer_on_the_connection_without_journaling() {
-    let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
-        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
-    ));
-    let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("notes.txt"), "draft\n").unwrap();
-    assert!(
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(directory.path())
-            .args(["init", "-q"])
-            .status()
-            .unwrap()
-            .success()
+/// A sub-agent's coordinator: it observes its agent's work when a prompt ends.
+async fn run_capturing_coordinator(
+    relay: Arc<Mutex<DurableRelay>>,
+    events: mpsc::Receiver<RuntimeEvent>,
+    wakes: mpsc::Receiver<()>,
+    commands: mpsc::Sender<CommandRequest>,
+    observer: crate::work_facts::WorkObserver,
+) -> anyhow::Result<()> {
+    let (shell_events, _shell_events_rx) = mpsc::channel(1);
+    let shells = crate::user_shell::UserShellRegistry::new(
+        std::env::current_dir()?,
+        BTreeMap::new(),
+        shell_events,
     );
-    let (wake, _wakes) = mpsc::channel(1);
-    let (fatal, _errors) = mpsc::channel(1);
-    let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let task = tokio::spawn(unix::serve_client_with_memory(
-        server,
-        relay.clone(),
-        wake,
-        Err("no credentials".into()),
-        unix::ConnectionRuntime {
-            work: Some(crate::work_facts::WorkObserver {
-                session_id: SESSION_ID.into(),
-                worker_pid: std::process::id(),
-                directory: directory.path().to_path_buf(),
-                git: "git".into(),
-                harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
-                children: Default::default(),
-            }),
-            ..Default::default()
-        },
-        fatal,
-    ));
-    let mut client = BufReader::new(client);
-    let request = RelayRequestEnvelope {
-        request_id: "facts".into(),
-        protocol_version: RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::WorkFacts {
-            processes: true,
-            worktree: true,
-        },
-    };
-    let mut bytes = serde_json::to_vec(&request).unwrap();
-    bytes.push(b'\n');
-    client.get_mut().write_all(&bytes).await.unwrap();
-    let mut line = String::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        client.read_line(&mut line),
+    unix::run_relay_coordinator_with_verdict(
+        relay,
+        events,
+        wakes,
+        commands,
+        shells,
+        None,
+        None,
+        Some(observer),
     )
     .await
-    .unwrap()
-    .unwrap();
-    let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
-    let RelayResponseBody::Ok {
-        payload: RelayResponsePayload::WorkFacts { facts, .. },
-    } = response.body
-    else {
-        panic!("{line}");
-    };
-    let tree = facts.worktree.known().expect("worktree observed");
-    assert_eq!((tree.changed, tree.untracked), (1, 1));
-    assert_eq!(tree.shown[0].path, "notes.txt");
-    assert!(facts.processes.known().is_some(), "{:?}", facts.processes);
-    assert_eq!(relay.lock().unwrap().latest_ordinal(), 0);
-    drop(client);
-    task.await.unwrap().unwrap();
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn a_slow_working_tree_read_on_one_connection_never_delays_processes_on_another() {
-    use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
-        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
-    ));
-    let slow_git = temp.path().join("slow-git");
-    std::fs::write(&slow_git, "#!/bin/sh\nsleep 4\nexit 1\n").unwrap();
-    std::fs::set_permissions(&slow_git, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let observer = crate::work_facts::WorkObserver {
-        session_id: SESSION_ID.into(),
-        worker_pid: std::process::id(),
-        directory: temp.path().to_path_buf(),
-        git: slow_git.into(),
-        harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
-        children: Default::default(),
-    };
-    async fn connect(
-        relay: &Arc<Mutex<DurableRelay>>,
-        observer: &crate::work_facts::WorkObserver,
-    ) -> BufReader<tokio::net::UnixStream> {
-        let (wake, _wakes) = mpsc::channel(1);
-        let (fatal, _errors) = mpsc::channel(1);
-        let (server, client) = tokio::net::UnixStream::pair().unwrap();
-        tokio::spawn(unix::serve_client_with_memory(
-            server,
-            relay.clone(),
-            wake,
-            Err("no credentials".into()),
-            unix::ConnectionRuntime {
-                work: Some(observer.clone()),
-                ..Default::default()
-            },
-            fatal,
-        ));
-        BufReader::new(client)
-    }
-    async fn send(client: &mut BufReader<tokio::net::UnixStream>, processes: bool, worktree: bool) {
-        let request = RelayRequestEnvelope {
-            request_id: "facts".into(),
-            protocol_version: RELAY_PROTOCOL_VERSION,
-            request: RelayRequest::WorkFacts {
-                processes,
-                worktree,
-            },
-        };
-        let mut bytes = serde_json::to_vec(&request).unwrap();
-        bytes.push(b'\n');
-        client.get_mut().write_all(&bytes).await.unwrap();
-    }
-    let mut slow = connect(&relay, &observer).await;
-    let mut quick = connect(&relay, &observer).await;
-    send(&mut slow, false, true).await;
-    let asked = std::time::Instant::now();
-    send(&mut quick, true, false).await;
-    let mut line = String::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        quick.read_line(&mut line),
-    )
-    .await
-    .expect("the process facts waited for the working tree read")
-    .unwrap();
-    assert!(asked.elapsed() < std::time::Duration::from_secs(3));
-    let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
-    let RelayResponseBody::Ok {
-        payload: RelayResponsePayload::WorkFacts { facts, .. },
-    } = response.body
-    else {
-        panic!("{line}");
-    };
-    assert!(facts.processes.known().is_some(), "{:?}", facts.processes);
-    // The part not asked for says so; it is not an empty tree.
-    assert!(facts.worktree.known().is_none());
-    // The slow read finishes on its own connection, and says that Git failed.
-    let mut line = String::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        slow.read_line(&mut line),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(line.contains("work_facts"), "{line}");
+/// The facts a prompt's published outcome carries, once it is published:
+/// `Some(None)` is an outcome without any.
+fn prompt_outcome_facts(
+    relay: &Arc<Mutex<DurableRelay>>,
+) -> Option<Option<mj_core::work_facts::WorkFacts>> {
+    relay
+        .lock()
+        .unwrap()
+        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap()
+        .into_iter()
+        .find_map(|event| match event.observation {
+            RelayObservation::CommandCompleted {
+                outcome: mj_core::relay::RelayCommandOutcome::Prompt { work_facts, .. },
+                ..
+            } => Some(work_facts.map(|facts| *facts)),
+            _ => None,
+        })
 }
 
-/// The worker owns acceptance, and says what it had accepted when the
-/// observation ended, not when it began: work accepted while a slow Git read
-/// ran is work the read may have seen.
+/// A fake `git` whose `status` announces itself and then waits for a release
+/// file, so a test can hold the capture open.
 #[cfg(unix)]
-#[tokio::test]
-async fn work_facts_report_the_work_accepted_while_the_observation_ran() {
+fn gated_git(directory: &Path, release: bool) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
-        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
-    ));
-    let slow_git = temp.path().join("slow-git");
-    std::fs::write(&slow_git, "#!/bin/sh\nsleep 1\nexit 1\n").unwrap();
-    std::fs::set_permissions(&slow_git, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let (wake, _wakes) = mpsc::channel(1);
-    let (fatal, _errors) = mpsc::channel(1);
-    let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    tokio::spawn(unix::serve_client_with_memory(
-        server,
-        relay.clone(),
-        wake,
-        Err("no credentials".into()),
-        unix::ConnectionRuntime {
-            work: Some(crate::work_facts::WorkObserver {
-                session_id: SESSION_ID.into(),
-                worker_pid: std::process::id(),
-                directory: temp.path().to_path_buf(),
-                git: slow_git.into(),
-                harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
-                children: Default::default(),
-            }),
-            ..Default::default()
-        },
-        fatal,
-    ));
-    let mut client = BufReader::new(client);
-    let request = RelayRequestEnvelope {
-        request_id: "facts".into(),
-        protocol_version: RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::WorkFacts {
-            processes: false,
-            worktree: true,
-        },
+    let git = directory.join("gated-git");
+    let wait = if release {
+        r#"while [ ! -f "$dir/release" ]; do sleep 0.01; done"#
+    } else {
+        r#"while true; do sleep 0.05; done"#
     };
-    let mut bytes = serde_json::to_vec(&request).unwrap();
-    bytes.push(b'\n');
-    client.get_mut().write_all(&bytes).await.unwrap();
-    // A prompt is accepted while the read runs.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let accepted = {
-        let mut relay = relay.lock().unwrap();
-        submit(&mut relay, "during-the-read", prompt("one more thing"));
-        relay.newest_accepted_work_ordinal()
-    };
-    assert!(accepted > 0);
-    let mut line = String::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        client.read_line(&mut line),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
-    let RelayResponseBody::Ok {
-        payload: RelayResponsePayload::WorkFacts {
-            accepted_ordinal, ..
-        },
-    } = response.body
-    else {
-        panic!("{line}");
-    };
-    assert_eq!(accepted_ordinal, Some(accepted));
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn a_disconnect_kills_the_git_read_it_started() {
-    use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
-        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
-    ));
-    let pid_file = temp.path().join("git.pid");
-    let stalled_git = temp.path().join("stalled-git");
     std::fs::write(
-        &stalled_git,
+        &git,
         format!(
-            "#!/bin/sh\necho $$ > '{}'\nexec sleep 60\n",
-            pid_file.display()
+            r#"#!/bin/sh
+dir="$2"; command="$3"
+sha=1111111111111111111111111111111111111111
+case "$command" in
+  status) touch "$dir/status.started"; {wait}
+          printf '# branch.oid %s\000# branch.head main\000? notes.txt\000' "$sha" ;;
+  log) printf '%s\000The subject\n' "$sha" ;;
+  *) exit 2 ;;
+esac
+"#
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&stalled_git, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let (wake, _wakes) = mpsc::channel(1);
-    let (fatal, _errors) = mpsc::channel(1);
-    let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let task = tokio::spawn(unix::serve_client_with_memory(
-        server,
-        relay.clone(),
-        wake,
-        Err("no credentials".into()),
-        unix::ConnectionRuntime {
-            work: Some(crate::work_facts::WorkObserver {
-                session_id: SESSION_ID.into(),
-                worker_pid: std::process::id(),
-                directory: temp.path().to_path_buf(),
-                git: stalled_git.into(),
-                harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
-                children: Default::default(),
-            }),
-            ..Default::default()
-        },
-        fatal,
-    ));
-    let mut client = BufReader::new(client);
-    let request = RelayRequestEnvelope {
-        request_id: "facts".into(),
-        protocol_version: RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::WorkFacts {
-            processes: false,
-            worktree: true,
-        },
-    };
-    let mut bytes = serde_json::to_vec(&request).unwrap();
-    bytes.push(b'\n');
-    client.get_mut().write_all(&bytes).await.unwrap();
-    let pid = loop {
-        if let Ok(text) = std::fs::read_to_string(&pid_file)
-            && let Ok(pid) = text.trim().parse::<i32>()
-        {
-            break pid;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    };
-    let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0
-        && !std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .is_ok_and(|stat| stat.rsplit(')').next().is_some_and(|rest| rest.trim_start().starts_with('Z')));
-    assert!(alive(pid), "the Git read was not running");
-    drop(client);
-    tokio::time::timeout(std::time::Duration::from_secs(5), task)
-        .await
-        .expect("the connection did not end")
-        .unwrap()
-        .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while alive(pid) && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git
+}
+
+#[cfg(unix)]
+fn capture_observer(
+    relay: &Arc<Mutex<DurableRelay>>,
+    directory: &Path,
+    git: PathBuf,
+) -> crate::work_facts::WorkObserver {
+    crate::work_facts::WorkObserver {
+        session_id: SESSION_ID.into(),
+        worker_pid: std::process::id(),
+        directory: directory.to_path_buf(),
+        git: git.into(),
+        harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
+        children: Default::default(),
     }
-    assert!(!alive(pid), "the Git read outlived its requester");
+}
+
+/// A sub-agent's prompt outcome is published with the facts its worker observed,
+/// and the next prompt, which this task dispatches only after the outcome is
+/// recorded, waits for the observation.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sub_agents_prompt_outcome_carries_its_facts_and_the_next_prompt_waits_for_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-first", prompt("first"));
+    submit(&mut durable, "prompt-second", prompt("second"));
+    let relay = Arc::new(Mutex::new(durable));
+    let git = gated_git(work.path(), true);
+    let observer = capture_observer(&relay, work.path(), git);
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (_wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_capturing_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+        observer,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-first", "first");
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-first".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    // The capture is running (its Git read has started and is held): nothing is
+    // published and the second prompt has not been dispatched.
+    wait_for("the capture to start", async {
+        while !work.path().join("status.started").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(command_rx.try_recv().is_err(), "the next turn started");
+    assert_eq!(prompt_outcome_facts(&relay), None, "published early");
+
+    std::fs::write(work.path().join("release"), "").unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-second", "second");
+    let facts = prompt_outcome_facts(&relay)
+        .expect("the outcome is published")
+        .expect("with the facts");
+    let tree = facts.worktree.known().expect("the working tree was read");
+    assert!(tree.shown.iter().any(|path| path.path == "notes.txt"));
+    assert!(facts.processes.known().is_some(), "{:?}", facts.processes);
+    drop(event_tx);
+    drop(_wake_tx);
+    let _ = coordinator.await;
+}
+
+/// The harness stopping while the observation runs ends it: the outcome is
+/// published with the facts unavailable and the reason, and the event that
+/// stopped it is recorded after the outcome.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_capture_cancelled_by_the_harness_stopping_publishes_unavailable_facts() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-only", prompt("only"));
+    let relay = Arc::new(Mutex::new(durable));
+    // A Git read that never ends: only the stop can end the capture.
+    let git = gated_git(work.path(), false);
+    let observer = capture_observer(&relay, work.path(), git);
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (_wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_capturing_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+        observer,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-only", "only");
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-only".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    wait_for("the capture to start", async {
+        while !work.path().join("status.started").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    coordinator.await.unwrap().unwrap();
+    let facts = prompt_outcome_facts(&relay)
+        .expect("the outcome is published")
+        .expect("with facts that say they are unavailable");
+    assert!(
+        matches!(
+            &facts.worktree,
+            mj_core::work_facts::Observed::Unavailable { reason }
+                if reason.contains("harness stopped")
+        ),
+        "{facts:?}"
+    );
+    assert!(facts.processes.known().is_none());
+}
+
+/// A session that is not a sub-agent has no observer, and its outcome says
+/// nothing of facts.
+#[tokio::test]
+async fn an_ordinary_sessions_prompt_outcome_carries_no_facts() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-only", prompt("only"));
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (_wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-only", "only");
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-only".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    wait_for_relay_state(&relay, |state| state.active_prompt.is_none()).await;
+    assert_eq!(prompt_outcome_facts(&relay), Some(None));
+    drop(event_tx);
+    drop(_wake_tx);
+    let _ = coordinator.await;
 }
 
 #[test]

@@ -205,15 +205,18 @@ and its parent has been told, Mjolnir parks it:
 - Its worker and harness stop, so it holds no harness processes. Parking
   stops the harness and the processes under it; a process the agent started
   detached, for example with `setsid`, is not part of that tree and may keep
-  running. So when a sub-agent finishes, Mjolnir asks its worker which
+  running. So when a sub-agent's turn ends, its worker observes which
   processes it can find in the worker's process tree or carrying this
-  session's marker, and what the working tree holds, and puts both in the
-  report the parent receives, as Mjolnir's observation ahead of the child's
-  own text. A process outside that scope, such as a job started with
-  `env -i setsid` whose launching shell has exited, is not seen. The report
-  waits for both observations; the worker has the relay's 15-second request
-  deadline for each, and a part it cannot give in that time is reported as
-  unavailable, with the reason. `list_agents` shows the same lines under
+  session's marker, and what the working tree holds, before it publishes the
+  turn's outcome. The two are read together, and the facts are part of the
+  outcome record, so the report the parent receives lists them as Mjolnir's
+  observation, ahead of the child's own text, and nothing waits for them
+  afterwards. A process outside that scope, such as a job started with
+  `env -i setsid` whose launching shell has exited, is not seen. There is no
+  time limit on the observation: the sub-agent's next turn starts after it. It
+  ends early only if the harness stops or exits, and the outcome then says the
+  facts are unavailable and why. A turn recorded by an older worker has no
+  facts, and the report says so. `list_agents` shows the same lines under
   `facts`.
 - Its conversation, its report, and the files on its target stay. Its row
   shows the idle symbol and reads "Parked". The report message the parent

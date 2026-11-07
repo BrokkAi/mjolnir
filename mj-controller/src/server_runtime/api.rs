@@ -162,12 +162,6 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent close is unavailable") })
     }
 
-    /// Make sure the facts of the finish that completed turn `ordinal` are being
-    /// collected. A report whose facts are not stored waits for the collection,
-    /// which stores something and reports the parent again. A backend without a
-    /// daemon collects nothing.
-    fn ensure_finish_facts(self: Arc<Self>, _session_id: String, _completed_ordinal: u64) {}
-
     /// Whether a park of this child is still running. A backend without a
     /// daemon parks nothing.
     fn subagent_park_running(&self, _session_id: &str) -> bool {
@@ -1114,13 +1108,6 @@ impl ApiBackend {
                     .iter()
                     .map(|relation| relation.child_session_id.clone())
                     .collect::<Vec<_>>();
-                // One read of what was recorded; this listing never asks a
-                // worker, so it stays a read of recorded state.
-                let recorded_facts = blocking("load sub-agent work facts", {
-                    let child_ids = child_ids.clone();
-                    move || crate::database::load_work_facts(&child_ids)
-                })
-                .await?;
                 let (observed, starts) = self.child_snapshots(child_ids).await?;
                 let summaries = observed
                     .into_iter()
@@ -1173,8 +1160,12 @@ impl ApiBackend {
                         inputs.annotate(&relation.child_session_id, &mut entry);
                         mark_parked(&mut entry, record.as_ref());
                         mark_promptable(&mut entry, &state, progress, record.as_ref());
-                        if let Some(recorded) = recorded_facts.get(&relation.child_session_id) {
-                            entry["facts"] = work_facts_entry(recorded, now_ms);
+                        if let Some(facts) = progress
+                            .answer
+                            .as_ref()
+                            .and_then(|turn| turn.work_facts.as_ref())
+                        {
+                            entry["facts"] = work_facts_entry(facts, now_ms);
                         }
                         entry
                     })
@@ -1719,7 +1710,6 @@ impl ApiBackend {
             )),
             Some(ChildDisposition::NotNews(why)) => Ok(ChildReport::NotNews(why)),
             Some(ChildDisposition::NotFinished) => Ok(ChildReport::NotFinished),
-            Some(ChildDisposition::Held) => Ok(ChildReport::Awaiting),
             Some(ChildDisposition::Reported) => {
                 let child = child_id.to_owned();
                 let marker = blocking("read the child's reported finish", move || {
@@ -1776,68 +1766,6 @@ impl ApiBackend {
         if ready.is_empty() {
             return Ok(reconciled);
         }
-        // Facts are never asked of a worker here: this runs for every parent in
-        // the mailbox sweep, and one slow worker must not hold up any other
-        // report. The reconcile also never writes them. A finish whose facts are
-        // not stored is held: the collection of its facts (started here if it is
-        // not running) records something, the worker's answer or why it could not
-        // be asked, and reports this parent again.
-        let ids = ready
-            .iter()
-            .map(|child| child.relation.child_session_id.clone())
-            .collect::<Vec<_>>();
-        let stored = blocking("load recorded work facts", move || {
-            crate::database::load_work_facts(&ids)
-        })
-        .await?;
-        let mut work_facts = BTreeMap::new();
-        let mut reportable = Vec::with_capacity(ready.len());
-        for child in ready {
-            let id = child.relation.child_session_id.clone();
-            if child.finished && child.relation.kind != mj_core::subagent::SubagentKind::Oracle {
-                // Whether to ask the worker follows from there being a
-                // completed turn, not from the kind of identity: a finished
-                // child whose last message delivery failed is asked like any
-                // other finish.
-                let completed = child
-                    .identity
-                    .as_ref()
-                    .and_then(|identity| identity.completed_ordinal());
-                let Some(completed_ordinal) = completed else {
-                    // No completed turn: no completion task asks its worker.
-                    work_facts.insert(
-                        id,
-                        mj_core::work_facts::WorkFacts::unavailable(
-                            "the child ended without a completed turn, so its worker was not asked",
-                        ),
-                    );
-                    reportable.push(child);
-                    continue;
-                };
-                let recorded = stored
-                    .get(&id)
-                    .filter(|recorded| recorded.finish_ordinal == Some(completed_ordinal))
-                    .and_then(|recorded| recorded.finish.clone());
-                let Some(facts) = recorded else {
-                    // Held, and not for ever: the collection records something
-                    // for this finish (what the worker said, or why it could not
-                    // be asked) and reports this parent again. It does not wait
-                    // on the actor's view of the worker, which is also
-                    // disconnected before the actor first connects.
-                    self.exports
-                        .clone()
-                        .ensure_finish_facts(id.clone(), completed_ordinal);
-                    reconciled.children.insert(id, ChildDisposition::Held);
-                    continue;
-                };
-                work_facts.insert(id, facts);
-            }
-            reportable.push(child);
-        }
-        let ready = reportable;
-        if ready.is_empty() {
-            return Ok(reconciled);
-        }
         let spans = ready
             .iter()
             .map(|child| {
@@ -1884,9 +1812,15 @@ impl ApiBackend {
                 &child.progress,
                 child.record.as_ref(),
             );
+            let report_has_facts = child.finished && !oracle;
             let mut report =
                 serde_json::from_value::<mj_core::mailbox::SubagentFinishedReport>(entry)?;
-            report.facts = work_facts.remove(id);
+            // What the child's worker observed when the turn ended is part of the
+            // outcome that ended it, so the report reads it from the same snapshot
+            // as the finish, and nothing waits on it.
+            if report_has_facts {
+                report.facts = Some(finish_facts(&child.progress));
+            }
             notifications.push((
                 child.identity.expect("ready report has a finish identity"),
                 report,
@@ -2308,8 +2242,6 @@ enum ChildDisposition {
     /// behind, or one that went on to a newer turn; the caller, which holds the
     /// ending it asks about, tells which.
     NotFinished,
-    /// News, held until the facts of the finish are collected.
-    Held,
 }
 
 /// Whether the parent has been told of one child's finish.
@@ -2321,8 +2253,7 @@ pub(crate) enum ChildReport {
     /// The reconcile does not see the child as finished.
     NotFinished,
     /// News, but not reported yet: the readers' snapshot has not caught up with
-    /// the finish, its facts are being collected, or the enqueue skipped it.
-    /// Ask again.
+    /// the finish, or the enqueue skipped it. Ask again.
     Awaiting,
 }
 
@@ -2544,21 +2475,36 @@ fn wait_agent_entry(
     agent
 }
 
-/// The `facts` object of a `list_agents` entry: the lines of the observation
-/// recorded with the child's latest finish report, rendered by the same code as
-/// the mailbox report.
-fn work_facts_entry(recorded: &crate::database::StoredWorkFacts, now_ms: u64) -> serde_json::Value {
-    let mut facts = serde_json::Map::new();
-    if let Some(finish) = &recorded.finish {
-        facts.insert(
-            "finish".into(),
-            serde_json::json!({
-                "observed_secs_ago": now_ms.saturating_sub(finish.observed_at_ms) / 1000,
-                "lines": finish.render_lines(),
-            }),
+/// The `facts` object of a `list_agents` entry: the lines of what the child's
+/// worker observed when its last turn ended, rendered by the same code as the
+/// mailbox report.
+fn work_facts_entry(facts: &mj_core::work_facts::WorkFacts, now_ms: u64) -> serde_json::Value {
+    serde_json::json!({
+        "finish": {
+            "observed_secs_ago": now_ms.saturating_sub(facts.observed_at_ms) / 1000,
+            "lines": facts.render_lines(),
+        }
+    })
+}
+
+/// The facts a finished child's report carries: what its worker recorded in the
+/// outcome that ended its last turn, or why there are none. A prompt outcome
+/// without them is from a worker that predates the capture; an ending that was
+/// not a completed prompt took no observation.
+fn finish_facts(progress: &ChildProgress) -> mj_core::work_facts::WorkFacts {
+    let Some(turn) = &progress.answer else {
+        return mj_core::work_facts::WorkFacts::unavailable(
+            "the child ended without a completed turn, so its worker did not observe it",
         );
-    }
-    serde_json::Value::Object(facts)
+    };
+    turn.work_facts.clone().unwrap_or_else(|| {
+        mj_core::work_facts::WorkFacts::unavailable(match turn.outcome {
+            mj_core::state::TurnOutcomeKind::Completed { .. } => {
+                "the child's worker predates this version"
+            }
+            _ => "the turn ended without completing, so its worker took no observation",
+        })
+    })
 }
 
 /// What the session list calls a child now, bounded to one line, or the task

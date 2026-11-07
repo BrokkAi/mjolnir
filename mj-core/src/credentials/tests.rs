@@ -390,6 +390,7 @@ fn a_codex_refresh_failure_is_an_auth_failure() {
             command: None,
             command_id: "prompt-1".into(),
             outcome: crate::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "error".into(),
                 diagnostic: Some(crate::diagnostic::TurnDiagnostic::from_acp(&error)),
                 usage: None,
@@ -899,6 +900,7 @@ fn a_kimi_token_refusal_is_an_auth_failure() {
     .unwrap();
     assert!(turn_diagnostic_reports_auth_failure(&diagnostic));
     let turn = crate::state::MaterializedTurnOutcome {
+        work_facts: None,
         answered_through: None,
         diagnostic: Some(diagnostic),
         usage: None,

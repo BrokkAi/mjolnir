@@ -939,9 +939,6 @@ fn export_spec_schema_mismatch_is_detected_from_the_parse_error() {
 }
 pub(crate) const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
 pub(crate) const LATCH_RELAY_MAX_PROTOCOL: &str = "MJ_TEST_LATCH_RELAY_MAX_PROTOCOL";
-/// A file holding the work facts the stand-in relay answers with; without it
-/// the request is refused as a worker that cannot observe would refuse it.
-pub(crate) const LATCH_RELAY_WORK_FACTS: &str = "MJ_TEST_LATCH_RELAY_WORK_FACTS";
 pub(crate) const LATCH_RECORD_SUBAGENT_ADMISSION: &str = "MJ_TEST_LATCH_RECORD_SUBAGENT_ADMISSION";
 pub(crate) const LATCH_DROP_ADMISSION_CLOSE_REPLY: &str =
     "MJ_TEST_LATCH_DROP_ADMISSION_CLOSE_REPLY";
@@ -1067,24 +1064,6 @@ fn latch_relay_child_serves_stdio() {
                     .into(),
                     session_id: LATCH_RELAY_SESSION.into(),
                     worker_build: None,
-                })
-            }
-            mj_core::relay::RelayRequest::WorkFacts { worktree, .. } => {
-                std::env::var_os(LATCH_RELAY_WORK_FACTS).map(|path| {
-                    // Record what each request asked for, beside the facts.
-                    use std::io::Write;
-                    let mut requests = path.clone();
-                    requests.push(".requests");
-                    let mut log = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(requests)
-                        .expect("open the work facts request log");
-                    writeln!(log, "worktree={worktree}").expect("log a work facts request");
-                    mj_core::relay::RelayResponsePayload::WorkFacts {
-                        facts: serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap(),
-                        accepted_ordinal: Some(0),
-                    }
                 })
             }
             mj_core::relay::RelayRequest::PollSubagentQueue { .. }
@@ -1339,6 +1318,7 @@ fn latch_relay_child_serves_stdio() {
                         .record_command_completed(
                             &claimed.command_id,
                             RelayCommandOutcome::Prompt {
+                                work_facts: None,
                                 diagnostic: None,
                                 stop_reason: "end_turn".into(),
                                 usage: None,
@@ -1370,6 +1350,7 @@ fn latch_relay_child_serves_stdio() {
                         .record_command_completed(
                             &prompt_id,
                             RelayCommandOutcome::Prompt {
+                                work_facts: None,
                                 diagnostic: None,
                                 stop_reason: "cancelled".into(),
                                 usage: None,
@@ -1544,7 +1525,6 @@ pub(crate) fn latch_relay_target(
     }
     for key in [
         LATCH_RELAY_MAX_PROTOCOL,
-        LATCH_RELAY_WORK_FACTS,
         LATCH_RECORD_SUBAGENT_ADMISSION,
         LATCH_DROP_ADMISSION_CLOSE_REPLY,
     ] {

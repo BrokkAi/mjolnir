@@ -204,11 +204,6 @@ struct QuotaBoard {
     refresh: Option<tokio::sync::mpsc::Sender<()>>,
 }
 
-/// A finish's facts being collected: everyone who asks while it runs waits for
-/// the one collection and reads its result.
-pub(crate) type FactCollections =
-    BTreeMap<(String, u64), Arc<tokio::sync::OnceCell<std::result::Result<(), String>>>>;
-
 pub struct RuntimeState {
     attachments: Mutex<BTreeMap<String, Attachment>>,
     phone_status: Mutex<WebViewerStatus>,
@@ -223,11 +218,6 @@ pub struct RuntimeState {
     /// backend's ExportRuntime reference does not form an Arc cycle.
     pub(crate) report_backend:
         std::sync::OnceLock<std::sync::Weak<crate::server_runtime::api::ApiBackend>>,
-    /// The collections of finish facts that are running, one per (child,
-    /// finish): the delegation loop and a report's reconciliation both ask for
-    /// one, and they share it. In memory only, as nothing in it is needed after
-    /// a restart: the reconciliation asks again.
-    pub(crate) fact_collections: Mutex<FactCollections>,
     pub(crate) credential_targets:
         Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,
     feed: Mutex<feed::RuntimeHistory>,

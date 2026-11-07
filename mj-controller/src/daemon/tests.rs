@@ -7115,6 +7115,7 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
             }));
     }
     conversation.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        work_facts: None,
         answered_through: None,
         diagnostic: None,
         usage: None,
@@ -9584,6 +9585,7 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
         .record_command_completed(
             &prompt_id,
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
                 diagnostic: None,

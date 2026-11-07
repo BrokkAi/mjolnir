@@ -507,9 +507,9 @@ mod tests {
     struct BusyThenParked(AtomicUsize);
     impl ExportRuntime for BusyThenParked {
         fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
-            (session_id == "parent").then(|| {
+            matches!(session_id, "parent" | "child").then(|| {
                 crate::daemon::tests::runtime_test_session(
-                    "parent",
+                    session_id,
                     "workspace",
                     mj_core::state::SessionState::Running,
                 )
@@ -530,6 +530,53 @@ mod tests {
                 })
             })
         }
+    }
+
+    /// The session actor's view of the child: connected and idle after `turn`,
+    /// which is what a delegation observation is made from.
+    async fn publish_idle_child(
+        manager: &crate::daemon::tests::TestRemoteManager,
+        turn: &mj_core::state::MaterializedTurnOutcome,
+    ) {
+        let mut view = crate::daemon::tests::ready_startup_view();
+        view.snapshot
+            .as_mut()
+            .unwrap()
+            .materialized
+            .last_turn_outcome = Some(turn.clone());
+        manager
+            .publisher
+            .publish("child".into(), view)
+            .await
+            .unwrap();
+    }
+
+    /// A child's stored last turn: what the readers' snapshot knows of it.
+    fn store_finished_turn(
+        child: &str,
+        command_id: &str,
+        completed_ordinal: u64,
+    ) -> mj_core::state::MaterializedTurnOutcome {
+        let turn = mj_core::state::MaterializedTurnOutcome {
+            answered_through: None,
+            diagnostic: None,
+            usage: None,
+            command_id: command_id.into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: None,
+            completed_ordinal,
+            completed_at_ms: 1,
+            outcome: mj_core::state::TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+            work_facts: None,
+        };
+        let mut conversation = mj_core::state::MaterializedSession::empty(child);
+        conversation.applied_event_ordinal = completed_ordinal;
+        conversation.applied_event_digest = format!("{completed_ordinal:064x}");
+        conversation.last_turn_outcome = Some(turn.clone());
+        crate::database::save_materialized_session(&conversation).unwrap();
+        turn
     }
 
     // Hard-won: 5bb43721a: child completion wrote a redundant notice to the parent.
@@ -563,7 +610,8 @@ mod tests {
         crate::database::save_session(&parent).unwrap();
         let relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
         crate::database::save_subagent_session(&child, &relation).unwrap();
-        let state = crate::daemon::tests::test_runtime_state();
+        let manager = crate::daemon::tests::TestRemoteManager::for_session("child").await;
+        let state = crate::daemon::tests::test_runtime_state_with_manager(&manager);
         let parks = Arc::new(BusyThenParked(AtomicUsize::new(0)));
         // The parent has no actor. Durable report enqueue must not need one
         // or prevent either park attempt.
@@ -573,24 +621,15 @@ mod tests {
             parks.clone(),
         ));
         state.install_report_backend(&backend);
+        // The readers' snapshot holds the turn the observation reports.
+        let turn = store_finished_turn("child", "turn", 10);
+        publish_idle_child(&manager, &turn).await;
         let observation = DelegationObservation {
             requests: Vec::new(),
             completed: Vec::new(),
             in_flight: Vec::new(),
             credential_signal: None,
-            outcome: Some(mj_core::state::MaterializedTurnOutcome {
-                answered_through: None,
-                diagnostic: None,
-                usage: None,
-                command_id: "turn".into(),
-                accepted_ordinal: Some(1),
-                turn_start_position: None,
-                completed_ordinal: 10,
-                completed_at_ms: 1,
-                outcome: mj_core::state::TurnOutcomeKind::Completed {
-                    stop_reason: "end_turn".into(),
-                },
-            }),
+            outcome: Some(turn),
         };
         assert!(matches!(
             complete_child(
@@ -653,7 +692,8 @@ mod tests {
         let mut relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
         relation.handback_tool = true;
         crate::database::save_subagent_session(&child, &relation).unwrap();
-        let state = crate::daemon::tests::test_runtime_state();
+        let manager = crate::daemon::tests::TestRemoteManager::for_session("child").await;
+        let state = crate::daemon::tests::test_runtime_state_with_manager(&manager);
         let parks = Arc::new(BusyThenParked(AtomicUsize::new(1)));
         let backend = Arc::new(ApiBackend::new(
             state.session_manager.client(),
@@ -661,19 +701,8 @@ mod tests {
             parks.clone(),
         ));
         state.install_report_backend(&backend);
-        let outcome = mj_core::state::MaterializedTurnOutcome {
-            answered_through: None,
-            diagnostic: None,
-            usage: None,
-            command_id: "turn".into(),
-            accepted_ordinal: Some(1),
-            turn_start_position: None,
-            completed_ordinal: 10,
-            completed_at_ms: 1,
-            outcome: mj_core::state::TurnOutcomeKind::Completed {
-                stop_reason: "end_turn".into(),
-            },
-        };
+        let outcome = store_finished_turn("child", "turn", 10);
+        publish_idle_child(&manager, &outcome).await;
         let stored = crate::database::load_subagent("child").unwrap().unwrap();
         let settle = |review_open| {
             settle_child(
@@ -700,7 +729,19 @@ mod tests {
         );
         let report = crate::database::load_subagent_report("child").unwrap();
         assert!(report.reminder.is_none() && report.reminder_failed_for.is_none());
-        // With the review gone, the same turn is judged as before.
+        // With the review gone, the same turn is judged as before: the child
+        // handed back, so it is reported and parked.
+        assert!(
+            crate::database::record_subagent_handback(
+                "child",
+                &mj_core::subagent::SubagentHandback {
+                    command_id: "turn".into(),
+                    message: "done".into(),
+                    recorded_at_ms: 1,
+                },
+            )
+            .unwrap()
+        );
         assert!(matches!(
             settle(false).await.unwrap(),
             ChildCompletion::Settled
@@ -713,6 +754,105 @@ mod tests {
                 .noticed_turn,
             Some(10)
         );
+    }
+
+    // A completion is decided from the readers' snapshot, which refreshes after
+    // the write that makes a turn durable returns, while the observation comes
+    // from the session actor and can run ahead of it. Behind the observation the
+    // snapshot says nothing yet: no report, no park, and the completion asks
+    // again; once it has caught up the report is enqueued and only then is the
+    // child parked, once.
+    #[tokio::test]
+    async fn a_child_is_not_parked_until_the_parent_has_its_report() {
+        const CHILD: &str = "MJ_TEST_DELEGATION_PARK_AFTER_REPORT";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "a_child_is_not_parked_until_the_parent_has_its_report",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "delegation-park-after-report")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("park after report").unwrap();
+        let parent = crate::daemon::tests::runtime_test_session(
+            "parent",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        let child = crate::daemon::tests::runtime_test_session(
+            "child",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        crate::database::save_session(&parent).unwrap();
+        crate::database::save_subagent_session(
+            &child,
+            &crate::daemon::tests::runtime_test_subagent("child", "parent"),
+        )
+        .unwrap();
+        let manager = crate::daemon::tests::TestRemoteManager::for_session("child").await;
+        let state = crate::daemon::tests::test_runtime_state_with_manager(&manager);
+        // Every park attempt succeeds, so a park can only be refused by the rule.
+        let parks = Arc::new(BusyThenParked(AtomicUsize::new(1)));
+        let backend = Arc::new(ApiBackend::new(
+            state.session_manager.client(),
+            Arc::new(|_| None),
+            parks.clone(),
+        ));
+        state.install_report_backend(&backend);
+
+        // The snapshot holds the child's earlier turn; the observation is the
+        // turn after it.
+        let earlier = store_finished_turn("child", "earlier-turn", 5);
+        let newer = mj_core::state::MaterializedTurnOutcome {
+            command_id: "turn".into(),
+            completed_ordinal: 10,
+            ..earlier
+        };
+        publish_idle_child(&manager, &newer).await;
+        let observation = DelegationObservation {
+            requests: Vec::new(),
+            completed: Vec::new(),
+            in_flight: Vec::new(),
+            credential_signal: None,
+            outcome: Some(newer),
+        };
+        let complete = || {
+            complete_child(
+                state.clone(),
+                backend.clone(),
+                "child".into(),
+                observation.clone(),
+            )
+        };
+        let told = || crate::database::pending_mailbox_events(10).unwrap().len();
+        assert!(matches!(
+            complete().await.unwrap(),
+            ChildCompletion::RetryPark
+        ));
+        assert_eq!(parks.0.load(Ordering::SeqCst), 1, "no park while behind");
+        assert_eq!(told(), 0, "nothing is reported from a snapshot behind");
+
+        // The snapshot catches up: the report is enqueued, and then the child is
+        // parked.
+        store_finished_turn("child", "turn", 10);
+        assert!(matches!(
+            complete().await.unwrap(),
+            ChildCompletion::Settled
+        ));
+        assert_eq!(parks.0.load(Ordering::SeqCst), 2, "parked once, after");
+        assert_eq!(told(), 1, "the parent has its report");
+        let marker = crate::database::load_subagent("child")
+            .unwrap()
+            .unwrap()
+            .reported_finish
+            .expect("the report's marker is written with it");
+        assert!(marker.covers(10));
     }
 
     struct ParkedParents;
@@ -826,6 +966,7 @@ mod tests {
                 in_flight: Vec::new(),
                 credential_signal: None,
                 outcome: Some(mj_core::state::MaterializedTurnOutcome {
+                    work_facts: None,
                     answered_through: None,
                     diagnostic: None,
                     usage: None,
