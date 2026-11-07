@@ -25,6 +25,136 @@
     "authorization": {
       "messages": [
         {
+          "id": "user:127",
+          "role": "user",
+          "text": "let's do mutation testing using https://github.com/BrokkAi/quicksilver\n\nfirst you'll need to build it since it's not released\n\nthen apply it to our bottom-most crate\n\n1. decide which uncovered fns should get coverage; assign subagents to build those\n\n2. then re-map, and have \"straightforward\" subagents create mutations in parallel, then you can have \"subtle\" subagents check the results to see which survivors should be targeted w additional tests\n\n3. give me feedback on what we should build into quicksilver to make this better\n\n4. you can fix bugs in quicksilver that you find; if it needs a total redesign then stop and discuss w/ me"
+        },
+        {
+          "id": "user:323",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nTest scope: hmm i think we should change how --package works, or at least reverse-depedents a non-default option\nTest kind: Follow repo policy (Recommended)"
+        },
+        {
+          "id": "user:422",
+          "role": "user",
+          "text": "you're literally the first user so it's fine to be skeptical and bias towards fixing/changing qs"
+        },
+        {
+          "id": "user:3959",
+          "role": "user",
+          "text": "> so several agents' patches can be captured\n\nwhy isn't \"just build it with all the patches in place\" enough?\n\n> with CARGO set, it doesn't pin the toolchain\n\npls create a ticket in jbellis/mr-boxington\n\n0. submit the PR\n\n> the test run took 17 minutes\n\nthat seems fast, were the tests mostly disjoint (surprising) or did qs only run a single batch (seems like a bug? if so how do you disentangle which mutants broke which tests)\n\nsurvivors: 1-6 are worth addressing, and both side findings\n\nqs findings: will address separately"
+        },
+        {
+          "id": "user:5530",
+          "role": "user",
+          "text": "qs issues: pls file as tickets in brokkai/quicksilver"
+        },
+        {
+          "id": "user:5855",
+          "role": "user",
+          "text": "ok, those issues are addressed. should we do another round with the core crate again, or move up a level?"
+        },
+        {
+          "id": "user:6110",
+          "role": "user",
+          "text": "yes, and make an effort to test the qs fixes where reasonable"
+        },
+        {
+          "id": "user:8634",
+          "role": "user",
+          "text": "The quicksilver session relayed that you want me to keep going crate by crate through all of Bifrost (map, coverage lanes, mutants, survivor review, PRs, and quicksilver issues after each), until no crates are left. Is that what you want?\n\nNext crates: Yes, all crates (Recommended order)\nOther: yes, all crates, but pause for bug fixes between each like we've been doing"
+        },
+        {
+          "id": "user:8748",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:25971",
+          "role": "user",
+          "text": "Are you landing fixes or just creating tickets? "
+        },
+        {
+          "id": "user:26302",
+          "role": "user",
+          "text": "Pls tag the tickets escalated and assign to David. Did you have the reviewer session look at your fixes? If not, pls do so now"
+        },
+        {
+          "id": "user:26585",
+          "role": "user",
+          "text": "Pls file a ticket in brokkai/mjolnir to recognize 400 and 500 errors and route subagents away from the affected profile "
+        },
+        {
+          "id": "user:27279",
+          "role": "user",
+          "text": "Clean out every tld in /tmp whose newest contents mtime is older than 48h. You may have a memory about this. Save the script in ~ for next time. Special case /tmp/lanes as if it's contents were told of tmp"
+        },
+        {
+          "id": "user:27460",
+          "role": "user",
+          "text": "11G reclaimed is not much, I guess check if any worktrees belong to merged PRs"
+        },
+        {
+          "id": "user:27853",
+          "role": "user",
+          "text": "Yes, rm the stale worktrees. Go ahead and rm the mbx actions/"
+        },
+        {
+          "id": "user:28132",
+          "role": "user",
+          "text": "Yes, rm those"
+        },
+        {
+          "id": "user:28972",
+          "role": "user",
+          "text": "if we have just a flat out bug then you can fix it and release tscpp"
+        },
+        {
+          "id": "user:40675",
+          "role": "user",
+          "text": "pls continue to have reviewer 61f0abcccf634f1496fc07478093eb5d review your fixes"
+        },
+        {
+          "id": "user:53378",
+          "role": "user",
+          "text": "give me a report on bugs found by mutation testing so far by crate, pls"
+        },
+        {
+          "id": "user:53487",
+          "role": "user",
+          "text": "are you using caught and missed for killed/survived or sth else?"
+        },
+        {
+          "id": "user:55814",
+          "role": "user",
+          "text": "let's move java and C# crates next, in that order\n\nand i think we can start interleaving the mutate + fix legs"
+        },
+        {
+          "id": "user:55851",
+          "role": "user",
+          "text": "clarification, is mutation running on ec2? otherwise local box does not have room"
+        },
+        {
+          "id": "user:55908",
+          "role": "user",
+          "text": "my mistake re java/jvm, do just C# next"
+        },
+        {
+          "id": "user:102152",
+          "role": "user",
+          "text": "how many crates are remaining to mutation test?"
+        },
+        {
+          "id": "user:102290",
+          "role": "user",
+          "text": "what are \"adapter\" vs \"base\" language crates?"
+        },
+        {
+          "id": "user:103288",
+          "role": "user",
+          "text": "/compact"
+        },
+        {
           "id": "user:140678",
           "role": "user",
           "text": "where does that leave your work queue?"

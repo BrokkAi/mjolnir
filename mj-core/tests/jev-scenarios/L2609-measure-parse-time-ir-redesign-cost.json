@@ -370,7 +370,7 @@
           "text": "#8692 has landed: #8586 and #8624 are closed, their labels cleared, and the lane removed. The `getcwd` error came from the shell's working directory being inside the worktree I deleted, and it's harmless.\n\nToday's landed work:\n- **#8617 (#8579):** parse-time semantic IR is now a required part of every native language adapter.\n- **#8628 (#8618) and #8641 (#8633):** a nested query no longer takes on its sub-queries' stable content gaps as its own, and a cache hit replays the reads its fill made.\n- **#8682 (#8634):** Java switches whose only arm is `default` now produce valid semantic IR.\n- **#8692 (#8586, #8624):** one producer budget for every artifact, so an answer's completeness no longer depends on cache state.\n\nSeparately, someone opened #8712 to restore the Scala open-boundary reasons behind #8665, the master failure I showed this work didn't cause.\n\nThe one open item needs your decision: **#8580, Python and Scala parse-time IR.** Both need a redesign first:\n- **Python:** non-returning calls and `with` suppression must move to query time.\n- **Scala:** collection-flow contracts must be applied in the flow engine.\n\nI recommend measuring first. One profiled flask policy check would show what on-demand Python lowering costs today, and whether the Python work is worth doing now. The audit is on the issue: https://github.com/BrokkAi/bifrost-dev/issues/8580#issuecomment-6548479698"
         }
       ],
-      "authorization_complete": true,
+      "authorization_complete": false,
       "assistant_history_omitted": true,
       "open_assistant_id": null,
       "final_reply_omitted": false

@@ -35,19 +35,9 @@
           "text": "do it, and explain the #3835 decision pls"
         },
         {
-          "id": "user:888",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:1220",
           "role": "user",
           "text": "3835: recs accepted\n\n3844: close\n\n3840: go"
-        },
-        {
-          "id": "user:1254",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "user:1381",
@@ -58,26 +48,6 @@
           "id": "user:1483",
           "role": "user",
           "text": "that's odd. both are fine with me, try again?"
-        },
-        {
-          "id": "user:1646",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:1747",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:1803",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:2074",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "user:2981",
@@ -110,21 +80,6 @@
           "text": "move it pls"
         },
         {
-          "id": "user:5253",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:5293",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:5302",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:6033",
           "role": "user",
           "text": "mj should be fixed now. what should we tackle next?"
@@ -138,11 +93,6 @@
           "id": "user:6633",
           "role": "user",
           "text": "3650, 3492: recs accepted\n\nwhat tickets are open to us now"
-        },
-        {
-          "id": "user:6979",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:7023",
@@ -175,16 +125,6 @@
           "text": "I'll save fresh copies of the seven issues, with comments, for the children to read."
         },
         {
-          "id": "user:7259",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:7277",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:7303",
           "role": "assistant",
           "text": "Mjolnir broke again after one successful spawn, so I've stopped before starting the lanes. The daemon was upgraded to 2.40.0, build `52e3cfbc`. The installed worker, `~/.cargo/bin/mj-worker-x86_64-unknown-linux-musl`, is a different 2.40.0 build, `d6ebcbd3`, so every spawn fails at startup. I didn't touch the Mjolnir install. The fix is to install the worker from the same release as the daemon.\n\n**Already done for this batch:**\n- **#3420 is closed as obsolete.** The comment cites the commit that removed the Go data-race analysis.\n- **Seven tickets are claimed:** #4782, #3842, #3846, #3790, #3820, #3676 and #3674.\n- **A shared worktree is ready.** It is a read-only worktree at current master in `bifrost-wt/triage-ro`, so the diagnosis and probe lanes share one build and stay inside the disk budget.\n- **The lane briefs are written.** A shared brief for diagnosis and probes is ready, along with the #4782 inventory brief and fresh copies of the seven issues.\n\nOnce the worker matches the daemon, tell me and I'll start all six lanes in one step. They are the #4782 inventory, the #3842, #3846 and #3790 diagnoses, the #3820 re-measurement, and the #3676 and #3674 probes."
@@ -203,11 +143,6 @@
           "id": "agent:7451",
           "role": "assistant",
           "text": "All six lanes started. I'll collect their reports as they arrive."
-        },
-        {
-          "id": "user:7583",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:7647",

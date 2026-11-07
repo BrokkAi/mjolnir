@@ -37,15 +37,34 @@ The corpus was split by session into development (90 fixtures) and held-out (65)
 | c6 | c5 + a question asked before the user's latest message is set aside by it unless a later reply restates it | S03 no longer flagged |
 | c7 | c6 + the older status-question clause and `required` criterion require the choice to be stated or restated since that question (found in review) | adopted |
 
+## Evidence correction (found in review)
+
+The fixture extractor (`scripts/jev-scenarios-extract.py`) had drifted from `mj_core::assessment::ContextHistory`, which builds the evidence the worker sends. It kept Mjolnir-generated prompts (sub-agent notifications, control-origin notes) as user messages, marked the history incomplete instead of evicting the oldest exchange when the user budget was full, treated `/compact` as a boundary, and could emit 257 messages. It now ports `is_generated_prompt`, `is_generated_prompt_text`, the exchange eviction, the 256-message cap and the `/clear` boundary, and `--refresh` rebuilds a fixture's history while keeping its labels. Refreshing every transcript fixture changed 141 (user messages 3,311 to 1,712; the latest user message moved in 89). Twenty older fixtures no longer match their transcripts and were left as they were; none contains a generated prompt. Every refreshed fixture was replayed again with both the original and the adopted wording; the tables below use those replays and keep the earlier ones for unchanged fixtures. Labels did not change: the labelers had already skipped generated prompts.
+
 ## Result of c7 (adopted)
 
-Held-out half, three repeats: 73/84 non-menu requests (87%, baseline 50/84), 0/93 false alerts (baseline 0/93), offers 12/15 (baseline 6/15). Development half plus existing suite, two repeats: existing required 99/104, carry-over questions 22/28 (baseline 32/42 over three repeats), false alerts on existing `none` 5/346 (baseline 11/519; c5 7/346, c6 4/346). Differences of two or three requests between c5, c6 and c7 are within repeat noise; c7 was chosen because it removes the contradiction between the status-question clause and the set-aside rule. D03, whose choice is restated after the status question, still scores 0.94-0.95 required. The harmful-action and action-rate figures below were measured on c5. Harmful actions fell on both corpora (3/375 vs 15/465; 9/464 vs 15/696); on the existing suite, correct `finished`, `continue`, and `wait` rates did not fall.
+| Slice | Baseline | Adopted |
+|---|---:|---:|
+| Held-out half, required (three repeats) | 52/84 (62%) | 72/84 (86%) |
+| Held-out half, false alerts | 0/93 | 0/93 |
+| Development half, required | 81/123 (66%) | 89/103 (86%) |
+| Development half, false alerts | 3/99 | 0/78 |
+| Existing suite, required | 135/156 (87%) | 103/111 (93%) |
+| Existing suite, false alerts | 14/519 (2.7%) | 8/413 (1.9%) |
+| Offers and menus | 12/60 | 40/48 |
+| Carry-over questions | 33/42 (79%) | 22/29 (76%) |
+| Harmful actions, new corpus | 12/441 | 2/394 |
+| Harmful actions, existing suite | 23/693 | 11/536 |
+
+Carry-over questions are the one slice that did not improve; the difference is within repeat noise. Differences of two or three requests between c5, c6 and c7 were also within noise; c7 was chosen because it removes the contradiction between the status-question clause and the set-aside rule. D03, whose choice is restated after the status question, scores 0.94-0.95 required. On the existing suite, correct `finished`, `continue`, and `wait` rates did not fall (measured on c5 before the evidence correction).
+
+The figures before the correction (73/84 versus 50/84 held-out) are superseded by the table above.
 
 Remaining misses and alerts: L2308 (an evaluation lane's "decide whether the latency guard should be rerun" to its judge, 0.55 required), D15 (pausing for a pending SHA), W16/W17 near the ratio; W01, D07 (long-standing) and L2310 (1 of 2) false alerts. S03 still leans required (0.65-0.69) but stays below the ratio.
 
 ## Question locator
 
-The locator (`mj-core/src/activity/question_locator.json`) picks the reply that holds the open request so the dashboard and viewer can scroll to it. Its wording excluded replies that "offer optional extras", which the input rule now counts, so an alert raised by an offer would have had no target (found in review). The adopted wording counts offers and menus that wait for the user's answer and closing status items that name the user, and narrows the exclusion to decisions the user already made. L fixtures with a required label now carry `outcome.request_message_ids` (their request replies inside the locator window: 90 fixtures, 76 with two or more replies). Two repeats on all 106 locator-eligible fixtures: L 131/152 correct versus 113/152; W 60/60 versus 53/60. Remaining misses are the trimmed reports (L0303, L2208), ambiguous cases (L0301, L2106, L2710), and implicit report-backs (L2311, L3011).
+The locator (`mj-core/src/activity/question_locator.json`) picks the reply that holds the open request so the dashboard and viewer can scroll to it. Its wording excluded replies that "offer optional extras", which the input rule now counts, so an alert raised by an offer would have had no target (found in review). The adopted wording counts offers and menus that wait for the user's answer and closing status items that name the user, and narrows the exclusion to decisions the user already made. L fixtures with a required label now carry `outcome.request_message_ids` (their request replies inside the locator window: 90 fixtures, 76 with two or more replies). Two repeats on all locator-eligible fixtures after the evidence correction: L 145/166 correct versus 123/166; W 63/64 versus 58/64. Remaining misses are the trimmed reports (L0303, L2208), ambiguous cases (L0301, L2106, L2710), and implicit report-backs (L2311, L3011).
 
 ## Limits
 
@@ -53,4 +72,4 @@ The locator (`mj-core/src/activity/question_locator.json`) picks the reply that 
 - Repeats vary by a few points; differences of one or two requests are noise.
 - The corpus is biased toward long final reports; 35 of 155 final replies exceed 6 KiB.
 
-Artifacts: `/mnt/optane/tmp/jev-still-open-20261106/` (mined matches, blind labels, candidate questions `cand/c1-c5.json`, every replay's `results.jsonl`, scoring scripts in `tools/`).
+Artifacts: `/mnt/optane/tmp/jev-still-open-20261106/` (mined matches, blind labels, candidate questions `cand/c1-c7.json` and `cand/lc1.json`, reruns after the evidence correction in `cand/r-*`, every replay's `results.jsonl`, scoring scripts in `tools/`).

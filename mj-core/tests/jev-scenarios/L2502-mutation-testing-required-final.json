@@ -25,16 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:9",
-          "role": "user",
-          "text": "upgrade to cargo 1.101"
-        },
-        {
-          "id": "user:93",
-          "role": "user",
-          "text": "Stable Rust is 1.99.1, and the repo already uses it. Cargo 1.101 exists only as a nightly build. What should I do?\n\nCancelled"
-        },
-        {
           "id": "user:127",
           "role": "user",
           "text": "let's do mutation testing using https://github.com/BrokkAi/quicksilver\n\nfirst you'll need to build it since it's not released\n\nthen apply it to our bottom-most crate\n\n1. decide which uncovered fns should get coverage; assign subagents to build those\n\n2. then re-map, and have \"straightforward\" subagents create mutations in parallel, then you can have \"subtle\" subagents check the results to see which survivors should be targeted w additional tests\n\n3. give me feedback on what we should build into quicksilver to make this better\n\n4. you can fix bugs in quicksilver that you find; if it needs a total redesign then stop and discuss w/ me"

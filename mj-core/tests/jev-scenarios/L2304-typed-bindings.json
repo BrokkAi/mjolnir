@@ -265,11 +265,6 @@
           "text": "the other agent says you have the ball on dispatch resolution and openness suite, is that in progress?"
         },
         {
-          "id": "user:79909",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:86477",
           "role": "user",
           "text": "Explain the pros and cons of M6K please"
@@ -305,24 +300,9 @@
           "text": "GW, do that "
         },
         {
-          "id": "user:92011",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:92376",
           "role": "user",
           "text": "My harness UI shows no active sub-agents, which may be out of date, but if it's correct, what can we usefully set in motion now?"
-        },
-        {
-          "id": "user:96329",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:99219",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "user:99432",
@@ -453,11 +433,6 @@
           "id": "agent:101854",
           "role": "assistant",
           "text": "The guidance is updated. Waiting for the two children."
-        },
-        {
-          "id": "user:101926",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:101928",

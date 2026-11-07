@@ -65,21 +65,6 @@
           "text": "172 draft .rqlp files from the campaign under .agents/records/codeql-parity-2026-10/python/verification/\n\nthe fuck, we did a big campaign and then didn't generate actual rules?"
         },
         {
-          "id": "user:13496",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:13506",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:13551",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:13745",
           "role": "user",
           "text": "the PRs are merged I think. yes, start the authoring. follow the pack authoring guidelines on public/premium pls"
@@ -200,11 +185,6 @@
           "text": "All five lanes are active: each wrote logs within the last few minutes, and most are in their final validation runs. I'll keep waiting."
         },
         {
-          "id": "user:16509",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:16613",
           "role": "assistant",
           "text": "PR #4727 is open with #4645's first part. I'm now sending that lane its decisions for the remaining rules, on a stacked branch."
@@ -233,11 +213,6 @@
           "id": "agent:16972",
           "role": "assistant",
           "text": "API Error: Connection dropped (ECONNRESET)"
-        },
-        {
-          "id": "user:16982",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:16990",
@@ -310,16 +285,6 @@
           "text": "The #4720 child stopped because the container was near its memory limit. It did not finish its last validation, and it never reported upstream results. I'll look at what it committed."
         },
         {
-          "id": "user:17805",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:17820",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:17828",
           "role": "assistant",
           "text": "Nothing new from the work lanes. The only new report came from shutting down the #4720 replacement, which never started.\n\nOne thing needs your attention. **Mjolnir can't start or resume child sessions right now.** The host's worker binary `/home/jonathan/.cargo/bin/mj-worker-x86_64-unknown-linux-musl` is build `2.37.0+4684b3f`, but the controller expects `2.37.0+d045ad8`. I can't fix that from inside the container. Until the worker is reinstalled from the matching Mjolnir release, #4720 is stuck. Any child that finishes and needs follow-up will also be stuck. You can fix it by installing the matching build or setting `MJ_WORKER_BINARY`. The four running children are not affected.\n\nWhere things stand:\n\n- **Merged:** #4726, #4731, #4727, #4740, #4729, #4743 and #4737.\n- **#4732 and #4750** are drafts again. The queue rejected #4732 because two tests disagreed about whether `raise NotImplemented()` should be reported. CodeQL's own test reports it, so I kept the new behaviour. The #4649 child is updating the old test, refreshing one golden file and merging the fix into #4750.\n- **#4756** (#4647, part 1) is in the queue. It adds three import facts. repeated-import and import-deprecated-module now match CodeQL's tests exactly. print-during-import matches the reproduction, but CodeQL has no test for it. The same child is working on the other four import rules on a follow-up branch.\n- **#4651 and #4652** started on the new master. Most of their rules use third-party libraries, so those policies will go to the premium pack repo.\n- **#4720 is blocked.** The first child added path-sensitive analysis to the shared flow solver. It never ran CodeQL's tests on it. Two `type_flow_client` tests about how much work the solver does now fail, and they may be performance regressions in code that Java and JavaScript also use. The branch is committed and not pushed. It needs a child once spawning works.\n\nOnce the queue clears, I'll check all the new policies against one master build and add them to bifrost-packs in a single PR."
@@ -358,16 +323,6 @@
           "id": "agent:18526",
           "role": "assistant",
           "text": "Both lanes have their messages. Now I'm starting the integration child for the public batch."
-        },
-        {
-          "id": "user:18710",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:18715",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:18769",

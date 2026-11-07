@@ -40,11 +40,6 @@
           "text": "While they work, I'll read the routed testing guidance and the usage design chapter (not assigned to children)."
         },
         {
-          "id": "user:122",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:155",
           "role": "assistant",
           "text": "Both investigators reported. The usage scan already has method-value logic; navigation lacks it. I'm reading the scan's method-value code to decide on a design."

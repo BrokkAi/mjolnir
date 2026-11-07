@@ -295,11 +295,6 @@
           "text": "While that runs, I'll have the child test the Ruby explanation. It will add `nil` after each discarded call, keep every expectation the same, and rerun the 28 rows."
         },
         {
-          "id": "user:26606",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:26663",
           "role": "assistant",
           "text": "Master moved, and the merge was clean. I'll open the PR as a draft and mark it ready after the focused tests pass on the merged tree, as the repository's PR rules require."

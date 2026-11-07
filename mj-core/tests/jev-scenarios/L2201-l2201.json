@@ -35,19 +35,9 @@
           "text": "do it, and explain the #3835 decision pls"
         },
         {
-          "id": "user:888",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:1220",
           "role": "user",
           "text": "3835: recs accepted\n\n3844: close\n\n3840: go"
-        },
-        {
-          "id": "user:1254",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "user:1381",
@@ -90,24 +80,9 @@
           "text": "The #3773 report narrows the defect to shadow selection running before cfg activation, but the exact selection site is still unconfirmed. I'll ask that child to trace it before I write the design."
         },
         {
-          "id": "user:1646",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:1721",
           "role": "assistant",
           "text": "Status: the #3840 and #3835 contradictory-condition designs are settled. I'm writing them down for implementation lanes. #3773 and the #3835 activation inventory are still with children."
-        },
-        {
-          "id": "user:1747",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:1803",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:1852",
@@ -163,11 +138,6 @@
           "id": "agent:2055",
           "role": "assistant",
           "text": "Part A is done. I'll review its diff, starting with the solver change."
-        },
-        {
-          "id": "user:2074",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:2125",

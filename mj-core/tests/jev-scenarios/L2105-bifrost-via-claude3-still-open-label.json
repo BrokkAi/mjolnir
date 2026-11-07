@@ -120,11 +120,6 @@
           "text": "ticket lgtm but did you cover why agents keep editing engine copy instead of bf-packs? i.e. either there's stale old guidance, insufficent new guidance, or both"
         },
         {
-          "id": "user:10050",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:10289",
           "role": "user",
           "text": "sorry, pls spell this out for me more, what happened and what are our options w pros and cons"

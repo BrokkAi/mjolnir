@@ -80,21 +80,6 @@
           "text": "The storage and query changes are now being integrated. The regressions will check that nested regions retain the gate, ordinary callers cannot see disabled exports, and edits beneath the gate produce the same context as a fresh build.\n"
         },
         {
-          "id": "user:853",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:862",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:868",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:891",
           "role": "assistant",
           "text": "The golden now covers an imported alias as well as direct and nested `crate::` references. It also checks that gated usage hits retain conditional activation evidence and that the dependent application cannot resolve the disabled export.\n"
@@ -128,21 +113,6 @@
           "id": "agent:1316",
           "role": "assistant",
           "text": "The build wrapper has stalled: the active analysis invocations have spent over ten minutes in `mbx-rustc` without starting a compiler, leaving the other checks queued. I’ll stop those validation invocations and use the brief’s authorized plain-Cargo fallback. I won’t move targets or change cache settings.\n"
-        },
-        {
-          "id": "user:1386",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:1403",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:1409",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:1422",
@@ -188,11 +158,6 @@
           "id": "agent:2011",
           "role": "assistant",
           "text": "The Rust crate suite passed, but its new tests used synthetic predicates and missed the parser’s canonical representation. I’m taking over this small boundary fix after the cfg handbacks missed it, and will add coverage using predicates produced by tree-sitter before validation resumes."
-        },
-        {
-          "id": "user:2087",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:2125",

@@ -25,11 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:27",
-          "role": "user",
-          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /workspace/640af377fdec87f01cba51033f6e79ed/.mj-agents/a061f5191004064b68fdacb3c7a9ffea. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Write anything longer (logs, tables, full findings) to files in your report directory and list their paths in the report; never put it in the report itself. Fix mechanical errors yourself (compile errors, lint and format findings, test failures your own change caused) and list each fix in one line of your report. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When a parent decision blocks further progress, hand back the question with the evidence needed to decide. The parent owns consequential design decisions and final acceptance.\n\nYour complete assignment is in /workspace/640af377fdec87f01cba51033f6e79ed/test-audit/briefs/t-issues.txt. Read it first and follow it exactly; it points to the ExecPlan that defines the rules. Note: the current plan is in the main checkout at /workspace/640af377fdec87f01cba51033f6e79ed/bifrost/.agents/plans/test-suite-pruning-2026-10.md; if cherry-picking the policy commits conflicts on AGENTS.md or the plan, take the incoming version. This suite is organized by issue number, so many tests will be hard-won: check the issue in issues.tsv; an issue that fixed a defect makes its tests hardwon, but an issue that added a feature does not. Tag `hardwon` only for tests that pin a defect."
-        },
-        {
           "id": "agent:2909",
           "role": "assistant",
           "text": "The Java issues form several distinct defect families: lexical field ownership for inverse scans, enum switch-label binding, inherited invocation attribution, and field lookup in mirrored, local, and anonymous owners. I’ve traced the test bodies and their originating commits; I’m recording per-test evidence and preserving the fail-closed controls alongside the positive cases."
@@ -68,11 +63,6 @@
           "id": "agent:3892",
           "role": "assistant",
           "text": "The import-specifier golden now passes in bless mode and records ten structured lookup outcomes, including resolved named/default/namespace imports, aliased exports, a type-only import, and two fail-closed cases. The first attempts exposed a wrong occurrence index and a missing definitions array for unresolved results; both are corrected and captured in the runner."
-        },
-        {
-          "id": "user:4161",
-          "role": "user",
-          "text": "Read /workspace/640af377fdec87f01cba51033f6e79ed/test-audit/note-golden-names.txt."
         },
         {
           "id": "agent:4173",

@@ -25,6 +25,136 @@
     "authorization": {
       "messages": [
         {
+          "id": "user:12",
+          "role": "user",
+          "text": "Implement the functionality necessary for https://github.com/BrokkAi/bifrost-dev/issues/2433\n\nDo this in a separate branch and create a PR when done; assign review to DavidEffendiBaker"
+        },
+        {
+          "id": "user:4157",
+          "role": "user",
+          "text": "go ahead and fix the followups"
+        },
+        {
+          "id": "user:4185",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:9395",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:9649",
+          "role": "user",
+          "text": "CI says your PR failed, is that the existing bug?"
+        },
+        {
+          "id": "user:9879",
+          "role": "user",
+          "text": "> every tracked path must appear in the reviewed .open-core/public-paths.tsv manifest\n\nwhat fresh hell is this?"
+        },
+        {
+          "id": "user:10018",
+          "role": "user",
+          "text": "can you classify the new files based on existing precedent?"
+        },
+        {
+          "id": "user:10082",
+          "role": "user",
+          "text": "great. merge this into master pls"
+        },
+        {
+          "id": "user:10203",
+          "role": "user",
+          "text": "jesus i don't want to wait another 30 minutes, just merge it pls"
+        },
+        {
+          "id": "user:10241",
+          "role": "user",
+          "text": "what follow up work should obviously come next?"
+        },
+        {
+          "id": "user:10266",
+          "role": "user",
+          "text": "create tickets for these including call-binding refinements and near-miss ranking (unless such tickets already exist)\n\nthen let's dig into #1, give me your recommended solution to start"
+        },
+        {
+          "id": "user:10567",
+          "role": "user",
+          "text": "sorry, pls break it down for me\n\nwhy was it designed this way and what assumptions were incorrect"
+        },
+        {
+          "id": "user:10615",
+          "role": "user",
+          "text": "> True for dependency packs; meaningless for a repo describing\n│ itself\n\ni don't understand, what is \"a repo describing itself\""
+        },
+        {
+          "id": "user:10648",
+          "role": "user",
+          "text": "ok so \"self-describing model\" was something added later?"
+        },
+        {
+          "id": "user:10678",
+          "role": "user",
+          "text": "ok so what's your recommended fix"
+        },
+        {
+          "id": "user:10704",
+          "role": "user",
+          "text": "great. delegate to opus. \n\nthen: what else should we do before the P1 epic (#2441)"
+        },
+        {
+          "id": "user:11796",
+          "role": "user",
+          "text": "ok, good analysis, pls burn down the pre-P1 work in parallel where that makes sense"
+        },
+        {
+          "id": "user:18355",
+          "role": "user",
+          "text": "we got disconnected, how far did you get?"
+        },
+        {
+          "id": "user:18457",
+          "role": "user",
+          "text": "i'm heading to bed. merge + push when done pls"
+        },
+        {
+          "id": "user:18857",
+          "role": "user",
+          "text": "David says he wants to do some refactoring, so pause after pushing #2494 and #2495"
+        },
+        {
+          "id": "user:18874",
+          "role": "user",
+          "text": "i want to go back to default \"push to master\", we don't need PRs for these"
+        },
+        {
+          "id": "user:18882",
+          "role": "user",
+          "text": "if you have a bunch of open PRs rn, pls merge them to master"
+        },
+        {
+          "id": "user:18971",
+          "role": "user",
+          "text": "you know what, i'm more scared of cramping David's refactoring than I am of doing some extra merge work\n\ngo ahead and complete #2494 and #2495 but keep the work local until I get back, no push no PR"
+        },
+        {
+          "id": "user:21912",
+          "role": "user",
+          "text": "okay, you're good to merge and push, David is done, then keep going on the \"prep for P1 epic\" work"
+        },
+        {
+          "id": "user:25492",
+          "role": "user",
+          "text": "sorry, what do you need me to do?"
+        },
+        {
+          "id": "user:25514",
+          "role": "user",
+          "text": "/compact"
+        },
+        {
           "id": "user:25520",
           "role": "user",
           "text": "ok, that's done (the workflows add)\n\nP1 is now yours"

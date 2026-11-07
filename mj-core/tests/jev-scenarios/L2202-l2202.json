@@ -25,86 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:21",
-          "role": "user",
-          "text": "Make two CI changes in Bifrost, in one PR with two commits. Read\n.github/workflows/AGENTS.md and .agents/docs/scheduled-only-tests.md first.\n\n## Commit 1: Move seven scheduled-only tests to the per-push suite\n\nRemove the `#[cfg_attr(not(scheduled_tests), ignore = \"scheduled-only\")]`\nline from these tests. Each one caused a long red stretch in hourly or\nnightly CI between Sep 2 and Oct 8. Per-push CI passed on the same commits\nonly because it skipped the test.\n\n| Test (nextest binary :: name) | Hourly failed runs / incidents |\n|---|---|\n| brokk-bifrost::suite_bench_policy bifrost_policy_cli::policy_suppressions_are_deterministic_auditable_and_threshold_aware_across_formats | 58 / 5 |\n| brokk-bifrost::suite_bench_policy bifrost_policy_cli::thresholds_cover_clean_rated_and_unrated_findings | 58 / 5 |\n| brokk-bifrost::suite_bench_policy bifrost_policy_cli::diff_base_narrows_the_gate_to_new_findings_across_formats | nightly 3 / 1 |\n| brokk-bifrost-runtime::extension node_identity::byte_identical_siblings_get_distinct_stable_ids | 46 / 2 |\n| brokk-bifrost-runtime::extension completion_states::a_frontier_under_generous_budgets_is_not_budget_truncation | 37 / 1 |\n| brokk-bifrost-runtime::extension completion_states::an_exhausted_budget_names_the_dimension_it_exhausted | 37 / 1 |\n| brokk-bifrost::suite_usages usage_graph_cpp_test::out_of_line_member_definition_qualifiers_edge_to_class | 41 / 1 |\n\nBefore you edit, check that per-push ci.yml actually runs each of these test\nbinaries on Linux x86. Look at the lane selection and impact\nclassification. If a binary is not selected on push, removing the attribute\ndoes nothing for that test. In that case, stop and report it for that test\ninstead of changing ci.yml.\n\nThen run each test without the cfg flag, using the normal target directory\nand no RUSTFLAGS. Confirm that it runs rather than being skipped, that it\npasses, and how long it takes. Report the passing time of each test. The\nfailing runs took between 0.1 and 7 seconds. If any test takes more than\nabout 10 seconds when it passes, keep it scheduled-only and tell me.\n\n## Commit 2: Reduce the hourly matrix\n\nKeep the hourly cron as it is.\n\n1. In hourly.yml, remove the aarch64-unknown-linux-gnu entry from the\n   `rust_matrix` of the os-matrix job. Add the same leg to the nightly.yml\n   `rust_matrix`. Use the same RunsOn spec and `--cfg scheduled_tests`, but\n   rename the runner label from `hourly-rust-arm64` to `nightly-rust-arm64`.\n2. In hourly.yml, remove the aarch64-unknown-linux-gnu entry from\n   `python_matrix`. Nightly already runs Python on Linux ARM64.\n3. Do not touch the `arm-link-diagnostic` job. It is a manual, pinned-SHA\n   diagnostic.\n4. Keep the Windows x64 Rust leg and all other hourly legs.\n\nBefore you remove anything, search for consumers of the hourly job names or\nthe ARM legs. Check release-readiness, release-context, release.yml, the\nnightly incident job, and the scripts under scripts/. RC qualification uses\nhourly runs, so a check may expect an ARM64 hourly job to exist. If one\ndoes, tell me what depends on it and propose a fix. Do not quietly drop a\nrelease gate.\n\nUpdate every description of the schedule to match the new setup. That\nincludes the header comments in hourly.yml and nightly.yml, the \"schedule\"\nlist in scheduled-only-tests.md, and any other place your search finds.\nValidate the workflow YAML with actionlint if it is available.\n\n## Handback\n\nReport:\n- the per-push lane that runs each promoted test, with its passing time\n- any test you left scheduled-only, and why\n- every consumer of the hourly ARM jobs you found, and what you did about it\n- the validation you ran"
-        },
-        {
-          "id": "agent:868",
-          "role": "assistant",
-          "text": "The monitor expiring needs no action. I did find a mistake of my own, though. My summary and the pull request table say every time was measured with the test running alone, but I only did that for the three policy tests. The runtime and C++ times come from the first runs, where the three runtime tests ran together. I'll correct the pull request description."
-        },
-        {
-          "id": "agent:900",
-          "role": "assistant",
-          "text": "I made a mistake in my summary and in the description of draft pull request #4742, and I have now fixed the description. Both said every passing time came from running the test alone. Only the policy tests were timed that way.\n\n- **Three policy tests.** Each was timed alone, twice. The promoted policy test took 7 to 8 seconds. The two slow tests are the ones I kept scheduled-only.\n- **Three runtime tests.** These ran together in one nextest run. Each took under a second.\n- **C++ usage test.** This ran in its own run and took under a second. It was timed once, not twice.\n\nNone of these times is close to the 10-second limit, so all five promotions stand. The table in the pull request no longer says \"alone\". A note under the table now explains how each time was measured.\n\nNothing else has changed. The pull request is still a draft and still waits on your decision about the release-qualification gate. Merging it as is would make every release-candidate check fail on the missing hourly ARM64 jobs."
-        },
-        {
-          "id": "user:970",
-          "role": "user",
-          "text": "sorry, what's the decision?"
-        },
-        {
-          "id": "agent:972",
-          "role": "assistant",
-          "text": "The decision is how release qualification should check Linux ARM64 once those tests run only in nightly.\n\nToday the release check requires a green hourly run with the Linux ARM64 Rust and Python jobs at the candidate's exact commit. After my change, hourly no longer has those jobs, so every release-candidate check would fail. The check needs a new source for that evidence, and there are three choices.\n\n1. **Require only the Linux ARM64 jobs from nightly.** This is my recommendation. A candidate would need a nightly run at its exact commit with both Linux ARM64 jobs green, and the rest of nightly stays optional as it is today. This keeps the gate as strong as it is now. The cost is that a candidate must also get a nightly run, which you can start by hand the same way you start hourly for an RC.\n2. **Require all of nightly.** This is simpler but stricter. It also makes Windows ARM64 and macOS hard release gates. For v0.13, Windows ARM64 has an owner exception because it fails, so this choice would block on it in the general release route.\n3. **Stop requiring Linux ARM64 for releases.** This is the smallest change, but it drops a release gate. You told me not to do that quietly, so I would only do it if you choose it.\n\nIf you pick an option, I'll add it as a third commit to pull request #4742. The commit would update the job lists in `scripts/release-qualification.mjs` and `scripts/verify-projection-qualification.mjs` and their test fixtures. Then I'll mark the pull request ready."
-        },
-        {
-          "id": "user:1080",
-          "role": "user",
-          "text": "i think we want all of nightly"
-        },
-        {
-          "id": "agent:1082",
-          "role": "assistant",
-          "text": "I'll make nightly a required workflow for release qualification, move the two Linux ARM64 job names from the hourly list to the nightly list, and update the tests and release guidance. First I'll read how the gate treats nightly in each route."
-        },
-        {
-          "id": "agent:1107",
-          "role": "assistant",
-          "text": "The v0.13 route already requires nightly, with an owner exception for Windows ARM64. The general route treats nightly as optional. Let me read the test fixture and the guidance text I need to change."
-        },
-        {
-          "id": "agent:1130",
-          "role": "assistant",
-          "text": "The fixture uses positional run IDs, so I'll append nightly as the fifth run to keep existing indexes valid. Let me check whether the public release script keeps its own required-workflow list."
-        },
-        {
-          "id": "agent:1150",
-          "role": "assistant",
-          "text": "Only the two scripts hold job lists. Making the edits now."
-        },
-        {
-          "id": "agent:1167",
-          "role": "assistant",
-          "text": "Both groups are the expected fixture gaps: qualification now returns five pieces of evidence instead of four, and the v0.13 nightly fixture lacks the new Linux ARM64 Rust job. Updating the fixtures."
-        },
-        {
-          "id": "agent:1194",
-          "role": "assistant",
-          "text": "Nightly runs on the RC branch should be accepted when dispatched by hand. I'll make the RC test move nightly onto the RC branch too, so it covers that path, then update the counts."
-        },
-        {
-          "id": "agent:1213",
-          "role": "assistant",
-          "text": "All pass. The missing-workflow test now also removes the nightly run and confirms qualification is refused. I'll run the other tests that call into the qualification scripts."
-        },
-        {
-          "id": "agent:1229",
-          "role": "assistant",
-          "text": "Everything passes. Committing, merging current master, and pushing."
-        },
-        {
-          "id": "agent:1240",
-          "role": "assistant",
-          "text": "Master has not moved. Pushing, updating the pull request description, and marking it ready."
-        },
-        {
-          "id": "agent:1250",
-          "role": "assistant",
-          "text": "Release qualification now requires a complete nightly run, and pull request #4742 is marked ready for the merge queue.\n\nThe pull request now has three commits instead of the two you asked for, because the release-gate fix needed its own commit:\n\n1. **Five tests now run on every push.** Two slow policy tests stay scheduled-only, as described before.\n2. **The Linux ARM64 legs move from hourly to nightly.** The rest of hourly is unchanged.\n3. **Nightly is now a required workflow for release qualification.**\n\nWhat the third commit changes:\n\n- **General release route.** Nightly is no longer optional. The two Linux ARM64 jobs moved from the hourly job list to the nightly list. Every nightly job must be green, so Windows ARM64 and macOS are now release gates too.\n- **v0.13 route.** This route already required nightly. Its owner exception still lets a release go ahead when Windows ARM64 is the only failing nightly job. I kept that exception because it is a separate, documented owner decision. Under the exception, the Linux ARM64 Rust job must now also be green. If you meant \"all of nightly\" to remove that exception for v0.13 too, tell me and I'll take it out.\n- **Release candidates.** A candidate now needs a nightly run at its exact commit. Nightly can be started by hand on RC branches, the same way hourly is.\n- **Guidance.** The release guidance in `.agents/docs/release-and-open-core.md` now says nightly is required.\n\n**Validation.**\n- I updated the release tests. They now confirm that a missing nightly run blocks qualification, and that a nightly run started by hand on an RC branch is accepted.\n- The release-qualification, projection-qualification, release-candidate and workflow shape tests all pass, along with the other release-script tests.\n- Master had not moved when I pushed."
-        },
-        {
           "id": "user:1389",
           "role": "user",
           "text": "Dave asked us to tackle #4741"
@@ -201,7 +121,7 @@
         }
       ],
       "authorization_complete": true,
-      "assistant_history_omitted": true,
+      "assistant_history_omitted": false,
       "open_assistant_id": null,
       "final_reply_omitted": false
     },

@@ -25,26 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:9",
-          "role": "user",
-          "text": "sometimes the TUI freezes for 100s to 1000s of ms, we should not have anything on the event loop thread that blocks that long (we do have an event loop based design right?)"
-        },
-        {
-          "id": "user:752",
-          "role": "user",
-          "text": "both 1 and 2 pls"
-        },
-        {
-          "id": "user:2102",
-          "role": "user",
-          "text": "yes and yes"
-        },
-        {
-          "id": "user:2448",
-          "role": "user",
-          "text": "push"
-        },
-        {
           "id": "user:3226",
           "role": "user",
           "text": "add an ask_oracle agent tool; it should use a 3rd \"subagent\" type configuredin the same place as the others, but with a separate description: it is for read-only tricky questions that the primary agent isn't sure about\n\ntool description:\nConsult a strong read-only advisor about a decision before you commit to it. Consult when a choice is hard to reverse or affects more than your change, and you cannot state what it must satisfy, why your choice satisfies each requirement (beyond \"tests pass\"), and what would fail if you were wrong. Also consult before giving up, escalating to a human, or a third attempt at something that failed twice. Check facts yourself first; never use it for routine work. Send the decision, options, and evidence.\n\n---\nmechanics:\n\none oracle session per primary session, created lazily when first invoked, so no need to expose session ids. Oracle session should retain context between calls.\n\nany questions?"
