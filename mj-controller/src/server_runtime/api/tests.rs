@@ -2109,6 +2109,8 @@ struct ParkingExports {
     unparks: std::sync::atomic::AtomicUsize,
     unpark_failure: Option<String>,
     defer_unpark: std::sync::atomic::AtomicBool,
+    /// What the review host would answer for the child.
+    awaiting_review: std::sync::atomic::AtomicBool,
     protocol: u32,
 }
 
@@ -2134,6 +2136,7 @@ impl ParkingExports {
             unparks: Default::default(),
             unpark_failure: unpark_failure.map(str::to_owned),
             defer_unpark: Default::default(),
+            awaiting_review: Default::default(),
             protocol: if modern_worker {
                 mj_core::relay::RELAY_PROTOCOL_VERSION
             } else {
@@ -2165,6 +2168,12 @@ impl ParkingExports {
 }
 
 impl ExportRuntime for ParkingExports {
+    fn child_awaits_review(&self, _: String) -> BoxFuture<'_, bool> {
+        Box::pin(async {
+            self.awaiting_review
+                .load(std::sync::atomic::Ordering::SeqCst)
+        })
+    }
     fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
         Box::pin(load_startup_status(session_id))
     }
@@ -5079,6 +5088,35 @@ async fn report_reconcile_fails_while_the_parent_queue_connects_and_a_retry_reco
             .event_json
             .contains("report after the queue connects")
     );
+}
+
+// A child that handed back while its review is still open is pending, so a
+// later reconciliation (a sibling finishing) must not report it early.
+#[tokio::test]
+async fn report_reconcile_holds_a_finished_child_until_its_review_closes() {
+    if !isolated_parked_test("report_reconcile_holds_a_finished_child_until_its_review_closes") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    record_finished_child("child-1", "task-1", "report after the verdict", 3, 9, 7);
+    let (backend, exports) = report_backend(active_parent_view("working"));
+    exports
+        .awaiting_review
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+    exports
+        .awaiting_review
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].event_json.contains("report after the verdict"));
 }
 
 /// A person may rename a child after the parent spawned it. The parent's

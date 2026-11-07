@@ -1036,6 +1036,13 @@ fn zombie_only_daemon_group_counts_as_gone() {
 }
 
 pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
+    test_runtime_state_with(Controller {
+        config: Config::default(),
+        state: mj_core::state::State::default(),
+    })
+}
+
+pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
@@ -1044,10 +1051,7 @@ pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
     );
     Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
-        Controller {
-            config: Config::default(),
-            state: mj_core::state::State::default(),
-        },
+        controller,
         recovery.observer(),
         upgrades.observer(),
         Vec::new(),

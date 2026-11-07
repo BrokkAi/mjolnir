@@ -691,14 +691,14 @@ impl Controller {
             .as_ref()
             .is_none_or(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
         {
-            match self.state.effective_review(session_id) {
-                Ok(choice) => self.config.review.for_session(choice).trigger(),
-                Err(missing) => {
-                    tracing::warn!(session_id, missing = %missing,
-                        "review choice cannot be resolved through the parent chain; launching without review tools");
-                    Default::default()
-                }
+            if let Err(missing) = self.state.effective_review(session_id) {
+                tracing::warn!(session_id, missing = %missing,
+                    "review choice cannot be resolved through the parent chain; launching without review tools");
             }
+            self.config
+                .review
+                .for_session(self.state.effective_review_or_off(session_id))
+                .trigger()
         } else {
             Default::default()
         };

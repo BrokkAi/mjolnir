@@ -74,17 +74,10 @@ impl RuntimeState {
                     // same as its launch, which offered no review tools.
                     let choice = committed_sessions.as_ref().and_then(|committed| {
                         committed.borrow().as_ref().ok().map(|committed| {
-                            committed
-                                .state
-                                .effective_review(session_id)
-                                .map(|choice| choice.cloned())
+                            committed.state.effective_review_or_off(session_id).cloned()
                         })
                     });
-                    let choice = match choice {
-                        Some(Ok(choice)) => choice,
-                        Some(Err(_)) => Some(mj_core::config::SessionReview::Off),
-                        None => None,
-                    };
+                    let choice = choice.flatten();
                     installed
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -163,6 +156,48 @@ impl RuntimeState {
     /// The review host, for the surfaces that project and resolve reviews.
     pub fn review_host(&self) -> &TurnReviewHost {
         &self.review_host
+    }
+
+    /// Whether `child_id` can request review: an ordinary worker child whose
+    /// effective review choice triggers review, the fact launch uses to offer
+    /// the review tools. Nothing else ever has a review to wait for.
+    pub(super) fn child_can_request_review(&self, child_id: &str) -> bool {
+        let owner = self.owner();
+        let controller = owner.controller();
+        controller
+            .state
+            .subagents
+            .get(child_id)
+            .is_some_and(|relation| relation.kind == mj_core::subagent::SubagentKind::Worker)
+            && controller
+                .config
+                .review
+                .for_session(controller.state.effective_review_or_off(child_id))
+                .trigger()
+                == mj_core::config::ReviewTrigger::Push
+    }
+
+    /// Whether `child_id` is still waiting for its review's verdict, so its
+    /// ended turn or recorded handback is not final. Delegation completion and
+    /// parent report reconciliation both ask here, and only about a child that
+    /// can request review; the review host answers.
+    ///
+    /// When the host cannot answer (its startup recovery failed), the child
+    /// counts as having no open review: a review that recovery did not restore
+    /// cannot produce a verdict in this daemon run, and one it restored is
+    /// still reported as open, so waiting would only block the child forever.
+    pub(crate) async fn child_awaits_review(&self, child_id: &str) -> bool {
+        if !self.child_can_request_review(child_id) {
+            return false;
+        }
+        match self.review_host().has_open_review(child_id).await {
+            Ok(open) => open,
+            Err(error) => {
+                tracing::warn!(child_session_id = child_id, %error,
+                    "cannot tell whether the child's review is open; settling it as having none");
+                false
+            }
+        }
     }
 
     /// The SessionWiki indexer, for the surfaces and jobs that trigger a sync.

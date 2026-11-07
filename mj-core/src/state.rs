@@ -2573,6 +2573,18 @@ impl State {
         }
         Err(session_id.to_owned())
     }
+
+    /// `effective_review`, with a parent chain that cannot be followed
+    /// reviewing as Off. Launch (no review tools), the review host, the
+    /// delegation completion and the viewer all read the choice through this
+    /// one rule.
+    pub fn effective_review_or_off(
+        &self,
+        session_id: &str,
+    ) -> Option<&crate::config::SessionReview> {
+        const OFF: &crate::config::SessionReview = &crate::config::SessionReview::Off;
+        self.effective_review(session_id).unwrap_or(Some(OFF))
+    }
 }
 
 /// The effective code checkout for one session, including who owns it.

@@ -215,6 +215,14 @@ impl TurnReviewHost {
             .map_err(|_| "the review host stopped".to_owned())?
     }
 
+    /// Puts the host in the state a failed startup recovery leaves it in.
+    #[cfg(test)]
+    pub(crate) fn fail_startup_recovery(&self, error: &str) {
+        let _ = self
+            .events
+            .send(HostEvent::StartupRecoveryFailed(error.to_owned()));
+    }
+
     /// Hands a finished reviewer child to the host's closer. The host retries
     /// the close with backoff until it succeeds; callers must not close the
     /// child again themselves.

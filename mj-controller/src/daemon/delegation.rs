@@ -21,6 +21,9 @@ enum ChildCompletion {
     /// handback. The verdict wakes the child; this checks again if the review
     /// ends without waking it (a cancel).
     AwaitingReview,
+    /// The daemon began handing off before the completion could be admitted;
+    /// the next daemon settles the child.
+    Draining,
 }
 
 /// First wait after a child completion fails or finds the child busy.
@@ -190,17 +193,11 @@ async fn run(
                 {
                     continue;
                 }
-                let Ok(work) =
-                    crate::upgrade::activity_unless_draining("delegation child completion")
-                else {
-                    continue;
-                };
                 let child_id = child.clone();
                 let backend = backend.clone();
                 let state = state.clone();
                 let observation = observation.clone();
                 let task = completions.spawn(async move {
-                    let _work = work;
                     complete_child(state, backend, child_id, observation).await
                 });
                 completion_ids.insert(task.id(), (child.clone(), outcome.completed_ordinal));
@@ -263,7 +260,7 @@ async fn run(
                 if let Some((id, ordinal)) = completion_ids.remove(&task_id) {
                     match result {
                         Ok(ChildCompletion::Settled) => { noticed.insert(id.clone(), ordinal); retry.remove(&id); }
-                        Ok(ChildCompletion::RetryPark | ChildCompletion::AwaitingReview) => {
+                        Ok(ChildCompletion::RetryPark | ChildCompletion::AwaitingReview | ChildCompletion::Draining) => {
                             let (next, _) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), None);
                             retry.insert(id, next);
                         }
@@ -327,21 +324,17 @@ async fn complete_child(
         .clone()
         .context("child completion has no outcome")?;
     // The review host owns whether a session's review is open. Asked once,
-    // before anything is decided about the ended turn. A reviewer child never
-    // requests review.
-    let review_open = if relation.kind == mj_core::subagent::SubagentKind::Worker {
-        state
-            .review_host()
-            .has_open_review(&child_id)
-            .await
-            .map_err(anyhow::Error::msg)?
-    } else {
-        false
+    // before anything is decided about the ended turn, and before taking the
+    // handoff admission: during startup the host defers the answer until its
+    // interrupted-review sweep ends, and a handoff must not wait on reviews.
+    let review_open = state.child_awaits_review(&child_id).await;
+    let Ok(work) = crate::upgrade::activity_unless_draining("delegation child completion") else {
+        return Ok(ChildCompletion::Draining);
     };
     settle_child(
         &state,
         &backend,
-        child_id,
+        work,
         relation,
         observation.in_flight,
         outcome,
@@ -353,12 +346,13 @@ async fn complete_child(
 async fn settle_child(
     state: &RuntimeState,
     backend: &ApiBackend,
-    child_id: String,
+    work: crate::upgrade::Work,
     relation: mj_core::subagent::SubagentRecord,
     in_flight: Vec<String>,
     outcome: mj_core::state::MaterializedTurnOutcome,
     review_open: bool,
 ) -> Result<ChildCompletion> {
+    let child_id = relation.child_session_id.clone();
     if relation.kind == mj_core::subagent::SubagentKind::Reviewer {
         let id = child_id.clone();
         let command_id = outcome.command_id.clone();
@@ -402,9 +396,16 @@ async fn settle_child(
             return Ok(ChildCompletion::Settled);
         }
     }
+    // Reconciliation asks the review host about sibling children, which can
+    // wait on the startup sweep: it runs outside the handoff admission, which
+    // is taken again for the park.
+    drop(work);
     state
         .reconcile_parent_reports(&relation.parent_session_id)
         .await?;
+    let Ok(_work) = crate::upgrade::activity_unless_draining("delegation child completion") else {
+        return Ok(ChildCompletion::Draining);
+    };
     match backend.park_subagent(&child_id).await? {
         crate::controller::ParkOutcome::Busy => Ok(ChildCompletion::RetryPark),
         crate::controller::ParkOutcome::Parked | crate::controller::ParkOutcome::NotRunning => {
@@ -641,7 +642,7 @@ mod tests {
             settle_child(
                 &state,
                 &backend,
-                "child".into(),
+                crate::upgrade::activity_unless_draining("test completion").unwrap(),
                 stored.clone(),
                 Vec::new(),
                 outcome.clone(),
@@ -675,5 +676,141 @@ mod tests {
                 .noticed_turn,
             Some(10)
         );
+    }
+
+    struct ParkedParents;
+    impl ExportRuntime for ParkedParents {
+        fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
+            session_id.starts_with("parent").then(|| {
+                crate::daemon::tests::runtime_test_session(
+                    session_id,
+                    "workspace",
+                    mj_core::state::SessionState::Running,
+                )
+            })
+        }
+        fn checkpoint_now(
+            &self,
+            _: String,
+        ) -> BoxFuture<'_, Result<mj_core::state::CheckpointMetadata>> {
+            Box::pin(async { anyhow::bail!("a park does not checkpoint") })
+        }
+        fn park_subagent(self: Arc<Self>, _: String) -> BoxFuture<'static, Result<ParkOutcome>> {
+            Box::pin(async { Ok(ParkOutcome::Parked) })
+        }
+    }
+
+    // After a failed review-host startup recovery its open-review answer is an
+    // error. Delegation decides what that means: a child that cannot request
+    // review never asks, and one that can settles as having no open review.
+    #[tokio::test]
+    async fn children_settle_when_the_review_host_failed_its_startup_recovery() {
+        const CHILD: &str = "MJ_TEST_DELEGATION_REVIEW_HOST_FAILED";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "children_settle_when_the_review_host_failed_its_startup_recovery",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "delegation-review-host-failed")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("host failed").unwrap();
+        let mut controller = crate::controller::Controller {
+            config: Default::default(),
+            state: Default::default(),
+        };
+        for (parent_id, child_id, review) in [
+            (
+                "parent-off",
+                "child-off",
+                mj_core::config::SessionReview::Off,
+            ),
+            (
+                "parent-push",
+                "child-push",
+                mj_core::config::SessionReview::Push {
+                    reviewers: Some(vec![mj_core::config::SubagentChoice {
+                        model: "review-model".into(),
+                        effort: None,
+                    }]),
+                },
+            ),
+        ] {
+            let mut parent = crate::daemon::tests::runtime_test_session(
+                parent_id,
+                &workspace.id,
+                mj_core::state::SessionState::Running,
+            );
+            parent.review = Some(review);
+            let child = crate::daemon::tests::runtime_test_session(
+                child_id,
+                &workspace.id,
+                mj_core::state::SessionState::Running,
+            );
+            crate::database::save_session(&parent).unwrap();
+            let relation = crate::daemon::tests::runtime_test_subagent(child_id, parent_id);
+            crate::database::save_subagent_session(&child, &relation).unwrap();
+            controller.state.sessions.insert(parent_id.into(), parent);
+            controller.state.sessions.insert(child_id.into(), child);
+            controller
+                .state
+                .subagents
+                .insert(child_id.into(), relation.into());
+        }
+        let state = crate::daemon::tests::test_runtime_state_with(controller);
+        assert!(state.child_can_request_review("child-push"));
+        assert!(!state.child_can_request_review("child-off"));
+        state
+            .review_host()
+            .fail_startup_recovery("the sweep could not read the store");
+        assert!(
+            state
+                .review_host()
+                .has_open_review("child-push")
+                .await
+                .is_err(),
+            "the host answers with an error once its recovery failed"
+        );
+        let backend = Arc::new(ApiBackend::new(
+            state.session_manager.client(),
+            Arc::new(|_| None),
+            Arc::new(ParkedParents),
+        ));
+        state.install_report_backend(&backend);
+        for child in ["child-off", "child-push"] {
+            let observation = DelegationObservation {
+                requests: Vec::new(),
+                completed: Vec::new(),
+                in_flight: Vec::new(),
+                credential_signal: None,
+                outcome: Some(mj_core::state::MaterializedTurnOutcome {
+                    answered_through: None,
+                    diagnostic: None,
+                    usage: None,
+                    command_id: "turn".into(),
+                    accepted_ordinal: Some(1),
+                    turn_start_position: None,
+                    completed_ordinal: 10,
+                    completed_at_ms: 1,
+                    outcome: mj_core::state::TurnOutcomeKind::Completed {
+                        stop_reason: "end_turn".into(),
+                    },
+                }),
+            };
+            assert!(
+                matches!(
+                    complete_child(state.clone(), backend.clone(), child.into(), observation)
+                        .await
+                        .unwrap(),
+                    ChildCompletion::Settled
+                ),
+                "{child} settles"
+            );
+        }
     }
 }

@@ -233,7 +233,7 @@ impl ViewerSnapshot {
                 let start = session.start_selection();
                 let review = config
                     .review
-                    .for_session(state.effective_review(&session.id).ok().flatten());
+                    .for_session(state.effective_review_or_off(&session.id));
                 ViewerSession {
                     oracle: session.oracle,
                     oracle_choice: session.oracle_choice.clone(),

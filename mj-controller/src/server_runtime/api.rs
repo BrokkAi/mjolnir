@@ -77,6 +77,12 @@ pub trait ExportRuntime: Send + Sync {
         Default::default()
     }
 
+    /// Whether a child that can request review is still waiting for its
+    /// verdict. A child's handback or ended turn is not final until it is not.
+    fn child_awaits_review(&self, _child_session_id: String) -> BoxFuture<'_, bool> {
+        Box::pin(async { false })
+    }
+
     fn queue_startup(
         self: Arc<Self>,
         _session_id: String,
@@ -278,6 +284,10 @@ impl ExportRuntime for RuntimeState {
 
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         self.with_config(|config| config.subagents.clone())
+    }
+
+    fn child_awaits_review(&self, child_session_id: String) -> BoxFuture<'_, bool> {
+        Box::pin(async move { RuntimeState::child_awaits_review(self, &child_session_id).await })
     }
 
     fn queue_startup(
@@ -1665,19 +1675,26 @@ impl ApiBackend {
             return Ok(());
         }
         let (inputs, children) = self.notification_children(parent_id).await?;
-        let ready = children
-            .into_iter()
-            .filter(|child| {
-                child.relation.kind != mj_core::subagent::SubagentKind::Reviewer
-                    && !self
-                        .exports
-                        .close_is_requested(&child.relation.child_session_id)
-                    && !matches!(child.state.as_str(), "stopping" | "stopped")
-                    && child.identity.as_ref().is_some_and(|identity| {
-                        child.relation.reported_finish.as_ref() != Some(identity)
-                    })
-            })
-            .collect::<Vec<_>>();
+        let mut ready = Vec::new();
+        for child in children {
+            if child.relation.kind != mj_core::subagent::SubagentKind::Reviewer
+                && !self
+                    .exports
+                    .close_is_requested(&child.relation.child_session_id)
+                && !matches!(child.state.as_str(), "stopping" | "stopped")
+                && child.identity.as_ref().is_some_and(|identity| {
+                    child.relation.reported_finish.as_ref() != Some(identity)
+                })
+                // A child whose review is open is still pending, whatever
+                // handback it recorded: the parent hears after the verdict.
+                && !self
+                    .exports
+                    .child_awaits_review(child.relation.child_session_id.clone())
+                    .await
+            {
+                ready.push(child);
+            }
+        }
         if ready.is_empty() {
             return Ok(());
         }
