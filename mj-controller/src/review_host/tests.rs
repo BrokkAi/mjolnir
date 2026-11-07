@@ -244,6 +244,9 @@ struct FakeEnvironment {
     close_fails: std::sync::atomic::AtomicBool,
     close_attempts: std::sync::atomic::AtomicUsize,
     start_error: Mutex<Option<String>>,
+    /// What the store says about each reviewer child; absent means live with
+    /// no handback.
+    standings: Mutex<std::collections::BTreeMap<String, ChildStanding>>,
     register_error: Mutex<Option<String>>,
     register_gate: Mutex<Option<Arc<SaveGate>>>,
     registered_gate: Mutex<Option<Arc<SaveGate>>>,
@@ -258,6 +261,10 @@ struct FakeEnvironment {
     sweep_gate: Mutex<Option<Arc<SaveGate>>>,
     save_error: Mutex<Option<String>>,
     final_save_error: Mutex<Option<String>>,
+    /// The requesting session's record is gone: the store refuses the final
+    /// save of its review, as the foreign key on its review state does.
+    owner_deleted: std::sync::atomic::AtomicBool,
+    deleted_owner_saves: std::sync::atomic::AtomicUsize,
     subagent: std::sync::atomic::AtomicBool,
     review_refusal: Mutex<Option<String>>,
     /// Refusals the next reviewer resolutions answer with, in order.
@@ -325,6 +332,7 @@ impl FakeEnvironment {
             close_fails: std::sync::atomic::AtomicBool::new(false),
             close_attempts: std::sync::atomic::AtomicUsize::new(0),
             start_error: Mutex::new(None),
+            standings: Mutex::new(std::collections::BTreeMap::new()),
             register_error: Mutex::new(None),
             register_gate: Mutex::new(None),
             registered_gate: Mutex::new(None),
@@ -335,6 +343,8 @@ impl FakeEnvironment {
             sweep_gate: Mutex::new(None),
             save_error: Mutex::new(None),
             final_save_error: Mutex::new(None),
+            owner_deleted: std::sync::atomic::AtomicBool::new(false),
+            deleted_owner_saves: std::sync::atomic::AtomicUsize::new(0),
             subagent: std::sync::atomic::AtomicBool::new(false),
             review_refusal: Mutex::new(None),
             resolve_refusals: Mutex::new(std::collections::VecDeque::new()),
@@ -419,6 +429,20 @@ impl ReviewEnvironment for FakeEnvironment {
     }
     fn reviewer_children(&self) -> Result<Vec<ReviewerChildRelation>, String> {
         Ok(self.child_relations.lock().unwrap().clone())
+    }
+
+    fn session_exists(&self, _session_id: &str) -> Result<bool, String> {
+        Ok(!self.owner_deleted.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    fn reviewer_child_standing(&self, child: &str) -> Result<ChildStanding, String> {
+        Ok(self
+            .standings
+            .lock()
+            .unwrap()
+            .get(child)
+            .cloned()
+            .unwrap_or_default())
     }
 
     fn active_groups(&self) -> Result<Vec<(String, TurnReviewState)>, String> {
@@ -576,6 +600,14 @@ impl ReviewEnvironment for FakeEnvironment {
             && let Some(error) = self.final_save_error.lock().unwrap().take()
         {
             return Err(error);
+        }
+        if state.active_group.is_none()
+            && state.active.is_none()
+            && self.owner_deleted.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.deleted_owner_saves
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Err("FOREIGN KEY constraint failed".into());
         }
         let mut stored = self
             .state
@@ -2035,6 +2067,305 @@ async fn startup_reaps_settled_and_orphaned_reviewers_but_preserves_their_busy_p
     .expect("only the role still awaiting an outcome survives startup");
     host.shutdown().await.unwrap();
     assert!(environment.state().active.is_some());
+}
+
+/// A group restored from the store with one busy child per role, as a new
+/// daemon finds it. Returns once every child has been started.
+async fn restore_busy_group(
+    manager: &FakeManager,
+    environment: &Arc<FakeEnvironment>,
+    count: usize,
+    not_started: &[&str],
+) -> (TurnReviewHost, Vec<String>) {
+    let (mut driver, _) = TurnReviewDriver::start(
+        TurnReviewSeed {
+            task: "inspect the changes".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+        },
+        "restored-group".into(),
+        std::num::NonZeroUsize::new(count).unwrap(),
+    );
+    driver.delta_captured(vec![push_delta("/workspace/app", "newtree")]);
+    let children: Vec<String> = (1..=count).map(|n| format!("busy-child-{n}")).collect();
+    *environment.owner.lock().unwrap() = Some(manager.session.clone());
+    *environment.state.lock().unwrap() = TurnReviewState {
+        active: Some("restored-group".into()),
+        active_group: Some(mj_core::storage::ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers: vec![ReviewerIdentity::default(); count],
+            registrations: children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| mj_core::storage::ReviewerRegistration {
+                    role: format!("reviewer-{}", index + 1),
+                    request_key: format!("key-{child}"),
+                    child_session_id: Some(child.clone()),
+                })
+                .collect(),
+        }),
+        ..Default::default()
+    };
+    let host = TurnReviewHost::spawn_in(
+        manager.control.clone(),
+        push_config_count(count),
+        environment.clone(),
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while children.iter().any(|child| {
+            !not_started.contains(&child.as_str())
+                && !environment.started.lock().unwrap().contains(child)
+        }) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the new daemon reattaches every restored reviewer");
+    (host, children)
+}
+
+async fn wait_until_review_resolves(host: &TurnReviewHost, session: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.view(session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the review resolves");
+}
+
+/// The one verdict a resolved review delivered: its findings and the
+/// reviewers that never reported.
+fn delivered_findings(
+    environment: &FakeEnvironment,
+) -> (bool, Vec<mj_core::review::verdict::ReviewerFailure>) {
+    let mailbox = environment.mailbox.lock().unwrap();
+    assert_eq!(mailbox.len(), 1, "exactly one verdict is delivered");
+    let mj_core::mailbox::MailboxEventBody::ReviewVerdict { verdict, .. } = &mailbox[0].body else {
+        panic!("the review delivers a verdict");
+    };
+    let ReviewVerdict::Findings { evidence, .. } = verdict else {
+        panic!("the surviving reviewer's findings are delivered: {verdict:?}");
+    };
+    (verdict.is_complete(), evidence.reviewer_failures.clone())
+}
+
+// Hard-won: f61b30a62: a restored reviewer whose session ended without a report left its review open forever
+#[tokio::test]
+async fn a_restored_reviewer_that_ends_without_an_outcome_leaves_an_incomplete_review() {
+    let session = session_id("restored-ended");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+
+    host.child_ended(
+        children[0].clone(),
+        "the reviewer's session ended (stopped)".into(),
+    );
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &children[1],
+        Some("real defect"),
+    )
+    .await;
+    wait_until_review_resolves(&host, &session).await;
+
+    let (complete, failures) = delivered_findings(&environment);
+    assert!(!complete);
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].label.contains("Reviewer 1"), "{failures:?}");
+    assert!(
+        failures[0].reason.contains("session ended (stopped)"),
+        "{failures:?}"
+    );
+    assert!(environment.state().active_group.is_none());
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: f61b30a62: a restored reviewer whose session had already ended left its review open forever
+#[tokio::test]
+async fn a_restored_reviewer_whose_session_already_ended_fails_its_role() {
+    let session = session_id("restored-start");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment.standings.lock().unwrap().insert(
+        "busy-child-1".into(),
+        ChildStanding {
+            ended: Some("stopped".into()),
+            handback: None,
+        },
+    );
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &["busy-child-1"]).await;
+
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &children[1],
+        Some("real defect"),
+    )
+    .await;
+    wait_until_review_resolves(&host, &session).await;
+
+    let (complete, failures) = delivered_findings(&environment);
+    assert!(!complete);
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0]
+            .reason
+            .contains("ended before the review was restored (stopped)"),
+        "{failures:?}"
+    );
+    assert!(
+        !environment
+            .started
+            .lock()
+            .unwrap()
+            .contains(&"busy-child-1".to_owned()),
+        "an ended child is not started"
+    );
+    host.shutdown().await.unwrap();
+}
+
+/// After a restart a start error can be transient, so a live restored
+/// reviewer that fails to start keeps its role.
+#[tokio::test]
+async fn a_live_restored_reviewer_that_fails_to_start_is_not_failed() {
+    let session = session_id("restored-transient");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    *environment.start_error.lock().unwrap() = Some("relay not ready".to_owned());
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(host.view(&session).is_some(), "the review stays open");
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &children[0],
+        Some("real defect"),
+    )
+    .await;
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &children[1],
+        Some("No findings."),
+    )
+    .await;
+    wait_until_review_resolves(&host, &session).await;
+
+    let (complete, failures) = delivered_findings(&environment);
+    assert!(complete && failures.is_empty(), "{failures:?}");
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: f61b30a62: a review of a destroyed requester retried its undeliverable verdict forever
+#[tokio::test]
+async fn a_review_whose_requester_was_destroyed_is_dropped_without_retrying() {
+    let session = session_id("restored-destroyed");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+    environment
+        .owner_deleted
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    for child in &children {
+        host.child_ended(
+            child.clone(),
+            "the reviewer's session ended (removed)".into(),
+        );
+    }
+    wait_until_review_resolves(&host, &session).await;
+
+    // The first retry would come after one second.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        environment
+            .deleted_owner_saves
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the undeliverable verdict is attempted once"
+    );
+    assert!(host.view(&session).is_none());
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: f61b30a62: a reviewer that ended with an undelivered handback lost its verdict
+#[tokio::test]
+async fn a_reviewer_that_ends_with_an_undelivered_handback_resolves_with_it() {
+    let session = session_id("restored-handback");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+    environment.standings.lock().unwrap().insert(
+        children[0].clone(),
+        ChildStanding {
+            ended: Some("stopped".into()),
+            handback: Some("real defect".into()),
+        },
+    );
+
+    host.child_ended(
+        children[0].clone(),
+        "the reviewer's session ended (stopped)".into(),
+    );
+    finish_child(
+        &host,
+        &environment,
+        &session,
+        &children[1],
+        Some("No findings."),
+    )
+    .await;
+    wait_until_review_resolves(&host, &session).await;
+
+    let (complete, failures) = delivered_findings(&environment);
+    assert!(complete, "{failures:?}");
+    assert!(failures.is_empty(), "{failures:?}");
+    host.shutdown().await.unwrap();
+}
+
+/// Ending is a fact about a role only until it has an outcome, and it counts
+/// once however often it is reported.
+#[tokio::test]
+async fn a_reviewer_ending_after_its_outcome_or_twice_fails_nothing_more() {
+    let session = session_id("restored-idempotent");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+
+    host.reviewer_finished(
+        session.clone(),
+        children[0].clone(),
+        Some("real defect".into()),
+    )
+    .await
+    .unwrap();
+    // Closing a finished child ends its session; its report stands.
+    host.child_ended(
+        children[0].clone(),
+        "the reviewer's session ended (stopped)".into(),
+    );
+    assert!(host.view(&session).is_some(), "reviewer 2 is still awaited");
+    for _ in 0..2 {
+        host.child_ended(
+            children[1].clone(),
+            "the reviewer's session ended (error)".into(),
+        );
+    }
+    wait_until_review_resolves(&host, &session).await;
+
+    let (complete, failures) = delivered_findings(&environment);
+    assert!(!complete);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].label.contains("Reviewer 2"), "{failures:?}");
+    host.shutdown().await.unwrap();
 }
 
 // A review someone asked for delivers its findings: a findings verdict is

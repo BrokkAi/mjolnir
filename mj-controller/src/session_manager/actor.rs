@@ -7,7 +7,7 @@ const DEFERRED_SUBMIT_CAPACITY: usize = 32;
 /// `Closing` and `Destroying` are still in flight and their owners need the
 /// actor. The rest have ended: nothing will ever answer on this session's
 /// control socket again.
-fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
+pub(crate) fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
     use mj_core::state::SessionState;
     matches!(
         state,

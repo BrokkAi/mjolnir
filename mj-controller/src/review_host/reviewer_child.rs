@@ -32,6 +32,52 @@ impl CloseAttempts {
     }
 }
 
+/// Reads one reviewer child's standing off the host's task.
+async fn reviewer_standing(
+    environment: &Arc<dyn ReviewEnvironment>,
+    child: &str,
+) -> Result<ChildStanding, String> {
+    let environment = environment.clone();
+    let child = child.to_owned();
+    tokio::task::spawn_blocking(move || environment.reviewer_child_standing(&child))
+        .await
+        .map_err(|error| format!("reviewer standing lookup stopped: {error}"))?
+}
+
+/// The one rule for a reviewer child whose session has ended: a handback it
+/// recorded is its outcome, delivered the way a finished turn's is, and only
+/// without one does its role fail. Both events are idempotent in the host.
+fn settle_ended_reviewer(
+    events: &mpsc::UnboundedSender<HostEvent>,
+    session_id: String,
+    epoch: u64,
+    role: String,
+    child: String,
+    reason: String,
+    handback: Option<String>,
+) {
+    let event = match handback {
+        Some(answer) => {
+            // The host answers a delegation caller; nobody waits here.
+            let (reply, _) = oneshot::channel();
+            HostEvent::ReviewerFinished {
+                session_id,
+                child_session_id: child,
+                answer: Some(answer),
+                reply,
+            }
+        }
+        None => HostEvent::RoleFailed {
+            session_id,
+            epoch,
+            role,
+            child_session_id: Some(child),
+            reason,
+        },
+    };
+    let _ = events.send(event);
+}
+
 impl HostState {
     pub(super) fn register_reviewer_child(
         &mut self,
@@ -170,9 +216,35 @@ impl HostState {
         let events = self.events.clone();
         let session_id = session_id.to_owned();
         tokio::spawn(async move {
+            if !fresh {
+                // A restored child may still be running its worker turn, and
+                // a start error after a restart can be transient, so only the
+                // store's record that its session ended settles the role.
+                match reviewer_standing(&environment, &child).await {
+                    Ok(ChildStanding {
+                        ended: Some(state),
+                        handback,
+                    }) => {
+                        settle_ended_reviewer(
+                            &events,
+                            session_id,
+                            epoch,
+                            role,
+                            child,
+                            format!(
+                                "the reviewer's session ended before the review was restored ({state})"
+                            ),
+                            handback,
+                        );
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(child, %error, "could not read a restored reviewer's standing; starting it");
+                    }
+                }
+            }
             if let Err(error) = environment.start_child(&child).await {
-                // A restored child may already be running its worker turn.
-                // Startup readiness timing cannot turn that work into a failed review.
                 if fresh {
                     tracing::warn!(child, %error, "reviewer child failed to start");
                     let _ = events.send(HostEvent::RoleFailed {
@@ -290,7 +362,13 @@ impl HostState {
         else {
             return;
         };
+        let prior = slot.driver.snapshot();
         let requests = slot.driver.role_failed(role, child, reason);
+        // A role that already has an outcome, or a review already finished,
+        // is not failed again, and a repeated failure persists nothing.
+        if slot.driver.snapshot() == prior {
+            return;
+        }
         if let Some(group) = slot.state.active_group.as_mut() {
             group.driver = slot.driver.snapshot();
         }
@@ -308,6 +386,50 @@ impl HostState {
             return;
         }
         self.run(session_id, requests);
+    }
+
+    /// A reviewer child's session ended. A handback it recorded is its
+    /// outcome; without one its role fails through [`Self::role_failed`], so
+    /// the group resolves like any other reviewer failure.
+    pub(super) fn child_ended(&mut self, child: &str, reason: String) {
+        let Some((session_id, epoch, role)) = self.reviews.iter().find_map(|(session_id, slot)| {
+            let registration = slot
+                .state
+                .active_group
+                .as_ref()?
+                .registrations
+                .iter()
+                .find(|item| item.child_session_id.as_deref() == Some(child))?;
+            Some((session_id.clone(), slot.epoch, registration.role.clone()))
+        }) else {
+            return;
+        };
+        // A handback that is waiting behind a saving outcome settles the role.
+        if self.reviews.get(&session_id).is_some_and(|slot| {
+            slot.queued_outcomes
+                .iter()
+                .any(|queued| queued.child_session_id == child)
+        }) {
+            return;
+        }
+        let environment = self.environment.clone();
+        let events = self.events.clone();
+        let child = child.to_owned();
+        tokio::spawn(async move {
+            // A handback the child recorded before it ended is its outcome.
+            let (handback, reason) = match reviewer_standing(&environment, &child).await {
+                Ok(standing) => (standing.handback, reason),
+                Err(error) => {
+                    tracing::warn!(child, %error, "could not check an ended reviewer for a handback");
+                    (
+                        None,
+                        format!("{reason}; its recorded handback could not be read: {error}"),
+                    )
+                }
+            };
+            tracing::info!(child, session_id, role, %reason, found_handback = handback.is_some(), "reviewer child ended");
+            settle_ended_reviewer(&events, session_id, epoch, role, child, reason, handback);
+        });
     }
 
     pub(super) fn reviewer_finished(

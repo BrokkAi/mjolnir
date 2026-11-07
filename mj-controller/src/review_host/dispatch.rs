@@ -142,6 +142,10 @@ impl HostState {
                 let _ = reply.send(target);
             }
             HostEvent::CloseChild { child_session_id } => self.close_child(child_session_id),
+            HostEvent::ChildEnded {
+                child_session_id,
+                reason,
+            } => self.child_ended(&child_session_id, reason),
             HostEvent::ReviewerFinished {
                 session_id,
                 child_session_id,
@@ -264,9 +268,48 @@ impl HostState {
                 }
                 Err(error) => {
                     self.close_reviewer_child(&session_id);
-                    self.retry_push_delivery(&session_id, error);
+                    // The one decision: a record that is definitely gone ends
+                    // the review; anything else, including a failed lookup,
+                    // retries.
+                    let environment = self.environment.clone();
+                    let events = self.events.clone();
+                    let owner = session_id.clone();
+                    tokio::spawn(async move {
+                        let lookup = owner.clone();
+                        let exists = tokio::task::spawn_blocking(move || {
+                            environment.session_exists(&lookup)
+                        })
+                        .await;
+                        let step = match exists {
+                            Ok(Ok(false)) => ReviewStep::PushOwnerGone,
+                            _ => ReviewStep::PushRetry(error),
+                        };
+                        let _ = events.send(HostEvent::Step {
+                            session_id: owner,
+                            epoch,
+                            step,
+                        });
+                    });
                 }
             },
+            ReviewStep::PushRetry(error) => self.retry_push_delivery(&session_id, error),
+            ReviewStep::PushOwnerGone => {
+                let review_id = self
+                    .reviews
+                    .get(&session_id)
+                    .map(|slot| slot.driver.snapshot().review_id)
+                    .unwrap_or_default();
+                // Nothing to tell the person: the session is destroyed, and
+                // its review state went with its record.
+                tracing::info!(
+                    session_id,
+                    review_id,
+                    "dropping the review of a session that no longer exists"
+                );
+                self.close_reviewer_child(&session_id);
+                self.reviews.remove(&session_id);
+                self.publish(&session_id);
+            }
             ReviewStep::Delta(result) => {
                 let requests = match result {
                     Ok(deltas) => self

@@ -64,6 +64,12 @@ pub(super) enum HostEvent {
     CloseChild {
         child_session_id: String,
     },
+    /// A reviewer child's session reached a terminal state. The role it
+    /// served fails unless it already has an outcome.
+    ChildEnded {
+        child_session_id: String,
+        reason: String,
+    },
     ReviewerFinished {
         session_id: String,
         child_session_id: String,
@@ -163,6 +169,12 @@ pub(super) enum PersistenceRequest {
 pub(super) enum ReviewStep {
     Delta(Result<Vec<mj_core::relay::RepoDelta>, String>),
     PushDelivered(Result<Box<TurnReviewState>, String>),
+    /// Delivery failed and the requesting session still exists, or could not
+    /// be looked up: the delivery is tried again.
+    PushRetry(String),
+    /// Delivery failed because the requesting session's record is gone, so
+    /// no verdict or review state can be saved for it.
+    PushOwnerGone,
 }
 
 /// Everything one blocking preparation gathered before a review can start.

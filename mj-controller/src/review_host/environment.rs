@@ -78,6 +78,20 @@ pub trait ReviewEnvironment: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// What the store holds about one reviewer child: whether its session has
+    /// ended, and the handback it recorded, if any. Blocking: production reads
+    /// the controller's database.
+    fn reviewer_child_standing(&self, _child: &str) -> Result<ChildStanding, String> {
+        Ok(ChildStanding::default())
+    }
+
+    /// Whether the store still has this session's record. A destroyed
+    /// session has none, and nothing about its reviews can be saved again.
+    /// Blocking: production reads the controller's database.
+    fn session_exists(&self, _session_id: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+
     /// Holds the session against background work for as long as a review
     /// needs its worker: waits until no recovery copy or worker upgrade is
     /// running (up to `deadline`), then keeps new ones from starting until
@@ -105,6 +119,15 @@ pub struct ReviewerChildRelation {
     pub parent_session_id: String,
     pub request_key: String,
     pub child_session_id: String,
+}
+
+/// What the store holds about a reviewer child, read at one moment.
+#[derive(Clone, Debug, Default)]
+pub struct ChildStanding {
+    /// Why its session can no longer run, or `None` while it still can.
+    pub ended: Option<String>,
+    /// The report it handed back, whether or not the review has taken it yet.
+    pub handback: Option<String>,
 }
 
 /// Keeps background work off a session while a review needs its worker.
@@ -219,6 +242,33 @@ impl ReviewEnvironment for ControllerEnvironment {
             })
             .collect())
     }
+
+    fn reviewer_child_standing(&self, child: &str) -> Result<ChildStanding, String> {
+        let ended = match crate::database::load_session_record(child)
+            .map_err(|error| format!("{error:#}"))?
+        {
+            None => Some("removed".to_owned()),
+            Some(record) if crate::session_manager::terminal_for_reconnect(record.state) => {
+                Some(match record.last_error {
+                    Some(cause) => format!("{}: {cause}", record.state.as_str()),
+                    None => record.state.as_str().to_owned(),
+                })
+            }
+            Some(_) => None,
+        };
+        let handback = crate::database::load_subagent_report(child)
+            .map_err(|error| format!("{error:#}"))?
+            .handback
+            .map(|handback| handback.message);
+        Ok(ChildStanding { ended, handback })
+    }
+
+    fn session_exists(&self, session_id: &str) -> Result<bool, String> {
+        crate::database::load_session_record(session_id)
+            .map(|record| record.is_some())
+            .map_err(|error| format!("{error:#}"))
+    }
+
     fn register_child(
         &self,
         session_id: &str,
