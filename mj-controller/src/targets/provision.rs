@@ -571,6 +571,46 @@ pub(super) fn execute_checked(
     Ok(())
 }
 
+const METADATA_OPTIONS_FLAG: &str = "--metadata-options";
+
+/// Require IMDSv2 on a launched instance. IMDS is the instance metadata
+/// service at 169.254.169.254, where code on the instance can read its
+/// instance profile's credentials; IMDSv2 demands a session token obtained
+/// with an HTTP PUT first, which simple request-forgery bugs cannot send.
+///
+/// One definition owns the flag. Move stores the launch arguments in the
+/// database before running them, so a launch prepared by an older daemon
+/// reaches this function again at execution time; the flag is added once.
+pub fn with_required_imds(mut args: Vec<String>) -> Vec<String> {
+    if !args.iter().any(|arg| arg == METADATA_OPTIONS_FLAG) {
+        args.extend([
+            METADATA_OPTIONS_FLAG.to_owned(),
+            "HttpTokens=required".to_owned(),
+        ]);
+    }
+    args
+}
+
+/// Check the `run-instances` response: the instance must report that it
+/// requires IMDSv2. A launch template or account default that did not yield
+/// to our request then fails visibly instead of leaving an IMDSv1 instance.
+pub fn require_imdsv2(run_instances_response: &serde_json::Value) -> Result<()> {
+    let instance = run_instances_response.pointer("/Instances/0");
+    let instance_id = instance
+        .and_then(|instance| instance.get("InstanceId"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let tokens = instance
+        .and_then(|instance| instance.pointer("/MetadataOptions/HttpTokens"))
+        .and_then(serde_json::Value::as_str);
+    ensure!(
+        tokens == Some("required"),
+        "EC2 instance {instance_id} does not require IMDSv2 (HttpTokens is {}), although Mjolnir asked for it; terminating it. Check the launch template and account metadata defaults",
+        tokens.unwrap_or("missing from the launch response")
+    );
+    Ok(())
+}
+
 /// Shared EC2 creation request; Move adds its durable per-attempt client token.
 pub fn ec2_launch_command(aws: &AwsTemplate, session_id: &str) -> Result<CommandSpec> {
     validate_aws(aws)?;
@@ -602,6 +642,7 @@ pub fn ec2_launch_command(aws: &AwsTemplate, session_id: &str) -> Result<Command
         session_id,
     ));
     args.extend(["--output".to_owned(), "json".to_owned()]);
+    let args = with_required_imds(args);
     Ok(CommandSpec::new("aws", args)
         .purpose("launch EC2 session instance")
         .stage(ProvisionStage::Provisioning)

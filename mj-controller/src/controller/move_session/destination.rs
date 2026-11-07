@@ -121,9 +121,14 @@ impl Controller {
         if matches!(destination.state, PreparedDestinationState::LaunchPending) {
             executor.notify_notice("Creating EC2 destination");
             let output = executor.execute(
-                &CommandSpec::new("aws", destination.launch_args.clone())
-                    .purpose("launch EC2 Move destination")
-                    .stage(ProvisionStage::Provisioning),
+                &CommandSpec::new(
+                    "aws",
+                    // A launch prepared before IMDSv2 was required stored
+                    // arguments without the flag.
+                    targets::with_required_imds(destination.launch_args.clone()),
+                )
+                .purpose("launch EC2 Move destination")
+                .stage(ProvisionStage::Provisioning),
             )?;
             if output.status != 0 {
                 // Only a first-call refusal proves this attempt was never accepted.
@@ -148,6 +153,17 @@ impl Controller {
             operation.prepared_destination.as_mut().unwrap().state =
                 PreparedDestinationState::Created { instance_id };
             crate::database::save_move_operation(operation)?;
+            if let Err(error) = targets::require_imdsv2(&json) {
+                // The instance is recorded, so the durable cleanup owns it.
+                return Err(
+                    match self.cleanup_prepared_move_destination(operation, executor) {
+                        Ok(()) => error,
+                        Err(cleanup) => error.context(format!(
+                            "terminating the instance failed and will be retried: {cleanup:#}"
+                        )),
+                    },
+                );
+            }
         }
         if let PreparedDestinationState::Created { instance_id } = operation
             .prepared_destination

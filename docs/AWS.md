@@ -12,8 +12,21 @@ on an `aws-ec2` machine runs:
 ```console
 aws --profile <aws_profile> --region <region> ec2 run-instances \
   --launch-template LaunchTemplateName=<launch_template>[,Version=<launch_template_version>] \
+  --metadata-options HttpTokens=required \
   ...
 ```
+
+`--metadata-options HttpTokens=required` makes the instance accept only IMDSv2.
+The instance metadata service (IMDS) at `169.254.169.254` hands out the instance
+profile's credentials to code running on the instance. IMDSv2 requires a session
+token obtained with an HTTP `PUT` first, which blocks simple request-forgery
+reads that IMDSv1 allows. Mjolnir sets this on every instance it launches,
+including Move destinations, whatever the launch template says. It then reads
+`MetadataOptions.HttpTokens` from the `run-instances` response; if the instance
+does not report `required`, Mjolnir terminates it and fails the launch with
+the reason. Code in a session on an EC2 machine can therefore read the instance
+profile's credentials only with IMDSv2 tokens. Scope the instance profile's
+role to what sessions need; Mjolnir does not create or limit it.
 
 Mjolnir adds three tags as part of that launch:
 
@@ -58,8 +71,10 @@ AMIs. Prepare those resources before you point a target at AWS.
   template).
 
 Mjolnir does not create those prerequisites. Add the AWS machine and target
-in Settings. `mj doctor` checks the configured identity and launch template,
-and session preflight checks the identity and
+in Settings. `mj doctor` checks the configured identity and launch template
+(and warns when the template version allows IMDSv1, although Mjolnir requires
+IMDSv2 on its own launches regardless; fix the template for anyone else who
+launches from it), and session preflight checks the identity and
 configured launch-template version. These checks do not replace configuring
 the launch template, network, and SSH access correctly.
 

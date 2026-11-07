@@ -72,12 +72,16 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         Ok(output(
             br#"{"LaunchTemplates":[{"LaunchTemplateId":"lt-0123456789abcdef0","LaunchTemplateName":"mjolnir","CreateTime":"2026-01-01T00:00:00+00:00","CreatedBy":"arn:aws:iam::123456789012:user/doctor","DefaultVersionNumber":7,"LatestVersionNumber":7}]}"#,
         )),
+        // `--query ...MetadataOptions.HttpTokens --output text` of a template
+        // version that allows IMDSv1.
+        Ok(output(b"optional\n")),
     ]);
     let aws_check = aws_target_check(
         "production",
         None,
         "us-east-2",
         "lt-0123456789abcdef0",
+        Some("7"),
         &aws,
     );
     let aws_commands = aws.commands.borrow();
@@ -102,6 +106,12 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         aws_commands[2]
             .args
             .contains(&"--launch-template-ids".to_owned())
+    );
+    assert!(
+        aws_commands[3]
+            .args
+            .windows(2)
+            .any(|args| args == ["--versions", "7"])
     );
     drop(aws_commands);
 

@@ -2864,12 +2864,14 @@ fn aws_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<
                 aws_profile,
                 region,
                 launch_template,
+                launch_template_version,
                 ..
             } => Some(aws_target_check(
                 id,
                 aws_profile.as_deref(),
                 region,
                 launch_template,
+                launch_template_version.as_deref(),
                 executor,
             )),
             _ => None,
@@ -2893,6 +2895,7 @@ fn aws_target_check(
     profile: Option<&str>,
     region: &str,
     launch_template: &str,
+    launch_template_version: Option<&str>,
     executor: &impl CommandExecutor,
 ) -> DoctorCheck {
     let check_id = format!("runtime.aws-ec2.{id}");
@@ -2990,13 +2993,96 @@ fn aws_target_check(
             ),
             template_remediation,
         ),
-        Ok(_) => DoctorCheck::ready(
-            check_id,
-            title,
-            format!(
+        Ok(_) => {
+            let ready = format!(
                 "The AWS CLI is installed, profile {profile_label} has valid credentials, and launch template {launch_template} exists in {region}."
+            );
+            aws_template_metadata_check(
+                check_id,
+                title,
+                ready,
+                (profile, region),
+                launch_template,
+                launch_template_version,
+                executor,
+            )
+        }
+    }
+}
+
+/// Mjolnir passes `HttpTokens=required` on every launch it makes, so its own
+/// instances are protected whatever the template says. The template still
+/// matters to everyone else who launches from it, so a template that allows
+/// IMDSv1 (plain-GET reads of the instance profile's credentials) is
+/// reported when the version can be read.
+fn aws_template_metadata_check(
+    check_id: String,
+    title: String,
+    ready: String,
+    (profile, region): (Option<&str>, &str),
+    launch_template: &str,
+    launch_template_version: Option<&str>,
+    executor: &impl CommandExecutor,
+) -> DoctorCheck {
+    let mut args = aws_global_args(profile, region);
+    args.extend([
+        "ec2".to_owned(),
+        "describe-launch-template-versions".to_owned(),
+    ]);
+    args.extend([
+        if launch_template.starts_with("lt-") {
+            "--launch-template-id".to_owned()
+        } else {
+            "--launch-template-name".to_owned()
+        },
+        launch_template.to_owned(),
+        "--versions".to_owned(),
+        launch_template_version.unwrap_or("$Default").to_owned(),
+        "--query".to_owned(),
+        "LaunchTemplateVersions[0].LaunchTemplateData.MetadataOptions.HttpTokens".to_owned(),
+        "--output".to_owned(),
+        "text".to_owned(),
+    ]);
+    let command = CommandSpec::new("aws", args)
+        .purpose("check the launch template's instance metadata options");
+    let unread = |reason: String| {
+        DoctorCheck::ready(
+            check_id.clone(),
+            title.clone(),
+            format!(
+                "{ready} Its instance metadata setting could not be read ({reason}); Mjolnir requires IMDSv2 on every instance it launches regardless."
             ),
-        ),
+        )
+    };
+    match executor.execute(&command) {
+        Err(error) => unread(format!("{error:#}")),
+        Ok(output) if output.status != 0 => {
+            unread(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        }
+        Ok(output) => match String::from_utf8_lossy(&output.stdout).trim() {
+            "required" => DoctorCheck::ready(
+                check_id,
+                title,
+                format!("{ready} The template requires IMDSv2."),
+            ),
+            "optional" => DoctorCheck::warning(
+                check_id,
+                title,
+                format!(
+                    "{ready} The template allows IMDSv1 (HttpTokens=optional), so other instances launched from it let code on the instance read its instance profile's credentials with a plain HTTP GET. Mjolnir requires IMDSv2 on the instances it launches regardless."
+                ),
+                format!(
+                    "Optional: create a new version of launch template {launch_template} with the metadata option HttpTokens set to required, and make it the default version."
+                ),
+            ),
+            _ => DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "{ready} The template does not set HttpTokens, so the account default applies to other launches; Mjolnir requires IMDSv2 on every instance it launches."
+                ),
+            ),
+        },
     }
 }
 

@@ -1294,6 +1294,9 @@ pub(super) fn locator_after_provision_named(
             let output = first_output.context("AWS launch produced no output")?;
             let json: serde_json::Value = serde_json::from_slice(&output.stdout)
                 .context("parse aws ec2 run-instances response")?;
+            // The error is the discover failure that makes provisioning
+            // terminate the instance it just created.
+            targets::require_imdsv2(&json)?;
             let instance_id = json
                 .pointer("/Instances/0/InstanceId")
                 .and_then(serde_json::Value::as_str)

@@ -1879,3 +1879,98 @@ fn limits_a_rootless_podman_host_cannot_enforce_are_dropped_and_reported() {
     assert!(args.contains(&"--cpus=4".to_owned()), "{args:?}");
     assert!(args.contains(&"--memory=8589934592".to_owned()), "{args:?}");
 }
+
+/// Answers the EC2 launch with a recorded-shape `run-instances` response whose
+/// instance allows IMDSv1, and records every command.
+struct WeakImdsLaunch {
+    commands: Mutex<Vec<Vec<String>>>,
+}
+
+impl CommandExecutor for WeakImdsLaunch {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let mut argv = vec![command.program.clone()];
+        argv.extend(command.args.clone());
+        self.commands.lock().unwrap().push(argv);
+        Ok(CommandOutput {
+            status: 0,
+            stdout: if command.creates_target {
+                br#"{"Instances":[{"InstanceId":"i-0123456789abcdef0","MetadataOptions":{"HttpTokens":"optional"}}]}"#
+                    .to_vec()
+            } else {
+                Vec::new()
+            },
+            stderr: Vec::new(),
+        })
+    }
+}
+
+#[test]
+fn an_ec2_instance_that_allows_imdsv1_is_terminated_instead_of_used() {
+    let ssh = SshTarget {
+        destination: "ubuntu@example.test".into(),
+        ssh_args: Vec::new(),
+    };
+    let target = targets::TargetTemplate::AwsEc2(targets::AwsTemplate {
+        profile: "default".into(),
+        region: "us-east-1".into(),
+        launch_template: "lt-0123456789abcdef0".into(),
+        launch_template_version: None,
+        instance_type: None,
+        ssh,
+    });
+    let canonical = mj_core::config::TargetTemplate::AwsEc2 {
+        aws_profile: None,
+        region: "us-east-1".into(),
+        launch_template: "lt-0123456789abcdef0".into(),
+        launch_template_version: None,
+        ssh_user: "ubuntu".into(),
+        address_source: mj_core::config::AwsAddressSource::PublicIp,
+        identity_file: None,
+        ssh_args: Vec::new(),
+    };
+    let plan =
+        targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None).unwrap();
+    let executor = WeakImdsLaunch {
+        commands: Mutex::new(Vec::new()),
+    };
+    let name = targets::resource_name(PROVISIONED_SESSION).unwrap();
+
+    let error = provision_target_creation_named(
+        &plan,
+        &target,
+        PROVISIONED_SESSION,
+        &executor,
+        &name,
+        |outputs| {
+            crate::controller::backend::locator_after_provision_named(
+                &canonical,
+                &target,
+                PROVISIONED_SESSION,
+                outputs.first(),
+                &executor,
+                &name,
+            )
+        },
+    )
+    .map(|_| ())
+    .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("does not require IMDSv2"),
+        "{error:#}"
+    );
+    let commands = executor.commands.lock().unwrap();
+    assert!(
+        commands
+            .iter()
+            .any(|argv| argv.iter().any(|a| a == "terminate-instances")
+                && argv.iter().any(|a| a == "i-0123456789abcdef0")),
+        "{commands:?}"
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|argv| argv.iter().any(|a| a == "instance-running")),
+        "the instance must not be waited on or used: {commands:?}"
+    );
+}

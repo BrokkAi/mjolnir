@@ -93,6 +93,8 @@ struct Ec2 {
     refuse_launch: AtomicBool,
     fail_boot: AtomicBool,
     fail_cleanup: AtomicBool,
+    /// Launch responses report an instance that allows IMDSv1.
+    imds_optional: AtomicBool,
     low_disk: AtomicBool,
     handoff: AtomicBool,
     resumable: AtomicBool,
@@ -146,7 +148,15 @@ impl CommandExecutor for Ec2 {
                 if self.lose_ack.swap(false, Ordering::SeqCst) {
                     bail!("launch accepted; acknowledgement lost");
                 }
-                stdout = format!(r#"{{"Instances":[{{"InstanceId":"{INSTANCE}"}}]}}"#).into_bytes();
+                let tokens = if self.imds_optional.load(Ordering::SeqCst) {
+                    "optional"
+                } else {
+                    "required"
+                };
+                stdout = format!(
+                    r#"{{"Instances":[{{"InstanceId":"{INSTANCE}","MetadataOptions":{{"HttpTokens":"{tokens}"}}}}]}}"#
+                )
+                .into_bytes();
             }
             "wait for EC2 session instance to run" => {
                 assert!(
@@ -253,6 +263,10 @@ fn ec2_preparation_persists_launch_before_boot_and_reuses_the_checked_instance()
     assert_eq!(
         argument(&launches[0].args, "--client-token").unwrap().len(),
         64
+    );
+    assert_eq!(
+        argument(&launches[0].args, "--metadata-options").unwrap(),
+        "HttpTokens=required"
     );
     assert_eq!(
         crate::database::load_session_record(ID).unwrap().unwrap(),
@@ -726,4 +740,81 @@ fn a_first_ec2_launch_refusal_releases_an_attempt_without_cleanup() {
             .all(|c| c.purpose != "terminate exact EC2 session instance"
                 && c.purpose != "reconcile EC2 Move launch acknowledgement")
     );
+}
+
+#[test]
+fn a_launch_prepared_before_imdsv2_was_required_gets_the_flag_when_it_runs() {
+    if !isolated("a_launch_prepared_before_imdsv2_was_required_gets_the_flag_when_it_runs") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (controller, mut operation) = fixture();
+    // The arguments an older daemon stored: no metadata options.
+    operation.prepared_destination = Some(PreparedMoveDestination {
+        launch_args: [
+            "--profile",
+            "test",
+            "--region",
+            "us-east-1",
+            "ec2",
+            "run-instances",
+        ]
+        .into_iter()
+        .chain([
+            "--client-token",
+            "a-token-stored-by-an-older-daemon",
+            "--output",
+            "json",
+        ])
+        .map(str::to_owned)
+        .collect(),
+        runtime: TargetRuntimeSettings::from(&ec2_target()),
+        state: PreparedDestinationState::LaunchPending,
+    });
+    crate::database::save_move_operation(&operation).unwrap();
+    let cloud = Ec2::default();
+    controller
+        .prepare_ec2_move_destination(&mut operation, &cloud)
+        .unwrap();
+    let commands = cloud.commands.lock().unwrap();
+    let launch = commands
+        .iter()
+        .find(|command| command.purpose == "launch EC2 Move destination")
+        .unwrap();
+    assert_eq!(
+        argument(&launch.args, "--metadata-options").unwrap(),
+        "HttpTokens=required"
+    );
+}
+
+#[test]
+fn an_instance_that_allows_imdsv1_is_terminated_and_the_source_is_retained() {
+    if !isolated("an_instance_that_allows_imdsv1_is_terminated_and_the_source_is_retained") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (controller, mut operation) = fixture();
+    let cloud = Ec2 {
+        imds_optional: AtomicBool::new(true),
+        ..Default::default()
+    };
+    let error = controller
+        .prepare_ec2_move_destination(&mut operation, &cloud)
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("does not require IMDSv2"));
+    let commands = cloud.commands.lock().unwrap();
+    assert!(
+        commands
+            .iter()
+            .any(|command| command.purpose == "terminate exact EC2 session instance")
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|command| command.purpose == "wait for EC2 session instance to run")
+    );
+    assert!(matches!(
+        operation.prepared_destination.unwrap().state,
+        PreparedDestinationState::Released
+    ));
 }
