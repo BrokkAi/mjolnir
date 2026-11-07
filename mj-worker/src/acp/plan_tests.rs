@@ -414,8 +414,10 @@ async fn kimi_leaves_plan_for_the_policy_mode() {
     let restoring = probe.message().await;
     assert_eq!(restoring["method"], "session/set_config_option");
     assert_eq!(restoring["params"]["value"], "auto");
+    // Hard-won: ce521dc: Kimi answers with the configuration it held before
+    // the change, so a strict confirmation failed every Plan exit.
     probe
-        .result(&restoring, json!({"configOptions": mode_config("auto")}))
+        .result(&restoring, json!({"configOptions": mode_config("plan")}))
         .await;
     loop {
         match probe.event().await {

@@ -587,6 +587,7 @@ async fn select_confirmed(
     desired: &str,
     config_options: &mut Vec<SessionConfigOption>,
 ) -> Result<String> {
+    let previous = surface::config_current_value(config_options, &option_id.to_string());
     let response = connection
         .send_request(SetSessionConfigOptionRequest::new(
             session_id.clone(),
@@ -597,6 +598,13 @@ async fn select_confirmed(
         .await
         .with_context(|| format!("select required ACP {label} {desired}"))?;
     *config_options = response.config_options;
+    // Codex and Kimi answer with the configuration they held before the
+    // change (see `adopt_requested_value`). Every other harness must confirm
+    // the value it now runs, since acknowledging one mode while running in
+    // another is unsafe.
+    if matches!(harness, HarnessKind::Codex | HarnessKind::Kimi) {
+        adopt_requested_value(config_options, &option_id, previous.as_deref(), desired);
+    }
     // A harness can answer the request and still report another value, so
     // the session is only safe to use once it confirms the effective one.
     let effective = surface::config_current_value(config_options, &option_id.to_string());
