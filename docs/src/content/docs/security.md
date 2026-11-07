@@ -225,6 +225,28 @@ profile home, and is passed to new and resumed Claude sessions as
 `CLAUDE_CODE_OAUTH_TOKEN`. It authorizes model requests; it does not enable
 Claude Remote Control or claude.ai connectors.
 
+## SSH host keys are trusted on first use
+
+Mjolnir's SSH connections accept a host key they have never seen and record it
+in `known_hosts`, and refuse a key that has changed
+(`StrictHostKeyChecking=accept-new`). This covers SSH machines, EC2 instances,
+whose key is always new at first contact, and Git over SSH when Mjolnir
+clones or fetches a repository. Someone who can intercept that first connection
+can present their own key, and Mjolnir keeps trusting it.
+
+To require keys you have already checked:
+
+- For an SSH machine, add `"-o", "StrictHostKeyChecking=yes"` to its
+  `extra_args`; Mjolnir puts `extra_args` first, so it wins. See
+  [SSH targets](/targets/).
+- For an EC2 machine, add the same option to its `ssh_args`.
+- For Git, set `GIT_SSH_COMMAND` in the daemon's environment, for example
+  `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes`. Mjolnir uses its own
+  command only when `GIT_SSH_COMMAND` is unset.
+
+Add each host key to `~/.ssh/known_hosts` before the first connection, after
+checking its fingerprint, for example with `ssh-keyscan`.
+
 ## Isolated sessions use independent network clones
 
 A bundle repository declared with `local = "/absolute/path"` supplies its
