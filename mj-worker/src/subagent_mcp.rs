@@ -629,12 +629,19 @@ fn call_with_budget_and_options(
             if instructions.is_empty() {
                 bail!("spawn instructions cannot be empty");
             }
-            let parent_directory = std::env::current_dir()
-                .context("resolve the parent's working directory for spawn")?;
-            let resolved_working_directory = if args.working_directory.as_os_str().is_empty() {
-                parent_directory
+            // An absolute path stands alone, so it still works after the
+            // parent's own directory was deleted or renamed.
+            let resolved_working_directory = if args.working_directory.is_absolute() {
+                args.working_directory.clone()
             } else {
-                mj_core::target_path::join(&parent_directory, &args.working_directory)
+                let parent_directory = std::env::current_dir().context(
+                    "the parent's working directory is gone; pass an absolute working_directory",
+                )?;
+                if args.working_directory.as_os_str().is_empty() {
+                    parent_directory
+                } else {
+                    mj_core::target_path::join(&parent_directory, &args.working_directory)
+                }
             };
             if !resolved_working_directory.is_dir() {
                 bail!(
