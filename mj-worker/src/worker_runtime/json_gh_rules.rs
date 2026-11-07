@@ -78,7 +78,7 @@ fn string_value(node: Option<CstNode>) -> Option<String> {
     node?.as_string_lit()?.decoded_value().ok()
 }
 
-/// One native permission rule, as OpenCode 2.2.1 lists them in `permissions`.
+/// One native permission rule, as OpenCode 2.2.6 lists them in `permissions`.
 type Rule = (&'static str, &'static str, &'static str);
 
 /// The rules this launch appends after every rule the profile supplies, so
@@ -88,7 +88,7 @@ fn opencode_rules(policy: ExecutionPolicy, denials: OpenCodeDenials) -> Vec<Rule
     if policy == ExecutionPolicy::ConfiguredApprovals {
         rules.extend(GH_COMMANDS.map(|command| ("bash", command, "allow")));
     }
-    // With `execute` allowed, OpenCode 2.2.1 offers MCP tools only through a
+    // With `execute` allowed, OpenCode 2.2.6 offers MCP tools only through a
     // JavaScript `execute` tool ("Code Mode"). Denying it lists the
     // `mj-agents` tools as direct `mj-agents_<tool>` tools, which the
     // delegation policy text and the owned-server approvals name.
@@ -112,7 +112,7 @@ fn configure_opencode(
     let rules = object
         .array_value_or_create("permissions")
         .context("OPENCODE_CONFIG_CONTENT permissions must be an array")?;
-    // OpenCode 2.2.1 concatenates native permission arrays across config documents.
+    // OpenCode 2.2.6 concatenates native permission arrays across config documents.
     // Keeping this as its own document preserves even scalar legacy defaults.
     let wanted = opencode_rules(policy, denials);
     let elements = rules.elements();
@@ -349,7 +349,7 @@ mod tests {
     /// stub provider records what the model is offered; nothing leaves the
     /// machine.
     #[test]
-    #[ignore = "requires MJ_OPENCODE_TEST_BINARY naming OpenCode 2.2.1 and MJ_WORKER_BINARY pointing to the current mj-worker build"]
+    #[ignore = "requires MJ_OPENCODE_TEST_BINARY naming OpenCode 2.2.6 and MJ_WORKER_BINARY pointing to the current mj-worker build"]
     fn live_opencode_offers_mj_agents_directly_and_drops_denied_tools() {
         use std::io::{BufRead, BufReader, Write};
         use std::process::{Command, Stdio};
@@ -436,26 +436,20 @@ mod tests {
                     "env": []}]}),
             );
             let session_id = session["sessionId"].clone();
-            // OpenCode lists a freshly connected server's tools to the model a
-            // moment after it connects (see the race on the first prompt), so
-            // prompt until a request shows them. Each pass is a full turn.
-            let mut tools = Vec::new();
-            for _ in 0..10 {
-                call(
-                    "session/prompt",
-                    serde_json::json!({"sessionId": session_id, "prompt": [{"type":"text","text":"hello"}]}),
-                );
-                let seen = offered.lock().unwrap();
-                tools = seen
-                    .iter()
-                    .rev()
-                    .find(|tools| tools.iter().any(|tool| tool == "mj-agents_spawn"))
-                    .cloned()
-                    .unwrap_or_default();
-                if !tools.is_empty() {
-                    break;
-                }
-            }
+            // The only prompt, sent right after `session/new`, must already
+            // list the connected server's tools. A title request may precede
+            // it and offer no tools.
+            call(
+                "session/prompt",
+                serde_json::json!({"sessionId": session_id, "prompt": [{"type":"text","text":"hello"}]}),
+            );
+            let tools = offered
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|tools| tools.iter().any(|tool| tool == "mj-agents_spawn"))
+                .cloned()
+                .unwrap_or_default();
             let _ = child.kill();
             let _ = child.wait();
             assert!(

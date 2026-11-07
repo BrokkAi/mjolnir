@@ -345,7 +345,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
     spec.subagent_mcp_socket.as_mut().unwrap().review_gate = false;
 }
 
-/// OpenCode 2.2.1 titles an MCP call `<server>_<tool>`, and server names may
+/// OpenCode 2.2.6 titles an MCP call `<server>_<tool>`, and server names may
 /// contain `_`, so another server can produce an owned tool's exact title.
 // Hard-won: 01332d2da: a server named `mj-agents_send` could borrow `send_message`'s approval
 #[test]
@@ -3716,6 +3716,15 @@ async fn prompt_echoing_bridge(
     stream: tokio::io::DuplexStream,
     observed: mpsc::UnboundedSender<String>,
 ) {
+    prompt_echoing_bridge_reporting(stream, observed, None).await;
+}
+
+/// `prompt_echoing_bridge` that names itself `agent_version` in `initialize`.
+async fn prompt_echoing_bridge_reporting(
+    stream: tokio::io::DuplexStream,
+    observed: mpsc::UnboundedSender<String>,
+    agent_version: Option<&str>,
+) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
@@ -3733,7 +3742,12 @@ async fn prompt_echoing_bridge(
         let response = match method {
             "initialize" => {
                 let _ = observed.send(method.to_owned());
-                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": 1}})
+                let mut result = serde_json::json!({"protocolVersion": 1});
+                if let Some(version) = agent_version {
+                    result["agentInfo"] =
+                        serde_json::json!({"name": "opencode", "version": version});
+                }
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
             }
             "session/new" | "session/load" => {
                 let _ = observed.send(method.to_owned());
@@ -3759,69 +3773,91 @@ async fn prompt_echoing_bridge(
     }
 }
 
-/// OpenCode reloads its tool registry 100 ms after an MCP server connects and
-/// signals nobody, so the first prompt waits 250 ms from the open. A prompt
-/// queued at open is held; a later prompt is not.
+/// OpenCode before 2.2.6 reloads its tool registry 100 ms after an MCP server
+/// connects and signals nobody, so its first prompt waits 250 ms from the open
+/// (a prompt queued at open is held; a later prompt is not). A version that
+/// is missing or unparseable takes the same safe side. 2.2.6 and later wait
+/// for the tools themselves (anomalyco/opencode#60490) and get no hold.
 #[tokio::test(start_paused = true)]
-async fn the_first_opencode_prompt_waits_for_the_tool_registry_and_later_prompts_do_not() {
-    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let bridge = tokio::spawn(prompt_echoing_bridge(bridge_stream, observed_tx));
-    let (client_read, client_write) = tokio::io::split(client_stream);
-    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
-    let mut spec = reload_fallback_spec(HarnessKind::OpenCode);
-    spec.resume_session = None;
-    let (request_tx, mut request_rx) = mpsc::channel(4);
-    let (event_tx, mut event_rx) = mpsc::channel(64);
-    let prompt = |request_id: &str| CommandRequest::Prompt {
-        request_id: request_id.into(),
-        prompt: vec![ContentBlock::Text(TextContent::new(request_id))],
-    };
-    request_tx.send(prompt("first")).await.unwrap();
-    let driver = tokio::spawn(async move {
-        drive(
-            transport,
-            spec,
-            &mut request_rx,
-            event_tx,
-            Arc::new(Mutex::new(None)),
-            false,
-        )
-        .await
-    });
-    let mut observe = async |expected: &str| {
-        loop {
-            let method = observed_rx
-                .recv()
-                .await
-                .expect("the bridge keeps reporting");
-            if method == expected {
-                return tokio::time::Instant::now();
+async fn the_first_prompt_of_an_older_opencode_waits_for_the_tool_registry_and_2_2_6_does_not() {
+    for (version, held) in [
+        (Some("2.2.1"), true),
+        (Some("2.2.5"), true),
+        (Some("not-a-version"), true),
+        (None, true),
+        (Some("2.2.6"), false),
+        (Some("2.3.0"), false),
+    ] {
+        let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+        let bridge = tokio::spawn(prompt_echoing_bridge_reporting(
+            bridge_stream,
+            observed_tx,
+            version,
+        ));
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+        let mut spec = reload_fallback_spec(HarnessKind::OpenCode);
+        spec.resume_session = None;
+        let (request_tx, mut request_rx) = mpsc::channel(4);
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let prompt = |request_id: &str| CommandRequest::Prompt {
+            request_id: request_id.into(),
+            prompt: vec![ContentBlock::Text(TextContent::new(request_id))],
+        };
+        request_tx.send(prompt("first")).await.unwrap();
+        let driver = tokio::spawn(async move {
+            drive(
+                transport,
+                spec,
+                &mut request_rx,
+                event_tx,
+                Arc::new(Mutex::new(None)),
+                false,
+            )
+            .await
+        });
+        let mut observe = async |expected: &str| {
+            loop {
+                let method = observed_rx
+                    .recv()
+                    .await
+                    .expect("the bridge keeps reporting");
+                if method == expected {
+                    return tokio::time::Instant::now();
+                }
             }
+        };
+        let opened = observe("session/new").await;
+        let first = observe("session/prompt:first").await;
+        if held {
+            assert!(
+                first - opened >= Duration::from_millis(250),
+                "the first prompt reached OpenCode {version:?} {:?} after the open",
+                first - opened
+            );
+        } else {
+            assert_eq!(
+                first, opened,
+                "OpenCode {version:?} must not hold its first prompt"
+            );
         }
-    };
-    let opened = observe("session/new").await;
-    let first = observe("session/prompt:first").await;
-    assert!(
-        first - opened >= Duration::from_millis(250),
-        "the first prompt reached OpenCode {:?} after the open",
-        first - opened
-    );
-    wait_for_runtime_event(&mut event_rx, |event| {
-        matches!(event, RuntimeEvent::PromptFinished { request_id, .. } if request_id == "first")
-    })
-    .await;
-    let sent = tokio::time::Instant::now();
-    request_tx.send(prompt("second")).await.unwrap();
-    let second = observe("session/prompt:second").await;
-    assert_eq!(second, sent, "a later prompt must not be delayed");
-    drop(request_tx);
-    tokio::time::timeout(Duration::from_secs(5), driver)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    bridge.abort();
+        wait_for_runtime_event(&mut event_rx, |event| {
+            matches!(event, RuntimeEvent::PromptFinished { request_id, .. } if request_id == "first")
+        })
+        .await;
+        let sent = tokio::time::Instant::now();
+        request_tx.send(prompt("second")).await.unwrap();
+        let second = observe("session/prompt:second").await;
+        assert_eq!(second, sent, "a later prompt must not be delayed");
+        drop(request_tx);
+        tokio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        bridge.abort();
+    }
 }
 
 async fn wait_for_runtime_event<F>(

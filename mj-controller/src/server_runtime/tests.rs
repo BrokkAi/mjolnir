@@ -10,6 +10,7 @@ use mj_core::config::{
     CONFIG_VERSION, Config, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository,
     TargetTemplate,
 };
+use mj_core::remote_git::Shorthand;
 use mj_core::state::SessionState;
 
 #[test]
@@ -1623,7 +1624,7 @@ async fn phone_projects_resolve_origins_and_discard_results_after_location_chang
         cancelled: previous.cancelled.clone(),
         session_id: "first-checkout".into(),
         key: previous.key.clone(),
-        result: Ok(ProjectSourceIdentity::git_remote("old/wrong").unwrap()),
+        result: Ok(ProjectSourceIdentity::git_remote("old/wrong", Shorthand::Allowed).unwrap()),
     };
     controller
         .state
