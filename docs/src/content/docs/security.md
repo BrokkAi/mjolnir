@@ -112,6 +112,13 @@ not make copied secrets unreadable inside the target. Likewise, provider-side
 handling of prompts and repository content is governed by the selected
 harness and account, not by Mjolnir.
 
+Mjolnir stores what agents print as they printed it. Transcripts, checkpoints,
+and worker diagnostics keep any secret that appears in agent output, for
+example after an agent runs `env` or reads a token file, and the dashboard and
+web viewer show it. Only the evidence sent to the Jev classifier has long
+token-like strings replaced before it leaves the machine or is written to
+`jev-decisions/`.
+
 ## Sessions are not isolated from each other's agents
 
 Mjolnir does not keep one session's agent away from another session's data.
@@ -134,7 +141,9 @@ tokens for any repository the App can reach.
 Mjolnir does not scope this token to one session. An agent in a bare local
 session already runs with your account's authority: it can read your files,
 your credentials, and Mjolnir's data directory directly, so a narrower API token
-would not contain it. No `/api/v1` route edits Mjolnir's configuration:
+would not contain it. Each worker's control socket follows the same rule: any
+process running as the same user on the worker's machine can connect to it and
+use every method it serves. No `/api/v1` route edits Mjolnir's configuration:
 profiles, targets, and the other settings in `config.toml` change only through
 the dashboard, the cookie-authenticated web viewer settings, or the file
 itself.
