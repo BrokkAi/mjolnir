@@ -80,15 +80,14 @@ impl ScopedAwsCredentials {
         );
     }
 
-    /// How long until the credentials cached for this session and source are
-    /// no longer fresh and are due to be renewed; `None` when none are cached
-    /// (or another caller is minting into the entry), or when they are due
-    /// already: no wait is a reason to retry, not to renew again at once.
-    pub(crate) fn renew_in(
+    /// Read the entry cached for this session and source, when there is one
+    /// and nobody is minting into it.
+    fn peek<T>(
         &self,
         session_id: &str,
         source: &AwsCredentialSource,
-    ) -> Option<Duration> {
+        read: impl FnOnce(&ScopedEntry, SystemTime) -> Option<T>,
+    ) -> Option<T> {
         let role = source.role.as_ref()?;
         let now = (self.now)();
         let cell = Arc::clone(
@@ -102,12 +101,41 @@ impl ScopedAwsCredentials {
                 })?,
         );
         let entry = cell.try_lock().ok()?;
-        entry
-            .as_ref()?
-            .refresh_at()
-            .duration_since(now)
-            .ok()
-            .filter(|wait| !wait.is_zero())
+        read(entry.as_ref()?, now)
+    }
+
+    /// How long until the credentials cached for this session and source are
+    /// no longer fresh and are due to be renewed; `None` when none are cached
+    /// (or another caller is minting into the entry), or when they are due
+    /// already: no wait is a reason to retry, not to renew again at once.
+    pub(crate) fn renew_in(
+        &self,
+        session_id: &str,
+        source: &AwsCredentialSource,
+    ) -> Option<Duration> {
+        self.peek(session_id, source, |entry, now| {
+            entry
+                .refresh_at()
+                .duration_since(now)
+                .ok()
+                .filter(|wait| !wait.is_zero())
+        })
+    }
+
+    /// How long the cached credentials stay valid; `None` when none are cached
+    /// or they have expired.
+    pub(crate) fn remaining_validity(
+        &self,
+        session_id: &str,
+        source: &AwsCredentialSource,
+    ) -> Option<Duration> {
+        self.peek(session_id, source, |entry, now| {
+            entry
+                .expires_at
+                .duration_since(now)
+                .ok()
+                .filter(|left| !left.is_zero())
+        })
     }
 
     /// Drop the credentials cached for this session and source, so the next

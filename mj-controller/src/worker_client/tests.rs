@@ -2997,6 +2997,110 @@ async fn a_stalled_session_does_not_keep_another_session_from_being_renewed_on_a
     std::fs::write(&release, "").unwrap();
 }
 
+// A triggered session's renewal can stall in STS or behind its actor. The
+// trigger's answer waits for it, but the profile's slot does not: the profile's
+// other syncs (login, GitHub token, skills) run meanwhile.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stalled_triggered_renewal_does_not_hold_the_profiles_other_syncs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat-1").unwrap();
+    // An `aws` that does not answer until `release` exists.
+    let cli = granting_aws_cli(scratch.path());
+    let (started, release) = (
+        scratch.path().join("sts-started"),
+        scratch.path().join("sts-release"),
+    );
+    std::fs::write(
+        cli.join("aws"),
+        format!(
+            "#!/bin/sh\n/usr/bin/touch {started}\nwhile [ ! -e {release} ]; do /bin/sleep 0.05; done\nexec /bin/cat {output}\n",
+            started = started.display(),
+            release = release.display(),
+            output = scratch.path().join("granted.json").display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(cli.join("aws"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "stalled", None);
+    let mut coordinator = CredentialSyncCoordinator::spawn();
+    let handle = coordinator.handle();
+    handle.set_targets(vec![target.clone()]);
+    let wait_for = async |what: &str, condition: &(dyn Fn() -> bool + Sync)| {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    };
+    let github = root.join("github");
+    // The profile's first pass ran, and the renewal is stuck in STS.
+    wait_for("the first pass", &|| github.exists()).await;
+    wait_for("the STS call", &|| started.exists()).await;
+
+    // An authentication failure in the session wakes its renewal. The pass
+    // for the trigger pushes the new token and ends; the renewal has not.
+    std::fs::write(&token, "pat-2").unwrap();
+    handle.sync_profile_now(
+        &target.profile_id,
+        Some(mj_core::credentials::CredentialSyncCause {
+            session_id: "stalled".into(),
+            reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+        }),
+    );
+    wait_for("the trigger's pass", &|| {
+        std::fs::read_to_string(&github).is_ok_and(|text| text == "pat-2")
+    })
+    .await;
+
+    // A second sync of the same profile runs while the renewal still waits.
+    std::fs::write(&token, "pat-3").unwrap();
+    handle.sync_profile_now(&target.profile_id, None);
+    wait_for("the second sync", &|| {
+        std::fs::read_to_string(&github).is_ok_and(|text| text == "pat-3")
+    })
+    .await;
+    assert!(!root.join("aws").exists(), "the stalled renewal finished");
+    while let Some(result) = coordinator.try_result() {
+        assert!(
+            result.trigger.is_none(),
+            "the trigger was answered before its renewal ended: {result:?}"
+        );
+    }
+
+    // The renewal ends; the trigger's answer arrives, with the renewal in it.
+    std::fs::write(&release, "").unwrap();
+    let answered = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let result = coordinator.result().await.expect("coordinator stopped");
+            if result.trigger.is_some() {
+                return result;
+            }
+        }
+    })
+    .await
+    .expect("the trigger's answer arrived once the renewal ended");
+    // The stalled cycle installed the credentials and reported that itself;
+    // the woken cycle after it found them current. Both ended without failure.
+    assert!(root.join("aws").exists());
+    assert!(answered.failures().next().is_none(), "{answered:?}");
+    assert!(
+        answered
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.session_id == "stalled"),
+        "{answered:?}"
+    );
+}
+
 // An open AWS failure outlives the task that reported it: the replacement
 // task's first clean cycle is reported too, so the notices end the failure and
 // report a later recurrence.
@@ -3310,7 +3414,7 @@ fn renewal_retries_double_up_to_the_credential_half_life() {
     let limit = crate::aws_assume_role::credential_half_life(&role);
     assert_eq!(limit, Duration::from_secs(1800), "AWS's one-hour default");
     let delays = (0..8)
-        .map(|failures| credential_sync::backoff(minute, failures, limit).as_secs())
+        .map(|failures| credential_sync::retry_delay(minute, failures, limit, None).as_secs())
         .collect::<Vec<_>>();
     assert_eq!(delays, [60, 120, 240, 480, 960, 1800, 1800, 1800]);
     // A configured lifetime sets the limit; a limit under the base is the base.
@@ -3322,9 +3426,52 @@ fn renewal_retries_double_up_to_the_credential_half_life() {
         crate::aws_assume_role::credential_half_life(&short),
         Duration::from_secs(450)
     );
-    assert_eq!(credential_sync::backoff(minute, 5, Duration::ZERO), minute);
+    assert_eq!(
+        credential_sync::retry_delay(minute, 5, Duration::ZERO, None),
+        minute
+    );
+    // While the credentials are valid, the delay never reaches past half of
+    // what they have left. One-hour credentials whose renewals fail from the
+    // half-life on (minutes 30, 31, 33, 37 and 45) would otherwise next be
+    // tried at minute 61, after they expired at 60.
+    let expiry = Duration::from_secs(3600);
+    let mut attempts = vec![Duration::from_secs(30 * 60)];
+    for failures in 0.. {
+        let now = *attempts.last().unwrap();
+        let remaining = expiry.checked_sub(now).filter(|left| !left.is_zero());
+        let next = now + credential_sync::retry_delay(minute, failures, limit, remaining);
+        if next >= expiry {
+            break;
+        }
+        attempts.push(next);
+    }
+    let minutes = attempts
+        .iter()
+        .take(6)
+        .map(|attempt| attempt.as_secs_f64() / 60.0)
+        .collect::<Vec<_>>();
+    assert_eq!(minutes[..5], [30.0, 31.0, 33.0, 37.0, 45.0], "{minutes:?}");
+    // The attempt after minute 45 lands before the credentials expire, and
+    // the attempts keep closing in, a minute apart at the end, until they do.
+    assert!(
+        attempts[5] > attempts[4] && attempts[5] < expiry,
+        "{attempts:?}"
+    );
+    assert!(
+        *attempts.last().unwrap() + minute >= expiry,
+        "attempts stopped well before the expiry: {attempts:?}"
+    );
+    // Once they have expired, the backoff stands.
+    assert_eq!(
+        credential_sync::retry_delay(minute, 5, limit, None),
+        Duration::from_secs(1800)
+    );
+
     // Any number of failures stays within the limit.
-    assert_eq!(credential_sync::backoff(minute, u32::MAX, limit), limit);
+    assert_eq!(
+        credential_sync::retry_delay(minute, u32::MAX, limit, None),
+        limit
+    );
 }
 
 // An authentication failure may mean the session's credentials are no longer

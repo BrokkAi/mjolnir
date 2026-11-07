@@ -261,6 +261,15 @@ impl SessionSteps {
     }
 }
 
+/// What a profile's spawned reconcile tells the coordinator loop, which alone
+/// owns the profile's busy slot.
+enum PassEvent {
+    /// The reconcile ended: the profile can be synced again.
+    Released(String),
+    /// The trigger's answer, once everything it waits for has ended.
+    Finished(CredentialSyncResult),
+}
+
 pub struct CredentialSyncCoordinator {
     pub(super) handle: CredentialSyncHandle,
     pub(super) results: mpsc::UnboundedReceiver<CredentialSyncResult>,
@@ -319,7 +328,7 @@ impl CredentialSyncCoordinator {
         let mut targets_rx = targets_tx.subscribe();
         let handle_targets = targets_tx.clone();
         let (triggers_tx, mut triggers_rx) = mpsc::unbounded_channel::<SyncTrigger>();
-        let (completed_tx, mut completed_rx) = mpsc::unbounded_channel::<CredentialSyncResult>();
+        let (completed_tx, mut completed_rx) = mpsc::unbounded_channel::<PassEvent>();
         let (results_tx, results_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval_at(
@@ -328,7 +337,10 @@ impl CredentialSyncCoordinator {
             );
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // A pull rewrites the canonical file, so one profile is never
-            // reconciled twice at once.
+            // reconciled twice at once. The loop alone inserts and removes:
+            // each insert is matched by one `PassEvent::Released`, sent as soon
+            // as the reconcile has ended (or panicked), and never later than
+            // the trigger's answer, which can wait for a renewal.
             let mut busy = BTreeSet::<String>::new();
             let mut queue = VecDeque::<SyncTrigger>::new();
             // Role-scoped AWS credentials are renewed by a task per session,
@@ -379,20 +391,28 @@ impl CredentialSyncCoordinator {
                         enqueue(&mut queue, trigger);
                     }
                     completed = completed_rx.recv() => {
-                        let Some(result) = completed else { break };
-                        busy.remove(&result.profile_id);
-                        if result.trigger.is_some()
-                            || result.failure.is_some()
-                            || !result.outcomes.is_empty()
-                        {
-                            let profile_id = result.profile_id.clone();
-                            if results_tx.send(result).is_err() {
-                                tracing::debug!(
-                                    %profile_id,
-                                    operation = "credential_sync_result",
-                                    "credential sync result receiver was already closed"
-                                );
+                        let Some(event) = completed else { break };
+                        match event {
+                            // The queued triggers are looked at below, so one
+                            // deferred by this slot starts at once.
+                            PassEvent::Released(profile_id) => {
+                                busy.remove(&profile_id);
                             }
+                            PassEvent::Finished(result)
+                                if result.trigger.is_some()
+                                    || result.failure.is_some()
+                                    || !result.outcomes.is_empty() =>
+                            {
+                                let profile_id = result.profile_id.clone();
+                                if results_tx.send(result).is_err() {
+                                    tracing::debug!(
+                                        %profile_id,
+                                        operation = "credential_sync_result",
+                                        "credential sync result receiver was already closed"
+                                    );
+                                }
+                            }
+                            PassEvent::Finished(_) => {}
                         }
                     }
                 }
@@ -455,7 +475,7 @@ impl CredentialSyncCoordinator {
                     let steps = steps.clone();
                     tokio::spawn(async move {
                         let joined = tokio::spawn(async move {
-                            let mut outcomes = reconcile_profile_guarded(
+                            reconcile_profile_guarded(
                                 &relays,
                                 &targets,
                                 triggered_by.as_deref(),
@@ -464,31 +484,47 @@ impl CredentialSyncCoordinator {
                                 slopcop_login,
                                 &steps,
                             )
-                            .await;
-                            if let Some(report) = aws_report {
-                                // The renewal task answers once its cycle ends;
-                                // none answers when the task was stopped, and
-                                // its replacement reports for itself.
-                                if let Ok(Some(report)) = report.await {
-                                    merge_report(&mut outcomes, report);
-                                }
-                            }
-                            outcomes
+                            .await
                         })
                         .await;
-                        let (failure, outcomes) = match joined {
+                        let profile_id = trigger.profile_id.clone();
+                        // The profile's slot covers the reconcile only. It is
+                        // released here, on every path (a panicked reconcile
+                        // included), before anything waits for a renewal:
+                        // a renewal stalled in STS must not hold up the
+                        // profile's login, token and skills syncs.
+                        if completed_tx
+                            .send(PassEvent::Released(profile_id.clone()))
+                            .is_err()
+                        {
+                            tracing::debug!(
+                                %profile_id,
+                                operation = "credential_sync_completion",
+                                "credential sync coordinator stopped before receiving completion"
+                            );
+                        }
+                        let (failure, mut outcomes) = match joined {
                             Ok(outcomes) => (None, outcomes),
                             Err(error) => (Some(format!("sync task stopped: {error}")), Vec::new()),
                         };
-                        let profile_id = trigger.profile_id.clone();
+                        if let Some(report) = aws_report {
+                            // The trigger's answer includes the renewal's
+                            // outcome, so it is sent when both have ended.
+                            // The renewal task answers once its cycle ends;
+                            // none answers when the task was stopped, and its
+                            // replacement reports for itself.
+                            if let Ok(Some(report)) = report.await {
+                                merge_report(&mut outcomes, report);
+                            }
+                        }
                         if completed_tx
-                            .send(CredentialSyncResult {
+                            .send(PassEvent::Finished(CredentialSyncResult {
                                 profile_id: trigger.profile_id,
                                 trigger: trigger.cause,
                                 failure,
                                 outcomes,
                                 partial: false,
-                            })
+                            }))
                             .is_err()
                         {
                             tracing::debug!(
@@ -1317,7 +1353,15 @@ async fn renew_session_aws(
             failures_in_a_row = 0;
         } else if checked {
             failures_in_a_row = failures_in_a_row.saturating_add(1);
-            delay = backoff(env.retry, failures_in_a_row - 1, retry_limit);
+            delay = retry_delay(
+                env.retry,
+                failures_in_a_row - 1,
+                retry_limit,
+                target.aws_credentials.as_ref().and_then(|source| {
+                    crate::aws_assume_role::ScopedAwsCredentials::shared()
+                        .remaining_validity(&target.session_id, source)
+                }),
+            );
         }
         let mut outcomes = BTreeMap::new();
         merge_aws_cycle(&mut outcomes, &target.session_id, result);
@@ -1373,9 +1417,30 @@ async fn renew_session_aws(
     }
 }
 
+/// How long to wait before the next attempt after the `failures`-th
+/// consecutive failure (counting from zero): the backoff, and while the
+/// current credentials are still valid no more than half the time they have
+/// left (but never less than `base`). Attempts then come closer as the expiry
+/// nears, so the last one lands before it; the limit is the expiry itself.
+/// Once the credentials have expired (`remaining` is `None`) the backoff
+/// stands: an authentication failure, which wakes the renewal, is how a session
+/// that has recovered renews promptly.
+pub(super) fn retry_delay(
+    base: Duration,
+    failures: u32,
+    limit: Duration,
+    remaining: Option<Duration>,
+) -> Duration {
+    let delay = backoff(base, failures, limit);
+    match remaining {
+        Some(remaining) => delay.min((remaining / 2).max(base)),
+        None => delay,
+    }
+}
+
 /// How long to wait after the `failures`-th consecutive failure (counting from
 /// zero): `base` doubled each time, up to `limit`.
-pub(super) fn backoff(base: Duration, failures: u32, limit: Duration) -> Duration {
+fn backoff(base: Duration, failures: u32, limit: Duration) -> Duration {
     base.saturating_mul(2u32.saturating_pow(failures.min(31)))
         .min(limit.max(base))
 }

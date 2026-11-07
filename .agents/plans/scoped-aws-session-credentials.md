@@ -255,6 +255,12 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - Decision (thirteenth review): the refusal when AWS will not let the controller assume the role names only the trust-policy fix (which identity must be allowed `sts:AssumeRole` on which role, and be named in its trust policy). It no longer offers removing `[profiles.<id>.aws]`, which is a configuration edit and widens access; the session stays refused (fail closed). `credentials_for` no longer takes the profile id, which only the old message used.
   Date/Author: 2026-11-07 / Claude, from review.
 
+- Decision (fourteenth review): the profile's busy slot covers the reconcile only. The coordinator loop is the one owner of `busy`; each insert is matched by one `PassEvent::Released`, sent by the spawned task as soon as the reconcile has joined (so on every path, a panicked reconcile included) and before anything waits for a renewal. The trigger's answer is a separate `PassEvent::Finished`, sent when the reconcile and the woken renewal have both ended, with the renewal's outcome merged in. A renewal stalled in STS or queued behind its actor therefore delays only the trigger's answer, never the profile's login, GitHub token or skills syncs.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (fourteenth review): the retry schedule respects the credentials' real expiry. While the current credentials are still valid, the next delay after a failure is `min(backoff, max(sync interval, remaining validity / 2))`, so attempts come closer as the expiry nears and the limit is the expiry itself, not a margin. One-hour credentials failing at minutes 30, 31, 33, 37 and 45 are next tried at minute 52.5, not 61. After expiry the backoff stands: the authentication-failure wake, which resets it, is how a session that has recovered renews promptly. `ScopedAwsCredentials::remaining_validity` reads the cached expiry (the entry is kept until it expires, even after a failed renewal).
+  Date/Author: 2026-11-07 / Claude, from review.
+
 ## Outcomes & Retrospective
 
 Implemented through Milestone 6 on 2026-11-07. A Bedrock profile with `[profiles.<id>.aws] role_arn = ...` now gives each container or SSH session credentials assumed for it alone (role session name `mj-<session id>`), narrowed by a session policy, renewed after half their lifetime through the existing credential sync, with no relay or database change. A refused role fails the launch with AWS's error line and a remedy, or fails the running session's sync outcome while the worker keeps what it has; nothing falls back to the unscoped export. Profiles without a role behave as before, and `mj doctor` warns about them and probes a configured role with a real throwaway AssumeRole. Every EC2 launch (ordinary and Move) requires IMDSv2, verified in the launch response, and doctor warns about a launch template that allows IMDSv1.
@@ -479,3 +485,5 @@ Revision note (2026-11-07, twelfth review): a queued job's hold is released when
 
 
 Revision note (2026-11-07, thirteenth review): IMDSv2 required on every adoption; running jobs observe cancellation and report deferred; failed renewals back off to the credential half-life; the refusal names only the trust-policy fix. Reason: thirteenth review.
+
+Revision note (2026-11-07, fourteenth review): the profile's busy slot is released when the reconcile ends, not when a triggered renewal does; retry delays are capped by half the remaining validity. Reason: fourteenth review.
