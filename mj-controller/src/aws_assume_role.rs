@@ -422,6 +422,22 @@ pub(crate) fn credential_half_life(role: &AwsRoleConfig) -> Duration {
         / 2
 }
 
+/// Role-scoped credentials installed under the profile name the worker's
+/// configuration already has, which can differ from the host profile the mint
+/// ran as. The name is part of the secret, so the scope is signed again.
+pub(crate) fn for_worker_profile(
+    credentials: AwsCredentials,
+    profile: &str,
+) -> Result<AwsCredentials> {
+    if credentials.profile() == profile {
+        return Ok(credentials);
+    }
+    credentials
+        .with_profile(profile)?
+        .sign_scope(sign_scope)
+        .context("could not sign the session's AWS scope record with the controller's signing key")
+}
+
 /// The role session name: it appears in the assumed-role ARN of every
 /// CloudTrail event the session causes. A session id is 32 hex characters, so
 /// this fits STS's 64-character limit.
@@ -591,6 +607,8 @@ mod tests {
         AwsCredentialSource {
             environment: BTreeMap::from([("AWS_PROFILE".into(), "work".into())]),
             role: Some(role),
+            mints: true,
+            selection: None,
         }
     }
 

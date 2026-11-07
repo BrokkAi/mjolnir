@@ -32,7 +32,10 @@ growing pauses within the same five-minute limit it allows a new instance to
 become reachable over SSH. If the change fails, does not apply in that time, or
 the operation is cancelled, the launch fails with the reason and the instance is
 removed. Code in a session on an EC2 machine can therefore read the instance
-profile's credentials only with IMDSv2 tokens. Scope the instance profile's
+profile's credentials only with IMDSv2 tokens, on instances this version of
+Mjolnir launches or adopts. An instance launched before keeps whatever
+`HttpTokens` setting it was created with until it is replaced; Mjolnir does not
+check or change instances it is not adopting. Scope the instance profile's
 role to what sessions need; Mjolnir does not create or limit it.
 
 Mjolnir adds three tags as part of that launch:

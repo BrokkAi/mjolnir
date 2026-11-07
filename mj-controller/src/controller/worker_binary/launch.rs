@@ -61,19 +61,16 @@ impl Controller {
         crate::aws_credentials::source(profile, &backend, &environment)
     }
 
-    /// [`Self::aws_credential_source`] for the credential sync, which does not
-    /// read the harness's configuration for the AWS profile it selects (see
+    /// [`Self::aws_credential_source`] for the credential sync: the same for a
+    /// profile without a role, and for one with a role every session that may
+    /// hold Mjolnir's credentials stays managed (see
     /// [`crate::aws_credentials::sync_source`]).
     pub(crate) fn aws_credential_sync_source(
         &self,
         session_id: &str,
     ) -> Result<Option<mj_core::aws_credentials::AwsCredentialSource>> {
         let (profile, backend, environment) = self.aws_session_inputs(session_id)?;
-        Ok(crate::aws_credentials::sync_source(
-            profile,
-            &backend,
-            &environment,
-        ))
+        crate::aws_credentials::sync_source(profile, &backend, &environment)
     }
 
     /// A notice for the person when the profile's `[profiles.<id>.aws]` role
@@ -255,12 +252,6 @@ impl Controller {
         if let Some(source) = self.aws_credential_source(session_id)? {
             let credentials = crate::aws_assume_role::obtain(session_id, &source, executor)?;
             credentials.install(&profile_stage, Path::new(&target_profile_home))?;
-            // The selection is recorded by the step that stages it, so the
-            // two cannot disagree. A re-stage (resume, Move, repair) is a new
-            // selection and replaces the record. The sync uses this record,
-            // never the session's own AWS configuration, which the session can
-            // edit.
-            crate::database::set_session_aws_profile(session_id, credentials.profile())?;
         }
         stage_claude_keychain_login(
             profile,

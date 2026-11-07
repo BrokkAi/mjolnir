@@ -80,6 +80,26 @@ pub struct AwsCredentialSource {
     /// credentials. Part of the source, and so of the sync target's identity:
     /// a configuration change makes obsolete queued work compare unequal.
     pub role: Option<crate::config::AwsRoleConfig>,
+    /// Whether credentials are minted for the role. A role is configured for
+    /// every session of the profile, but only a session that receives synced
+    /// credentials gets any: for a profile that does not authenticate with the
+    /// AWS credential chain nothing is minted, and credentials a session holds
+    /// from before are still withdrawn.
+    pub mints: bool,
+    /// Where the harness's own configuration may name the AWS profile the
+    /// role-scoped mint runs as (Codex's provider table). Only the pointer is
+    /// part of the source and of the sync target's identity; the file is read
+    /// each time a credential is minted, because an edit to it does not
+    /// rebuild the target.
+    pub selection: Option<AwsProfileSelection>,
+}
+
+/// The configuration file that may select the AWS profile.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AwsProfileSelection {
+    pub home: std::path::PathBuf,
+    /// The Codex profile overlay the profile runs with, if any.
+    pub overlay: Option<String>,
 }
 
 impl std::fmt::Debug for AwsCredentialSource {
@@ -206,6 +226,17 @@ impl AwsCredentials {
     /// in the session's AWS configuration.
     pub fn profile(&self) -> &str {
         &self.profile
+    }
+
+    /// These credentials, installed under another profile name. The name is
+    /// part of the secret, so this is done before the scope is signed.
+    pub fn with_profile(mut self, profile: &str) -> Result<Self> {
+        ensure!(
+            valid_profile_name(profile),
+            "AWS profile name {profile:?} is not valid"
+        );
+        self.profile = profile.to_owned();
+        Ok(self)
     }
 
     /// Attach a scope read from the wire.
@@ -337,6 +368,35 @@ fn remove_if_present(path: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
     }
+}
+
+/// A profile name the controller will install role-scoped credentials under.
+pub fn valid_profile_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+}
+
+/// The AWS profile this session was staged with: the section name in its AWS
+/// configuration. Role-scoped credentials are installed under it, so a renewal
+/// keeps the name the session's environment selects. The session can edit the
+/// file, which is safe here only because what is installed under the name is
+/// role-scoped: a changed name changes where those credentials are written, not
+/// what they allow. `None` when nothing was staged or the name is not valid.
+pub fn staged_profile(home: &Path) -> Result<Option<String>> {
+    let text = match std::fs::read_to_string(home.join(CONFIG_FILE)) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read session AWS configuration"),
+    };
+    Ok(text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("[profile ")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .filter(|name| valid_profile_name(name))
+            .map(str::to_owned)
+    }))
 }
 
 /// The scope Mjolnir recorded for the credentials in `home`, when the record

@@ -3,7 +3,6 @@
 
 mod aws_assume_role;
 mod aws_credentials;
-mod aws_selection;
 mod claude_usage;
 mod codex_usage;
 mod grok_usage;

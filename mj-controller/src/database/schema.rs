@@ -2196,28 +2196,6 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
-    // Compatible: a new table, `session_aws_selections`, that older daemons
-    // never read or write. It holds the AWS profile the controller staged into
-    // a session, which the credential sync uses for the session's life instead
-    // of anything the session can edit. Rows follow their session through the
-    // foreign key, whichever daemon destroys it. A session staged by an older
-    // daemon has no row, and the first sync cycle that can read the profile's
-    // configuration records one. The compatibility floor stays where it is.
-    if version < 117 {
-        connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             CREATE TABLE IF NOT EXISTS session_aws_selections (
-                 session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
-                 aws_profile TEXT NOT NULL CHECK (aws_profile <> ''),
-                 recorded_at_ms INTEGER NOT NULL
-             );
-             INSERT INTO schema_migrations(version, applied_at)
-                 VALUES (117, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-             PRAGMA user_version = 117;
-             COMMIT;",
-        )?;
-    }
-
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

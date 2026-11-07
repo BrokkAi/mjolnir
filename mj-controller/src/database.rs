@@ -31,12 +31,10 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 117;
+const SCHEMA_VERSION: i64 = 116;
 
 mod session_move;
 pub use session_move::*;
-mod session_aws_selection;
-pub(crate) use session_aws_selection::*;
 mod session_restart;
 pub(crate) use session_restart::*;
 mod github_watch;
