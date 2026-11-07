@@ -417,7 +417,7 @@ pub fn parse_github_remote(source: &str, shorthand: Shorthand) -> Option<GithubR
                 } else {
                     GithubSpelling::Http
                 };
-                if !host_name.eq_ignore_ascii_case("github.com") || url.port().is_some() {
+                if !is_github_web_host(&url) {
                     return None;
                 }
                 (spelling, GithubHost::GithubCom, None)
@@ -492,6 +492,22 @@ pub fn parse_github_remote(source: &str, shorthand: Shorthand) -> Option<GithubR
         host,
         port,
     })
+}
+
+/// Whether `url` names GitHub's web host on its default port.
+fn is_github_web_host(url: &Url) -> bool {
+    url.port().is_none()
+        && url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+}
+
+/// Whether `source` is an https URL on GitHub's web host, whatever its path.
+/// Authentication follows the server, so a caller deciding whether to send a
+/// GitHub token must not depend on the path being a repository name
+/// [`parse_github_remote`] accepts, such as one written with percent escapes.
+pub fn is_github_https_url(source: &str) -> bool {
+    Url::parse(source.trim()).is_ok_and(|url| url.scheme() == "https" && is_github_web_host(&url))
 }
 
 /// The owner and repository of a GitHub source, in the case written. Accepts
@@ -611,6 +627,33 @@ mod tests {
         let source = resolve_repository(&repository, &crate::targets::ProcessExecutor).unwrap();
         assert_eq!(source.fetch_url, "https://github.com/BrokkAi/hel.git");
         assert_eq!(source.push_urls, ["https://github.com/BrokkAi/hel.git"]);
+    }
+
+    // Hard-won: a2e8bd8e9: a GitHub token was withheld from a URL whose path the parser rejects.
+    #[test]
+    fn github_https_hosts_are_recognized_whatever_the_path() {
+        for url in [
+            "https://github.com/o/r",
+            "https://github.com/acme/%72epo.git",
+            "https://GITHUB.com/o/r",
+            "https://github.com:443/o/r",
+        ] {
+            assert!(is_github_https_url(url), "{url}");
+        }
+        // The token goes only to GitHub's web host, over https, on its port.
+        for url in [
+            "http://github.com/o/r",
+            "https://github.com:444/o/r",
+            "https://gist.github.com/o/r",
+            "https://github.example.com/o/r",
+            "https://notgithub.com/o/r",
+            "https://github.com.example.com/o/r",
+            "git@github.com:o/r.git",
+            "ssh://git@github.com/o/r.git",
+            "o/r",
+        ] {
+            assert!(!is_github_https_url(url), "{url}");
+        }
     }
 
     #[test]
