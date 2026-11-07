@@ -40,7 +40,39 @@ pub struct WorkObserver {
     /// Epoch milliseconds at which the harness session was last configured, or
     /// 0 while no configured harness exists.
     pub harness_ready_ms: Arc<AtomicI64>,
+    /// The processes this worker has started to collect facts (its Git reads),
+    /// whichever request started them, while they run. Shared by every
+    /// connection's clone of the observer, so a scan for one request never
+    /// reports the subprocess of another as the agent's work.
+    pub children: ObserverChildren,
 }
+
+/// One recorded subprocess of the observer, removed from the registry when it
+/// is dropped (the read ended, or its request went away).
+struct RegisteredChild {
+    children: ObserverChildren,
+    pid: u32,
+}
+
+impl Drop for RegisteredChild {
+    fn drop(&mut self) {
+        // The registry's lock may be held by a scan, and dropping cannot wait.
+        let children = self.children.clone();
+        let pid = self.pid;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                children.0.lock().await.remove(&pid);
+            });
+        }
+    }
+}
+
+/// The registry of the observer's own subprocesses. A scan holds it for the
+/// whole scan and a spawn holds it from before the spawn until the new
+/// process is recorded, so a scan sees every such process that exists, or none
+/// that is not yet recorded.
+#[derive(Clone, Debug, Default)]
+pub struct ObserverChildren(Arc<tokio::sync::Mutex<std::collections::BTreeSet<u32>>>);
 
 /// One process as the platform reader sees it. Cheap fields only; the text of
 /// the command line and the start identity are read for the survivors.
@@ -79,6 +111,9 @@ pub(crate) struct ScanContext<'a> {
     pub harness_age_ms: Option<i64>,
     /// Mjolnir's own executable: its commands are never the agent's work.
     pub own_exe: Option<&'a Path>,
+    /// The observer's own subprocesses; they and their descendants are never
+    /// the agent's work.
+    pub observer_children: &'a std::collections::BTreeSet<u32>,
 }
 
 /// Decide which rows are the agent's work. Pure: the platform readers feed it.
@@ -101,10 +136,20 @@ pub(crate) fn select_processes(
             }
         }
     }
+    // The observer's own subprocesses, with everything they started.
+    let mut own = ctx.observer_children.clone();
+    let mut pending: Vec<u32> = own.iter().copied().collect();
+    while let Some(pid) = pending.pop() {
+        for &child in children.get(&pid).into_iter().flatten() {
+            if own.insert(child) {
+                pending.push(child);
+            }
+        }
+    }
     let mut work = Vec::new();
     let mut unattributed = 0_u32;
     for row in rows {
-        if row.pid == ctx.worker_pid || row.zombie {
+        if row.pid == ctx.worker_pid || row.zombie || own.contains(&row.pid) {
             continue;
         }
         let in_tree = tree.contains(&row.pid);
@@ -185,6 +230,9 @@ mod linux;
 mod macos;
 
 fn scan_processes(observer: &WorkObserver) -> Observed<ProcessFacts> {
+    // Held for the whole scan: a Git read that starts meanwhile waits to be
+    // recorded, and one already running is in the registry.
+    let observer_children = observer.children.0.blocking_lock();
     let own_exe = std::env::current_exe().ok().map(|exe| {
         // A replaced executable reads back with this suffix.
         let text = exe.to_string_lossy();
@@ -210,6 +258,7 @@ fn scan_processes(observer: &WorkObserver) -> Observed<ProcessFacts> {
         // through the present.
         harness_age_ms: (ready_ms > 0).then(|| now_ms.saturating_sub(ready_ms)),
         own_exe: own_exe.as_deref(),
+        observer_children: &observer_children,
     };
     Observed::Known(select_processes(&rows, &ctx, |row| reader.describe(row)))
 }
@@ -232,8 +281,13 @@ impl ProcessReader {
 }
 
 /// What `git status` and `git log` say about `directory`.
-async fn read_worktree(git: &std::ffi::OsStr, directory: &Path) -> Observed<WorktreeFacts> {
+async fn read_worktree(
+    children: &ObserverChildren,
+    git: &std::ffi::OsStr,
+    directory: &Path,
+) -> Observed<WorktreeFacts> {
     let status = match run_git(
+        children,
         git,
         directory,
         &[
@@ -257,6 +311,7 @@ async fn read_worktree(git: &std::ffi::OsStr, directory: &Path) -> Observed<Work
         // A subject that cannot be read leaves the commit id, which is the
         // fact; an empty subject is not an error.
         if let Ok(subject) = run_git(
+            children,
             git,
             directory,
             &["log", "-1", "--format=%s", "--no-show-signature"],
@@ -278,6 +333,7 @@ async fn read_worktree(git: &std::ffi::OsStr, directory: &Path) -> Observed<Work
 /// waits with no deadline and no limit on the output, because neither has a
 /// source: a `git status` takes as long as the tree needs.
 async fn run_git(
+    children: &ObserverChildren,
     git: &std::ffi::OsStr,
     directory: &Path,
     args: &[&str],
@@ -291,13 +347,33 @@ async fn run_git(
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0");
-    let output =
-        match mj_core::subprocess::run_bounded(&mut command, usize::MAX, std::time::Duration::MAX)
-            .await
+    // Recorded as the child starts, under the registry's lock, which a scan
+    // holds for its whole duration: a scan sees a Git read that exists, or the
+    // read waits to be recorded. Removed when the read ends, however it ends,
+    // including when this future is dropped on a disconnect.
+    let gate = children.0.clone().lock_owned().await;
+    let mut registered = None;
+    let output = mj_core::subprocess::run_bounded_observed(
+        &mut command,
+        usize::MAX,
+        std::time::Duration::MAX,
         {
-            Ok(output) => output,
-            Err(error) => return Err(format!("could not run git: {error:#}")),
-        };
+            let registered = &mut registered;
+            let children = children.clone();
+            move |pid| {
+                let mut gate = gate;
+                if let Some(pid) = pid {
+                    gate.insert(pid);
+                    *registered = Some(RegisteredChild { children, pid });
+                }
+            }
+        },
+    )
+    .await;
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => return Err(format!("could not run git: {error:#}")),
+    };
     if output.status.success() {
         return Ok(output.stdout);
     }
@@ -415,7 +491,7 @@ pub async fn collect(observer: &WorkObserver, processes: bool, worktree: bool) -
     let worktree = if worktree {
         // Awaited here, not handed to a blocking thread: the Git child belongs
         // to this future and is killed when it is dropped.
-        read_worktree(&observer.git, &observer.directory).await
+        read_worktree(&observer.children, &observer.git, &observer.directory).await
     } else {
         Observed::unavailable("the working tree was not requested")
     };
@@ -488,17 +564,17 @@ mod tests {
         rows
     }
 
+    static NO_CHILDREN: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+
     fn context(own: &Path) -> ScanContext<'_> {
         ScanContext {
             worker_pid: WORKER,
             harness_age_ms: Some(700_000),
             own_exe: Some(own),
+            observer_children: &NO_CHILDREN,
         }
     }
 
-    // Hard-won: a430ee620: every process running anything under the managed
-    // Node directory was hidden, so an agent's own node, npm and test processes
-    // were reported as no work at all.
     #[test]
     fn processes_exclude_helpers_and_keep_exact_counts_beyond_what_is_shown() {
         let facts = select_processes(&busy_table(), &context(Path::new("/bin/hel")), describe);
@@ -588,7 +664,9 @@ mod tests {
             )
             .unwrap();
         }
-        let Observed::Known(facts) = read_worktree("git".as_ref(), directory).await else {
+        let Observed::Known(facts) =
+            read_worktree(&ObserverChildren::default(), "git".as_ref(), directory).await
+        else {
             panic!("worktree unavailable");
         };
         assert_eq!(facts.changed, 5001);
@@ -605,7 +683,7 @@ mod tests {
     #[tokio::test]
     async fn a_directory_that_is_not_a_repository_is_unavailable_not_clean() {
         let temp = tempfile::tempdir().unwrap();
-        match read_worktree("git".as_ref(), temp.path()).await {
+        match read_worktree(&ObserverChildren::default(), "git".as_ref(), temp.path()).await {
             Observed::Unavailable { reason } => {
                 assert!(reason.contains("not a git repository"), "{reason}")
             }
@@ -626,7 +704,9 @@ mod tests {
         git(directory, &["add", "."]);
         git(directory, &["commit", "-qm", "first"]);
         git(directory, &["mv", "old name.txt", "new name.txt"]);
-        let Observed::Known(facts) = read_worktree("git".as_ref(), directory).await else {
+        let Observed::Known(facts) =
+            read_worktree(&ObserverChildren::default(), "git".as_ref(), directory).await
+        else {
             panic!("worktree unavailable");
         };
         assert_eq!(facts.changed, 1);
@@ -653,6 +733,7 @@ mod tests {
             directory: std::env::temp_dir(),
             git: "git".into(),
             harness_ready_ms: Arc::new(AtomicI64::new(0)),
+            children: ObserverChildren::default(),
         };
         let mut found = None;
         for _ in 0..100 {
@@ -674,8 +755,6 @@ mod tests {
         assert_eq!(process.command, "sleep 61");
         assert_eq!(facts.identities[0].start, identity);
     }
-    // Hard-won: a430ee620: the working-tree read ran beside the process scan, so
-    // the observer's own `git` could be reported as the agent's work.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_observers_own_git_is_not_reported_as_the_agents_work() {
@@ -693,6 +772,7 @@ mod tests {
             directory: temp.path().to_path_buf(),
             git: slow_git.clone().into(),
             harness_ready_ms: Arc::new(AtomicI64::new(mj_core::clock::epoch_millis() - 1)),
+            children: ObserverChildren::default(),
         };
         let facts = collect(&observer, true, true).await;
         let Observed::Known(processes) = &facts.processes else {
@@ -717,6 +797,7 @@ mod tests {
             directory: temp.path().to_path_buf(),
             git: "/nonexistent/git-must-not-run".into(),
             harness_ready_ms: Arc::new(AtomicI64::new(0)),
+            children: ObserverChildren::default(),
         };
         let facts = collect(&observer, false, false).await;
         assert!(matches!(
@@ -724,9 +805,6 @@ mod tests {
             Observed::Unavailable { reason } if reason.contains("not requested")
         ));
     }
-    // Hard-won: a195a62bc: `status.showUntrackedFiles=no` in a repository's
-    // configuration made a tree with new files read as clean, and untracked
-    // directories were reported as one path.
     #[tokio::test]
     async fn untracked_directories_are_expanded_whatever_the_repository_configures() {
         let temp = tempfile::tempdir().unwrap();
@@ -736,7 +814,9 @@ mod tests {
         std::fs::create_dir(directory.join("newdir")).unwrap();
         std::fs::write(directory.join("newdir/a.txt"), "a\n").unwrap();
         std::fs::write(directory.join("newdir/b.txt"), "b\n").unwrap();
-        let Observed::Known(facts) = read_worktree("git".as_ref(), directory).await else {
+        let Observed::Known(facts) =
+            read_worktree(&ObserverChildren::default(), "git".as_ref(), directory).await
+        else {
             panic!("worktree unavailable");
         };
         assert_eq!((facts.changed, facts.untracked), (2, 2));
@@ -744,9 +824,6 @@ mod tests {
         assert_eq!(paths, ["newdir/a.txt", "newdir/b.txt"]);
     }
 
-    // Hard-won: a195a62bc: an unreadable environment counted as "no session
-    // marker", so live work whose environment could not be read was left out
-    // with no sign that it had been.
     #[test]
     fn a_process_whose_environment_cannot_be_read_is_counted_not_omitted() {
         let mut rows = busy_table();
@@ -794,9 +871,6 @@ mod tests {
         assert_eq!(seen, Marker::Unreadable);
         assert_eq!(own, Marker::Absent);
     }
-    // Hard-won: 49a8da78c: changed paths went through the command redactor, so a
-    // file named with 24 or more token characters was stored as `[redacted]`,
-    // and long ones were cut and had their whitespace collapsed at storage.
     #[tokio::test]
     async fn a_real_long_path_is_stored_exactly_as_git_reported_it() {
         let temp = tempfile::tempdir().unwrap();
@@ -808,10 +882,61 @@ mod tests {
         std::fs::create_dir_all(directory.join("docs")).unwrap();
         std::fs::write(directory.join(long), "").unwrap();
         std::fs::write(directory.join(spaced), "").unwrap();
-        let Observed::Known(facts) = read_worktree("git".as_ref(), directory).await else {
+        let Observed::Known(facts) =
+            read_worktree(&ObserverChildren::default(), "git".as_ref(), directory).await
+        else {
             panic!("worktree unavailable");
         };
         let paths: Vec<_> = facts.shown.iter().map(|path| path.path.as_str()).collect();
         assert_eq!(paths, [spaced, long]);
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scan_during_another_requests_git_read_does_not_report_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("git.pid");
+        let slow_git = temp.path().join("fake-git-in-flight");
+        std::fs::write(
+            &slow_git,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nsleep 31 &\nwait\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&slow_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let observer = WorkObserver {
+            session_id: format!("in-flight-{}", std::process::id()),
+            worker_pid: std::process::id(),
+            directory: temp.path().to_path_buf(),
+            git: slow_git.into(),
+            harness_ready_ms: Arc::new(AtomicI64::new(mj_core::clock::epoch_millis() - 1)),
+            children: ObserverChildren::default(),
+        };
+        let reading = tokio::spawn({
+            let observer = observer.clone();
+            async move { collect(&observer, false, true).await }
+        });
+        while !std::fs::read_to_string(&pid_file)
+            .is_ok_and(|text| text.trim().parse::<u32>().is_ok())
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // The park's request: processes only, while the tree read runs.
+        let facts = collect(&observer, true, false).await;
+        let Observed::Known(processes) = &facts.processes else {
+            panic!("{:?}", facts.processes);
+        };
+        let reported: Vec<_> = processes
+            .shown
+            .iter()
+            .filter(|process| {
+                process.command.contains("fake-git-in-flight")
+                    || process.command.contains("sleep 31")
+            })
+            .collect();
+        reading.abort();
+        assert!(reported.is_empty(), "{reported:?}");
     }
 }

@@ -210,6 +210,19 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
   Date/Author: 2026-11-07 / implementing agent, from review.
 
 
+- Decision (fourth review, 2026-11-07): The park and the tree read are coordinated by the one task that owns both. While a child's own working-tree read is in flight, its completion reports and then returns `RetryPark` (the existing backoff, no new timeout) instead of parking; the tree task's completion clears the child's retry so the park goes ahead at once. This delays only that child's park and slot, and does not change what the agent's processes get: a park is as before once the read is stored. The earlier behavior, stopping the worker that ran the read, ended with the tree unavailable exactly for slow repositories.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (fourth review): The worker keeps one registry of the processes it starts for fact collection (`ObserverChildren`, shared by every connection's observer), recorded as each Git child spawns (`run_bounded_observed` reports the PID) and removed when the read ends or its future is dropped. A scan holds the registry for its whole duration and a spawn holds it from before the spawn until the child is recorded, so a scan sees every such process that exists, and excludes them and their descendants whichever request is running. This supersedes the ordering rule that read processes before Git within one request, which separate overlapping requests defeated.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (fourth review): A report sent with the working tree pending is followed by the tree in a dedicated message (`MailboxEventBody::SubagentWorkingTree`, wake false), one per finish, decided in the transaction that stores the tree. `subagent_work_facts.tree_owed` is set in the transaction that enqueues the report; the tree's arrival, a tree that arrived before the enqueue, or a newer finish superseding an unread tree (stored as unavailable, "the child began new work before the tree was read") each send it and clear the mark, keyed by parent, child and finish so retries cannot duplicate it. It is a separate message rather than part of the park follow-up because the park may be held, may have no process news, or may never come for a child given new work; the same message covers every case. The finish report's pending line now says a later message gives the tree. A tree task that fails or panics stores the tree as unavailable with the reason and logs at warn.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (2026-11-07, from the parent): Review-round tests that cited local merge SHAs in `// Hard-won:` markers lose those markers (the tests stay): the SHAs will not exist on master, and the tests accompany an unlanded feature, which `AGENTS.md` does not mark. None are added for this round.
+  Date/Author: 2026-11-07 / implementing agent, from the parent's direction.
+
+
 ## Outcomes & Retrospective
 
 Review round (2026-11-07): see the Decision Log entries marked "review fix". After them, live Claude runs 5 and 6 of `tests/e2e/handback_facts.py` passed, clippy was clean, and the isolated upgrade regressions in `mj-cli/tests/daemon_startup.rs` passed (21 of 21).

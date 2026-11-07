@@ -7946,10 +7946,6 @@ fn settled_harness_turn_admits_only_its_current_reminder() {
     );
 }
 
-// Hard-won: a195a62bc: readiness was stored as a flag and, beside it, as the
-// instant the work-facts scan reads. Tests (and any future writer) that set one
-// left the other at 0, which the scan reads as "no harness" and so hid the
-// agent's processes. The instant is the only owner; the flag is derived.
 #[test]
 fn readiness_and_the_instant_the_scan_reads_cannot_disagree() {
     let temp = tempfile::tempdir().unwrap();

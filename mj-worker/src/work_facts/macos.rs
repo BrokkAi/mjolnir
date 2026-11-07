@@ -141,9 +141,6 @@ pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReade
 mod tests {
     use super::*;
 
-    // Hard-won: 49a8da78c: the macOS reader never reported an unreadable
-    // environment, so a same-user process `ps -E` could not show was taken for
-    // another session's and left out.
     #[test]
     fn a_same_user_process_whose_environment_ps_cannot_show_is_unreadable() {
         let wanted = "MJ_SESSION_ID=abc";

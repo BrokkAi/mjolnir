@@ -331,9 +331,6 @@ mod tests {
     use crate::controller::test_support::{IsolatedTest, test_name};
     use mj_core::work_facts::{Observed, ParkFacts, ProcessFacts, ProcessIdentity, RunningProcess};
 
-    // Hard-won: 49a8da78c: startup captured the pending park before the child's
-    // lifecycle was acquired; a child unparked, finished again and parked again
-    // meanwhile had its newer outcome overwritten from the stale snapshot.
     #[tokio::test]
     async fn settling_reads_the_pending_park_inside_the_lifecycle_not_at_startup() {
         const CHILD: &str = "MJ_TEST_SETTLE_RELOAD";

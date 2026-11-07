@@ -438,22 +438,25 @@ impl WorkFacts {
             Observed::Pending => lines
                 .push("Running processes started by the child's agent: still being read".into()),
         }
-        match &self.worktree {
-            Observed::Known(tree) => lines.extend(render_worktree(tree)),
-            Observed::Unavailable { reason } => {
-                lines.push(format!("Working tree: unavailable ({reason})"));
-            }
-            Observed::Pending => lines.push(
-                "Working tree: still being read when this was written; list_agents shows it once it arrives"
-                    .into(),
-            ),
-        }
+        lines.extend(render_worktree_part(&self.worktree));
         lines
     }
 
     /// Number of running processes, when they were observed.
     pub fn running_processes(&self) -> Option<u32> {
         self.processes.known().map(|processes| processes.running)
+    }
+}
+
+/// The working-tree lines of a report, or the reason they are missing.
+pub fn render_worktree_part(worktree: &Observed<WorktreeFacts>) -> Vec<String> {
+    match worktree {
+        Observed::Known(tree) => render_worktree(tree),
+        Observed::Unavailable { reason } => vec![format!("Working tree: unavailable ({reason})")],
+        Observed::Pending => vec![
+            "Working tree: still being read when this was written; a later message from Mjolnir gives it, and list_agents shows it"
+                .into(),
+        ],
     }
 }
 
@@ -573,8 +576,6 @@ fn render_worktree(tree: &WorktreeFacts) -> Vec<String> {
 mod tests {
     use super::*;
 
-    // Hard-won: a195a62bc: a process that was gone after the park was reported
-    // as stopped by it, though it may have exited on its own before the check.
     #[test]
     fn a_process_that_is_gone_is_never_said_to_have_been_stopped_by_the_park() {
         let process = |pid: u32| RunningProcess {

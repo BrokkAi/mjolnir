@@ -470,6 +470,7 @@ fn downgrade_review_or_report(event: &mut mj_core::mailbox::MailboxEvent, protoc
         event.body,
         mj_core::mailbox::MailboxEventBody::SubagentFinished { .. }
             | mj_core::mailbox::MailboxEventBody::SubagentParked { .. }
+            | mj_core::mailbox::MailboxEventBody::SubagentWorkingTree { .. }
             | mj_core::mailbox::MailboxEventBody::ReviewVerdict { .. }
     ) && protocol < event.body.minimum_relay_protocol()
     {
@@ -699,6 +700,38 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("parked child task Run suites")
+        );
+        let mut current = event.clone();
+        super::downgrade_review_or_report(&mut current, mj_core::relay::RELAY_WORK_FACTS_PROTOCOL);
+        assert_eq!(current, event);
+    }
+
+    #[test]
+    fn a_working_tree_follow_up_reaches_older_workers_as_text() {
+        let event = mj_core::mailbox::MailboxEvent {
+            key: "tree-1".into(),
+            source: "mjolnir".into(),
+            wake: false,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::SubagentWorkingTree {
+                child_session_id: "child-1".into(),
+                task_name: "Run suites".into(),
+                child_name: None,
+                worktree: Box::new(mj_core::work_facts::Observed::unavailable("no repository")),
+            },
+        };
+        let mut older = event.clone();
+        super::downgrade_review_or_report(
+            &mut older,
+            mj_core::relay::RELAY_WORK_FACTS_PROTOCOL - 1,
+        );
+        let wire = serde_json::to_value(&older).unwrap();
+        assert_eq!(wire["body"]["type"], "plain_text");
+        assert!(
+            wire["body"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Working tree: unavailable (no repository)")
         );
         let mut current = event.clone();
         super::downgrade_review_or_report(&mut current, mj_core::relay::RELAY_WORK_FACTS_PROTOCOL);

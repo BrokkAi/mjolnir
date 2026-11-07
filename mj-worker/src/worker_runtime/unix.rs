@@ -853,6 +853,7 @@ pub async fn run_daemon_owned(
         directory: config.cwd.clone(),
         git: "git".into(),
         harness_ready_ms: durable_relay.harness_ready_clock(),
+        children: Default::default(),
     };
     let relay = Arc::new(Mutex::new(durable_relay));
     // Client tasks are detached, so a durable failure they cannot recover

@@ -67,6 +67,38 @@ fn completion_steps(
     steps
 }
 
+/// What becomes of a child's working-tree read when its task ends. One that
+/// failed or stopped (a panic included) must not leave the tree pending for
+/// ever: it is stored as unavailable, with why, and the parent is told by the
+/// follow-up that stores owe.
+async fn settle_tree_read(child: &str, ordinal: u64, result: Result<()>) {
+    let Err(error) = result else {
+        return;
+    };
+    let reason = format!("the working-tree read stopped: {error:#}");
+    tracing::warn!(child_session_id = %child, error = %reason, "could not record a finished child's working tree");
+    let stored = tokio::task::spawn_blocking({
+        let child = child.to_owned();
+        move || {
+            crate::database::record_finish_worktree(
+                child,
+                ordinal,
+                mj_core::work_facts::Observed::unavailable(reason),
+            )
+        }
+    })
+    .await;
+    match stored {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(child_session_id = %child, error = format!("{error:#}"), "could not store the unavailable working tree of a finished child");
+        }
+        Err(error) => {
+            tracing::warn!(child_session_id = %child, %error, "storing the unavailable working tree of a finished child stopped");
+        }
+    }
+}
+
 /// When one child outcome's completion may run again, and how it has been
 /// going. Settling the child forgets it; a later outcome starts afresh.
 struct CompletionRetry {
@@ -166,6 +198,7 @@ async fn run(
     // The working tree, which has no fixed duration, is read after the report
     // can be built, by another task of the same child, and nothing waits for it.
     let mut tree_tasks = tokio::task::JoinSet::new();
+    let mut tree_ids = BTreeMap::<tokio::task::Id, (String, u64)>::new();
     let mut noticed = BTreeMap::<String, u64>::new();
     let mut retry = BTreeMap::<String, CompletionRetry>::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -265,11 +298,18 @@ async fn run(
                         let Some(observation) = observations.get(&child).cloned() else {
                             continue;
                         };
+                        // The park stops the worker that owns an in-flight Git
+                        // read of this child's tree. It waits for the read to be
+                        // stored (the completion returns RetryPark), so a slow
+                        // repository still ends with its tree; no other child's
+                        // completion or slot is involved.
+                        let hold_park = tree_ids.values().any(|(id, _)| id == &child);
                         let child_id = child.clone();
                         let backend = backend.clone();
                         let state = state.clone();
                         let task = completions.spawn(async move {
-                            complete_child(state, backend, child_id, observation, work).await
+                            complete_child(state, backend, child_id, observation, work, hold_park)
+                                .await
                         });
                         completion_ids.insert(task.id(), (child, ordinal));
                     }
@@ -336,11 +376,10 @@ async fn run(
                         Ok(()) => {
                             let state = state.clone();
                             let child_id = id.clone();
-                            tree_tasks.spawn(async move {
-                                if let Err(error) = state.collect_finish_worktree(&child_id, ordinal).await {
-                                    tracing::warn!(child_session_id = %child_id, error = format!("{error:#}"), "could not record a finished child's working tree");
-                                }
+                            let task = tree_tasks.spawn(async move {
+                                state.collect_finish_worktree(&child_id, ordinal).await
                             });
+                            tree_ids.insert(task.id(), (id.clone(), ordinal));
                             facts_done.insert(id, ordinal);
                         }
                         Err(error) => {
@@ -354,7 +393,19 @@ async fn run(
                     }
                 }
             }
-            _ = tree_tasks.join_next(), if !tree_tasks.is_empty() => {}
+            completed = tree_tasks.join_next_with_id(), if !tree_tasks.is_empty() => {
+                let Some(completed) = completed else { continue };
+                let (task_id, result) = match completed {
+                    Ok((id, result)) => (id, result),
+                    Err(error) => (error.id(), Err(anyhow::Error::from(error))),
+                };
+                if let Some((id, ordinal)) = tree_ids.remove(&task_id) {
+                    settle_tree_read(&id, ordinal, result).await;
+                    // The read is over: this child's park, held while it ran,
+                    // may go ahead without waiting out its backoff.
+                    retry.remove(&id);
+                }
+            }
             completed = completions.join_next_with_id(), if !completions.is_empty() => {
                 let Some(completed) = completed else { continue };
                 let (task_id, result) = match completed {
@@ -419,6 +470,7 @@ async fn complete_child(
     child_id: String,
     observation: DelegationObservation,
     work: crate::upgrade::Work,
+    hold_park: bool,
 ) -> Result<ChildCompletion> {
     let id = child_id.clone();
     let relation =
@@ -476,6 +528,11 @@ async fn complete_child(
     state
         .reconcile_parent_reports(&relation.parent_session_id)
         .await?;
+    // The report is out; the park waits while this child's own working-tree
+    // read is in flight, because the park stops the worker that runs it.
+    if hold_park {
+        return Ok(ChildCompletion::RetryPark);
+    }
     match backend.park_subagent(&child_id).await? {
         crate::controller::ParkOutcome::Busy => Ok(ChildCompletion::RetryPark),
         crate::controller::ParkOutcome::Parked | crate::controller::ParkOutcome::NotRunning => {
@@ -565,9 +622,154 @@ mod tests {
         }
     }
 
-    // Hard-won: a195a62bc: a child's wait on its worker for its facts occupied
-    // one of the 32 completion slots, so 32 children inside idle checkpoints
-    // blocked every other completion, reviewers and oracles included.
+    #[tokio::test]
+    async fn a_park_waits_for_its_own_childs_tree_read_while_other_completions_proceed() {
+        const CHILD: &str = "MJ_TEST_DELEGATION_PARK_HOLD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "a_park_waits_for_its_own_childs_tree_read_while_other_completions_proceed",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "delegation-park-hold")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("park hold").unwrap();
+        let parent = crate::daemon::tests::runtime_test_session(
+            "parent",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        crate::database::save_session(&parent).unwrap();
+        for child in ["slow", "quick"] {
+            let record = crate::daemon::tests::runtime_test_session(
+                child,
+                &workspace.id,
+                mj_core::state::SessionState::Running,
+            );
+            crate::database::save_subagent_session(
+                &record,
+                &crate::daemon::tests::runtime_test_subagent(child, "parent"),
+            )
+            .unwrap();
+        }
+        let state = crate::daemon::tests::test_runtime_state();
+        let parks = Arc::new(BusyThenParked(AtomicUsize::new(1)));
+        let backend = Arc::new(ApiBackend::new(
+            state.session_manager.client(),
+            Arc::new(|_| None),
+            parks.clone(),
+        ));
+        state.install_report_backend(&backend);
+        let observation = DelegationObservation {
+            requests: Vec::new(),
+            completed: Vec::new(),
+            in_flight: Vec::new(),
+            credential_signal: None,
+            outcome: Some(mj_core::state::MaterializedTurnOutcome {
+                answered_through: None,
+                diagnostic: None,
+                usage: None,
+                command_id: "turn".into(),
+                accepted_ordinal: Some(1),
+                turn_start_position: None,
+                completed_ordinal: 10,
+                completed_at_ms: 1,
+                outcome: mj_core::state::TurnOutcomeKind::Completed {
+                    stop_reason: "end_turn".into(),
+                },
+            }),
+        };
+        let complete = |child: &'static str, hold: bool| {
+            complete_child(
+                state.clone(),
+                backend.clone(),
+                child.into(),
+                observation.clone(),
+                crate::upgrade::activity_unless_draining("test completion").unwrap(),
+                hold,
+            )
+        };
+        // The slow child's tree read is in flight: it is not parked, and is told
+        // to retry; the quick child, whose read is done, is parked meanwhile.
+        assert!(matches!(
+            complete("slow", true).await.unwrap(),
+            ChildCompletion::RetryPark
+        ));
+        assert_eq!(
+            parks.0.load(Ordering::SeqCst),
+            1,
+            "a held child must not be parked"
+        );
+        assert!(matches!(
+            complete("quick", false).await.unwrap(),
+            ChildCompletion::Settled
+        ));
+        assert_eq!(parks.0.load(Ordering::SeqCst), 2);
+        // Once its read is stored, the slow child parks.
+        assert!(matches!(
+            complete("slow", false).await.unwrap(),
+            ChildCompletion::Settled
+        ));
+        assert_eq!(parks.0.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_tree_task_that_panics_stores_the_tree_as_unavailable() {
+        const CHILD: &str = "MJ_TEST_DELEGATION_TREE_PANIC";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "a_tree_task_that_panics_stores_the_tree_as_unavailable",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "delegation-tree-panic")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("tree panic").unwrap();
+        let parent = crate::daemon::tests::runtime_test_session(
+            "parent",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        let child = crate::daemon::tests::runtime_test_session(
+            "child",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        crate::database::save_session(&parent).unwrap();
+        crate::database::save_subagent_session(
+            &child,
+            &crate::daemon::tests::runtime_test_subagent("child", "parent"),
+        )
+        .unwrap();
+        let mut facts = mj_core::work_facts::WorkFacts::unavailable("not needed");
+        facts.worktree = mj_core::work_facts::Observed::Pending;
+        crate::database::record_finish_facts("child".into(), 10, facts).unwrap();
+        // The task panics, as the loop's JoinSet reports it.
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async { panic!("the read blew up") });
+        let (_, result) = match tasks.join_next_with_id().await.unwrap() {
+            Ok((id, ())) => (id, Ok(())),
+            Err(error) => (error.id(), Err(anyhow::Error::from(error))),
+        };
+        settle_tree_read("child", 10, result).await;
+        let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
+        assert!(matches!(
+            &recorded["child"].finish.as_ref().unwrap().worktree,
+            mj_core::work_facts::Observed::Unavailable { reason }
+                if reason.contains("the working-tree read stopped")
+        ));
+    }
+
     #[test]
     fn children_waiting_for_their_facts_never_occupy_the_completion_pool() {
         let finished = (0..100)
@@ -670,7 +872,8 @@ mod tests {
                 backend.clone(),
                 "child".into(),
                 observation.clone(),
-                crate::upgrade::activity_unless_draining("test completion").unwrap()
+                crate::upgrade::activity_unless_draining("test completion").unwrap(),
+                false
             )
             .await
             .unwrap(),
@@ -682,7 +885,8 @@ mod tests {
                 backend,
                 "child".into(),
                 observation,
-                crate::upgrade::activity_unless_draining("test completion").unwrap()
+                crate::upgrade::activity_unless_draining("test completion").unwrap(),
+                false
             )
             .await
             .unwrap(),

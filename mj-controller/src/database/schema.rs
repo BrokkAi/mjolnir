@@ -2208,6 +2208,9 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              CREATE TABLE IF NOT EXISTS subagent_work_facts (
                  child_session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
                  finish_ordinal INTEGER,
+                 -- A report went out with the working tree still being read: its
+                 -- follow-up is owed once the tree is stored.
+                 tree_owed INTEGER NOT NULL DEFAULT 0 CHECK(tree_owed IN (0, 1)),
                  finish_json TEXT CHECK(finish_json IS NULL OR json_valid(finish_json)),
                  park_json TEXT CHECK(park_json IS NULL OR json_valid(park_json))
              ) STRICT;
@@ -4226,9 +4229,6 @@ mod reader_tests {
         assert_eq!(state.minimum_compatible, Some(SCHEMA_VERSION));
     }
 
-    // Hard-won: a430ee620: revision 117 was classified compatible, but it lets a
-    // `subagent_parked` mailbox event into the outbox, which a revision-116
-    // daemon cannot deserialize and so silently skips.
     #[test]
     fn work_facts_migration_raises_the_floor_and_its_table_follows_its_session() {
         let directory = tempfile::tempdir().unwrap();

@@ -170,7 +170,7 @@ pub(crate) fn enqueue_subagent_reports(
         let transaction = connection.transaction()?;
         let mut inserted = false;
         for (identity, report) in reports {
-            let child_id = &report.child_session_id;
+            let child_id = &report.child_session_id.clone();
             let stored: String = transaction.query_row(
                 "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1 AND parent_session_id=?2",
                 params![child_id, parent], |row| row.get(0),
@@ -194,6 +194,9 @@ pub(crate) fn enqueue_subagent_reports(
             if already_enqueued {
                 continue;
             }
+            let tree_pending = report.facts.as_ref().is_some_and(|facts| {
+                matches!(facts.worktree, mj_core::work_facts::Observed::Pending)
+            });
             let event = mj_core::mailbox::MailboxEvent {
                 key: key.clone(),
                 source: "mjolnir".into(),
@@ -212,6 +215,22 @@ pub(crate) fn enqueue_subagent_reports(
                 false,
             )?;
             inserted = true;
+            // A report that went out with the working tree still being read owes
+            // its parent that tree. The mark is written with the report, in this
+            // transaction; if the tree was stored between the report's building
+            // and now, the follow-up is due at once.
+            if tree_pending
+                && let mj_core::subagent::SubagentFinishIdentity::Turn {
+                    completed_ordinal, ..
+                } = &identity
+            {
+                transaction.execute(
+                    "UPDATE subagent_work_facts SET tree_owed=1
+                     WHERE child_session_id=?1 AND finish_ordinal=?2",
+                    params![child_id, completed_ordinal],
+                )?;
+                deliver_owed_tree(&transaction, child_id)?;
+            }
             relation.reported_finish = Some(identity);
             transaction.execute(
                 "UPDATE subagent_sessions SET record_json=?2 WHERE child_session_id=?1",
@@ -282,19 +301,146 @@ pub(crate) fn record_finish_facts(
     ordinal: u64,
     facts: mj_core::work_facts::WorkFacts,
 ) -> Result<()> {
-    submit_database_write("record finish facts", move |connection| {
-        connection.execute(
+    let enqueued = submit_database_write("record finish facts", move |connection| {
+        let transaction = connection.transaction()?;
+        // A finish whose report owed its parent a working tree that was never
+        // read is superseded by this one: the parent is told so, once, instead
+        // of waiting for a tree that will not come.
+        let owed = supersede_owed_tree(&transaction, &child, ordinal)?;
+        transaction.execute(
             "INSERT INTO subagent_work_facts(child_session_id, finish_ordinal, finish_json, park_json)
              VALUES (?1, ?2, ?3, NULL)
              ON CONFLICT(child_session_id) DO UPDATE SET
                  park_json = CASE WHEN finish_ordinal IS excluded.finish_ordinal
                                   THEN park_json ELSE NULL END,
+                 tree_owed = CASE WHEN finish_ordinal IS excluded.finish_ordinal
+                                  THEN tree_owed ELSE 0 END,
                  finish_ordinal = excluded.finish_ordinal,
                  finish_json = excluded.finish_json",
             params![child, ordinal, serde_json::to_string(&facts)?],
         )?;
-        Ok(())
-    })
+        transaction.commit()?;
+        Ok(owed)
+    })?;
+    if enqueued {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(())
+}
+
+/// Enqueue the follow-up of an earlier finish's pending working tree as
+/// unavailable, when `ordinal` is a different finish of the same child.
+fn supersede_owed_tree(
+    transaction: &rusqlite::Transaction<'_>,
+    child: &str,
+    ordinal: u64,
+) -> Result<bool> {
+    let row: Option<(Option<u64>, bool, Option<String>)> = transaction
+        .query_row(
+            "SELECT finish_ordinal, tree_owed, finish_json FROM subagent_work_facts
+             WHERE child_session_id=?1",
+            [child],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((Some(old), true, Some(json))) = row else {
+        return Ok(false);
+    };
+    if old == ordinal {
+        return Ok(false);
+    }
+    let facts: mj_core::work_facts::WorkFacts = serde_json::from_str(&json)?;
+    if !matches!(facts.worktree, mj_core::work_facts::Observed::Pending) {
+        return deliver_owed_tree(transaction, child);
+    }
+    enqueue_worktree_followup(
+        transaction,
+        child,
+        old,
+        mj_core::work_facts::Observed::unavailable(
+            "the child began new work before the tree was read",
+        ),
+    )
+}
+
+/// Send the follow-up a report owes for its working tree, now that the tree is
+/// stored, and clear the mark: one follow-up per finish, in the transaction
+/// that decides it. Nothing happens while the tree is still pending or when
+/// nothing is owed.
+fn deliver_owed_tree(transaction: &rusqlite::Transaction<'_>, child: &str) -> Result<bool> {
+    let row: Option<(Option<u64>, bool, Option<String>)> = transaction
+        .query_row(
+            "SELECT finish_ordinal, tree_owed, finish_json FROM subagent_work_facts
+             WHERE child_session_id=?1",
+            [child],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((Some(ordinal), true, Some(json))) = row else {
+        return Ok(false);
+    };
+    let facts: mj_core::work_facts::WorkFacts = serde_json::from_str(&json)?;
+    if matches!(facts.worktree, mj_core::work_facts::Observed::Pending) {
+        return Ok(false);
+    }
+    let enqueued = enqueue_worktree_followup(transaction, child, ordinal, facts.worktree)?;
+    transaction.execute(
+        "UPDATE subagent_work_facts SET tree_owed=0 WHERE child_session_id=?1",
+        [child],
+    )?;
+    Ok(enqueued)
+}
+
+fn enqueue_worktree_followup(
+    transaction: &rusqlite::Transaction<'_>,
+    child: &str,
+    ordinal: u64,
+    worktree: mj_core::work_facts::Observed<mj_core::work_facts::WorktreeFacts>,
+) -> Result<bool> {
+    use sha2::{Digest, Sha256};
+    let stored: String = transaction.query_row(
+        "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+        [child],
+        |row| row.get(0),
+    )?;
+    let relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&stored)?;
+    let key = format!(
+        "subagent-working-tree-{}",
+        mj_core::hex::lower_hex(Sha256::digest(serde_json::to_vec(&(
+            &relation.parent_session_id,
+            child,
+            ordinal,
+        ))?))
+    );
+    let already: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
+        [&key],
+        |row| row.get(0),
+    )?;
+    if already {
+        return Ok(false);
+    }
+    let event = mj_core::mailbox::MailboxEvent {
+        key: key.clone(),
+        source: "mjolnir".into(),
+        wake: false,
+        created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
+        body: mj_core::mailbox::MailboxEventBody::SubagentWorkingTree {
+            child_session_id: child.to_owned(),
+            task_name: relation.task_name.clone(),
+            child_name: None,
+            worktree: Box::new(worktree),
+        },
+    };
+    super::mailbox::enqueue_mailbox_event_with(
+        transaction,
+        &key,
+        &relation.parent_session_id,
+        &serde_json::to_string(&event)?,
+        false,
+        false,
+    )?;
+    Ok(true)
 }
 
 /// Record the working-tree part of the facts of the finish that completed turn
@@ -307,7 +453,7 @@ pub(crate) fn record_finish_worktree(
     ordinal: u64,
     worktree: mj_core::work_facts::Observed<mj_core::work_facts::WorktreeFacts>,
 ) -> Result<()> {
-    submit_database_write("record finish working tree", move |connection| {
+    let enqueued = submit_database_write("record finish working tree", move |connection| {
         let transaction = connection.transaction()?;
         let row: Option<(Option<u64>, Option<String>)> = transaction
             .query_row(
@@ -317,23 +463,29 @@ pub(crate) fn record_finish_worktree(
             )
             .optional()?;
         let Some((Some(stored), Some(json))) = row else {
-            return Ok(());
+            return Ok(false);
         };
         if stored != ordinal {
-            return Ok(());
+            return Ok(false);
         }
         let mut facts: mj_core::work_facts::WorkFacts = serde_json::from_str(&json)?;
         if !matches!(facts.worktree, mj_core::work_facts::Observed::Pending) {
-            return Ok(());
+            return Ok(false);
         }
         facts.worktree = worktree;
         transaction.execute(
             "UPDATE subagent_work_facts SET finish_json=?2 WHERE child_session_id=?1",
             params![child, serde_json::to_string(&facts)?],
         )?;
+        // A report that went out with this tree pending is owed it now.
+        let enqueued = deliver_owed_tree(&transaction, &child)?;
         transaction.commit()?;
-        Ok(())
-    })
+        Ok(enqueued)
+    })?;
+    if enqueued {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(())
 }
 
 /// The unfinished park of one child, if it still has one.

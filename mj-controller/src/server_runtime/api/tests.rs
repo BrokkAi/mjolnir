@@ -4875,8 +4875,6 @@ async fn a_finish_report_carries_what_the_worker_observed_and_list_agents_repeat
     assert!(child["facts"].get("park").is_none(), "{child}");
 }
 
-// Hard-won: 49a8da78c: a `git status` that never ended withheld the finish
-// report and discarded the process facts, so the parent could wait forever.
 /// The finish report is built from the process facts alone, with the working
 /// tree pending; `list_agents` shows the tree once its read arrives, and the
 /// report already sent is not rewritten. A tree for another finish, or a part
@@ -4932,13 +4930,142 @@ async fn a_pending_working_tree_does_not_withhold_the_report_and_arrives_in_list
     assert!(!listed.contains("still being read"), "{listed}");
     // The report that was sent said the tree was pending, and still does.
     let events = crate::database::pending_mailbox_events(10).unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(events[0].event_json.contains("\"pending\""));
+    let reports: Vec<_> = events
+        .iter()
+        .filter(|event| event.event_json.contains("subagent_finished"))
+        .collect();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].event_json.contains("\"pending\""));
+    // The tree itself follows in its own message.
+    assert_eq!(working_tree_followups().len(), 1);
 }
 
-// Hard-won: a430ee620: the report reconcile awaited every ready child's worker,
-// so one slow Git read or a child inside an idle checkpoint delayed every
-// sibling's report, every other parent's reports and all mailbox delivery.
+fn working_tree_followups() -> Vec<(bool, String)> {
+    crate::database::pending_mailbox_events(20)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.event_json.contains("subagent_working_tree"))
+        .map(|event| {
+            let parsed: mj_core::mailbox::MailboxEvent =
+                serde_json::from_str(&event.event_json).unwrap();
+            (parsed.wake, mj_core::mailbox::render_mailbox_event(&parsed))
+        })
+        .collect()
+}
+
+/// A report that went out with the tree pending is followed by the tree, once,
+/// in the transaction that stores it; a later park outcome neither repeats nor
+/// merges it, and a second arrival changes nothing.
+#[tokio::test]
+async fn a_report_sent_with_the_tree_pending_is_followed_by_the_tree_exactly_once() {
+    if !isolated_parked_test(
+        "a_report_sent_with_the_tree_pending_is_followed_by_the_tree_exactly_once",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut pending = observed_work();
+    let tree = pending.worktree.clone();
+    pending.worktree = mj_core::work_facts::Observed::Pending;
+    let (report, _child, _backend) = finish_report_and_listing(Some(pending)).await;
+    assert!(report.is_some());
+    assert!(
+        working_tree_followups().is_empty(),
+        "nothing to send before the tree arrives"
+    );
+
+    crate::database::record_finish_worktree("child-1".into(), 9, tree.clone()).unwrap();
+    crate::database::record_finish_worktree("child-1".into(), 9, tree).unwrap();
+    let followups = working_tree_followups();
+    assert_eq!(followups.len(), 1, "{followups:?}");
+    assert!(
+        !followups[0].0,
+        "the tree follows quietly: the report already woke the parent"
+    );
+    assert!(followups[0].1.contains("notes.txt"), "{}", followups[0].1);
+
+    // A park that follows, with or without news, sends its own message and does
+    // not send the tree again.
+    crate::database::record_park_outcome(
+        "child-1".into(),
+        "audit deps".into(),
+        mj_core::work_facts::ParkFacts::settled(
+            mj_core::work_facts::Observed::unavailable("n/a"),
+            &[],
+        ),
+    )
+    .unwrap();
+    assert_eq!(working_tree_followups().len(), 1);
+}
+
+/// A tree stored between the report's building and its enqueue is owed at once,
+/// and a finish superseded before its tree arrived is followed by an
+/// unavailable one, so a parent is never left waiting.
+#[tokio::test]
+async fn an_owed_tree_is_sent_when_it_raced_the_report_or_the_finish_was_superseded() {
+    if !isolated_parked_test(
+        "an_owed_tree_is_sent_when_it_raced_the_report_or_the_finish_was_superseded",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let known = observed_work();
+    let mut pending = known.clone();
+    pending.worktree = mj_core::work_facts::Observed::Pending;
+    let report =
+        |facts: &mj_core::work_facts::WorkFacts| -> mj_core::mailbox::SubagentFinishedReport {
+            let mut report: mj_core::mailbox::SubagentFinishedReport =
+                serde_json::from_value(serde_json::json!({
+                    "child_session_id": "child-1", "task_name": "audit deps", "state": "completed",
+                    "finished": true, "output": "done", "report_dir": null
+                }))
+                .unwrap();
+            report.facts = Some(facts.clone());
+            report
+        };
+    let identity = |ordinal: u64| mj_core::subagent::SubagentFinishIdentity::Turn {
+        start_position: 1,
+        completed_ordinal: ordinal,
+        state: "completed".into(),
+    };
+    // The tree was stored (known) before a report built with it pending went out.
+    crate::database::record_finish_facts("child-1".into(), 9, known).unwrap();
+    crate::database::enqueue_subagent_reports(
+        "parent-1".into(),
+        vec![(identity(9), report(&pending))],
+    )
+    .unwrap();
+    assert_eq!(working_tree_followups().len(), 1);
+
+    // A later finish whose report went out pending, superseded before its tree.
+    crate::database::record_finish_facts("child-1".into(), 12, pending.clone()).unwrap();
+    crate::database::enqueue_subagent_reports(
+        "parent-1".into(),
+        vec![(identity(12), report(&pending))],
+    )
+    .unwrap();
+    assert_eq!(
+        working_tree_followups().len(),
+        1,
+        "still being read: nothing yet"
+    );
+    crate::database::record_finish_facts("child-1".into(), 15, observed_work()).unwrap();
+    let followups = working_tree_followups();
+    assert_eq!(followups.len(), 2, "{followups:?}");
+    assert!(
+        followups[1]
+            .1
+            .contains("the child began new work before the tree was read"),
+        "{}",
+        followups[1].1
+    );
+    // The late tree of the superseded finish changes nothing.
+    crate::database::record_finish_worktree("child-1".into(), 12, observed_work().worktree)
+        .unwrap();
+    assert_eq!(working_tree_followups().len(), 2);
+}
+
 /// Reconciling reports never asks a worker. A finish whose completion task has
 /// not stored its facts yet is left for the pass after it does, and nothing
 /// else waits for it: this test has no worker to ask at all.

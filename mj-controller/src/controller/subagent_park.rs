@@ -1238,9 +1238,6 @@ mod tests {
     /// The parent is told once what a park stopped and what survived, woken
     /// for it, and the same facts are recorded for `list_agents`. The park is
     /// begun durably before its stop, and asks for processes only.
-    // Hard-won: a430ee620: the park snapshot was written only after the stop, so
-    // a daemon that died between the stop and its record left nothing to settle
-    // the park from, and Git ran under the park's idle reservation.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_park_records_what_it_stopped_and_spared_and_tells_the_parent_once() {
         const FACTS_FILE: &str = "MJ_TEST_PARK_FACTS_FILE";
@@ -1437,8 +1434,6 @@ mod tests {
     /// the child's record says parked, so the stop ran, and what survived is
     /// exactly the process that still lives. The check sees only that the
     /// other process is gone, so the message does not claim the park stopped it.
-    // Hard-won: a430ee620: a daemon that died between the stop and the park's
-    // record left the parent never told, with nothing to settle it from.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unfinished_park_is_settled_after_a_restart_from_its_snapshot() {
         if !isolated("an_unfinished_park_is_settled_after_a_restart_from_its_snapshot") {
@@ -1473,9 +1468,6 @@ mod tests {
     /// happened: its stop failed, or it was started again, possibly on a new
     /// worker. Its old processes being gone proves nothing, so no message is
     /// sent and the marker is dropped.
-    // Hard-won: a195a62bc: startup treated a gone worker as proof the park ran,
-    // so a stop that failed after the worker died, and an actor that restarted
-    // the worker, produced a false "parked" message.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unfinished_park_of_a_child_that_is_running_again_sends_nothing() {
         if !isolated("an_unfinished_park_of_a_child_that_is_running_again_sends_nothing") {
@@ -1566,8 +1558,6 @@ mod tests {
     /// The child is still recorded as running, but the worker the park
     /// recorded is gone and no other worker lives for the session, so the park
     /// completed: the child is saved as parked and the parent is told.
-    // Hard-won: 49a8da78c: a crash after the stop but before saving Parked left a
-    // pending marker that startup dropped silently, though the stop had run.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_crash_between_the_stop_and_the_parked_record_settles_with_a_message() {
         if !isolated("a_crash_between_the_stop_and_the_parked_record_settles_with_a_message") {
@@ -1594,8 +1584,6 @@ mod tests {
     /// The same marker, but the worker it recorded was replaced: the actor
     /// restarted the child on a new worker, so the old stop proves nothing about
     /// this session, and no message is sent.
-    // Hard-won: 49a8da78c: a gone worker was taken as proof the park ran, so a
-    // restarted child produced a false "parked" message.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_restarted_worker_drops_the_marker_and_sends_nothing() {
         if !isolated("a_restarted_worker_drops_the_marker_and_sends_nothing") {
@@ -1634,9 +1622,6 @@ mod tests {
     /// A process the finish report listed that was gone before the park began is
     /// in no snapshot of the park. The follow-up still accounts for it, as the
     /// finish report promised an account of each process it listed.
-    // Hard-won: 49a8da78c: only the park's fresh snapshot was accounted for, so
-    // a listed process that exited before it, while another started, was never
-    // mentioned again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_listed_process_that_exited_before_the_park_is_accounted_for() {
         if !isolated("a_listed_process_that_exited_before_the_park_is_accounted_for") {
@@ -1696,9 +1681,6 @@ mod tests {
     /// The finish report promised a later message about the processes it
     /// listed. A park that could not observe them still keeps that promise, and
     /// a finish that listed none promised nothing.
-    // Hard-won: a195a62bc: a park whose pre-stop snapshot was unavailable sent
-    // nothing, although the finish report had said a later message would say what
-    // happened to the processes it listed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_park_that_could_not_observe_keeps_the_promise_the_finish_report_made() {
         if !isolated("a_park_that_could_not_observe_keeps_the_promise_the_finish_report_made") {

@@ -7907,6 +7907,7 @@ async fn work_facts_answer_on_the_connection_without_journaling() {
                 directory: directory.path().to_path_buf(),
                 git: "git".into(),
                 harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
+                children: Default::default(),
             }),
             ..Default::default()
         },
@@ -7948,9 +7949,6 @@ async fn work_facts_answer_on_the_connection_without_journaling() {
     task.await.unwrap().unwrap();
 }
 
-// Hard-won: a195a62bc: the whole observation went over one request with a
-// fixed deadline on the actor's own connection, so a slow `git status` lost the
-// process facts and held the session actor.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_slow_working_tree_read_on_one_connection_never_delays_processes_on_another() {
@@ -7968,6 +7966,7 @@ async fn a_slow_working_tree_read_on_one_connection_never_delays_processes_on_an
         directory: temp.path().to_path_buf(),
         git: slow_git.into(),
         harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
+        children: Default::default(),
     };
     async fn connect(
         relay: &Arc<Mutex<DurableRelay>>,
@@ -8038,9 +8037,6 @@ async fn a_slow_working_tree_read_on_one_connection_never_delays_processes_on_an
     assert!(line.contains("work_facts"), "{line}");
 }
 
-// Hard-won: 49a8da78c: the Git read ran on a blocking thread whose handle was
-// dropped when the requester went away, so a stalled `git status` kept running,
-// and each handoff that asked again added another scan.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_disconnect_kills_the_git_read_it_started() {
@@ -8075,6 +8071,7 @@ async fn a_disconnect_kills_the_git_read_it_started() {
                 directory: temp.path().to_path_buf(),
                 git: stalled_git.into(),
                 harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
+                children: Default::default(),
             }),
             ..Default::default()
         },
