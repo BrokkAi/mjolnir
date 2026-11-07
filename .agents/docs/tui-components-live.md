@@ -7,12 +7,47 @@ cargo build -p brokk-mjolnir -p brokk-mj-worker
 python3 tests/e2e/tui_components_tmux.py --seed 515
 ```
 
-On a busy host the fixed waits (15 s for the TUI, 20 s for the lab, 8 s in the
-dialog probes) can expire before a daemon or session is up. Set
-`MJ_E2E_TIMEOUT_SCALE=4` to multiply the waits of 20 s or less (the 150 s review
-waits are left alone); the default, 1, changes nothing. Run it from a quiet shell too: the lab removes the host session's
-`CLAUDE*`, `CODEX_*` and `MJ_*` variables from the daemon's environment, so a
-real profile is not picked up.
+## Running it on a busy or shared host
+
+The fixed waits (15 s for the TUI, 20 s for the lab, 8 s in the dialog probes)
+can expire before a daemon or session is up. Set `MJ_E2E_TIMEOUT_SCALE=4` to
+multiply the waits of 20 s or less (the 150 s review waits are left alone); the
+default, 1, changes nothing:
+
+```sh
+MJ_E2E_TIMEOUT_SCALE=4 python3 tests/e2e/tui_components_tmux.py --seed 515 --hel target/debug/mj
+```
+
+The scale does not rescue a host that is far too busy. At a load average of
+100 to 290 the first steps fail whatever the scale, so start the run when the
+load is below about 60. On a WSL host the figure is inflated by how the VM's
+processors map to the host's, but the failures still track it.
+
+The lab removes the host session's `CLAUDE*`, `CODEX_*` and `MJ_*` variables
+from the daemon's environment, so a real profile is not picked up when the
+harness runs from inside a Mjolnir session. If a lab config shows a
+`[profiles.claude]` table, that protection has regressed.
+
+Exit code 2 with no artifact directory and "live tmux setup gap" in the log
+means the shared build cache's garbage collection removed `target/debug/mj` and
+`target/debug/mj-worker`. Build them again with the command above; no source
+change is involved.
+
+When a step fails, the message keeps only the last 4096 characters of the pane,
+which cuts off the top of the dashboard. To see the whole screen, add a
+temporary `open("/path", "w").write(tmux.capture())` before and after the step
+in a copy of the script, and restore the file afterwards.
+
+The TUI applies a focus change, and registers a new step's click areas, when
+the next frame is drawn, and nothing on screen shows that has happened. A key
+or click sent right after a step change can therefore act on the previous
+frame. The script waits a short, scaled time before such a click or Enter
+(`click` in tui_components_actions.py, and the Shift-Tab then Enter at the start
+of the workflow). A lost click shows up as the next wait timing out.
+
+Last verified on 2026-11-07: seeds 61172 and 61173 passed with scale 4, 73
+captures each, on the final version of the scripts. The `--dialogs-only`, `--navigation-only` and `--subagents-only`
+modes, and scale 1, had not been run.
 
 Run outside the restricted sandbox because the application uses loopback and
 Unix sockets. The harness selects the freshly built worker explicitly. It uses
