@@ -261,6 +261,9 @@ where
             }
         }
         previous_transcripts = snapshot.transcripts.clone();
+        // The snapshot keeps its live views: the dashboard reads each
+        // session's policy-owned settings from them.
+        snapshot.sessions = sessions.clone();
         if tx
             .send(RuntimeFeedUpdate::Snapshot(Box::new(snapshot)))
             .await
