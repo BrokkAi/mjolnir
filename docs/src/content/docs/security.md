@@ -235,9 +235,12 @@ What a session receives depends on the profile:
   call to its session; `source_identity = true` also records it as the
   immutable `SourceIdentity`. The host's own credentials never leave the
   controller. If AWS refuses the role, a launch fails with AWS's error and the
-  fix, and a running session keeps its current credentials until they expire
-  while the sync reports the failure; Mjolnir never falls back to the host's
-  credentials. See [Limiting the AWS credentials sessions receive](/profiles/#limiting-the-aws-credentials-sessions-receive).
+  fix. A running session keeps the scoped credentials Mjolnir issued for it
+  until they expire while the sync reports the failure, but a session that
+  still holds the host's own credentials (installed before the role was
+  configured) has them withdrawn, because static host keys never expire.
+  Mjolnir never falls back to the host's credentials, and the session's other
+  synchronization (GitHub token, skills, logins) continues. See [Limiting the AWS credentials sessions receive](/profiles/#limiting-the-aws-credentials-sessions-receive).
 
 This applies only to sessions that receive synced credentials. A raw local
 session reads the host's AWS files directly, an EC2 session uses its instance

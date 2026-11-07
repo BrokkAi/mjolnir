@@ -355,14 +355,19 @@ pub(super) async fn reconcile_profile_guarded(
     let mut aws_credentials = targets
         .iter()
         .map(|target| match &target.aws_credentials {
-            None => Some(Ok(None)),
+            None => Some(AwsSync::Unmanaged),
             Some(source) if source.role.is_some() => None,
             Some(_) => Some(match &unscoped_aws_credentials {
-                Ok(credentials) => Ok(credentials.clone()),
-                Err(error) => Err(format!("{error:#}")),
+                Ok(Some(credentials)) => AwsSync::Install(credentials.clone()),
+                Ok(None) => AwsSync::Unmanaged,
+                Err(error) => AwsSync::Unavailable {
+                    error: format!("{error:#}"),
+                    scoped_required: false,
+                    scoped_held: None,
+                },
             }),
         })
-        .collect::<Vec<Option<AwsCredentialsResult>>>();
+        .collect::<Vec<Option<AwsSync>>>();
     let mut outcomes = BTreeMap::<String, CredentialSyncOutcome>::new();
     for pass in 0..2 {
         let mut pulled = false;
@@ -379,32 +384,32 @@ pub(super) async fn reconcile_profile_guarded(
                         break;
                     };
                     aws_credentials[index] = Some(
-                        minted
+                        match minted
                             .context("AWS role assumption task stopped")
                             .and_then(|result| result)
-                            .map(Some)
-                            .map_err(|error| format!("{error:#}")),
+                        {
+                            Ok(credentials) => AwsSync::Install(credentials),
+                            Err(error) => AwsSync::Unavailable {
+                                error: format!("{error:#}"),
+                                scoped_required: true,
+                                // Scoped credentials the controller itself
+                                // issued and the worker may still hold.
+                                scoped_held: targets[index].aws_credentials.as_ref().and_then(
+                                    |source| {
+                                        crate::aws_assume_role::ScopedAwsCredentials::shared()
+                                            .cached(&targets[index].session_id, source)
+                                    },
+                                ),
+                            },
+                        },
                     );
                     index
                 }
             };
             let target = &targets[index];
-            let aws = match aws_credentials[index]
+            let aws = aws_credentials[index]
                 .as_ref()
-                .expect("credentials arrived")
-            {
-                Ok(credentials) => credentials.as_ref(),
-                Err(error) => {
-                    outcomes.insert(
-                        target.session_id.clone(),
-                        CredentialSyncOutcome {
-                            session_id: target.session_id.clone(),
-                            outcome: Err(error.clone()),
-                        },
-                    );
-                    continue;
-                }
-            };
+                .expect("credentials arrived");
             reconcile_target(&pass_context, target, aws, pass, &mut outcomes, &mut pulled).await;
         }
         if !pulled || pass == 1 {
@@ -414,7 +419,36 @@ pub(super) async fn reconcile_profile_guarded(
     outcomes.into_values().collect()
 }
 
-type AwsCredentialsResult = Result<Option<mj_core::aws_credentials::AwsCredentials>, String>;
+/// What a sync pass does about one session's AWS credentials.
+#[derive(Clone)]
+pub(super) enum AwsSync {
+    /// The session's AWS credentials are not managed by the controller.
+    Unmanaged,
+    /// The session should hold exactly these.
+    Install(mj_core::aws_credentials::AwsCredentials),
+    /// They could not be obtained. Nothing is installed, and this step's
+    /// failure is reported on its own: the session's other sync steps still
+    /// run.
+    Unavailable {
+        error: String,
+        /// The profile requires role-scoped credentials. A worker may still
+        /// hold the host's own credentials, installed before the role was
+        /// configured; unless it provably holds `scoped_held`, they are
+        /// withdrawn rather than left in place. Static host keys never expire.
+        scoped_required: bool,
+        /// Unexpired scoped credentials the controller issued for this
+        /// session, which the worker may still hold. Keeping them until they
+        /// expire is safe: they are limited to the role.
+        scoped_held: Option<mj_core::aws_credentials::AwsCredentials>,
+    },
+}
+
+/// What reconciling one session did: the actions taken, and the failure of
+/// its AWS step, which does not stop the other steps.
+pub(super) struct SessionSync {
+    pub(super) actions: Vec<CredentialSyncAction>,
+    pub(super) aws_error: Option<String>,
+}
 
 /// What one reconcile pass shares between its sessions.
 struct PassContext<'a> {
@@ -430,7 +464,7 @@ struct PassContext<'a> {
 async fn reconcile_target(
     context: &PassContext<'_>,
     target: &CredentialSyncTarget,
-    aws_credentials: Option<&mj_core::aws_credentials::AwsCredentials>,
+    aws_credentials: &AwsSync,
     pass: usize,
     outcomes: &mut BTreeMap<String, CredentialSyncOutcome>,
     pulled: &mut bool,
@@ -518,11 +552,32 @@ async fn reconcile_target(
         // Deferral is not a successful credential check: in particular
         // it must not mark an authentication-triggered login refused.
         Ok(None) => {}
-        Ok(Some(actions))
+        Ok(Some(SessionSync {
+            actions,
+            aws_error: Some(error),
+        })) => {
+            // The AWS step failed; the session's other steps ran.
+            *pulled |= actions.contains(&CredentialSyncAction::Pulled);
+            tracing::warn!(
+                session_id = %target.session_id,
+                profile_id = %target.profile_id,
+                pass = pass + 1,
+                error = %error,
+                "AWS credential synchronization failed for relay session"
+            );
+            outcomes.insert(
+                target.session_id.clone(),
+                CredentialSyncOutcome {
+                    session_id: target.session_id.clone(),
+                    outcome: Err(error),
+                },
+            );
+        }
+        Ok(Some(SessionSync { actions, .. }))
             if actions.is_empty()
                 && (*triggered_by != Some(target.session_id.as_str())
                     || outcomes.contains_key(&target.session_id)) => {}
-        Ok(Some(actions)) => {
+        Ok(Some(SessionSync { actions, .. })) => {
             *pulled |= actions.contains(&CredentialSyncAction::Pulled);
             outcomes.insert(
                 target.session_id.clone(),
@@ -665,7 +720,7 @@ pub(super) struct SessionCanonical {
     pub(super) credential_bytes: Vec<u8>,
     pub(super) skills: Arc<CanonicalSkills>,
     pub(super) github_token: Option<String>,
-    pub(super) aws_credentials: Option<mj_core::aws_credentials::AwsCredentials>,
+    pub(super) aws: AwsSync,
     pub(super) slopcop_login: HostSlopcopLogin,
 }
 
@@ -692,7 +747,7 @@ impl SessionCanonical {
             credential_bytes,
             skills,
             github_token: github_token.map(ToOwned::to_owned),
-            aws_credentials: None,
+            aws: AwsSync::Unmanaged,
             slopcop_login: HostSlopcopLogin::Unknown,
         })
     }
@@ -706,11 +761,11 @@ pub(super) async fn reconcile_session(
     target: &CredentialSyncTarget,
     skills: &Arc<CanonicalSkills>,
     github_token: Option<&str>,
-    aws_credentials: Option<&mj_core::aws_credentials::AwsCredentials>,
+    aws: &AwsSync,
     slopcop_login: &HostSlopcopLogin,
-) -> Result<Option<Vec<CredentialSyncAction>>> {
+) -> Result<Option<SessionSync>> {
     let mut canonical = SessionCanonical::read(target, skills.clone(), github_token)?;
-    canonical.aws_credentials = aws_credentials.cloned();
+    canonical.aws = aws.clone();
     canonical.slopcop_login = slopcop_login.clone();
     match relays {
         SessionRelays::Actors(manager) => {
@@ -733,7 +788,7 @@ pub(super) async fn reconcile_session(
                 .await
                 .context("the session actor dropped the credential sync")?
             {
-                Ok(actions) => Ok(Some(actions)),
+                Ok(sync) => Ok(Some(sync)),
                 Err(error) if RelayJobDeferred::marks(&error) => {
                     tracing::debug!(
                         session_id = %target.session_id,
@@ -765,19 +820,29 @@ pub(super) async fn reconcile_on(
     client: &mut RelayClient,
     target: &CredentialSyncTarget,
     canonical: &SessionCanonical,
-) -> Result<Vec<CredentialSyncAction>> {
+) -> Result<SessionSync> {
     let mut actions = Vec::new();
-    if let Some(credentials) = &canonical.aws_credentials {
-        let expected = mj_core::aws_credentials::snapshot(&credentials.encode()?);
-        if client.aws_credentials_state().await? != expected {
-            let installed = client.install_aws_credentials(credentials).await?;
-            anyhow::ensure!(
-                installed == expected,
-                "session AWS credentials do not match the controller after installation"
-            );
-            actions.push(CredentialSyncAction::Pushed);
+    // The AWS step reports its own failure and never stops the steps below:
+    // the GitHub token, the skills and the slopcop login do not depend on STS.
+    let aws_error = match reconcile_aws(client, &canonical.aws).await {
+        Ok(action) => {
+            actions.extend(action);
+            match &canonical.aws {
+                AwsSync::Unavailable { error, .. } => Some(error.clone()),
+                _ => None,
+            }
         }
-    }
+        Err(error) => Some(match &canonical.aws {
+            AwsSync::Unavailable {
+                error: unavailable, ..
+            } => {
+                format!(
+                    "{unavailable}; and the session's AWS credentials could not be withdrawn: {error:#}"
+                )
+            }
+            _ => format!("{error:#}"),
+        }),
+    };
     let skills = canonical
         .skills
         .for_format(client.skills_archive_format(), target.skills_scope)?;
@@ -797,14 +862,71 @@ pub(super) async fn reconcile_on(
     if let Some(action) = reconcile_slopcop_login(client, target, &canonical.slopcop_login).await? {
         actions.push(action);
     }
-    Ok(actions)
+    Ok(SessionSync { actions, aws_error })
+}
+
+/// Converge the session's AWS credentials, or withdraw the host's own when
+/// the profile requires role-scoped credentials and none can be issued.
+async fn reconcile_aws(
+    client: &mut RelayClient,
+    aws: &AwsSync,
+) -> Result<Option<CredentialSyncAction>> {
+    match aws {
+        AwsSync::Unmanaged => Ok(None),
+        AwsSync::Install(credentials) => {
+            let expected = mj_core::aws_credentials::snapshot(&credentials.encode()?);
+            if client.aws_credentials_state().await? == expected {
+                return Ok(None);
+            }
+            let installed = client.install_aws_credentials(credentials).await?;
+            anyhow::ensure!(
+                installed == expected,
+                "session AWS credentials do not match the controller after installation"
+            );
+            Ok(Some(CredentialSyncAction::Pushed))
+        }
+        AwsSync::Unavailable {
+            scoped_required: false,
+            ..
+        } => Ok(None),
+        AwsSync::Unavailable {
+            scoped_held,
+            scoped_required: true,
+            ..
+        } => {
+            let held = client.aws_credentials_state().await?;
+            if !held.present {
+                return Ok(None);
+            }
+            // Credentials this controller issued for the role stay until they
+            // expire. Anything else the worker holds may be the host's own,
+            // installed before the role was configured, and static host keys
+            // never expire.
+            if let Some(scoped) = scoped_held
+                && mj_core::aws_credentials::snapshot(&scoped.encode()?) == held
+            {
+                return Ok(None);
+            }
+            anyhow::ensure!(
+                client.protocol_version() >= mj_core::relay::RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL,
+                "the session's worker (relay protocol {}) cannot withdraw AWS credentials; restart the session so a current worker replaces it",
+                client.protocol_version()
+            );
+            let removed = client.remove_aws_credentials().await?;
+            anyhow::ensure!(
+                !removed.present,
+                "the session kept its AWS credentials after removal"
+            );
+            Ok(Some(CredentialSyncAction::AwsCredentialsRemoved))
+        }
+    }
 }
 
 /// One session's reconciliation, run by its actor on the actor's connection.
 struct CredentialSyncJob {
     target: CredentialSyncTarget,
     canonical: SessionCanonical,
-    reply: tokio::sync::oneshot::Sender<Result<Vec<CredentialSyncAction>>>,
+    reply: tokio::sync::oneshot::Sender<Result<SessionSync>>,
 }
 
 impl RelayConnectionJob for CredentialSyncJob {

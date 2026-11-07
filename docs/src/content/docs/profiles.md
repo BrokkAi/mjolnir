@@ -262,8 +262,10 @@ AWS `SourceIdentity`, which the role's trust policy must allow with
 The controller's AWS login (the profile's `AWS_PROFILE`, or the default) needs
 `sts:AssumeRole` on the role, and the role's trust policy must name that login.
 `mj doctor` assumes the role once to check this. If AWS refuses, a new session
-fails to start with AWS's error and what to change, and a running session keeps
-its credentials until they expire; you can also remove the table to return to
+fails to start with AWS's error and what to change. A running session keeps the
+scoped credentials Mjolnir issued until they expire, and has any other AWS
+credentials it holds (the host's own, from before you added the role) withdrawn;
+the session's other synchronization continues and the failure is reported. you can also remove the table to return to
 copying the host's credentials. This applies only to container and SSH
 sessions that receive synced credentials: raw local sessions read the host's
 AWS files directly, EC2 sessions use their instance role, and a Bedrock API key

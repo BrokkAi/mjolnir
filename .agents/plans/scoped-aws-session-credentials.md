@@ -153,6 +153,12 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - Decision (second review): `mj doctor` probes with a role session name (and `SourceIdentity`, if the profile sets it) of the real shape, `mj-` plus 32 random lowercase hex digits, and its output says it is a probe. A trust policy that allows only the documented shape then no longer refuses the probe.
   Date/Author: 2026-11-07 / Claude, from review.
 
+- Decision (third review): when the profile requires role-scoped credentials and no mint can be issued, the sync withdraws whatever AWS credentials the worker holds unless it provably holds scoped credentials this controller issued (its fingerprint equals the unexpired cache entry's). Static host keys never expire, so leaving credentials of unknown origin would keep the old, wider scope indefinitely. Withdrawal needs a new relay request, `RemoveAwsCredentials` (relay protocol 55), which deletes the credential file; a worker below 55 cannot withdraw, and the sync reports that and tells the person to restart the session. Known cost: after a daemon restart during an STS outage the controller cannot prove what a worker holds, so it withdraws scoped credentials too (fail closed); the next successful pass installs new ones. Writing the scope into the credentials and reading it back would avoid this, at the price of a larger wire change.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (third review): the AWS step of a session's sync fails on its own. `reconcile_on` returns the actions taken plus the AWS error, runs the GitHub token, skills and slopcop steps regardless, and the pass records the AWS error as the session's outcome.
+  Date/Author: 2026-11-07 / Claude, from review.
+
 ## Outcomes & Retrospective
 
 Implemented through Milestone 6 on 2026-11-07. A Bedrock profile with `[profiles.<id>.aws] role_arn = ...` now gives each container or SSH session credentials assumed for it alone (role session name `mj-<session id>`), narrowed by a session policy, renewed after half their lifetime through the existing credential sync, with no relay or database change. A refused role fails the launch with AWS's error line and a remedy, or fails the running session's sync outcome while the worker keeps what it has; nothing falls back to the unscoped export. Profiles without a role behave as before, and `mj doctor` warns about them and probes a configured role with a real throwaway AssumeRole. Every EC2 launch (ordinary and Move) requires IMDSv2, verified in the launch response, and doctor warns about a launch template that allows IMDSv1.
@@ -354,3 +360,5 @@ Revision note (2026-11-07, later): Milestones 1 to 6 implemented; Progress, Deci
 Revision note (2026-11-07, review): seven review findings fixed (Move replay, in-place IMDSv2 enforcement on every adoption path, concurrent mints, cache key, single host predicate, sweep race, sweep from the sync pass). Reason: review of the first implementation.
 
 Revision note (2026-11-07, second review): applied-state wait for IMDSv2, per-session reconcile as mints complete, doctor probe identity of the real shape. Reason: second review.
+
+Revision note (2026-11-07, third review): withdrawal of unscoped credentials on a failed mint (relay protocol 55) and an independent AWS step in the session sync. Reason: third review.

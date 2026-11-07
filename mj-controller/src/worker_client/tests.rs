@@ -1330,14 +1330,14 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
             &target,
             &skills,
             None,
-            None,
+            &credential_sync::AwsSync::Unmanaged,
             &credential_sync::HostSlopcopLogin::Unknown,
         )
         .await
         .unwrap();
 
         assert_eq!(
-            actions,
+            actions.map(|sync| sync.actions),
             Some(vec![CredentialSyncAction::SkillsPushed]),
             "protocol {protocol}"
         );
@@ -1878,6 +1878,257 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
             .iter()
             .all(|outcome| outcome.outcome == Ok(vec![CredentialSyncAction::Pushed])),
         "{outcomes:?}"
+    );
+}
+
+/// Plays a worker that keeps, in the directory named by its third argument,
+/// the AWS credentials, GitHub token and skills it is sent, and starts with a
+/// stale skills tree. Any request it does not expect fails the exchange.
+#[cfg(unix)]
+const AWS_SYNC_RELAY: &str = r#"
+import base64, gzip, hashlib, json, os, sys
+protocol, session, root = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+def path(name): return os.path.join(root, name)
+def state(name):
+    if not os.path.exists(path(name)):
+        return {"present": False, "fingerprint": "", "freshness_epoch_ms": None}
+    data = open(path(name), "rb").read()
+    return {"present": True, "fingerprint": hashlib.sha256(data).hexdigest(), "freshness_epoch_ms": None}
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    params = req["request"].get("params", {})
+    if method == "hello":
+        payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "aws-sync-fixture", "session_id": session}}
+    elif method == "aws_credentials_state":
+        payload = {"type": "credential_state", "data": state("aws")}
+    elif method == "install_aws_credentials":
+        open(path("aws"), "wb").write(base64.b64decode(params["data"]))
+        payload = {"type": "credential_state", "data": state("aws")}
+    elif method == "remove_aws_credentials":
+        os.remove(path("aws"))
+        payload = {"type": "credential_state", "data": state("aws")}
+    elif method == "github_token_state":
+        s = state("github")
+        payload = {"type": "github_token_state", "data": {"present": s["present"], "fingerprint": s["fingerprint"]}}
+    elif method == "install_github_token":
+        open(path("github"), "wb").write(base64.b64decode(params["data"]))
+        s = state("github")
+        payload = {"type": "github_token_state", "data": {"present": True, "fingerprint": s["fingerprint"]}}
+    elif method == "skills_state":
+        payload = {"type": "skills_state", "data": {"present": True, "fingerprint": open(path("skills")).read() if os.path.exists(path("skills")) else "stale"}}
+    elif method == "install_skills":
+        archive = base64.b64decode(params["data"])
+        body = archive[8:]
+        if archive[:8] == b"HELSKIL2":
+            body = gzip.decompress(body)
+        fingerprint = hashlib.sha256(b"HELSKIL1" + body).hexdigest()
+        open(path("skills"), "w").write(fingerprint)
+        payload = {"type": "skills_state", "data": {"present": True, "fingerprint": fingerprint}}
+    else:
+        raise AssertionError(method)
+    print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
+"#;
+
+/// A Claude session on [`AWS_SYNC_RELAY`] whose profile names a role, whose
+/// GitHub token comes from `token_file` and whose skills come from `home`.
+#[cfg(unix)]
+fn aws_sync_session(
+    home: &std::path::Path,
+    root: &std::path::Path,
+    token_file: &std::path::Path,
+    aws_cli: &std::path::Path,
+) -> CredentialSyncTarget {
+    std::fs::create_dir_all(home.join("skills/review")).unwrap();
+    std::fs::write(home.join("skills/review/SKILL.md"), "review").unwrap();
+    let mut target = skills_sync_target(home);
+    target.skips_login_file_sync = true;
+    target.sync_github_token = true;
+    target.github = mj_core::config::GithubConfig {
+        session_token_path: Some(token_file.to_path_buf()),
+        ..Default::default()
+    };
+    target.skills_scope = mj_core::skills::SkillsScope::Isolated;
+    target.spec = CommandSpec::new(
+        "python3",
+        [
+            "-u".to_owned(),
+            "-c".to_owned(),
+            AWS_SYNC_RELAY.to_owned(),
+            RELAY_PROTOCOL_VERSION.to_string(),
+            SESSION_ID.to_owned(),
+            root.to_string_lossy().into_owned(),
+        ],
+    )
+    .purpose("AWS sync test relay");
+    target.aws_credentials = Some(mj_core::aws_credentials::AwsCredentialSource {
+        environment: BTreeMap::from([
+            ("PATH".into(), aws_cli.to_string_lossy().into_owned()),
+            ("AWS_PROFILE".into(), "bedrock".into()),
+        ]),
+        role: Some(mj_core::config::AwsRoleConfig {
+            role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+            session_policy: None,
+            session_policy_arns: Vec::new(),
+            duration_seconds: None,
+            source_identity: false,
+        }),
+    });
+    target
+}
+
+/// An `aws` that refuses every `sts assume-role` with the recorded
+/// AccessDenied line.
+#[cfg(unix)]
+fn refusing_aws_cli(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let aws = bin.join("aws");
+    std::fs::write(
+        &aws,
+        format!(
+            "#!/bin/sh\n/bin/cat {} >&2\nexit 254\n",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/aws-sts-assume-role-access-denied.txt")
+                .display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
+    bin
+}
+
+// Hard-won: ca9a1d9ca: a session holding the host's unscoped credentials kept them, with no expiry for static keys, when the newly configured role could not be assumed.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_session_holding_the_hosts_credentials_loses_them_when_its_new_role_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let token = root.path().join("token-source");
+    std::fs::write(&token, "session-pat").unwrap();
+    // Installed while the profile had no role: static host keys, no expiry.
+    std::fs::write(
+        root.path().join("aws"),
+        serde_json::to_vec(&serde_json::json!({
+            "Version": 1, "AccessKeyId": "AKIAHOSTKEY", "SecretAccessKey": "host-secret",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let cli = refusing_aws_cli(root.path());
+    let target = aws_sync_session(home.path(), root.path(), &token, &cli);
+
+    let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
+
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    let error = outcomes[0].outcome.as_ref().unwrap_err();
+    assert!(error.contains("AccessDenied"), "{error}");
+    assert!(
+        !root.path().join("aws").exists(),
+        "the host's credentials were left installed"
+    );
+}
+
+// Hard-won: ca9a1d9ca: a failed AssumeRole skipped the whole session's sync, so GitHub token and skills changes also waited for STS.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failing_mint_does_not_stop_the_sessions_other_sync_steps() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let token = root.path().join("token-source");
+    std::fs::write(&token, "rotated-session-pat").unwrap();
+    let cli = refusing_aws_cli(root.path());
+    let target = aws_sync_session(home.path(), root.path(), &token, &cli);
+
+    let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
+
+    // The AWS failure is the session's reported outcome...
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    assert!(
+        outcomes[0]
+            .outcome
+            .as_ref()
+            .unwrap_err()
+            .contains("AccessDenied"),
+        "{outcomes:?}"
+    );
+    // ...and the GitHub token and skills still converged.
+    assert_eq!(
+        std::fs::read(root.path().join("github")).unwrap(),
+        b"rotated-session-pat"
+    );
+    assert!(
+        root.path().join("skills").exists(),
+        "skills were not pushed"
+    );
+}
+
+// Hard-won: ca9a1d9ca: credentials the controller issued for the role must survive a failed renewal until they expire, while anything else is withdrawn.
+#[cfg(unix)]
+#[tokio::test]
+async fn scoped_credentials_the_controller_issued_survive_a_failed_renewal() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let token = root.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = refusing_aws_cli(root.path());
+    let target = aws_sync_session(home.path(), root.path(), &token, &cli);
+    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/aws-sts-assume-role.json"
+    ))
+    .unwrap();
+    recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
+    let issued = mj_core::aws_credentials::AwsCredentials::from_assume_role(
+        "bedrock",
+        &serde_json::to_vec(&recorded).unwrap(),
+    )
+    .unwrap();
+    let unavailable = credential_sync::AwsSync::Unavailable {
+        error: "AWS refused AssumeRole".into(),
+        scoped_required: true,
+        scoped_held: Some(issued.clone()),
+    };
+    let skills = Arc::new(CanonicalSkills::collect(&target));
+    let reconcile = || {
+        reconcile_session(
+            &SessionRelays::Direct,
+            &target,
+            &skills,
+            None,
+            &unavailable,
+            &credential_sync::HostSlopcopLogin::Unknown,
+        )
+    };
+
+    // The worker holds what the controller issued: kept.
+    issued.install(root.path(), root.path()).unwrap();
+    std::fs::rename(
+        root.path()
+            .join(mj_core::aws_credentials::SHARED_CREDENTIALS_FILE),
+        root.path().join("aws"),
+    )
+    .unwrap();
+    let sync = reconcile().await.unwrap().unwrap();
+    assert!(root.path().join("aws").exists());
+    assert_eq!(sync.aws_error.as_deref(), Some("AWS refused AssumeRole"));
+    assert!(
+        !sync
+            .actions
+            .contains(&CredentialSyncAction::AwsCredentialsRemoved)
+    );
+
+    // The worker holds something else: withdrawn.
+    std::fs::write(
+        root.path().join("aws"),
+        br#"{"Version":1,"AccessKeyId":"AKIA"}"#,
+    )
+    .unwrap();
+    let sync = reconcile().await.unwrap().unwrap();
+    assert!(!root.path().join("aws").exists());
+    assert!(
+        sync.actions
+            .contains(&CredentialSyncAction::AwsCredentialsRemoved)
     );
 }
 
