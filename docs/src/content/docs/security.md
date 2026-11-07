@@ -112,6 +112,30 @@ not make copied secrets unreadable inside the target. Likewise, provider-side
 handling of prompts and repository content is governed by the selected
 harness and account, not by Mjolnir.
 
+## Agents on the controller host act with your authority
+
+The daemon's API under `/api/v1` accepts one bearer token, kept in the
+owner-only `api-token` file in Mjolnir's data directory. `mj api` and
+`mj github-token` read it from there. Any process that runs as your user on the
+controller host can read that file, and that includes agents in bare `local`
+sessions. With the token, a process can read and write any session's workspace
+files, read any transcript, destroy sessions, and mint GitHub App installation
+tokens for any repository the App can reach.
+
+Mjolnir does not scope this token to one session. An agent in a bare local
+session already runs with your account's authority: it can read your files,
+your credentials, and Mjolnir's data directory directly, so a narrower API token
+would not contain it. Treat every agent you run in a bare local session as
+trusted with everything your user account can reach. The one surface agents
+cannot reach through this token is configuration: settings are edited only
+through the cookie-authenticated web viewer API, so an agent cannot rewrite your
+configuration through `/api/v1`.
+
+To keep an agent away from these capabilities, run it in a container or on a
+remote target. Those sessions do not receive the `api-token` file. Their GitHub
+access comes only from the credentials Mjolnir syncs to them, described under
+[Credential synchronization and exclusion](#credential-synchronization-and-exclusion).
+
 ## Profile staging is allowlisted
 
 Mjolnir never copies a harness home wholesale. It builds a per-session profile
