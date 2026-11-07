@@ -2195,3 +2195,33 @@ fn cancelled_operation_leaves_the_running_recovery_copy_alone() {
     });
     assert!(reservation.is_ok());
 }
+
+// Hard-won: c2d74db67: the refresher's first look could run while daemon startup was still starting Apple's container service, read it as stopped, and skip a whole interval.
+#[tokio::test(start_paused = true)]
+async fn the_image_refresher_waits_for_apple_container_startup_before_its_first_look() {
+    let looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let settled = tokio_util::sync::CancellationToken::new();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let refresher = spawn_image_refresher(
+        {
+            let looks = looks.clone();
+            move || {
+                looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Vec::new()
+            }
+        },
+        |_| {},
+        settled.clone(),
+        cancellation.clone(),
+    );
+
+    tokio::time::sleep(IMAGE_REFRESH_DELAY * 10).await;
+    assert_eq!(looks.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    settled.cancel();
+    tokio::time::sleep(IMAGE_REFRESH_DELAY * 2).await;
+    assert_eq!(looks.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    cancellation.cancel();
+    refresher.await.unwrap();
+}

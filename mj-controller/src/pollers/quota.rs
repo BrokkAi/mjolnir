@@ -258,10 +258,19 @@ pub enum ImageRefreshReport {
 pub fn spawn_image_refresher(
     plan: impl Fn() -> Vec<ImageRefresh> + Send + 'static,
     report: impl Fn(ImageRefreshReport) + Send + Sync + 'static,
+    apple_container_settled: tokio_util::sync::CancellationToken,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let report: Arc<dyn Fn(ImageRefreshReport) + Send + Sync> = Arc::new(report);
     tokio::spawn(async move {
+        // The refresher only looks at Apple's service and never starts it,
+        // so its first look waits for daemon startup's start to finish:
+        // a look mid-start would read "stopped" and skip a whole interval.
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return,
+            _ = apple_container_settled.cancelled() => {}
+        }
         let mut interval = tokio::time::interval_at(
             tokio::time::Instant::now() + IMAGE_REFRESH_DELAY,
             IMAGE_REFRESH_INTERVAL,
