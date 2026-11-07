@@ -52,7 +52,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "bundle version input, or a semantic id that default-route products key on? Separate \"caches rotate, answers stay the same\" from \"answers change\".\n3. Goldens and pins that would move: the resolution-facts golden, the manual corpus-sites test, row-count pins, and any golden_java_* case. List the test names and say why each moves.\n4. Other languages: confirm whether the change to `root_prefix_rule` is per-language (Java only), and whether any shared code path changes behaviour for Rust, Go, Kotlin or Scala.\n5. Conclusion: can this change alter any default-route Java taint or policy answer? Name each answer that could change, with evidence, or give the code-backed argument why none can. Use the words confirmed, likely, possible or unknown accurately.\nStop after the map. Do not design the fix.\n\nOUTPUT. Write .mj/agents/<your id>/7804-default-route-readers.md (the report directory Mjolnir gives you). Hand back a short summary: the conclusion, the readers that do run on the default route, and the open uncertainties.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The read-only audit is complete. The [reader map](/home/jonathan/Projects/bifrost/.mj/clones/05d9cf1a40f2a74086d14d7010497284/.mj/agents/4b9e8ca501c48ea47cc89e9c99bf6d9a/7804-default-route-readers.md) shows that shared Java lowering and reference-edge readers run outside the trial gate. A claim that production taint and policy findings are unchanged remains unproved; the downstream consumer trace is still open.",
     "completion": {
       "stop_reason": "EndTurn",

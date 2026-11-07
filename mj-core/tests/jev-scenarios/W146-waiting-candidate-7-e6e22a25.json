@@ -157,7 +157,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The wait tool's connection keeps dropping, but the background watcher on the first profiling run will resume me when it finishes. Then I'll collect the two lanes' reports with a direct wait.\n\nStatus: the first of three profiling compiles is running. Two verification lanes are checking the resolution extraction and the language registry's call sites.",
     "completion": {
       "stop_reason": "EndTurn",

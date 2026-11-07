@@ -412,7 +412,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "nds you saw: tests/suite_cross_language/code_query_tutorials.rs (`tutorials_cover_all_public_kinds_roles_and_pages`: add real positive tutorial queries/pages for each new public kind and role, following the existing pattern; read how the tutorials are generated or stored) and crates/bifrost-rql/src/structural/search/tests/details.rs (`the_declaration_kind_domain_is_exactly_the_union_of_its_two_producers`: find the two producers and fix the PRODUCTION side if the new kinds belong in the domain, rather than editing the test's expectation, unless the test is the wrong side; explain which). Commit with a clear multiline message (end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`), detached HEAD, no push. (2) Then rerun the full CI gate exactly as before on the new HEAD through cargo-slot, rerun persisting failures alone, classify vs origin/master (your ci-origin worktree; `git -C ... checkout --detach origin/master` after `git fetch` is fine). Hand back the commit SHA and the same style of report.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The Python tutorial now has concrete examples queued for each missing kind, the two new roles, and all 11 Python query steps. I’ve also made the coverage test enforce those steps so future additions cannot silently go undocumented. The focused run is waiting on the shared build slots before it can generate exact expected outputs.",
     "completion": {
       "stop_reason": "EndTurn",

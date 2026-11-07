@@ -47,7 +47,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "E_HOME per invocation; eatmydata; actual nice10 for frontend (do not double nice20). default concurrency. Save exact argv/effective env/head/tree/status guards before/after, stdout stderr exit and sources manifest in ignored .agents/scratch/9447-integrated-materialization-202db/ (exclusive). Existing helper source manifest in ../9447-application-results/.agents/scratch/9447-source-manifest.py can be read/reused if appropriate (Python nice10). Need compile and run proof, actual mismatch details for go-function-value-obligations including original F/G/importedH positives, local error shadows, new package-level error same/sibling negatives. Expected mismatch is possible; do not call a golden failure a pass. Parent audits expected updates. Older runtime at4d child45 may run concurrently in another worktree; do not touch it or duplicate its source. Stop at first terminal result, no retry. Concise report exact source association/counts/logpaths and decisive actual excerpts; no claiming runtime beyond selected test.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The specified run is still active; its output is being captured in the scratch directory. I’m waiting on this same invocation and won’t retry it.",
     "completion": {
       "stop_reason": "EndTurn",

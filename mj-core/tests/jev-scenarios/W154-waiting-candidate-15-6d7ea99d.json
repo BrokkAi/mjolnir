@@ -167,7 +167,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": " partial/missing-signature negative separately if simple. Also negative current assertion target_origin != semantic_model is too strong: incomplete rows can retain modeled candidate; require no exact mapping/selected semantic target rather than suppress candidate metadata. Before log already shows target_origin semantic_model with callee_unresolved. Inspect existing public contract and adjust tests to assert uncertainty, not no descriptive candidate. Own tests only; no production. Producer applying patch soon. After fixing test fixture, run required full analysis lib and Java-filtered suite_usages + suite_issues plus issue3522 integration. Use env -u JAVA_HOME BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 nextest --max-fail 100 default concurrency. Wait until production patch applied; coordinate sentinel by checking java.rs contains java_exact_external_call_evidence before starting (don't modify production). Report failures test name, one-line reason, log path; successes count/commands. Do not rerun green suites.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The lock holder is running a workspace-wide clippy build, so my focused issue-test command remains serialized behind it. I’m waiting for that build to release the target directory; once the queued test finishes, the analysis and Java-filtered suites can reuse the artifacts.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -197,7 +197,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "PR #5512 is in the merge queue. It expands literal argument packs (`*(...)`, `*[...]` and string-keyed `**{...}`) for Python call binding.\n\n**Gate before and after:**\n\n| Rule | Before | After |\n| --- | --- | --- |\n| call-wrong-named-argument | 1 miss | exact |\n| call-wrong-named-class-argument | 1 miss | exact |\n| call-wrong-number-class-arguments | 2 misses, 1 extra | 1 miss (`*t3`), 1 extra (the `f4(q=4)`-style defect) |\n| call-wrong-arguments | 4 misses, 3 extras | 3 misses (`*t3` and the joined-receiver `e.spam(0)`), 3 extras (mox and `**y`) |\n\nThe two named-argument rules match exactly, but their runs end inconclusive, the standard we've accepted for shipping. Both go into pack batch 5 once #5512 lands. Named operands like `*t3` stay unexpanded, and the PR records that as a follow-up.\n\n**Five Rust macro test failures, likely unrelated.** They showed up on the branch, but the PR's only shared change is a new method that only Python calls. I expect they already fail on master, but I haven't confirmed it; the merge queue will show it.\n\n**Waiting on review:** pack PRs #97 (uninitialized-local) and #99 (7 variable rules).\n\n**Still yours to decide:**\n- whether to start a Python module initializer procedure, with an ExecPlan first;\n- whether to count the `f4(q=4)` defect, a real bug CodeQL misses, as a true positive.\n\nThose two decisions are what stand between the remaining call-argument rules and shipping.",
     "completion": {
       "stop_reason": "EndTurn",

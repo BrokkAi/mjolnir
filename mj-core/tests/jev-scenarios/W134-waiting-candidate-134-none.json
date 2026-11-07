@@ -87,7 +87,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": " concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When a parent decision blocks further progress, hand back the question with the evidence needed to decide. The parent owns consequential design decisions and final acceptance.\n\nYour complete assignment is in /workspace/640af377fdec87f01cba51033f6e79ed/test-audit/briefs/t-usages.txt. Read it first and follow it exactly; it points to the ExecPlan that defines the rules. Note: the current plan is in the main checkout at /workspace/640af377fdec87f01cba51033f6e79ed/bifrost/.agents/plans/test-suite-pruning-2026-10.md; if cherry-picking the policy commits conflicts on AGENTS.md or the plan, take the incoming version.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "`cargo fmt --all` is still running without diagnostic output, likely competing with the other active lane builds. I’m waiting for it to finish before refreshing snapshots and running the lane’s required clippy check.",
     "completion": {
       "stop_reason": "EndTurn",

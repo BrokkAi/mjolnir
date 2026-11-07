@@ -127,7 +127,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "3271d5db is accepted, with two notes.\n(1) The Scala closer failure is inherited, not S1's and not yours. Its first mismatch, SemanticId 4294967314 -> 4294967348, is exactly the id rotation of master-red #8665 at your base a8316c4aa6. The fix, #8712, is in the queue. No action.\n(2) The Python mirror MUST be verified; please finish it. Adding a field to the semantic-model `Parameter` can make the checked-in `bifrost_searchtools/_generated_query_models.py` stale, because its decoder is strict and rejects unknown keys. A stale mirror broke master CI before (#6646), and no Rust suite catches it. Find the generator and check command (the CI step \"Check generated Python query-result models\"; search .github/workflows and scripts for `_generated_query_models`). Run it to completion in the background with nice -n 10 and a wait loop, splitting nothing; the dependency compile is just slow. If the mirror changes, commit the regenerated file with the trailer. Report the check result, the head and the log path. Do not push.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The regenerated Python mirror is committed, and the exact CI mirror check passes. Generator unit tests also pass. I’m waiting for the separate Rust fixture decoding check to finish, then I’ll report the final head and logs.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -177,6 +177,7 @@ mod tests {
             context_window_bytes: None,
             guardian_review_model: None,
             muse_auto_review: None,
+            aws: None,
             codex_profile: None,
             models: models.iter().map(|value| (*value).to_owned()).collect(),
             legacy_subagents: Default::default(),

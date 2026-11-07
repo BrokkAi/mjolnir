@@ -34,7 +34,7 @@ Constants: `mj_core::assessment::PROTOCOL` = 25, `AUTOMATION_CONFIDENCE` = 0.90,
 
 - `harness`, `phase` (`running` or `replied`), `silent_for_s`
 - `tools_in_flight` (title and running seconds, at most 16), `background_commands`, `queued_commands`
-- `user_prompt_tail` (1 KiB), `assistant_text_tail` (2 KiB)
+- `user_prompt_tail` (1 KiB; empty when Mjolnir submitted the turn's prompt, since 2026-11-07), `assistant_text_tail` (2 KiB)
 - `transcript_summary`: the conversation from the latest delivered user message, with all transcript tool entries removed before budgeting (the "0+1" policy chosen in the 2026-09-20 comparison), at most 48 KiB. Cleared when `authorization` is present.
 - `authorization`: `ContextHistory` with the newest whole real user messages since the last context reset that fit 32 KiB (oldest exchanges evicted first when full; the daemon's seed in `mj-transcript/src/authorization.rs` builds the same window from the transcript) and whole recent assistant replies (16 KiB), plus explicit omission flags. Present for both `running` and `replied` assessments. Older assistant replies give way, and then the history and summary are dropped, if the whole request including the bundled questions would exceed 64 KiB (`mj_core::activity::verdict::request_fits`). Stored evidence is fitted again before each retry, so evidence sized by an older build or before the questions grew still fits.
 - `completion` (replied only): stop reason and a bounded provider diagnostic (message 4 KiB, code 128 B, reset text 256 B)

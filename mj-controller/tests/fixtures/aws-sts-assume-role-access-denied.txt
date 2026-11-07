@@ -1,0 +1,2 @@
+
+aws: [ERROR]: An error occurred (AccessDenied) when calling the AssumeRole operation: User: arn:aws:iam::123456789012:user/jonathan is not authorized to perform: sts:AssumeRole on resource: arn:aws:iam::123456789012:role/mj-1424-nonexistent

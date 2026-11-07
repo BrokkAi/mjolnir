@@ -367,7 +367,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "ck/reports/review-a67a651769.md. Your items: 6 and 7.\nItem 6: move Scala's external index inputs onto the shared jvm/authority.rs record_external_inputs with a Scala family label, remove scala_dependency_input_keys and the unreachable!(\"Java and Kotlin own ...\") arm, and make a failed snapshot read a refusal (no .ok()), with the inventory fact and PathAbsent for conventional manifests as Java and Kotlin do, computed from the index's build rather than current files on every hit.\nItem 7: the external-input receipt must not be evictable independently of the index it certifies: store the receipt with the index value (for example in the same OnceLock entry), or refuse when the receipt is missing; pin it with a small-budget eviction test for Java and Kotlin (and Scala once it uses the same funnel).\nAnother lane changes the receipt shape (CapturedMemoReads gains an execution-mark channel, item 2) in core and analysis at the same time; stay out of those definitions and use the existing API; I will reconcile at merge.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The gate build has reached the final runtime and MCP crates. The earlier checks and all JVM-analysis tests remain green; I’m waiting for the integration gate result before handback.\n",
     "completion": {
       "stop_reason": "EndTurn",

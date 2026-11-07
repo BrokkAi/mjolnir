@@ -62,7 +62,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "does, report it and remove it before capturing). Comparator shim: /mnt/optane/tmp/lanes-primary/gate-inputs/scripts/legacy-comparator-shim.py. Use /tmp/lanes/jvm-gates/7747/ (PASS) as the shape of a complete run and report. Note that another gate lane (c52ae02f, /tmp/lanes/jvm-gates/7761/) is running concurrently on this host; that is fine for count-based comparisons, but do not touch its directories, clones or processes.\n\nRules: this host is shared; load 100-300 is normal and the gate is count-based, so do not wait for a quiet host (the README quiet-host clause applies only to the latency scripts, which you do not run). Kill only processes you started. Do not launch any cloud resource (no EC2, no remote machines). Keep heavy artifacts under /tmp/lanes/jvm-gates/7770/ and prune build trees after the report; keep REPORT.md, inputs.txt, the comparison JSONs and the per-family CSV. Report back a short verdict (PASS / PASS with conditions / FAIL) with the decisive artifact paths and anything you could not verify.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Both archive builds are being produced separately, with the candidate still compiling the analysis layer. The earlier base lock was resolved by stopping only my stalled build session; the successful base retry completed, and I’m waiting for the candidate artifact before starting captures.",
     "completion": {
       "stop_reason": "EndTurn",

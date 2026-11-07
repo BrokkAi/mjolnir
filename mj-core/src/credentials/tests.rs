@@ -761,12 +761,14 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
             }),
             failure: failure.map(str::to_owned),
             outcomes,
+            partial: false,
         }
     };
     let reached = |outcome: Result<Vec<CredentialSyncAction>, String>| {
         vec![CredentialSyncOutcome {
             session_id: "child-1".into(),
             outcome,
+            step_failures: Vec::new(),
         }]
     };
     let pushed = || reached(Ok(vec![CredentialSyncAction::Pushed]));
@@ -801,6 +803,23 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
         &result(
             CredentialSyncReason::AuthenticationFailure,
             Vec::new(),
+            None,
+        ),
+        &profile,
+    );
+    // The session's whole sync failed (its connection) although an AWS result
+    // was merged beside it: nothing was compared either.
+    rejected.observe(
+        &result(
+            CredentialSyncReason::AuthenticationFailure,
+            vec![CredentialSyncOutcome {
+                session_id: "child-1".into(),
+                outcome: Ok(vec![CredentialSyncAction::SkillsPushed]),
+                step_failures: vec![StepFailure {
+                    step: SyncStep::Session,
+                    detail: "worker unreachable".into(),
+                }],
+            }],
             None,
         ),
         &profile,

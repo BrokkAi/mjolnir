@@ -1083,6 +1083,12 @@ pub struct HarnessProfile {
     /// changes nothing there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muse_auto_review: Option<bool>,
+    /// The IAM role Mjolnir assumes for each session of a profile that
+    /// authenticates with the AWS credential chain (Bedrock), so the session
+    /// gets short-lived credentials limited to that role instead of a copy
+    /// of the controller host's credentials. See [`AwsRoleConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws: Option<super::AwsRoleConfig>,
     /// The models Mjolnir offers from this profile, as exact values from the
     /// profile's advertised catalogue (`openrouter/deepseek/deepseek-v4.1-flash-1017`).
     /// Empty offers everything the harness advertises. Some harnesses, such as
@@ -1179,6 +1185,7 @@ impl HarnessProfile {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             models: Default::default(),
             legacy_subagents: None,
         }
@@ -1516,6 +1523,9 @@ impl HarnessProfile {
         }
         if self.muse_auto_review.is_some() && self.kind != HarnessKind::Muse {
             bail!("profile {id:?}: `muse_auto_review` applies only to a Muse profile");
+        }
+        if let Some(aws) = &self.aws {
+            aws.validate(id)?;
         }
         Ok(())
     }

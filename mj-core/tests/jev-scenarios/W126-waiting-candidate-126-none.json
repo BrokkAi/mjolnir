@@ -347,7 +347,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": ". Commit with a hardwon test, and rerun the Kotlin-only and full-JAR projections.\n2. Read-only, for a coordinator decision: map exactly where a Partial MANIFEST blocks the selected owner read even though the owner's store flags are true. File:line of the gate in the reader or selected-owner path; whether it checks manifest completeness, a pack-level flag, or the presence of any reject; and how per-name loss rows interact with it. Also list every loss kind your producer emits, each with its scope: (provider, package, category, name), (provider, owner family), or UNSCOPED (no package known). An unscoped loss is one where the producer cannot say which package it affects.\nI am asking the coordinator whether the whole-pack gate can become a scoped gate: a selected owner or package read is closed when no ineligible loss row covers its own package and category, its owner family, or its supertype chain, while any unscoped loss keeps the whole pack open. Do not implement that until the ruling. Handback under 15 lines.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The focused fixture now reproduces the object extension-property omission and passes with the loss attributed to the object’s named family. The real source has several such properties, so I’m waiting for the producer rebuild to identify which declarations contributed to the previous aggregate warning and to rerun both JAR projections.",
     "completion": {
       "stop_reason": "EndTurn",

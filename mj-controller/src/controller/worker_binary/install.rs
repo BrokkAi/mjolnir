@@ -1032,11 +1032,7 @@ pub(super) fn clear_profile_configuration(
 ) -> Result<()> {
     let mut paths = profile_configuration_paths(harness);
     paths.push(harness.credential_file_name());
-    paths.extend([
-        mj_core::aws_credentials::SHARED_CREDENTIALS_FILE,
-        mj_core::aws_credentials::CONFIG_FILE,
-        mj_core::aws_credentials::EMPTY_CREDENTIALS_FILE,
-    ]);
+    paths.extend(mj_core::aws_credentials::FILES);
     if harness == HarnessKind::Codex {
         paths.push(STAGED_CATALOG_FILE);
     }

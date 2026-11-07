@@ -442,7 +442,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "t/); nextest --max-fail 100 with the targeted suites the testing guide names; clippy on edited crates. Cache identity: identify which levers your diff moves (native review item 3) and ask session 0bf0983d553751026807d97d54857ede for the actual numbers at the concrete diff (send_message with the diff summary); do not pick numbers yourself. Coordinate nothing with #9687 in M1 (it doesn't touch binding code). Commit with plain multi-line messages; keep the plan's Progress section current. When validated: merge latest origin/master, call request_review on your worktree, and after a clean verdict push and open a DRAFT PR referencing the issue (do not mark ready; the campaign owner reviews first). A separate lane implements M3 in parallel on its own branch; do not edit its files, and do not edit the plan from M3's side (send progress to me instead if needed). Handback: issue and PR numbers, the golden summary, the dead-code gate score before/after, cache levers moved and the numbers allocated, and anything blocked.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The gate build is still progressing through shared crates; the M3 branch is also still changing, so PR B will wait for a stable submitted head. PR A’s implementation and golden are committed and ready for scoring.",
     "completion": {
       "stop_reason": "EndTurn",

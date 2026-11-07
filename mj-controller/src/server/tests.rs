@@ -4163,6 +4163,34 @@ fn persisted_cookie_key_survives_a_restart_and_stays_owner_only() {
     assert!(!session_cookie_valid(&rotated, &cookie, 100));
 }
 
+// Two callers that find no key must not each create one: the phone server
+// starting while sessions launch and renew would otherwise end with different
+// keys, and records signed with the loser's stop verifying.
+#[test]
+fn concurrent_first_uses_of_the_cookie_key_end_with_one_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("nested").join("phone-cookie-key");
+    let start = std::sync::Arc::new(std::sync::Barrier::new(16));
+    let keys = (0..16)
+        .map(|_| {
+            let (path, start) = (path.clone(), start.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                load_or_create_cookie_key(&path).unwrap()
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+
+    let stored = std::fs::read(&path).unwrap();
+    assert!(
+        keys.iter().all(|key| *key == stored),
+        "callers ended with different keys"
+    );
+}
+
 #[test]
 fn corrupt_cookie_key_is_regenerated_instead_of_blocking_startup() {
     let directory = tempfile::tempdir().unwrap();

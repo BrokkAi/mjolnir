@@ -352,7 +352,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "re, against a scratch master worktree with the branch's test file and fixture copied in. Then the master output against the merged-branch output must differ ONLY by #7619's mechanism, type-parameter-free members bound on parameterized JDK call results, plus id-only changes after masking. Classify every differing line, and report anything else, such as open versus truncated coverage, as a finding with its cause.\n4. The store lib build failure is #8654, the C# test-support gates, fixed by #8658 in flight. Run the store lib WITH --features test-support for now and note it.\n5. Open-core: check whether the two unclassified packaging paths and the stale inventory come from this branch or from master at 0828462248, by running the projection dry run on master too. Fix only what this branch introduced.\nThen re-run the constructor-identity test after your OwnerInventoryOpen patch and finish phase 3 (the JVM roots in default and Java trial, Clippy, the projection). Commit the merge and the port, do not push, and report.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The final golden audit confirms that default Java/Kotlin/Scala call-binding sections match master, while trial Java adds the expected six binding rows. It also confirms two findings outside the intended mechanism: the open `OpenFactory.make` family closes to a resolved result, and a Scala trial diagnostic disappears. The exact-master comparison build is waiting on a shared mbx compile owned by another lane.",
     "completion": {
       "stop_reason": "EndTurn",

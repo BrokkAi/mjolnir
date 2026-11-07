@@ -1152,7 +1152,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "One more dependency on the missing mount: mbx's build cache is also under `/mnt/optane`, so the lanes' two manual golden runs (nextest builds) cannot run until it is back. A child asked to redirect the Cargo target to a lane-local directory; I declined, since that needs your approval per your standing rule. All five lanes now do everything else first and leave the goldens for last, polling for the mount; if it is still absent when they finish, they report measured results with the goldens marked \"pending mount\" and I have them rerun afterwards.\n\nSo the single host action remains: `sudo mount -t zfs optane /mnt/optane` from your WSL shell. If you would rather authorize a temporary lane-local Cargo target for the goldens instead, say so and I pass it on.\n\nNothing else is independent of pending results.",
     "completion": {
       "stop_reason": "EndTurn",

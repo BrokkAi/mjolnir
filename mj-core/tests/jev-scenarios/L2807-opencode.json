@@ -142,7 +142,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "I've asked the child, in the same session, to finish:\n\n- the legacy part of G3: use the profiles that have answered by the deadline\n- G6: request efforts for models newly added to the preset\n- a test showing the \"review is off for this session\" notice reaches `mj new` and `mj import` users\n- the full suite and clippy\n\nWhen it reports, I'll run the full validation, commit, and request review. Then I'll override the repeated and contradicting design findings with their reasons and push.\n\n**Still needs your answer:**\n1. May the install apply the breaking store migration (revision 110) to your live store? I won't install without your approval.\n2. If you'd rather I stop iterating and push after this round no matter what the reviewers say, tell me.\n\nWaiting on the round-9 child.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -312,7 +312,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "427comment6672242059 published source-qualifiedprimaryaxiscomplete; broadergoalstillopen, nojobsrunning,H2stoppedoldidentityunresolved. DurablecanonicalPRIMARY-RESULTS.md3697eef1... + primary-evidence-ledger.json0ee5e856... parentverifiedexactcopies. FinalRustADDENDUM nowexists .agents/scratch/9427-first-pass/qs28-rust-analysis-local-terminal-addendum-v1,5files435073B,index877d3cb96e7aecaacf84c6500c00a584ce97e28209a8e83f4d50ebf482d0d4ae,receipt5b08b86a064b8fb2d99938c82e5695283b27ba6c6d53d9abfb5a60bbd93e2bc7. Includescompleted12uncaughtSOURCE_PLAUSIBLEunexecuted JSON/MD(parentreadaccepted) +three ORIGINAL409underscore-namedcheckers; resolvesoldomissionwithoutrewriting205bundle(df91...). Verify/indexaddendum/updatecurrentprovenance frompendingtofinal, updatecheckpoint/publicationURL/canonical/durablemirrors/rootmanifest. Preserve r2/r3 historicalversionsandwhole-scopeaxis; no newresultcounts orcurrentHEADclaim. Pleasefinalhandbackshort withconsistency/count/sourcechecksum; no furtherworkrequestedafterfinalsync.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Recorded final checkpoint `7621acae64` and indexed the five-member Rust addendum. The 12 source-plausible routes remain unexecuted, with no defect inference; the frozen 205-member terminal bundle and r2/r3 records remain unchanged. The primary count remains 32 terminal, one structural, zero missing; broader scope is still open. Hashes and consistency checks are in the handback report.",
     "completion": {
       "stop_reason": "EndTurn",

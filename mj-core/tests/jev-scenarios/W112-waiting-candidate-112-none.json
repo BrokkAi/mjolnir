@@ -107,7 +107,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Parent: yes. For py/percent-format/not-mapping, an RHS that is structurally a list, tuple, set, string or numeric literal (or a binding whose single reaching initializer is one) is a known non-mapping: those builtin types are not Mappings. Dict literals and dict(...) calls with builtin identity are mappings; everything else (names with unknown values, calls, attributes, comprehensions other than dict comprehensions) is typed-incomplete. Continue the implementation, fixtures and landing per LANES2.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The query vocabulary is wired and both call and binary-expression inputs now reach the same query-local projection. The focused RQL test is waiting for the build slot; while it runs I’m keeping the lane changes isolated and will address any compile feedback before adding the policy cases.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -22,6 +22,23 @@ pub use mj_client::target::{ResumePlan, resume_compatibility, resume_compatibili
 
 use super::{BranchDisposition, Controller, execute_checked, now};
 
+/// The persisted checkout intent; materialization may run alongside worker setup.
+pub(super) struct PreparedManagedCheckout {
+    worktree: ManagedWorktree,
+    upstream: Option<String>,
+}
+
+impl PreparedManagedCheckout {
+    pub(super) fn execute(&self, executor: &impl CommandExecutor) -> Result<()> {
+        create_managed_worktree(
+            executor,
+            &self.worktree,
+            self.upstream.as_deref(),
+            PrimaryCheckoutRequirement::Clean,
+        )
+    }
+}
+
 impl Controller {
     /// Inspect in a supervised worker, never on a UI event loop.
     pub fn managed_worktree_options(
@@ -294,11 +311,24 @@ impl Controller {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn prepare_managed_raw_worktree(
         &mut self,
         session_id: &str,
         executor: &impl CommandExecutor,
     ) -> Result<bool> {
+        let checkout = self.plan_managed_raw_worktree(session_id, executor)?;
+        if let Some(checkout) = &checkout {
+            checkout.execute(executor)?;
+        }
+        Ok(checkout.is_some())
+    }
+
+    pub(super) fn plan_managed_raw_worktree(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<Option<PreparedManagedCheckout>> {
         let session = self
             .state
             .sessions
@@ -314,10 +344,10 @@ impl Controller {
         };
         drop(checkout);
         let Some(selected) = selected else {
-            return Ok(false);
+            return Ok(None);
         };
         if session.create_managed_worktree == Some(false) {
-            return Ok(false);
+            return Ok(None);
         }
         let template = self
             .config
@@ -338,14 +368,14 @@ impl Controller {
                 session.create_managed_worktree != Some(true) && session.launch_base.is_none(),
                 "managed worktree creation requires a Git project"
             );
-            return Ok(false);
+            return Ok(None);
         }
         let inspection = inspect_raw_project(executor, &target, &selected)?;
         if !inspection.primary_checkout
             && session.create_managed_worktree != Some(true)
             && session.launch_base.is_none()
         {
-            return Ok(false);
+            return Ok(None);
         }
         let relative_directory = inspection
             .source_project_directory
@@ -415,13 +445,10 @@ impl Controller {
         record.managed_worktree = Some(managed.clone());
         record.updated_at = now();
         self.persist_session_state(session_id)?;
-        create_managed_worktree(
-            executor,
-            &managed,
-            inspection.upstream.as_deref(),
-            PrimaryCheckoutRequirement::Clean,
-        )?;
-        Ok(true)
+        Ok(Some(PreparedManagedCheckout {
+            worktree: managed,
+            upstream: inspection.upstream,
+        }))
     }
 
     pub(super) fn cleanup_new_session_worktree_after_failure(

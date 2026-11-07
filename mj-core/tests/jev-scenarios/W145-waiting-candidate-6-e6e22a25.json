@@ -102,7 +102,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Waiting on the module-graph lane, the unit-test lane, and the capture build. The three profiling compiles start after the build.",
     "completion": {
       "stop_reason": "EndTurn",

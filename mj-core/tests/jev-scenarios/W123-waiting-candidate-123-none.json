@@ -127,7 +127,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Checkpoint, not a verdict; not finished. Both binaries are built. Resume: remove the source trees, tars and targets; then wait for load below 100 in the same shell (poll every 5 minutes) and capture base A, candidate and base B (fresh directories and cache roots, 40 s wait, each on its PID, with --record-answer-differences), completeness checks, strict comparator, SQL band with every family attributed (the accepted classes: per-blob parse-time IR writer statements for Java and Kotlin blobs, shown per blob and per request, and the matching drop of on-demand lowering reads; anything else named), replay130, nine answers, work50, the two manual goldens as separate invocations per side with digests and the J0_KPERF_SCOPE element comparison, closing manifests, REPORT.md with PASS or FAIL, cleanup. The turn ends only with the verdict.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The candidate golden build is waiting on mbx’s shared compile for `brokk_bifrost_tools`; it is still running normally and the gate instructions require waiting on the same process. No other Cargo command was started.",
     "completion": {
       "stop_reason": "EndTurn",

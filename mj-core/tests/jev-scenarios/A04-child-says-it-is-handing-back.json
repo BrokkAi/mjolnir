@@ -112,7 +112,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Root fix now in source .last().unwrap_or(node). After current analysis result, allow targeted regression/C++ runs to finish before starting more broad suites to avoid compiling another artifact on pending semantic fixes. Handback analysis results promptly; parent resumes broader checks once focused passes. Do not lose green checks.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The analysis library suite completed green: 3,071 passed and 123 skipped. I’m handing that result back now and will wait for the targeted regression and C++ children before starting the broader suites.",
     "completion": {
       "stop_reason": "EndTurn",

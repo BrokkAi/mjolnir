@@ -112,7 +112,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "y-authoring/ENGINE-BRIEF.md. Your issue is BrokkAi/bifrost-dev#4645, \"Complete Python class-member and protocol facts\". Its full body is at /workspace/31e44e629cb2bbaa225a83cd820af443/.mj-agents/2bb203013141f5828b032bba10771d8a/02-python-class-member-facts.md, with probes under that directory's probes/. Your worktree is /workspace/31e44e629cb2bbaa225a83cd820af443/bifrost/.worktrees/4645-class-member-facts, on branch 4645-class-member-facts. The rules cover the lifecycle rules (the trivial-method exclusion from CodeQL's MethodCallOrder.qll nonTrivial), conflicting-attributes, incomplete-ordering, inconsistent-equality, init-calls-subclass, the iterator protocol rules, special-method-wrong-signature and missing-docstring. Earlier authoring evidence, with the trial policies and fixtures, is in /workspace/31e44e629cb2bbaa225a83cd820af443/.mj-agents/c39946a94a49b0dc38b63f80d561d1f9/retry-evidence.md (and retry-policies/, retry-fixtures/). Prioritize by rules unblocked per change; the triviality fact unblocks four.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The fact and filter work is now documented, and I added candidate policy files for iterator protocol, special-method signatures, and missing method docstrings in the report area. The retest has acquired a build slot and is compiling the affected RQL crate; I’m waiting for that result before touching source again.",
     "completion": {
       "stop_reason": "EndTurn",

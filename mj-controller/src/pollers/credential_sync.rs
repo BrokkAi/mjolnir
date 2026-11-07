@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::credentials::SyncStep;
 
 /// One immediate sync and notice per session per cooldown, so a harness that
 /// repeats the same failed turn does not flood the UI.
@@ -96,7 +97,8 @@ pub fn schedule_due_credential_syncs(
 /// per-session failure.
 #[derive(Debug, Default)]
 pub struct CredentialSyncNotices {
-    pub(super) last_failures: std::collections::BTreeMap<(String, Option<String>), String>,
+    pub(super) last_failures:
+        std::collections::BTreeMap<(String, Option<String>, Option<SyncStep>), String>,
 }
 
 pub fn log_credential_sync_actions(result: &mj_core::credentials::CredentialSyncResult) {
@@ -168,7 +170,7 @@ impl CredentialSyncNotices {
             let session_id = &trigger.session_id;
             let session = state.session_notice_name(session_id);
             let sync_failure = result.failure.as_deref().or_else(|| {
-                result.failures().find_map(|(failed_session, detail)| {
+                result.failures().find_map(|(failed_session, _, detail)| {
                     (failed_session == session_id).then_some(detail)
                 })
             });
@@ -220,34 +222,63 @@ impl CredentialSyncNotices {
         let mut failures = std::collections::BTreeMap::new();
         if let Some(detail) = &result.failure {
             failures.insert(
-                (result.profile_id.clone(), None),
+                (result.profile_id.clone(), None, None),
                 format!(
                     "Credential sync for profile {} failed: {detail}",
                     result.profile_id
                 ),
             );
         }
-        for (session_id, detail) in result.failures() {
+        // Every failure of a step is said: a second one under the same key is
+        // added to the first, never put in its place.
+        let mut details = std::collections::BTreeMap::<_, Vec<&str>>::new();
+        for (session_id, step, detail) in result.failures() {
+            details
+                .entry((result.profile_id.clone(), Some(session_id.to_owned()), step))
+                .or_default()
+                .push(detail);
+        }
+        for (key, details) in details {
+            let session = state.session_notice_name(key.1.as_deref().unwrap_or_default());
             failures.insert(
-                (result.profile_id.clone(), Some(session_id.to_owned())),
+                key,
                 format!(
-                    "Credential sync for profile {} (session {}) failed: {detail}",
+                    "Credential sync for profile {} (session {session}) failed: {}",
                     result.profile_id,
-                    state.session_notice_name(session_id)
+                    details.join("; ")
                 ),
             );
         }
         // A key that stopped failing is forgotten silently, so the same failure
-        // after a clean cycle is reported again.
-        self.last_failures
-            .retain(|key, _| key.0 != result.profile_id || failures.contains_key(key));
-        let mut notice = None;
+        // after a clean cycle is reported again. A result can end only the
+        // failures of the steps it checked: the renewal task's result is about
+        // one session's role-scoped AWS credentials, and every other result
+        // is about everything but those.
+        self.last_failures.retain(|key, _| {
+            key.0 != result.profile_id
+                || failures.contains_key(key)
+                || if result.partial {
+                    !(key.2 == Some(SyncStep::Aws)
+                        && key.1.as_ref().is_some_and(|session| {
+                            result
+                                .outcomes
+                                .iter()
+                                .any(|outcome| outcome.session_id == *session)
+                        }))
+                } else {
+                    key.2 == Some(SyncStep::Aws)
+                }
+        });
+        // Every key is recorded as reported, so every newly failed step is
+        // said now, in one notice.
+        let mut new_messages = Vec::new();
         for (key, message) in failures {
             if self.last_failures.get(&key) != Some(&message) {
-                notice.get_or_insert_with(|| message.clone());
+                new_messages.push(message.clone());
             }
             self.last_failures.insert(key, message);
         }
+        let notice = (!new_messages.is_empty()).then(|| new_messages.join(" "));
         if let Some(text) = notice {
             return Some(warning(text));
         }

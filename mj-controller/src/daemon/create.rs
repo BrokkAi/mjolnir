@@ -431,6 +431,10 @@ impl RuntimeState {
         control: LifecycleControl,
         publication: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
     ) -> Result<(RegisteredSession, Option<&'static str>, Option<String>)> {
+        let mut admission_timing =
+            crate::launch_timing::LaunchPhaseTimer::new("", "admit and register session");
+        tracing::info!(profile_id = %request.profile_id, target_id = %request.target_template_id,
+            "session launch admission started");
         let mut request = request;
         let parent = request.profile_id.clone();
         let supplied = request.subagents.clone();
@@ -580,6 +584,8 @@ impl RuntimeState {
             ))
         })
         .await?;
+        admission_timing.set_session_id(&registered.session.id);
+        drop(admission_timing);
         let capacity_warning = [oracle_notice, _container_admission.warning.clone()]
             .into_iter()
             .flatten()
@@ -588,6 +594,7 @@ impl RuntimeState {
         let capacity_warning = (!capacity_warning.is_empty()).then_some(capacity_warning);
         drop(_container_admission);
         let session_id = registered.session.id.clone();
+        let scheduled_at = std::time::Instant::now();
         self.start_or_join_lifecycle_controlled(
             session_id,
             LifecycleKind::Create,
@@ -595,9 +602,18 @@ impl RuntimeState {
             None,
             Some(control.clone()),
             move |state, session_id, cancelled| async move {
+                tracing::info!(%session_id, elapsed_ms = scheduled_at.elapsed().as_millis(),
+                    "session launch lifecycle scheduled");
+                let _total =
+                    crate::launch_timing::LaunchPhaseTimer::new(&session_id, "create lifecycle");
+                let loading =
+                    crate::launch_timing::LaunchPhaseTimer::new(&session_id, "load controller");
                 let mut controller = tokio::task::spawn_blocking(Controller::load)
                     .await
                     .context("load controller for daemon create task")??;
+                drop(loading);
+                let publication_timing =
+                    crate::launch_timing::LaunchPhaseTimer::new(&session_id, "await publication");
                 let publication_error = if let Some(publication) = publication {
                     let published = tokio::select! {
                         result = publication => result.context("session publication owner stopped")
@@ -612,6 +628,7 @@ impl RuntimeState {
                 } else {
                     None
                 };
+                drop(publication_timing);
                 if publication_error.is_some() {
                     control.request_cancel("session publication failed");
                 }
@@ -646,7 +663,12 @@ impl RuntimeState {
                 Ok(DaemonLifecycleResult::Done)
             },
         )?;
+        let publishing = crate::launch_timing::LaunchPhaseTimer::new(
+            &registered.session.id,
+            "publish registered session view",
+        );
         self.reload_controller().await?;
+        drop(publishing);
         Ok((registered, review_notice, capacity_warning))
     }
 

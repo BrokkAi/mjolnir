@@ -723,7 +723,7 @@ mod tests {
         relay.background_work = BackgroundWorkPolicy::AirTasks;
         relay
             .turn_context
-            .reset("How many tickets fell out of s21?");
+            .reset(None, "How many tickets fell out of s21?");
         relay.record_session_update(serde_json::from_value(serde_json::json!({
             "sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"One ticket so far: #3486."}
         })).unwrap()).unwrap();

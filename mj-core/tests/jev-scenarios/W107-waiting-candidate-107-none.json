@@ -127,7 +127,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Continue",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The scheduled trial run finished with 498 passed, fourteen failed, and the usage differential timed out. I’m running the identical trial selection on the base now. Once it finishes, I’ll compare the failure names and outputs and hand back the evidence.",
     "completion": {
       "stop_reason": "EndTurn",

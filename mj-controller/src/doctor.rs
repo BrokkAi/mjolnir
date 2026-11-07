@@ -962,12 +962,145 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
     config
         .profiles
         .iter()
-        .map(|(id, profile)| {
+        .flat_map(|(id, profile)| {
             let mut check = harness_profile_check(id, profile, executor);
             check.detail = format!("{} {}", profile_summary(profile), check.detail);
-            check
+            let scope = aws_scope_check(id, profile, &config.targets, executor);
+            std::iter::once(check).chain(scope)
         })
         .collect()
+}
+
+/// What AWS credentials a Bedrock profile's sessions receive. Without a
+/// `[profiles.<id>.aws]` role they receive the controller host's own
+/// credentials; with one, credentials limited to the role, which is tested
+/// here with a real `AssumeRole` call so a broken trust policy or policy
+/// shows up before a session fails to start. A target the role cannot apply
+/// to (raw local, EC2, or one that sets its own AWS credentials) is reported
+/// by itself with the reason, whether or not another target is scoped.
+fn aws_scope_check(
+    id: &str,
+    profile: &HarnessProfile,
+    targets: &BTreeMap<String, TargetTemplate>,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorCheck> {
+    use crate::aws_credentials::{CredentialsWithheld, SessionHost, credentials_withheld};
+    if !profile.enabled {
+        return Vec::new();
+    }
+    let check_id = format!("harness.{id}.aws-scope");
+    let title = format!("AWS credentials for profile {id}");
+    if !crate::aws_credentials::is_bedrock(profile) {
+        // Sessions run, without scoping; they are not refused.
+        let Some(role) = &profile.aws else {
+            return Vec::new();
+        };
+        return vec![DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "[profiles.{id}.aws] names {}, but {}, so it has no effect. Sessions run without role-scoped credentials.",
+                role.role_arn,
+                CredentialsWithheld::NotBedrock.why_a_role_cannot_apply()
+            ),
+            format!(
+                "Remove `[profiles.{id}.aws]`, or configure Bedrock (the AWS credential chain) for this profile."
+            ),
+        )];
+    }
+    // The same question launch and the sync ask, per configured target.
+    let mut receiving = Vec::new();
+    let mut withheld = Vec::new();
+    for (target_id, template) in targets {
+        let environment = mj_core::state::TargetRuntimeSettings::from(template).environment;
+        match credentials_withheld(profile, SessionHost::from(template), &environment) {
+            None => receiving.push(target_id.as_str()),
+            Some(reason) => withheld.push((target_id.as_str(), reason)),
+        }
+    }
+    let Some(role) = &profile.aws else {
+        if receiving.is_empty() {
+            return Vec::new();
+        }
+        return vec![DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "Sessions on {} receive the controller host's own AWS credentials, unscoped: anything running in a session can use everything those credentials allow.",
+                receiving.join(", ")
+            ),
+            format!(
+                "Create an IAM role for sessions that the host's AWS login may assume, and set `[profiles.{id}.aws] role_arn = \"arn:aws:iam::<account>:role/<name>\"`. Sessions then receive short-lived credentials limited to that role and to a Bedrock-only session policy."
+            ),
+        )];
+    };
+    let mut checks = withheld
+        .iter()
+        .map(|(target_id, reason)| {
+            DoctorCheck::warning(
+                format!("{check_id}.{target_id}"),
+                format!("AWS credentials for profile {id} on target {target_id}"),
+                format!(
+                    "[profiles.{id}.aws] names {}, but it has no effect on sessions on target {target_id}: {}. Those sessions run with that target's own AWS identity, not role-scoped credentials.",
+                    role.role_arn,
+                    reason.why_a_role_cannot_apply()
+                ),
+                "Run this profile's Bedrock sessions on a container or SSH target without AWS credentials in its environment, or use the target's own identity deliberately and give it only the access sessions need.",
+            )
+        })
+        .collect::<Vec<_>>();
+    if receiving.is_empty() {
+        return checks;
+    }
+    let source = match crate::aws_credentials::selected_source(profile) {
+        Ok(source) => source,
+        Err(error) => {
+            checks.push(DoctorCheck::fixable(
+                check_id,
+                title,
+                format!("The profile's AWS identity could not be selected: {error:#}"),
+                "Fix the profile's Codex configuration or AWS_PROFILE setting.",
+            ));
+            return checks;
+        }
+    };
+    checks.push(match crate::aws_assume_role::probe(&source, executor) {
+        Ok(credentials) => {
+            let until = credentials
+                .expires_at_epoch_millis()
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map_or_else(String::new, |at| {
+                    format!(" Those credentials last until {at}.")
+                });
+            DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "The host's AWS login assumed {} for a probe session that exists only for this check, named like a real session (mj-<32 hex digits>); sessions on {} receive credentials limited to it.{until}",
+                    role.role_arn,
+                    receiving.join(", ")
+                ),
+            )
+        }
+        Err(error) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!("{error:#}"),
+            format!(
+                "Make the controller's AWS login (profile {}) able to assume the role: allow sts:AssumeRole on it, and name the login in the role's trust policy{}. Sessions on this profile are refused until then.",
+                source
+                    .environment
+                    .get("AWS_PROFILE")
+                    .map_or("default", String::as_str),
+                if role.source_identity {
+                    " with sts:SetSourceIdentity allowed (source_identity is on)"
+                } else {
+                    ""
+                }
+            ),
+        ),
+    });
+    checks
 }
 
 /// The readiness of one profile: its home, and whether it can authenticate.
@@ -2864,12 +2997,14 @@ fn aws_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<
                 aws_profile,
                 region,
                 launch_template,
+                launch_template_version,
                 ..
             } => Some(aws_target_check(
                 id,
                 aws_profile.as_deref(),
                 region,
                 launch_template,
+                launch_template_version.as_deref(),
                 executor,
             )),
             _ => None,
@@ -2893,6 +3028,7 @@ fn aws_target_check(
     profile: Option<&str>,
     region: &str,
     launch_template: &str,
+    launch_template_version: Option<&str>,
     executor: &impl CommandExecutor,
 ) -> DoctorCheck {
     let check_id = format!("runtime.aws-ec2.{id}");
@@ -2990,13 +3126,96 @@ fn aws_target_check(
             ),
             template_remediation,
         ),
-        Ok(_) => DoctorCheck::ready(
-            check_id,
-            title,
-            format!(
+        Ok(_) => {
+            let ready = format!(
                 "The AWS CLI is installed, profile {profile_label} has valid credentials, and launch template {launch_template} exists in {region}."
+            );
+            aws_template_metadata_check(
+                check_id,
+                title,
+                ready,
+                (profile, region),
+                launch_template,
+                launch_template_version,
+                executor,
+            )
+        }
+    }
+}
+
+/// Mjolnir passes `HttpTokens=required` on every launch it makes, so its own
+/// instances are protected whatever the template says. The template still
+/// matters to everyone else who launches from it, so a template that allows
+/// IMDSv1 (plain-GET reads of the instance profile's credentials) is
+/// reported when the version can be read.
+fn aws_template_metadata_check(
+    check_id: String,
+    title: String,
+    ready: String,
+    (profile, region): (Option<&str>, &str),
+    launch_template: &str,
+    launch_template_version: Option<&str>,
+    executor: &impl CommandExecutor,
+) -> DoctorCheck {
+    let mut args = aws_global_args(profile, region);
+    args.extend([
+        "ec2".to_owned(),
+        "describe-launch-template-versions".to_owned(),
+    ]);
+    args.extend([
+        if launch_template.starts_with("lt-") {
+            "--launch-template-id".to_owned()
+        } else {
+            "--launch-template-name".to_owned()
+        },
+        launch_template.to_owned(),
+        "--versions".to_owned(),
+        launch_template_version.unwrap_or("$Default").to_owned(),
+        "--query".to_owned(),
+        "LaunchTemplateVersions[0].LaunchTemplateData.MetadataOptions.HttpTokens".to_owned(),
+        "--output".to_owned(),
+        "text".to_owned(),
+    ]);
+    let command = CommandSpec::new("aws", args)
+        .purpose("check the launch template's instance metadata options");
+    let unread = |reason: String| {
+        DoctorCheck::ready(
+            check_id.clone(),
+            title.clone(),
+            format!(
+                "{ready} Its instance metadata setting could not be read ({reason}); Mjolnir requires IMDSv2 on every instance it launches regardless."
             ),
-        ),
+        )
+    };
+    match executor.execute(&command) {
+        Err(error) => unread(format!("{error:#}")),
+        Ok(output) if output.status != 0 => {
+            unread(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        }
+        Ok(output) => match String::from_utf8_lossy(&output.stdout).trim() {
+            "required" => DoctorCheck::ready(
+                check_id,
+                title,
+                format!("{ready} The template requires IMDSv2."),
+            ),
+            "optional" => DoctorCheck::warning(
+                check_id,
+                title,
+                format!(
+                    "{ready} The template allows IMDSv1 (HttpTokens=optional), so other instances launched from it let code on the instance read its instance profile's credentials with a plain HTTP GET. Mjolnir requires IMDSv2 on the instances it launches regardless."
+                ),
+                format!(
+                    "Optional: create a new version of launch template {launch_template} with the metadata option HttpTokens set to required, and make it the default version."
+                ),
+            ),
+            _ => DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "{ready} The template does not set HttpTokens, so the account default applies to other launches; Mjolnir requires IMDSv2 on every instance it launches."
+                ),
+            ),
+        },
     }
 }
 

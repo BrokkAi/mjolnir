@@ -47,7 +47,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "_TOOLCHAIN -u CARGO_MANIFEST_DIR nice -n 10 cargo build --profile measure --locked --features test-support --bin bifrost` (find the right package/feature spelling in the root Cargo.toml if this fails; do not change target dirs or profiles). Copy it immediately to /tmp/java-parity/bin/bifrost-7492-39fda1b1c3-measure-test-support.\n2. Rerun the diagnosis's two minimal cases (direct and through `new File(p)`) exactly as run.sh does, with the new binary, twice: without BIFROST_TRIAL_NATIVE_JAVA and with BIFROST_TRIAL_NATIVE_JAVA=1. Confirm the route actually switched (the earlier work used overload-dispatch evidence or a route diagnostic; look for one in the output).\n3. For each run report: findings, bound source and sink endpoint counts, solves, completion, and the call-binding rows for the FileInputStream and File constructor calls (callee resolution, coverage, declaration id).\n\nHandback under 15 lines: a table of the four runs, and whether the native route resolves the JDK constructors and produces the finding.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The lane is at the requested commit (`39fda1b1c3a23eff4d416a3d33e2757cb17729c8`). The test-support build is still compiling the CLI and language crates; once it completes I’ll preserve that binary and run the same direct and wrapped-constructor workspaces under both routes.",
     "completion": {
       "stop_reason": "EndTurn",

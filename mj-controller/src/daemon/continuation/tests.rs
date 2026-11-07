@@ -1433,6 +1433,7 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, PathBuf::default())
             },
         );

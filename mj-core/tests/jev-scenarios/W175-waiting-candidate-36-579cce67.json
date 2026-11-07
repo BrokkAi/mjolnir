@@ -62,7 +62,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "rds and three controls in tests/suite_bench_policy/resource_lifecycle_pack.rs (about 2512-2620) on this branch;\n- report whether `rust_resource_lifecycle_composition_matches_forced_icfg` returns to Complete for its proven move, which is expected once the closure can exclude the unrelated observation.\nValidation, under `env -u RUSTUP_TOOLCHAIN JAVA_HOME= BIFROST_OPEN_PACKS_DISABLE=1 BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 nice -n 10 eatmydata`, with a fresh XDG_CACHE_HOME under /mnt/optane/tmp/9550-m4/run/ and nextest `--max-fail 100`:\n- flow and policy typestate lib tests;\n- the policy-integration filters `resource_lifecycle_pack|go_typestate_lifecycle|policy_typestate|typestate` (PYO3_PYTHON=/home/jonathan/.local/share/uv/python/cpython-3.12.8-linux-x86_64-gnu/bin/python3.12, LD_LIBRARY_PATH set to its lib directory);\n- Clippy -D warnings on flow and policy;\n- fmt.\nClassify every changed outcome. Waiting on the Cargo lock is normal. Do not change Cargo profiles or redirect target/. Keep the handback short.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Clippy passed. The test build is still running, and the policy selection is waiting on Cargo’s build lock. The proof currently fails closed on missing coverage, open edges, and budget or cancellation errors; I’ll check the root-specific outcomes once the tests execute.",
     "completion": {
       "stop_reason": "EndTurn",

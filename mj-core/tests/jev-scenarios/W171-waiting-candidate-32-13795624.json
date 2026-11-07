@@ -292,7 +292,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": " classes (\"capture-scoped memo cannot cross capture boundaries\", \"!self.read_ledger_attached() ||\", \"must forward query read-ledger operations\") in their own worktrees. Your job: the remaining failures from your table that are NOT one of those three messages (about 56: epic_4343_* exit status and invalid JSON, issue_3386, go_typestate_lifecycle, analyzer_persistence, incremental_equivalence, layer_gate \"new layer violations\", issue_1334 \"walked N\", mcp_cli, golden_receiver_allocations timeout, the reuse-count assertions, and so on). Rerun exactly those tests at fa4a57d280 in the dev profile with RUST_BACKTRACE=1 (same suite settings as before). For each that still fails, give its root cause from the backtrace or assertion: whether it is one of the three panic classes in disguise (for example a subprocess that panicked), or a separate problem, with file:line. For layer_gate, report the exact new violation. Do not fix anything. Handback: table of still-failing tests with cause and file:line, and which now pass.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The staging run has reached the filtered integration binaries, but `mbx` is waiting on concurrent builds of `bifrost_benchmark`, `suite_usages`, and `suite_semantic` with matching arguments. Several are long-running on the shared host, so this remains a build-cache wait rather than a test hang.",
     "completion": {
       "stop_reason": "EndTurn",
