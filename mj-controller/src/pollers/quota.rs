@@ -263,14 +263,6 @@ pub fn spawn_image_refresher(
 ) -> tokio::task::JoinHandle<()> {
     let report: Arc<dyn Fn(ImageRefreshReport) + Send + Sync> = Arc::new(report);
     tokio::spawn(async move {
-        // The refresher only looks at Apple's service and never starts it,
-        // so its first look waits for daemon startup's start to finish:
-        // a look mid-start would read "stopped" and skip a whole interval.
-        tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => return,
-            _ = apple_container_settled.cancelled() => {}
-        }
         let mut interval = tokio::time::interval_at(
             tokio::time::Instant::now() + IMAGE_REFRESH_DELAY,
             IMAGE_REFRESH_INTERVAL,
@@ -288,7 +280,14 @@ pub fn spawn_image_refresher(
                 biased;
                 _ = cancellation.cancelled() => return,
                 _ = interval.tick() => {
-                    refresh_images(plan(), &report, &mut last_failures, &cancellation).await;
+                    refresh_images(
+                        plan(),
+                        &report,
+                        &mut last_failures,
+                        &apple_container_settled,
+                        &cancellation,
+                    )
+                    .await;
                 }
             }
         }
@@ -423,6 +422,7 @@ pub(super) async fn refresh_images(
     plan: Vec<ImageRefresh>,
     report: &Arc<dyn Fn(ImageRefreshReport) + Send + Sync>,
     last_failures: &mut BTreeMap<String, String>,
+    apple_container_settled: &tokio_util::sync::CancellationToken,
     cancellation: &tokio_util::sync::CancellationToken,
 ) {
     if plan.is_empty() {
@@ -447,11 +447,14 @@ pub(super) async fn refresh_images(
             );
             continue;
         }
-        // ProcessExecutor is synchronous, and a pull is long: it belongs on a
-        // blocking thread, never on the runtime.
         let executor = CancellableProcessExecutor::new(cancelled.clone());
         let report = report.clone();
-        hosts.spawn_blocking(move || refresh_one_host(refresh, &executor, &*report));
+        hosts.spawn(refresh_host_after_startup(
+            refresh,
+            apple_container_settled.clone(),
+            cancellation.clone(),
+            move |refresh| refresh_one_host(refresh, &executor, &*report),
+        ));
     }
     let mut cancelling = false;
     loop {
@@ -471,6 +474,35 @@ pub(super) async fn refresh_images(
                     tracing::warn!(%error, "container image refresh task failed");
                 }
             },
+        }
+    }
+}
+
+/// One host's refresh task. The local Apple container refresh first waits
+/// for daemon startup's start of the service to finish: the refresh only looks
+/// at the service and never starts it, and a look mid-start would read
+/// "stopped" and skip the whole interval. Every other host starts at once, so
+/// a slow Apple start holds no other host's refresh.
+pub(super) async fn refresh_host_after_startup(
+    refresh: ImageRefresh,
+    apple_container_settled: tokio_util::sync::CancellationToken,
+    cancellation: tokio_util::sync::CancellationToken,
+    run: impl FnOnce(ImageRefresh) -> Option<(String, String, Option<String>)> + Send + 'static,
+) -> Option<(String, String, Option<String>)> {
+    if matches!(refresh.host, ImageHost::AppleContainer) {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return None,
+            _ = apple_container_settled.cancelled() => {}
+        }
+    }
+    // ProcessExecutor is synchronous, and a pull is long: it belongs on a
+    // blocking thread, never on the runtime.
+    match tokio::task::spawn_blocking(move || run(refresh)).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(%error, "container image refresh task failed");
+            None
         }
     }
 }

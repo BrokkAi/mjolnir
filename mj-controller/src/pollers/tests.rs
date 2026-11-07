@@ -2198,30 +2198,41 @@ fn cancelled_operation_leaves_the_running_recovery_copy_alone() {
 
 // Hard-won: c2d74db67: the refresher's first look could run while daemon startup was still starting Apple's container service, read it as stopped, and skip a whole interval.
 #[tokio::test(start_paused = true)]
-async fn the_image_refresher_waits_for_apple_container_startup_before_its_first_look() {
-    let looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+async fn only_the_apple_container_refresh_waits_for_its_startup() {
+    let refresh = |host| {
+        crate::targets::image_refresh(
+            host,
+            "ghcr.io/example/dev:latest",
+            None,
+            mj_core::config::ImagePullPolicy::Auto,
+        )
+        .expect("a remote latest image is refreshed")
+    };
     let settled = tokio_util::sync::CancellationToken::new();
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let refresher = spawn_image_refresher(
-        {
-            let looks = looks.clone();
-            move || {
-                looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Vec::new()
-            }
-        },
-        |_| {},
+    let ran = |name: &'static str| move |_| Some((name.to_owned(), String::new(), None));
+    let apple = tokio::spawn(refresh_host_after_startup(
+        refresh(crate::targets::ImageHost::AppleContainer),
         settled.clone(),
         cancellation.clone(),
+        ran("apple"),
+    ));
+    // A slow Apple start holds no other host's refresh.
+    let docker = refresh_host_after_startup(
+        refresh(crate::targets::ImageHost::LocalDocker),
+        settled.clone(),
+        cancellation.clone(),
+        ran("docker"),
+    )
+    .await;
+    assert_eq!(docker.map(|(host, ..)| host).as_deref(), Some("docker"));
+
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    assert!(
+        !apple.is_finished(),
+        "the Apple refresh looked before startup finished"
     );
-
-    tokio::time::sleep(IMAGE_REFRESH_DELAY * 10).await;
-    assert_eq!(looks.load(std::sync::atomic::Ordering::SeqCst), 0);
-
     settled.cancel();
-    tokio::time::sleep(IMAGE_REFRESH_DELAY * 2).await;
-    assert_eq!(looks.load(std::sync::atomic::Ordering::SeqCst), 1);
-
-    cancellation.cancel();
-    refresher.await.unwrap();
+    let apple = apple.await.unwrap();
+    assert_eq!(apple.map(|(host, ..)| host).as_deref(), Some("apple"));
 }
