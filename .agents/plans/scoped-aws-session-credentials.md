@@ -18,12 +18,12 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - [x] (2026-11-06 00:00Z) Wrote this ExecPlan (design only).
 - [x] (2026-11-06 Z) Parent reviewed and accepted the plan and all five open decisions (see Decision Log, 2026-11-06 acceptance entries).
 - [x] (2026-11-07 03:58Z) Milestone 0: live AWS prototype done against the user's account with the limits the user set; all resources created were deleted and verified gone (see Artifacts and Notes, "Milestone 0 resource log"). Fixtures recorded under `mj-controller/tests/fixtures/`. Findings are in Surprises & Discoveries.
-- [ ] Milestone 1: IMDSv2 on Mjolnir-launched EC2 (launch flag, launch-response verification, Move compatibility, doctor template check).
-- [ ] Milestone 2: configuration type `[profiles.<id>.aws]`, validation, settings surface, shared "does this session receive synced credentials" predicate.
-- [ ] Milestone 3: STS minting and the per-session cache in the controller; launch-time use.
-- [ ] Milestone 4: credential sync integration and visible failure reporting.
-- [ ] Milestone 5: `mj doctor` checks (unscoped warning, role probe).
-- [ ] Milestone 6: documentation, focused tests, final validation, live isolated-instance check.
+- [x] (2026-11-07 Z) Milestone 1: IMDSv2 on Mjolnir-launched EC2 (commit e201e33ee): `with_required_imds` and `require_imdsv2` in `mj-controller/src/targets/provision.rs`, verification in `backend.rs` and the Move preparation, doctor template check.
+- [x] (2026-11-07 Z) Milestone 2: `[profiles.<id>.aws]` (`AwsRoleConfig`), `AwsCredentialSource.role`, and the shared `receives_synced_credentials` predicate (commit 0500d3881). Settings form deferred (see Decision Log).
+- [x] (2026-11-07 Z) Milestone 3: `mj-controller/src/aws_assume_role.rs` with the per-session cache, launch-time `obtain` (commit 0f5ce42b3).
+- [x] (2026-11-07 Z) Milestone 4: credential sync mints per session inside the admission-gated step (commit f58962e4d).
+- [x] (2026-11-07 Z) Milestone 5: doctor scope check with a real throwaway AssumeRole.
+- [x] (2026-11-07 Z) Milestone 6: documentation (`docs/AWS.md`, `security.md`, `profiles.md`), workspace clippy, touched-crate test suites (results under Outcomes & Retrospective).
 
 ## Surprises & Discoveries
 
@@ -118,9 +118,29 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
   Rationale: this is what the recorded real output looks like.
   Date/Author: 2026-11-07 / Claude.
 
+- Decision (implementation): the settings form for `[profiles.<id>.aws]` is deferred; the table is edited in `config.toml`, round-trips through Settings because it is a typed profile field, and is documented as such in `profiles.md`.
+  Rationale: Settings builds its pages from JSON defaults, and a new profile section would need a default object whose required `role_arn` is empty, which would be written to every profile on save and fail validation. A correct form needs "optional section with a required field" support in the settings schema, which is a separate change; config.toml editing is the same route GitHub App settings use today.
+  Date/Author: 2026-11-07 / Claude. Deferred item reported to the parent.
+
+- Decision (implementation): the "applies only to a profile that authenticates with the AWS credential chain" refusal is in `HarnessProfile::ensure_ready`, not `validate`; `validate` only checks the table's shape.
+  Rationale: whether a profile uses the AWS chain depends on its environment and, for Codex, on its home's `config.toml`, which `ensure_ready` already reads (the same split `guardian_review_model` uses). The refusal reaches the person through the same profile-refusal path and doctor.
+  Date/Author: 2026-11-07 / Claude.
+
+- Decision (implementation): the cache uses a `std::sync::Mutex` per key held across the blocking mint, and callers run it in `spawn_blocking`, instead of the plan's `tokio::sync::Mutex`.
+  Rationale: session launch is blocking code and the sync is async; one blocking implementation serves both, and single-flight per key holds the same. The map lock is held only to find the cell.
+  Date/Author: 2026-11-07 / Claude.
+
+- Decision (implementation): a failed renewal is always an error, even while the previous credentials are still valid.
+  Rationale: the worker keeps what it already has (nothing is pushed on failure), the failure is reported at once instead of at expiry, and the code has no in-memory fallback path. This matches the failure-behavior decision above.
+  Date/Author: 2026-11-07 / Claude.
+
 ## Outcomes & Retrospective
 
-Not started. At completion, record what was achieved against the Purpose section, what remains (in particular any Bedrock actions the default policy needed beyond the provisional list), and lessons learned.
+Implemented through Milestone 6 on 2026-11-07. A Bedrock profile with `[profiles.<id>.aws] role_arn = ...` now gives each container or SSH session credentials assumed for it alone (role session name `mj-<session id>`), narrowed by a session policy, renewed after half their lifetime through the existing credential sync, with no relay or database change. A refused role fails the launch with AWS's error line and a remedy, or fails the running session's sync outcome while the worker keeps what it has; nothing falls back to the unscoped export. Profiles without a role behave as before, and `mj doctor` warns about them and probes a configured role with a real throwaway AssumeRole. Every EC2 launch (ordinary and Move) requires IMDSv2, verified in the launch response, and doctor warns about a launch template that allows IMDSv1.
+
+Validation on the dev profile: workspace `cargo clippy --all-targets -- -D warnings` (default members) clean; `mj-tui` 582 passed; `mj-cli` all targets passed; `mj-core` library 614 passed with 5 failures that also fail on origin/master (`local_git::tests::project_identity_uses_default_branch_tracking_and_keeps_selected_worktree`, which sees this host's git URL rewriting, and four `targets::ssh::tests` against a real sshd); `mj-controller` 2404 passed with 4 failures that also fail on origin/master e2b34009e (`controller::tests::selecting_a_linked_checkout_reuses_identity_and_retains_its_push_settings`, `daemon::tests::child_close_preserves_history_and_reports_without_exporting_the_workspace`, `daemon::tests::failed_reviewer_recovery_releases_parent_upgrade_after_saving_its_journal`, `daemon::tests::child_close_cancel_before_commit_leaves_it_running_and_allows_a_fresh_close`). One further core test, `harness_install::tests::direct_grok_artifact_installs_relocatable_launchers`, failed once under load with "Text file busy" and passed alone and on rerun.
+
+Remaining or deferred: the Settings form for the `aws` table; a live end-to-end run of the finished build against AWS (only Milestone 0 touched AWS, with the same commands and policy); the `--min-count`/`--max-count` rejection by AWS CLI 2.36.24 in the Move launch (filed separately by the parent); proof that `--metadata-options` overrides a launch template that sets `optional` (the response check is the guard). Lesson: the AWS CLI v2 error line has an `aws: [ERROR]: ` prefix that a parser written from the API documentation would have missed; recording real output first (Milestone 0) caught it.
 
 ## Context and Orientation
 
@@ -309,3 +329,5 @@ Documentation to update in the same commits as the behavior: docs/AWS.md (the ex
 Revision note (2026-11-06): initial version of the plan, written for parent review before any implementation. Reason: requested design-first deliverable for #1424.
 
 Revision note (2026-11-07): recorded the user's acceptance of the five decisions and the Milestone 0 results (fixtures, CLI error shape, EC2 override left unproven, Move `--min-count` incompatibility, Bedrock action evidence). Reason: Milestone 0 complete; implementation continues from Milestone 1 after parent review.
+
+Revision note (2026-11-07, later): Milestones 1 to 6 implemented; Progress, Decision Log and Outcomes updated with the implementation decisions, deferred items and test results. Reason: implementation complete.
