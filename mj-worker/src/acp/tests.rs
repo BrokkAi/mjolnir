@@ -2652,8 +2652,9 @@ async fn stubborn_mode_bridge(stream: tokio::io::DuplexStream) {
 }
 
 /// A Muse bridge whose approval selector offers only `allowAll`: a Guardian
-/// session has no approval mode to run in.
-async fn allow_all_only_muse_bridge(stream: tokio::io::DuplexStream) {
+/// session has no approval mode to run in. With `plan`, it also carries
+/// Plan on its separate `mode` selector.
+async fn allow_all_only_muse_bridge(stream: tokio::io::DuplexStream, plan: bool) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let mut options = serde_json::json!([
@@ -2664,6 +2665,14 @@ async fn allow_all_only_muse_bridge(stream: tokio::io::DuplexStream) {
             {"value": "off", "name": "Off"}, {"value": "on", "name": "On"}
         ]}
     ]);
+    if plan {
+        options.as_array_mut().unwrap().push(serde_json::json!(
+            {"id": "mode", "name": "Mode", "category": "mode", "type": "select",
+             "currentValue": "default", "options": [
+                {"value": "default", "name": "Default"}, {"value": "plan", "name": "Plan"}
+            ]}
+        ));
+    }
     let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await.expect("read bridge input") {
@@ -2695,8 +2704,20 @@ async fn allow_all_only_muse_bridge(stream: tokio::io::DuplexStream) {
 // Hard-won: 26a181b: a Guardian Muse session started with approvals off when promptUnmatched was not offered
 #[tokio::test]
 async fn a_guardian_muse_whose_bridge_offers_only_allow_all_fails_the_session() {
+    guardian_muse_offering_only_allow_all_fails(false).await;
+}
+
+/// Muse keeps Plan on its `mode` selector, apart from `approval_mode`, so a
+/// context restored in Plan must not stand in for the approval policy.
+// Hard-won: 46cea84: a Guardian Muse session restored in Plan started with approvals off
+#[tokio::test]
+async fn a_guardian_muse_restored_in_plan_still_needs_its_approval_mode() {
+    guardian_muse_offering_only_allow_all_fails(true).await;
+}
+
+async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(allow_all_only_muse_bridge(bridge_stream));
+    let bridge = tokio::spawn(allow_all_only_muse_bridge(bridge_stream, plan));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
     let (request_tx, mut request_rx) = mpsc::channel(1);
@@ -2709,7 +2730,11 @@ async fn a_guardian_muse_whose_bridge_offers_only_allow_all_fails_the_session() 
         managed_subagent: false,
         subagent_mcp_socket: None,
         clear_context_request: None,
-        context_restore: None,
+        context_restore: plan.then(|| crate::acp::ContextReset {
+            request_id: "restore".into(),
+            selectors: Vec::new(),
+            mode: Some("plan".into()),
+        }),
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),

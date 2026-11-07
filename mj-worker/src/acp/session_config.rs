@@ -714,13 +714,20 @@ pub(super) async fn reassert_execution_policy(
     };
     let mut refused = None;
     if let Some(desired) = enforcement.acp_mode() {
-        let current = mj_core::acp::execution_mode_option(
-            config_options,
-            enforcement.acp_mode_selector(),
-            desired,
-        )
-        .and_then(|option| surface::config_current_value(config_options, &option.id.to_string()))
-        .or_else(|| current_session_mode(config_options, modes));
+        // The value on the selector the policy owns, or the legacy list when
+        // the bridge has no such selector. Muse keeps Plan on another
+        // selector, so its Plan never stands in for the approval policy.
+        let setting = enforcement.acp_setting().map(|(key, _)| key);
+        let current = match enforcement
+            .owned_config_keys(config_options)
+            .into_iter()
+            .find(|key| Some(key.as_str()) != setting)
+        {
+            Some(selector) => surface::config_current_value(config_options, &selector),
+            None => modes
+                .as_ref()
+                .map(|modes| modes.current_mode_id.to_string()),
+        };
         // A bridge whose catalogue omits the policy mode, as Claude's does
         // for Auto on some models, has refused it as plainly as one that
         // answers the request with an error.
