@@ -1400,6 +1400,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(Vec::new()),
+            step_failure: None,
         }],
     };
 
@@ -1427,6 +1428,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err("worker proxy disconnected".into()),
+            step_failure: None,
         }],
         ..result
     };
@@ -1453,6 +1455,7 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            step_failure: None,
         }],
     };
     let notice = CredentialSyncNotices::default()
@@ -1498,6 +1501,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err(detail.to_owned()),
+            step_failure: None,
         }],
     };
     let mut notices = CredentialSyncNotices::default();
@@ -1537,6 +1541,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            step_failure: None,
         }],
     };
     assert_eq!(notices.notice(&healthy, None, &State::default()), None);
@@ -2000,6 +2005,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
                     vec![CredentialSyncOutcome {
                         session_id: session_id.into(),
                         outcome,
+                        step_failure: None,
                     }]
                 })
                 .unwrap_or_default(),
@@ -2042,6 +2048,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             outcomes: vec![CredentialSyncOutcome {
                 session_id: session_id.into(),
                 outcome: Err("worker proxy disconnected".into()),
+                step_failure: None,
             }],
         },
     ];

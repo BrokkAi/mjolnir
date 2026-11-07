@@ -1329,7 +1329,7 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
             &SessionRelays::Direct,
             &target,
             &skills,
-            None,
+            &credential_sync::GithubSync::Known(None),
             &credential_sync::AwsSync::Unmanaged,
             &credential_sync::HostSlopcopLogin::Unknown,
         )
@@ -1451,6 +1451,10 @@ for line in sys.stdin:
         current = pathlib.Path(received)
         data = current.read_bytes() if current.exists() else b""
         payload = {"type": "credential_state", "data": {"present": bool(data), "fingerprint": hashlib.sha256(data).hexdigest() if data else "", "freshness_epoch_ms": None}}
+    elif method == "remove_aws_credentials":
+        import pathlib
+        pathlib.Path(received).unlink(missing_ok=True)
+        payload = {"type": "credential_state", "data": {"present": False, "fingerprint": "", "freshness_epoch_ms": None}}
     elif method in ("install_credentials", "install_aws_credentials"):
         data = base64.b64decode(req["request"]["params"]["data"])
         with open(received, "wb") as out:
@@ -1584,6 +1588,7 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
             [CredentialSyncOutcome {
                 session_id: "remote".into(),
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
+                step_failure: None,
             }]
         );
         let received: serde_json::Value =
@@ -1598,7 +1603,7 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
     let outcomes = reconcile_profile(&targets, None).await;
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0].session_id, "remote");
-    assert!(outcomes[0].outcome.is_err());
+    assert!(outcomes[0].step_failure.is_some());
 }
 
 // A profile with a role gives each session credentials assumed for it alone;
@@ -1698,7 +1703,7 @@ async fn role_scoped_sessions_receive_assumed_credentials_and_never_the_unscoped
         .iter()
         .find(|outcome| outcome.session_id == "role-denied")
         .unwrap();
-    let error = denied_outcome.outcome.as_ref().unwrap_err();
+    let error = denied_outcome.step_failure.as_deref().unwrap();
     assert!(
         error.contains("AccessDenied") && error.contains("remove [profiles."),
         "{error}"
@@ -1886,10 +1891,16 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
 /// stale skills tree. Any request it does not expect fails the exchange.
 #[cfg(unix)]
 const AWS_SYNC_RELAY: &str = r#"
-import base64, gzip, hashlib, json, os, sys
+import base64, gzip, hashlib, json, os, sys, time
 protocol, session, root = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+# A slow worker: its first AWS answer waits for this file, or fails the exchange.
+wait_for = sys.argv[4] if len(sys.argv) > 4 else ""
 def path(name): return os.path.join(root, name)
 def state(name):
+    # Provider files missing or different: the worker reports the credentials
+    # absent although the secret file may still be there.
+    if name == "aws" and os.path.exists(path("provider-files-broken")):
+        return {"present": False, "fingerprint": "", "freshness_epoch_ms": None}
     if not os.path.exists(path(name)):
         return {"present": False, "fingerprint": "", "freshness_epoch_ms": None}
     data = open(path(name), "rb").read()
@@ -1901,12 +1912,17 @@ for line in sys.stdin:
     if method == "hello":
         payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "aws-sync-fixture", "session_id": session}}
     elif method == "aws_credentials_state":
+        tries = 0
+        while wait_for and not os.path.exists(wait_for):
+            tries += 1
+            if tries > 200: sys.exit(1)
+            time.sleep(0.05)
         payload = {"type": "credential_state", "data": state("aws")}
     elif method == "install_aws_credentials":
         open(path("aws"), "wb").write(base64.b64decode(params["data"]))
         payload = {"type": "credential_state", "data": state("aws")}
     elif method == "remove_aws_credentials":
-        os.remove(path("aws"))
+        if os.path.exists(path("aws")): os.remove(path("aws"))
         payload = {"type": "credential_state", "data": state("aws")}
     elif method == "github_token_state":
         s = state("github")
@@ -1939,9 +1955,24 @@ fn aws_sync_session(
     token_file: &std::path::Path,
     aws_cli: &std::path::Path,
 ) -> CredentialSyncTarget {
+    aws_sync_session_named(home, root, token_file, aws_cli, SESSION_ID, None)
+}
+
+/// [`aws_sync_session`] for a named session, whose worker may wait for a
+/// file before answering about its AWS credentials.
+#[cfg(unix)]
+fn aws_sync_session_named(
+    home: &std::path::Path,
+    root: &std::path::Path,
+    token_file: &std::path::Path,
+    aws_cli: &std::path::Path,
+    session_id: &str,
+    worker_waits_for: Option<&std::path::Path>,
+) -> CredentialSyncTarget {
     std::fs::create_dir_all(home.join("skills/review")).unwrap();
     std::fs::write(home.join("skills/review/SKILL.md"), "review").unwrap();
     let mut target = skills_sync_target(home);
+    target.session_id = session_id.into();
     target.skips_login_file_sync = true;
     target.sync_github_token = true;
     target.github = mj_core::config::GithubConfig {
@@ -1956,9 +1987,12 @@ fn aws_sync_session(
             "-c".to_owned(),
             AWS_SYNC_RELAY.to_owned(),
             RELAY_PROTOCOL_VERSION.to_string(),
-            SESSION_ID.to_owned(),
+            session_id.to_owned(),
             root.to_string_lossy().into_owned(),
-        ],
+        ]
+        .into_iter()
+        .chain(worker_waits_for.map(|path| path.to_string_lossy().into_owned()))
+        .collect::<Vec<_>>(),
     )
     .purpose("AWS sync test relay");
     target.aws_credentials = Some(mj_core::aws_credentials::AwsCredentialSource {
@@ -1999,6 +2033,30 @@ fn refusing_aws_cli(dir: &std::path::Path) -> std::path::PathBuf {
     bin
 }
 
+/// An `aws` that answers every `sts assume-role` with the recorded output,
+/// expiring far in the future.
+#[cfg(unix)]
+fn granting_aws_cli(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("granting-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/aws-sts-assume-role.json"
+    ))
+    .unwrap();
+    recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
+    let output = dir.join("granted.json");
+    std::fs::write(&output, serde_json::to_vec(&recorded).unwrap()).unwrap();
+    let aws = bin.join("aws");
+    std::fs::write(
+        &aws,
+        format!("#!/bin/sh\nexec /bin/cat {}\n", output.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
+    bin
+}
+
 // Hard-won: ca9a1d9ca: a session holding the host's unscoped credentials kept them, with no expiry for static keys, when the newly configured role could not be assumed.
 #[cfg(unix)]
 #[tokio::test]
@@ -2022,7 +2080,7 @@ async fn a_session_holding_the_hosts_credentials_loses_them_when_its_new_role_fa
     let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
 
     assert_eq!(outcomes.len(), 1, "{outcomes:?}");
-    let error = outcomes[0].outcome.as_ref().unwrap_err();
+    let error = outcomes[0].step_failure.as_deref().unwrap();
     assert!(error.contains("AccessDenied"), "{error}");
     assert!(
         !root.path().join("aws").exists(),
@@ -2043,16 +2101,34 @@ async fn a_failing_mint_does_not_stop_the_sessions_other_sync_steps() {
 
     let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
 
-    // The AWS failure is the session's reported outcome...
+    // The AWS failure is reported next to what the session's other steps did,
+    // not instead of it...
     assert_eq!(outcomes.len(), 1, "{outcomes:?}");
     assert!(
         outcomes[0]
-            .outcome
-            .as_ref()
-            .unwrap_err()
+            .step_failure
+            .as_deref()
+            .unwrap()
             .contains("AccessDenied"),
         "{outcomes:?}"
     );
+    assert_eq!(
+        outcomes[0].outcome,
+        Ok(vec![
+            CredentialSyncAction::SkillsPushed,
+            CredentialSyncAction::GithubTokenPushed
+        ])
+    );
+    // ...so the counters and the failure list both see the session.
+    let result = CredentialSyncResult {
+        profile_id: "work".into(),
+        trigger: None,
+        failure: None,
+        outcomes: outcomes.clone(),
+    };
+    assert_eq!(result.skills_sessions(), 1);
+    assert_eq!(result.github_token_pushed_sessions(), 1);
+    assert_eq!(result.failures().count(), 1);
     // ...and the GitHub token and skills still converged.
     assert_eq!(
         std::fs::read(root.path().join("github")).unwrap(),
@@ -2062,6 +2138,111 @@ async fn a_failing_mint_does_not_stop_the_sessions_other_sync_steps() {
         root.path().join("skills").exists(),
         "skills were not pushed"
     );
+}
+
+// Hard-won: 96c0993ac: a failed GitHub token lookup ended the session's sync before its AWS credentials were installed or the host's withdrawn.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_github_lookup_does_not_stop_the_aws_step() {
+    let home = tempfile::tempdir().unwrap();
+    let missing_token = home.path().join("no-such-token-file");
+
+    // Scoped credentials are installed although the token cannot be read...
+    let granted_root = tempfile::tempdir().unwrap();
+    let cli = granting_aws_cli(granted_root.path());
+    let target = aws_sync_session(home.path(), granted_root.path(), &missing_token, &cli);
+    let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
+    assert!(granted_root.path().join("aws").exists(), "{outcomes:?}");
+    assert!(
+        outcomes[0]
+            .step_failure
+            .as_deref()
+            .unwrap()
+            .contains("GitHub token"),
+        "{outcomes:?}"
+    );
+
+    // ...and the host's credentials are withdrawn although it cannot.
+    let refused_root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        refused_root.path().join("aws"),
+        br#"{"Version":1,"AccessKeyId":"AKIA"}"#,
+    )
+    .unwrap();
+    let cli = refusing_aws_cli(refused_root.path());
+    let target = aws_sync_session(home.path(), refused_root.path(), &missing_token, &cli);
+    let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
+    assert!(!refused_root.path().join("aws").exists(), "{outcomes:?}");
+    let failure = outcomes[0].step_failure.as_deref().unwrap();
+    assert!(
+        failure.contains("GitHub token") && failure.contains("AccessDenied"),
+        "{failure}"
+    );
+}
+
+// Hard-won: 96c0993ac: withdrawal trusted the reported state, which is "absent" when a provider file is missing even though the secret file still exists.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_secret_is_withdrawn_even_when_the_worker_reports_the_credentials_absent() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let token = root.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    std::fs::write(
+        root.path().join("aws"),
+        br#"{"Version":1,"AccessKeyId":"AKIA"}"#,
+    )
+    .unwrap();
+    // aws-config is gone: the worker says "absent" about a secret it still has.
+    std::fs::write(root.path().join("provider-files-broken"), "").unwrap();
+    let cli = refusing_aws_cli(root.path());
+    let target = aws_sync_session(home.path(), root.path(), &token, &cli);
+
+    reconcile_profile(std::slice::from_ref(&target), None).await;
+
+    assert!(
+        !root.path().join("aws").exists(),
+        "the secret file survived"
+    );
+}
+
+// Hard-won: 96c0993ac: sessions were reconciled one after another, so a slow session actor kept already-minted credentials from reaching later sessions.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_slow_session_does_not_hold_up_another_sessions_install() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let fast_root = scratch.path().join("fast");
+    let slow_root = scratch.path().join("slow");
+    std::fs::create_dir(&fast_root).unwrap();
+    std::fs::create_dir(&slow_root).unwrap();
+    // The slow session's worker answers only once the fast session holds its
+    // credentials, and fails the exchange if that never happens. It is first.
+    let targets = [
+        aws_sync_session_named(
+            home.path(),
+            &slow_root,
+            &token,
+            &cli,
+            "slow-session",
+            Some(&fast_root.join("aws")),
+        ),
+        aws_sync_session_named(home.path(), &fast_root, &token, &cli, "fast-session", None),
+    ];
+
+    let outcomes = reconcile_profile(&targets, None).await;
+
+    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| outcome.step_failure.is_none() && outcome.outcome.is_ok()),
+        "{outcomes:?}"
+    );
+    assert!(slow_root.join("aws").exists());
 }
 
 // Hard-won: ca9a1d9ca: credentials the controller issued for the role must survive a failed renewal until they expire, while anything else is withdrawn.
@@ -2095,7 +2276,7 @@ async fn scoped_credentials_the_controller_issued_survive_a_failed_renewal() {
             &SessionRelays::Direct,
             &target,
             &skills,
-            None,
+            &credential_sync::GithubSync::Known(None),
             &unavailable,
             &credential_sync::HostSlopcopLogin::Unknown,
         )
@@ -2111,7 +2292,7 @@ async fn scoped_credentials_the_controller_issued_survive_a_failed_renewal() {
     .unwrap();
     let sync = reconcile().await.unwrap().unwrap();
     assert!(root.path().join("aws").exists());
-    assert_eq!(sync.aws_error.as_deref(), Some("AWS refused AssumeRole"));
+    assert_eq!(sync.failures, ["AWS credentials: AWS refused AssumeRole"]);
     assert!(
         !sync
             .actions
@@ -2162,6 +2343,7 @@ async fn a_triggered_sync_reports_the_session_it_reached_with_nothing_to_change(
         [CredentialSyncOutcome {
             session_id: SESSION_ID.into(),
             outcome: Ok(Vec::new()),
+            step_failure: None,
         }]
     );
     assert!(!received.exists(), "nothing was pushed");
@@ -2200,6 +2382,7 @@ async fn a_new_login_is_pushed_to_every_live_session_of_its_profile() {
             .map(|session| CredentialSyncOutcome {
                 session_id: (*session).into(),
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
+                step_failure: None,
             })
             .collect::<Vec<_>>()
     );

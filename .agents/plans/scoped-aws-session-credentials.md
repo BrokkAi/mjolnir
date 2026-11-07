@@ -159,6 +159,18 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - Decision (third review): the AWS step of a session's sync fails on its own. `reconcile_on` returns the actions taken plus the AWS error, runs the GitHub token, skills and slopcop steps regardless, and the pass records the AWS error as the session's outcome.
   Date/Author: 2026-11-07 / Claude, from review.
 
+- Decision (fourth review): every step of a session's sync is independent. The AWS credentials, harness login, skills, GitHub token and slopcop login each run whether or not another failed, a failure of any is recorded on its own, and the outcome keeps the actions taken next to the failures (`CredentialSyncOutcome::step_failure`), so the counters and `pushed_to` still see the work. The canonical inputs a step needs (the profile's login, the GitHub token) are read lazily and fail only that step.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (fourth review): when the profile requires role-scoped credentials and none can be issued, the controller always sends `RemoveAwsCredentials` unless the worker provably holds scoped credentials it issued. The reported state is not consulted because it is "absent" when a provider file is missing or differs although the secret file exists; the worker's removal deletes the secret file whatever the other files look like.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (fourth review): a sync pass reconciles all sessions together (a `FuturesUnordered`), each starting when its own AWS credentials are known, so a slow session actor or mint holds only itself. The per-profile busy flag is unchanged: a pull rewrites the canonical login, so one profile is never reconciled by two passes at once, and ending a pass before a stuck session answered would need a timeout nobody has measured. A stuck session still holds its profile's next pass; the others have been served by then.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (fourth review): the wait for IMDSv2 to apply sleeps through the existing `targets::sleep_unless_cancelled`, and checks cancellation again before each poll. A `[profiles.<id>.aws]` table on a profile that does not use the AWS chain is no longer a refusal: the session starts without scoping, with a launch notice, and doctor warns. The cache's sweep runs once per sync pass, not on every call.
+  Date/Author: 2026-11-07 / Claude, from review.
+
 ## Outcomes & Retrospective
 
 Implemented through Milestone 6 on 2026-11-07. A Bedrock profile with `[profiles.<id>.aws] role_arn = ...` now gives each container or SSH session credentials assumed for it alone (role session name `mj-<session id>`), narrowed by a session policy, renewed after half their lifetime through the existing credential sync, with no relay or database change. A refused role fails the launch with AWS's error line and a remedy, or fails the running session's sync outcome while the worker keeps what it has; nothing falls back to the unscoped export. Profiles without a role behave as before, and `mj doctor` warns about them and probes a configured role with a real throwaway AssumeRole. Every EC2 launch (ordinary and Move) requires IMDSv2, verified in the launch response, and doctor warns about a launch template that allows IMDSv1.
@@ -362,3 +374,5 @@ Revision note (2026-11-07, review): seven review findings fixed (Move replay, in
 Revision note (2026-11-07, second review): applied-state wait for IMDSv2, per-session reconcile as mints complete, doctor probe identity of the real shape. Reason: second review.
 
 Revision note (2026-11-07, third review): withdrawal of unscoped credentials on a failed mint (relay protocol 55) and an independent AWS step in the session sync. Reason: third review.
+
+Revision note (2026-11-07, fourth review): independent sync steps, unconditional withdrawal, concurrent per-session dispatch, cancellable IMDS wait, step failures kept beside actions, sweep per pass, non-Bedrock table is a notice. Reason: fourth review.

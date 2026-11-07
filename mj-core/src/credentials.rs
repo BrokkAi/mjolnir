@@ -710,6 +710,10 @@ pub struct CredentialSyncOutcome {
     /// Every action taken for the session, or why the reconcile failed. An
     /// empty action list means the copies already agreed.
     pub outcome: std::result::Result<Vec<CredentialSyncAction>, String>,
+    /// Steps of the sync that failed while the others ran, such as the AWS
+    /// credentials. `outcome` then still lists what the other steps did, so
+    /// their work is counted and reported.
+    pub step_failure: Option<String>,
 }
 
 /// Reported to the UI loops only when something happened: an action was taken,
@@ -741,7 +745,10 @@ impl CredentialSyncResult {
             .iter()
             .filter_map(|outcome| match &outcome.outcome {
                 Err(detail) => Some((outcome.session_id.as_str(), detail.as_str())),
-                Ok(_) => None,
+                Ok(_) => outcome
+                    .step_failure
+                    .as_deref()
+                    .map(|detail| (outcome.session_id.as_str(), detail)),
             })
     }
 
@@ -829,10 +836,18 @@ impl RejectedLogins {
         {
             return;
         }
-        let reached = result.outcomes.iter().find_map(|outcome| {
-            (outcome.session_id == cause.session_id).then_some(&outcome.outcome)
-        });
-        let Some(Ok(actions)) = reached else {
+        let reached = result
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.session_id == cause.session_id);
+        // A step that failed (the harness login among them) is not a clean
+        // check that the profile's own login is the one the provider refused.
+        let Some(CredentialSyncOutcome {
+            outcome: Ok(actions),
+            step_failure: None,
+            ..
+        }) = reached
+        else {
             return;
         };
         if actions.iter().any(|action| {

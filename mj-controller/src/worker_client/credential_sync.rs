@@ -371,46 +371,63 @@ pub(super) async fn reconcile_profile_guarded(
     let mut outcomes = BTreeMap::<String, CredentialSyncOutcome>::new();
     for pass in 0..2 {
         let mut pulled = false;
-        // The first pass takes sessions in the order their credentials are
-        // ready; the second sees every result.
-        let mut ready = (0..targets.len())
-            .filter(|index| aws_credentials[*index].is_some())
-            .collect::<std::collections::VecDeque<_>>();
-        loop {
-            let index = match ready.pop_front() {
-                Some(index) => index,
-                None => {
-                    let Some((index, minted)) = futures::StreamExt::next(&mut minting).await else {
-                        break;
-                    };
-                    aws_credentials[index] = Some(
-                        match minted
-                            .context("AWS role assumption task stopped")
-                            .and_then(|result| result)
-                        {
-                            Ok(credentials) => AwsSync::Install(credentials),
-                            Err(error) => AwsSync::Unavailable {
-                                error: format!("{error:#}"),
-                                scoped_required: true,
-                                // Scoped credentials the controller itself
-                                // issued and the worker may still hold.
-                                scoped_held: targets[index].aws_credentials.as_ref().and_then(
-                                    |source| {
-                                        crate::aws_assume_role::ScopedAwsCredentials::shared()
-                                            .cached(&targets[index].session_id, source)
-                                    },
-                                ),
-                            },
-                        },
-                    );
-                    index
-                }
-            };
+        // Every session is reconciled as soon as its own AWS credentials are
+        // known, and all of them together: a slow mint or a slow session actor
+        // holds only itself. Results are taken as they finish.
+        let mut running = futures::stream::FuturesUnordered::new();
+        let dispatch = |index: usize, aws: AwsSync, reported: bool| {
             let target = &targets[index];
-            let aws = aws_credentials[index]
-                .as_ref()
-                .expect("credentials arrived");
-            reconcile_target(&pass_context, target, aws, pass, &mut outcomes, &mut pulled).await;
+            let context = &pass_context;
+            async move {
+                (
+                    index,
+                    reconcile_target(context, target, aws, pass, reported).await,
+                )
+            }
+        };
+        for index in 0..targets.len() {
+            if let Some(aws) = &aws_credentials[index] {
+                let reported = outcomes.contains_key(&targets[index].session_id);
+                running.push(dispatch(index, aws.clone(), reported));
+            }
+        }
+        loop {
+            tokio::select! {
+                Some((index, minted)) = futures::StreamExt::next(&mut minting),
+                    if !minting.is_empty() =>
+                {
+                    let aws = match minted
+                        .context("AWS role assumption task stopped")
+                        .and_then(|result| result)
+                    {
+                        Ok(credentials) => AwsSync::Install(credentials),
+                        Err(error) => AwsSync::Unavailable {
+                            error: format!("{error:#}"),
+                            scoped_required: true,
+                            // Scoped credentials the controller itself issued
+                            // and the worker may still hold.
+                            scoped_held: targets[index].aws_credentials.as_ref().and_then(
+                                |source| {
+                                    crate::aws_assume_role::ScopedAwsCredentials::shared()
+                                        .cached(&targets[index].session_id, source)
+                                },
+                            ),
+                        },
+                    };
+                    aws_credentials[index] = Some(aws.clone());
+                    let reported = outcomes.contains_key(&targets[index].session_id);
+                    running.push(dispatch(index, aws, reported));
+                }
+                Some((index, result)) = futures::StreamExt::next(&mut running),
+                    if !running.is_empty() =>
+                {
+                    pulled |= result.pulled;
+                    if let Some(outcome) = result.outcome {
+                        outcomes.insert(targets[index].session_id.clone(), outcome);
+                    }
+                }
+                else => break,
+            }
         }
         if !pulled || pass == 1 {
             break;
@@ -443,11 +460,21 @@ pub(super) enum AwsSync {
     },
 }
 
-/// What reconciling one session did: the actions taken, and the failure of
-/// its AWS step, which does not stop the other steps.
+/// The controller's GitHub token for a session, or why it could not be read.
+#[derive(Clone)]
+pub(super) enum GithubSync {
+    Known(Option<String>),
+    /// The lookup failed. The session's copy stays as it is, because an
+    /// unreadable token is not an absent one.
+    Unavailable(String),
+}
+
+/// What reconciling one session did: the actions its steps took, and the
+/// failure of each step that failed. Every step runs whether or not another
+/// failed.
 pub(super) struct SessionSync {
     pub(super) actions: Vec<CredentialSyncAction>,
-    pub(super) aws_error: Option<String>,
+    pub(super) failures: Vec<String>,
 }
 
 /// What one reconcile pass shares between its sessions.
@@ -460,15 +487,34 @@ struct PassContext<'a> {
     triggered_by: Option<&'a str>,
 }
 
-/// One session's reconciliation in one pass, recorded in `outcomes`.
+/// What reconciling one session in one pass found.
+struct TargetResult {
+    outcome: Option<CredentialSyncOutcome>,
+    /// A fresher copy of the profile's login was pulled from the session.
+    pulled: bool,
+}
+
+/// The failures of a session's sync steps, as one message. A lost connection
+/// fails every step the same way, so a message is said once.
+fn joined_failures(failures: &[String]) -> Option<String> {
+    let mut unique = Vec::<&str>::new();
+    for failure in failures {
+        if !unique.contains(&failure.as_str()) {
+            unique.push(failure);
+        }
+    }
+    (!unique.is_empty()).then(|| unique.join("; "))
+}
+
+/// One session's reconciliation in one pass. `reported` says an earlier pass
+/// already recorded an outcome for it.
 async fn reconcile_target(
     context: &PassContext<'_>,
     target: &CredentialSyncTarget,
-    aws_credentials: &AwsSync,
+    aws_credentials: AwsSync,
     pass: usize,
-    outcomes: &mut BTreeMap<String, CredentialSyncOutcome>,
-    pulled: &mut bool,
-) {
+    reported: bool,
+) -> TargetResult {
     let PassContext {
         relays,
         gate,
@@ -477,9 +523,24 @@ async fn reconcile_target(
         slopcop_login,
         triggered_by,
     } = context;
+    // A failed GitHub token lookup is that step's failure, not the session's:
+    // the AWS credentials, skills and logins do not depend on it.
+    let github_token = |target: &CredentialSyncTarget| {
+        let (session_id, github) = (target.session_id.clone(), target.github.clone());
+        let wanted = target.sync_github_token;
+        async move {
+            if !wanted {
+                return GithubSync::Known(None);
+            }
+            match crate::controller::github_token_for_session(session_id, github).await {
+                Ok(token) => GithubSync::Known(token),
+                Err(error) => GithubSync::Unavailable(format!("{error:#}")),
+            }
+        }
+    };
     let result = match *gate {
-        Some(gate) => gate
-            .run_background(&target.session_id, async {
+        Some(gate) => {
+            gate.run_background(&target.session_id, async {
                 let current = if let Some(runtime) = *runtime {
                     runtime.credential_target_is_current(target)?
                 } else {
@@ -501,91 +562,69 @@ async fn reconcile_target(
                 if !current {
                     return Ok(None);
                 }
-                let github_token = if target.sync_github_token {
-                    crate::controller::github_token_for_session(
-                        target.session_id.clone(),
-                        target.github.clone(),
-                    )
-                    .await?
-                } else {
-                    None
-                };
+                let github = github_token(target).await;
                 reconcile_session(
                     relays,
                     target,
                     skills,
-                    github_token.as_deref(),
-                    aws_credentials,
+                    &github,
+                    &aws_credentials,
                     slopcop_login,
                 )
                 .await
             })
             .await
-            .unwrap_or_else(|| Ok(None)),
+            .unwrap_or_else(|| Ok(None))
+        }
         None => {
-            let github_token = if target.sync_github_token {
-                crate::controller::github_token_for_session(
-                    target.session_id.clone(),
-                    target.github.clone(),
-                )
-                .await
-            } else {
-                Ok(None)
-            };
-            match github_token {
-                Ok(github_token) => {
-                    reconcile_session(
-                        relays,
-                        target,
-                        skills,
-                        github_token.as_deref(),
-                        aws_credentials,
-                        slopcop_login,
-                    )
-                    .await
-                }
-                Err(error) => Err(error),
-            }
+            let github = github_token(target).await;
+            reconcile_session(
+                relays,
+                target,
+                skills,
+                &github,
+                &aws_credentials,
+                slopcop_login,
+            )
+            .await
         }
     };
     match result {
         // Deferral is not a successful credential check: in particular
         // it must not mark an authentication-triggered login refused.
-        Ok(None) => {}
-        Ok(Some(SessionSync {
-            actions,
-            aws_error: Some(error),
-        })) => {
-            // The AWS step failed; the session's other steps ran.
-            *pulled |= actions.contains(&CredentialSyncAction::Pulled);
-            tracing::warn!(
-                session_id = %target.session_id,
-                profile_id = %target.profile_id,
-                pass = pass + 1,
-                error = %error,
-                "AWS credential synchronization failed for relay session"
-            );
-            outcomes.insert(
-                target.session_id.clone(),
-                CredentialSyncOutcome {
-                    session_id: target.session_id.clone(),
-                    outcome: Err(error),
-                },
-            );
-        }
-        Ok(Some(SessionSync { actions, .. }))
+        Ok(None) => TargetResult {
+            outcome: None,
+            pulled: false,
+        },
+        Ok(Some(SessionSync { actions, failures }))
             if actions.is_empty()
-                && (*triggered_by != Some(target.session_id.as_str())
-                    || outcomes.contains_key(&target.session_id)) => {}
-        Ok(Some(SessionSync { actions, .. })) => {
-            *pulled |= actions.contains(&CredentialSyncAction::Pulled);
-            outcomes.insert(
-                target.session_id.clone(),
-                CredentialSyncOutcome {
+                && failures.is_empty()
+                && (*triggered_by != Some(target.session_id.as_str()) || reported) =>
+        {
+            TargetResult {
+                outcome: None,
+                pulled: false,
+            }
+        }
+        Ok(Some(SessionSync { actions, failures })) => {
+            let step_failure = joined_failures(&failures);
+            if let Some(failure) = &step_failure {
+                tracing::warn!(
+                    session_id = %target.session_id,
+                    profile_id = %target.profile_id,
+                    pass = pass + 1,
+                    error = %failure,
+                    "credential synchronization step failed for relay session"
+                );
+            }
+            TargetResult {
+                pulled: actions.contains(&CredentialSyncAction::Pulled),
+                outcome: Some(CredentialSyncOutcome {
                     session_id: target.session_id.clone(),
                     outcome: Ok(actions),
-                },
-            );
+                    step_failure,
+                }),
+            }
         }
         Err(error) => {
             tracing::warn!(
@@ -595,13 +634,14 @@ async fn reconcile_target(
                 error = %error,
                 "credential synchronization failed for relay session"
             );
-            outcomes.insert(
-                target.session_id.clone(),
-                CredentialSyncOutcome {
+            TargetResult {
+                pulled: false,
+                outcome: Some(CredentialSyncOutcome {
                     session_id: target.session_id.clone(),
                     outcome: Err(format!("{error:#}")),
-                },
-            );
+                    step_failure: None,
+                }),
+            }
         }
     }
 }
@@ -712,14 +752,20 @@ impl CanonicalSkills {
     }
 }
 
-/// What one session is reconciled against, read on the controller before its
-/// worker is asked anything.
-pub(super) struct SessionCanonical {
-    pub(super) credential_path: std::path::PathBuf,
+/// The profile's login as the controller holds it.
+pub(super) struct CanonicalLogin {
+    pub(super) path: std::path::PathBuf,
     pub(super) credential: CredentialSnapshot,
-    pub(super) credential_bytes: Vec<u8>,
+    pub(super) bytes: Vec<u8>,
+}
+
+/// What one session is reconciled against, read on the controller before its
+/// worker is asked anything. Nothing here fails the session as a whole: each
+/// part that could not be read is the failure of the one step that needs it.
+pub(super) struct SessionCanonical {
+    pub(super) login: Result<CanonicalLogin, String>,
     pub(super) skills: Arc<CanonicalSkills>,
-    pub(super) github_token: Option<String>,
+    pub(super) github: GithubSync,
     pub(super) aws: AwsSync,
     pub(super) slopcop_login: HostSlopcopLogin,
 }
@@ -728,28 +774,38 @@ impl SessionCanonical {
     pub(super) fn read(
         target: &CredentialSyncTarget,
         skills: Arc<CanonicalSkills>,
-        github_token: Option<&str>,
-    ) -> Result<Self> {
-        let credential_path = harness_authentication_marker(target.harness, &target.profile_home);
-        // A login database is read where the harness keeps it; the profile
-        // home holds no copy of it.
-        let (credential, credential_bytes) = if target.harness.keeps_logins_in_database() {
-            match crate::opencode_logins::home_logins(&target.profile_home)? {
-                Some(bytes) => (CredentialSnapshot::of(target.harness, &bytes), bytes),
-                None => (CredentialSnapshot::absent(), Vec::new()),
-            }
-        } else {
-            read_credential_file(target.harness, &credential_path)?
+        github: GithubSync,
+    ) -> Self {
+        let read_login = || -> Result<CanonicalLogin> {
+            let path = harness_authentication_marker(target.harness, &target.profile_home);
+            // A login database is read where the harness keeps it; the
+            // profile home holds no copy of it.
+            let (credential, bytes) = if target.harness.keeps_logins_in_database() {
+                match crate::opencode_logins::home_logins(&target.profile_home)? {
+                    Some(bytes) => (CredentialSnapshot::of(target.harness, &bytes), bytes),
+                    None => (CredentialSnapshot::absent(), Vec::new()),
+                }
+            } else {
+                read_credential_file(target.harness, &path)?
+            };
+            Ok(CanonicalLogin {
+                path,
+                credential,
+                bytes,
+            })
         };
-        Ok(Self {
-            credential_path,
-            credential,
-            credential_bytes,
+        Self {
+            // A profile without a login file has nothing to read.
+            login: if target.skips_login_file_sync {
+                Err("not synchronized".to_owned())
+            } else {
+                read_login().map_err(|error| format!("{error:#}"))
+            },
             skills,
-            github_token: github_token.map(ToOwned::to_owned),
+            github,
             aws: AwsSync::Unmanaged,
             slopcop_login: HostSlopcopLogin::Unknown,
-        })
+        }
     }
 }
 
@@ -760,11 +816,11 @@ pub(super) async fn reconcile_session(
     relays: &SessionRelays,
     target: &CredentialSyncTarget,
     skills: &Arc<CanonicalSkills>,
-    github_token: Option<&str>,
+    github: &GithubSync,
     aws: &AwsSync,
     slopcop_login: &HostSlopcopLogin,
 ) -> Result<Option<SessionSync>> {
-    let mut canonical = SessionCanonical::read(target, skills.clone(), github_token)?;
+    let mut canonical = SessionCanonical::read(target, skills.clone(), github.clone());
     canonical.aws = aws.clone();
     canonical.slopcop_login = slopcop_login.clone();
     match relays {
@@ -816,53 +872,75 @@ pub(super) async fn reconcile_session(
 }
 
 /// Reconcile one session over a connection to its worker.
+///
+/// Every step runs whether or not another failed, and each failure is
+/// recorded on its own: the AWS credentials, the harness login, the skills,
+/// the GitHub token and the slopcop login do not depend on one another, so a
+/// failing STS call or GitHub lookup must not hold back the rest.
 pub(super) async fn reconcile_on(
     client: &mut RelayClient,
     target: &CredentialSyncTarget,
     canonical: &SessionCanonical,
 ) -> Result<SessionSync> {
     let mut actions = Vec::new();
-    // The AWS step reports its own failure and never stops the steps below:
-    // the GitHub token, the skills and the slopcop login do not depend on STS.
-    let aws_error = match reconcile_aws(client, &canonical.aws).await {
-        Ok(action) => {
-            actions.extend(action);
-            match &canonical.aws {
-                AwsSync::Unavailable { error, .. } => Some(error.clone()),
-                _ => None,
-            }
-        }
-        Err(error) => Some(match &canonical.aws {
-            AwsSync::Unavailable {
-                error: unavailable, ..
-            } => {
-                format!(
-                    "{unavailable}; and the session's AWS credentials could not be withdrawn: {error:#}"
-                )
-            }
-            _ => format!("{error:#}"),
-        }),
-    };
-    let skills = canonical
-        .skills
-        .for_format(client.skills_archive_format(), target.skills_scope)?;
-    actions.extend(
-        reconcile_connected(
-            client,
-            target,
-            &canonical.credential_path,
-            &canonical.credential,
-            &canonical.credential_bytes,
-            skills,
-            canonical.github_token.as_deref(),
-        )
-        .await?,
-    );
-    // Last, so a slopcop failure cannot hold back the harness's own login.
-    if let Some(action) = reconcile_slopcop_login(client, target, &canonical.slopcop_login).await? {
-        actions.push(action);
+    let mut failures = Vec::new();
+    let mut note = |step: &str, error: String| failures.push(format!("{step}: {error}"));
+
+    match reconcile_aws(client, &canonical.aws).await {
+        Ok(action) => actions.extend(action),
+        Err(error) => note("AWS credentials withdrawal", format!("{error:#}")),
     }
-    Ok(SessionSync { actions, aws_error })
+    if let AwsSync::Unavailable { error, .. } = &canonical.aws {
+        note("AWS credentials", error.clone());
+    }
+    // Profiles without a harness login file already receive credentials
+    // through their environment or target credential chain.
+    if !target.skips_login_file_sync {
+        match &canonical.login {
+            Ok(login) => {
+                if let Err(error) = reconcile_credentials(
+                    client,
+                    target,
+                    &login.path,
+                    &login.credential,
+                    &login.bytes,
+                    &mut actions,
+                )
+                .await
+                {
+                    note("harness login", format!("{error:#}"));
+                }
+            }
+            Err(error) => note("harness login", error.clone()),
+        }
+    }
+    match canonical
+        .skills
+        .for_format(client.skills_archive_format(), target.skills_scope)
+    {
+        Ok(skills) => match reconcile_skills(client, target, skills).await {
+            Ok(true) => actions.push(CredentialSyncAction::SkillsPushed),
+            Ok(false) => {}
+            Err(error) => note("skills", format!("{error:#}")),
+        },
+        Err(error) => note("skills", format!("{error:#}")),
+    }
+    if target.sync_github_token {
+        match &canonical.github {
+            GithubSync::Known(token) => {
+                match reconcile_github_token(client, target, token.as_deref()).await {
+                    Ok(action) => actions.extend(action),
+                    Err(error) => note("GitHub token", format!("{error:#}")),
+                }
+            }
+            GithubSync::Unavailable(error) => note("GitHub token", error.clone()),
+        }
+    }
+    match reconcile_slopcop_login(client, target, &canonical.slopcop_login).await {
+        Ok(action) => actions.extend(action),
+        Err(error) => note("slopcop login", format!("{error:#}")),
+    }
+    Ok(SessionSync { actions, failures })
 }
 
 /// Converge the session's AWS credentials, or withdraw the host's own when
@@ -895,9 +973,6 @@ async fn reconcile_aws(
             ..
         } => {
             let held = client.aws_credentials_state().await?;
-            if !held.present {
-                return Ok(None);
-            }
             // Credentials this controller issued for the role stay until they
             // expire. Anything else the worker holds may be the host's own,
             // installed before the role was configured, and static host keys
@@ -912,11 +987,18 @@ async fn reconcile_aws(
                 "the session's worker (relay protocol {}) cannot withdraw AWS credentials; restart the session so a current worker replaces it",
                 client.protocol_version()
             );
+            // Always asked, whatever the reported state: the state is "absent"
+            // when a provider file is missing or differs, though the secret
+            // file may still exist. Removal is idempotent and deletes the
+            // secret file itself.
             let removed = client.remove_aws_credentials().await?;
             anyhow::ensure!(
                 !removed.present,
                 "the session kept its AWS credentials after removal"
             );
+            if !held.present {
+                return Ok(None);
+            }
             Ok(Some(CredentialSyncAction::AwsCredentialsRemoved))
         }
     }
@@ -955,40 +1037,6 @@ impl RelayConnectionJob for CredentialSyncJob {
             );
         }
     }
-}
-
-pub(super) async fn reconcile_connected(
-    client: &mut RelayClient,
-    target: &CredentialSyncTarget,
-    canonical_path: &Path,
-    canonical: &CredentialSnapshot,
-    canonical_bytes: &[u8],
-    canonical_skills: &mj_core::skills::SkillsArchive,
-    github_token: Option<&str>,
-) -> Result<Vec<CredentialSyncAction>> {
-    let mut actions = Vec::new();
-    // Profiles without a harness login file already receive credentials
-    // through their environment or target credential chain.
-    if !target.skips_login_file_sync {
-        reconcile_credentials(
-            client,
-            target,
-            canonical_path,
-            canonical,
-            canonical_bytes,
-            &mut actions,
-        )
-        .await?;
-    }
-    if reconcile_skills(client, target, canonical_skills).await? {
-        actions.push(CredentialSyncAction::SkillsPushed);
-    }
-    if target.sync_github_token
-        && let Some(action) = reconcile_github_token(client, target, github_token).await?
-    {
-        actions.push(action);
-    }
-    Ok(actions)
 }
 
 pub(super) async fn reconcile_credentials(

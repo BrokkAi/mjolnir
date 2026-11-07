@@ -767,6 +767,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
         vec![CredentialSyncOutcome {
             session_id: "child-1".into(),
             outcome,
+            step_failure: None,
         }]
     };
     let pushed = || reached(Ok(vec![CredentialSyncAction::Pushed]));
