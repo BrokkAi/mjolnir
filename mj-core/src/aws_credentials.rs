@@ -80,13 +80,20 @@ pub struct AwsCredentialSource {
     /// credentials. Part of the source, and so of the sync target's identity:
     /// a configuration change makes obsolete queued work compare unequal.
     pub role: Option<crate::config::AwsRoleConfig>,
-    /// Why the AWS profile this session should use could not be determined
-    /// (the profile's Codex configuration could not be read), when that is so.
-    /// The session stays managed as role-scoped, and nothing is minted for it:
-    /// credentials the controller issued are kept until they expire, anything
-    /// else is withdrawn, and the sync reports this. Part of the sync target's
-    /// identity.
-    pub unresolved: Option<String>,
+    /// Where the harness's own configuration may name the AWS profile to use
+    /// (Codex's provider table). Only the pointer is part of the source and so
+    /// of the sync target's identity; the file's content is read by whoever
+    /// uses the source, each time they use it, because an edit to it does not
+    /// rebuild the target.
+    pub selection: Option<AwsProfileSelection>,
+}
+
+/// The configuration file that may select the AWS profile.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AwsProfileSelection {
+    pub home: std::path::PathBuf,
+    /// The Codex profile overlay the profile runs with, if any.
+    pub overlay: Option<String>,
 }
 
 impl std::fmt::Debug for AwsCredentialSource {

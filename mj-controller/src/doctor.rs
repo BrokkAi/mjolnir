@@ -990,7 +990,7 @@ fn aws_scope_check(
     }
     let check_id = format!("harness.{id}.aws-scope");
     let title = format!("AWS credentials for profile {id}");
-    if profile.auth_scheme() != mj_core::config::AuthScheme::AwsCredentialChain {
+    if !crate::aws_credentials::is_bedrock(profile) {
         // Sessions run, without scoping; they are not refused.
         let Some(role) = &profile.aws else {
             return Vec::new();

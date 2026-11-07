@@ -708,6 +708,9 @@ pub enum CredentialSyncAction {
 /// result can say that a step is fine again only if it checked that step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SyncStep {
+    /// Not a step: the session's whole sync failed (its connection, say)
+    /// before any step ran. Reported without a step.
+    Session,
     /// The role-scoped AWS credentials, renewed by the session's own task.
     Aws,
     /// The profile's one AWS export, reconciled with its login pass.
@@ -791,7 +794,7 @@ impl CredentialSyncResult {
             let steps = outcome.step_failures.iter().map(|failure| {
                 (
                     outcome.session_id.as_str(),
-                    Some(failure.step),
+                    (failure.step != SyncStep::Session).then_some(failure.step),
                     failure.detail.as_str(),
                 )
             });
@@ -899,7 +902,7 @@ impl RejectedLogins {
         };
         if step_failures
             .iter()
-            .any(|failure| failure.step == SyncStep::HarnessLogin)
+            .any(|failure| matches!(failure.step, SyncStep::HarnessLogin | SyncStep::Session))
         {
             return;
         }

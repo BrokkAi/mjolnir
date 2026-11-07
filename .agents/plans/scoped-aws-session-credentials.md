@@ -273,6 +273,18 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - Decision (fifteenth review): a deferred renewal cycle does not consume the trigger's wake; the next cycle, still forced, answers it. A woken renewal that is stopped before it answers (its target changed, its session closed) leaves the outcome unknown, and the trigger's answer reports that as an AWS step failure instead of ignoring the closed channel.
   Date/Author: 2026-11-07 / Claude, from review.
 
+- Decision (sixteenth review, corrects the fifteenth): the sync target does not capture anything from the harness's configuration file. `AwsCredentialSource::unresolved` is removed. Targets are rebuilt when the mj configuration changes, not when Codex's `config.toml` does, so a captured read error never cleared after a repair and a changed AWS profile selection was missed. The target keeps what the mj configuration owns (profile, role, session) and a pointer to the file (`AwsCredentialSource::selection`: home and overlay). Whoever mints calls `aws_credentials::resolve` and reads the file at that moment, each cycle (the mint on the blocking pool; the renewal schedule resolves the same way to find the cached credentials). An unreadable file is that cycle's outcome: nothing is minted, the session stays managed (credentials the controller issued are kept until they expire, anything else is withdrawn), and the error is reported; the next cycle reads the file again. The fail-closed rule for "unknown is Bedrock" is unchanged and shared (`aws_credentials::is_bedrock`).
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (sixteenth review, corrects the fifteenth): the unscoped export keeps the 30 s `BoundedProcessExecutor` it has on master. Without a bound, a stuck `credential_process` would hold the profile's skills, harness login, GitHub token and slopcop steps, which run after it while the profile is busy. That export predates #1424; moving it off the profile pass (and then dropping the deadline) is tracked in #1469. Only the role-scoped AssumeRole mint stays without a deadline of our own: it is awaited only by `aws_cycle`, which runs in the session's renewal task and, in tests only, in `reconcile_profile`; no real profile pass awaits it, and launch mints with its own executor.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (sixteenth review): `mj doctor` asks the runtime's question. `aws_credentials::is_bedrock` is the one test for "does this profile use the AWS chain" (an unreadable Codex configuration with a role counts as yes); `credentials_withheld`, launch, the sync and doctor all use it, with no copy. The doctor golden gains an unreadable-configuration case.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (sixteenth review): a whole-session failure is no step's failure. Merging an AWS result into a session whose whole sync failed (its connection) keeps that failure as `SyncStep::Session`, which `CredentialSyncResult::failures()` reports without a step, as before, and `RejectedLogins` treats as "nothing was compared". It is no longer shown as a harness-login failure.
+  Date/Author: 2026-11-07 / Claude, from review.
+
 ## Outcomes & Retrospective
 
 Implemented through Milestone 6 on 2026-11-07. A Bedrock profile with `[profiles.<id>.aws] role_arn = ...` now gives each container or SSH session credentials assumed for it alone (role session name `mj-<session id>`), narrowed by a session policy, renewed after half their lifetime through the existing credential sync, with no relay or database change. A refused role fails the launch with AWS's error line and a remedy, or fails the running session's sync outcome while the worker keeps what it has; nothing falls back to the unscoped export. Profiles without a role behave as before, and `mj doctor` warns about them and probes a configured role with a real throwaway AssumeRole. Every EC2 launch (ordinary and Move) requires IMDSv2, verified in the launch response, and doctor warns about a launch template that allows IMDSv1.
@@ -501,3 +513,5 @@ Revision note (2026-11-07, thirteenth review): IMDSv2 required on every adoption
 Revision note (2026-11-07, fourteenth review): the profile's busy slot is released when the reconcile ends, not when a triggered renewal does; retry delays are capped by half the remaining validity. Reason: fourteenth review.
 
 Revision note (2026-11-07, fifteenth review): unreadable configuration fails closed (managed, reported); no own deadline on the mint or the export; refusal notices hold identifiers only; a deferred cycle keeps the wake, and a lost wake reports the outcome as unknown. Reason: fifteenth review.
+
+Revision note (2026-11-07, sixteenth review): the harness configuration is read at each mint, not captured in the target; the unscoped export is back to master (tracked in #1469); doctor shares the Bedrock predicate; whole-session failures keep no step. Reason: sixteenth review.

@@ -2164,6 +2164,32 @@ fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
         &AlwaysFailingExecutor,
     ));
 
+    // A role on a Codex profile whose provider configuration cannot be read:
+    // unknown is not "not Bedrock", so doctor asks the same question launch and
+    // the sync do, and reports the read error instead of dismissing the role.
+    let unreadable = tempfile::tempdir().unwrap();
+    std::fs::write(
+        unreadable.path().join("config.toml"),
+        "model_provider = [unterminated",
+    )
+    .unwrap();
+    let unreadable_profile = HarnessProfile {
+        aws: Some(mj_core::config::AwsRoleConfig {
+            role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+            session_policy: None,
+            session_policy_arns: Vec::new(),
+            duration_seconds: None,
+            source_identity: false,
+        }),
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, unreadable.path().to_path_buf())
+    };
+    checks.extend(aws_scope_check(
+        "codex-bedrock",
+        &unreadable_profile,
+        &containers,
+        &AlwaysFailingExecutor,
+    ));
+
     let mut rendered = Vec::new();
     render_human(&checks, &mut rendered).expect("render doctor checks");
     mj_core::golden::assert_golden(

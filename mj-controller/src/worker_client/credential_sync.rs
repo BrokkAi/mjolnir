@@ -681,10 +681,7 @@ pub(super) async fn reconcile_profile_guarded(
             let exported = tokio::task::spawn_blocking(move || {
                 crate::aws_credentials::export(
                     &source,
-                    // No deadline of our own: a credential_process may take
-                    // as long as it takes, and the AWS CLI bounds its own
-                    // network calls.
-                    &crate::targets::ProcessExecutor,
+                    &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
                 )
             })
             .await
@@ -766,8 +763,8 @@ pub(super) async fn reconcile_profile_guarded(
 }
 
 /// Fold one more step's result into a session's outcome. A session whose
-/// whole login step failed keeps that failure as a step failure (under the
-/// login pass's steps), so the other step's actions are recorded beside it.
+/// whole sync failed keeps that failure (as `SyncStep::Session`, which reports
+/// without a step), so the other step's actions are recorded beside it.
 pub(super) fn merge_step_outcome(
     outcomes: &mut BTreeMap<String, CredentialSyncOutcome>,
     session_id: &str,
@@ -789,11 +786,13 @@ pub(super) fn merge_step_outcome(
             existing.extend(actions);
             outcome.outcome = Ok(existing);
         }
+        // The session's whole sync failed (its connection): that is no step's
+        // failure, and is kept as such beside the AWS result.
         Err(detail) => {
             outcome.step_failures.insert(
                 0,
                 StepFailure {
-                    step: SyncStep::HarnessLogin,
+                    step: SyncStep::Session,
                     detail,
                 },
             );
@@ -1209,36 +1208,24 @@ pub(super) async fn aws_cycle(
             Err(error) => return (session_id, Err(error)),
         }
     }
-    let unresolved = target
-        .aws_credentials
-        .as_ref()
-        .and_then(|source| source.unresolved.as_deref());
-    let aws = match unresolved {
-        // Nothing can be minted without knowing which AWS login to use. The
-        // session stays managed: what the controller issued is kept until it
-        // expires, anything else is withdrawn, and the error is reported.
-        Some(why) => AwsSync::Unavailable {
-            error: format!(
-                "the profile's AWS identity could not be determined, so no credentials were renewed: {why}"
-            ),
-            scoped_required: true,
-            expected_scope: ScopeExpectation::of(target),
-        },
-        None => match start_scoped_mint(target, force_new) {
-            Some(mint) => match mint
-                .await
-                .context("AWS role assumption task stopped")
-                .and_then(|result| result)
-            {
-                Ok(credentials) => AwsSync::Install(credentials),
-                Err(error) => AwsSync::Unavailable {
-                    error: format!("{error:#}"),
-                    scoped_required: true,
-                    expected_scope: ScopeExpectation::of(target),
-                },
+    let aws = match start_scoped_mint(target, force_new) {
+        Some(mint) => match mint
+            .await
+            .context("AWS role assumption task stopped")
+            .and_then(|result| result)
+        {
+            Ok(credentials) => AwsSync::Install(credentials),
+            // A failed mint, including a harness configuration that could not
+            // be read this time: the session stays managed, keeps what the
+            // controller issued until it expires, loses anything else, and
+            // the failure is reported.
+            Err(error) => AwsSync::Unavailable {
+                error: format!("{error:#}"),
+                scoped_required: true,
+                expected_scope: ScopeExpectation::of(target),
             },
-            None => AwsSync::Unmanaged,
         },
+        None => AwsSync::Unmanaged,
     };
     // Takes its turn with the same session's login step instead of competing
     // with it for the admission slot, where a refusal would skip the install.
@@ -1392,9 +1379,9 @@ pub(super) async fn renew_session_aws(
                 env.retry,
                 failures_in_a_row - 1,
                 retry_limit,
-                target.aws_credentials.as_ref().and_then(|source| {
+                scheduling_source(&target).await.and_then(|source| {
                     crate::aws_assume_role::ScopedAwsCredentials::shared()
-                        .remaining_validity(&target.session_id, source)
+                        .remaining_validity(&target.session_id, &source)
                 }),
             );
         }
@@ -1436,9 +1423,9 @@ pub(super) async fn renew_session_aws(
             }
         }
         if completed
-            && let Some(source) = &target.aws_credentials
+            && let Some(source) = scheduling_source(&target).await
             && let Some(until) = crate::aws_assume_role::ScopedAwsCredentials::shared()
-                .renew_in(&target.session_id, source)
+                .renew_in(&target.session_id, &source)
         {
             delay = until;
         }
@@ -1455,6 +1442,21 @@ pub(super) async fn renew_session_aws(
             },
         }
     }
+}
+
+/// The source as the cycle just minted for it, to find its cached credentials:
+/// the cache is keyed by the environment the mint ran in, which includes the
+/// AWS profile the harness's configuration selects. Read now, off the async
+/// threads; `None` when the configuration cannot be read (nothing is cached
+/// for it, and the schedule falls back to the retry delay).
+async fn scheduling_source(
+    target: &CredentialSyncTarget,
+) -> Option<mj_core::aws_credentials::AwsCredentialSource> {
+    let source = target.aws_credentials.clone()?;
+    tokio::task::spawn_blocking(move || crate::aws_credentials::resolve(&source).ok())
+        .await
+        .ok()
+        .flatten()
 }
 
 /// How long to wait before the next attempt after the `failures`-th
@@ -1502,6 +1504,12 @@ fn start_scoped_mint(
         .filter(|source| source.role.is_some())?;
     let session_id = target.session_id.clone();
     Some(tokio::task::spawn_blocking(move || {
+        // The harness's configuration may select the AWS profile; it is read
+        // now, every time a mint is wanted, because an edit to it does not
+        // rebuild the target. If it cannot be read, nothing is minted.
+        let source = crate::aws_credentials::resolve(&source).context(
+            "the profile's AWS identity could not be determined, so no credentials were renewed",
+        )?;
         let cache = crate::aws_assume_role::ScopedAwsCredentials::shared();
         if force_new {
             cache.forget(&session_id, &source);

@@ -1586,7 +1586,7 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
             ),
         ]),
         role: None,
-        unresolved: None,
+        selection: None,
     });
     let targets = [local, remote];
     for generation in ["initial", "renewed"] {
@@ -1682,7 +1682,7 @@ async fn role_scoped_sessions_receive_assumed_credentials_and_never_the_unscoped
             duration_seconds: None,
             source_identity: false,
         }),
-        unresolved: None,
+        selection: None,
     };
     let granted_received = scratch.path().join("granted");
     let denied_received = scratch.path().join("denied");
@@ -1804,7 +1804,7 @@ async fn role_scoped_mints_for_one_profile_run_together() {
                     duration_seconds: None,
                     source_identity: false,
                 }),
-                unresolved: None,
+                selection: None,
             });
             target
         })
@@ -1879,7 +1879,7 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
                 duration_seconds: None,
                 source_identity: false,
             }),
-            unresolved: None,
+            selection: None,
         });
         target
     };
@@ -2051,7 +2051,7 @@ fn aws_sync_session_named(
             ("AWS_PROFILE".into(), "bedrock".into()),
         ]),
         role: Some(role_config()),
-        unresolved: None,
+        selection: None,
     });
     target
 }
@@ -2766,7 +2766,7 @@ async fn the_credential_cache_is_swept_on_the_schedule_even_with_no_sessions() {
     let source = mj_core::aws_credentials::AwsCredentialSource {
         environment: BTreeMap::from([("AWS_PROFILE".into(), "bedrock".into())]),
         role: Some(role_config()),
-        unresolved: None,
+        selection: None,
     };
     let cache = crate::aws_assume_role::ScopedAwsCredentials::shared();
     cache
@@ -3415,42 +3415,72 @@ async fn a_trigger_whose_renewal_is_stopped_reports_the_outcome_as_unknown() {
 }
 
 // When the controller cannot read the profile's Codex configuration it cannot
-// tell which AWS login to use, so nothing is minted. The session stays managed
-// as role-scoped: credentials the controller did not issue (the host's own,
-// from before the role) are withdrawn, and the read error is reported.
+// tell which AWS login to use, so nothing is minted that cycle. The session
+// stays managed as role-scoped: credentials the controller did not issue (the
+// host's own, from before the role) are withdrawn, and the read error is
+// reported. The file is read each cycle, not captured in the target: once it
+// is repaired, with the mj configuration unchanged, the next cycle mints.
 #[cfg(unix)]
 #[tokio::test]
-async fn an_unreadable_provider_configuration_withdraws_unscoped_credentials_and_reports_it() {
+async fn an_unreadable_provider_configuration_is_that_cycles_outcome_and_a_repair_is_seen() {
+    let codex_home = tempfile::tempdir().unwrap();
+    let config = codex_home.path().join("config.toml");
+    std::fs::write(&config, "model_provider = [unterminated").unwrap();
     let home = tempfile::tempdir().unwrap();
-    let root = tempfile::tempdir().unwrap();
-    let token = root.path().join("token-source");
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
     std::fs::write(&token, "pat").unwrap();
-    // Minting would be refused with AccessDenied; it must not be tried.
-    let cli = refusing_aws_cli(root.path());
+    let cli = granting_aws_cli(scratch.path());
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    // A running session still holding the host's own, unscoped credentials.
+    std::fs::write(root.join("aws"), br#"{"Version":1,"AccessKeyId":"AKIA"}"#).unwrap();
+    let mut target = aws_sync_session_named(home.path(), &root, &token, &cli, "unreadable", None);
+    target.aws_credentials.as_mut().unwrap().selection =
+        Some(mj_core::aws_credentials::AwsProfileSelection {
+            home: codex_home.path().to_path_buf(),
+            overlay: None,
+        });
+    let mut coordinator =
+        CredentialSyncCoordinator::spawn_with_renewal_retry(Duration::from_millis(100));
+    coordinator.handle().set_targets(vec![target]);
+    let next_partial = async |coordinator: &mut CredentialSyncCoordinator| {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let result = coordinator.result().await.expect("coordinator stopped");
+                if result.partial {
+                    return result;
+                }
+            }
+        })
+        .await
+        .expect("a renewal result arrived")
+    };
+
+    // Unreadable: the unscoped credentials are withdrawn, and the error said.
+    let failed = next_partial(&mut coordinator).await;
+    let (_, step, detail) = failed.failures().next().expect("the error is reported");
+    assert_eq!(step, Some(SyncStep::Aws));
+    assert!(
+        detail.contains("could not be determined") && detail.contains("TOML parse error"),
+        "{detail}"
+    );
+    assert!(!root.join("aws").exists(), "unscoped credentials were kept");
+
+    // Repaired, and nothing else changed: a later cycle mints and installs.
     std::fs::write(
-        root.path().join("aws"),
-        br#"{"Version":1,"AccessKeyId":"AKIA"}"#,
+        &config,
+        "model_provider = \"amazon-bedrock-runtime\"\n[model_providers.amazon-bedrock-runtime.aws]\nprofile = \"team\"\n",
     )
     .unwrap();
-    let mut target = aws_sync_session(home.path(), root.path(), &token, &cli);
-    target.aws_credentials.as_mut().unwrap().unresolved =
-        Some("parse Codex configuration config.toml: expected `]`".into());
-
-    let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
-
-    assert!(!root.path().join("aws").exists(), "{outcomes:?}");
-    let failure = outcomes[0].failure_text().unwrap();
-    assert!(
-        failure.contains("could not be determined")
-            && failure.contains("parse Codex configuration"),
-        "{failure}"
-    );
-    assert!(
-        !failure.contains("AccessDenied"),
-        "minted anyway: {failure}"
-    );
-    assert_eq!(outcomes[0].step_failures.len(), 1, "{failure}");
-    assert_eq!(outcomes[0].step_failures[0].step, SyncStep::Aws);
+    let repaired = loop {
+        let result = next_partial(&mut coordinator).await;
+        if result.failures().next().is_none() {
+            break result;
+        }
+    };
+    assert!(repaired.pushed_to("unreadable"), "{repaired:?}");
+    assert!(root.join("aws").exists());
 }
 
 // A job queued behind an actor that is busy with something else holds the
@@ -3805,6 +3835,19 @@ fn a_failed_login_step_keeps_the_aws_steps_actions_in_the_outcome() {
     assert_eq!(
         merged.failure_text().as_deref(),
         Some("worker proxy disconnected")
+    );
+    // A connection error is the session's, not the harness login's: it is
+    // reported without a step.
+    let result = CredentialSyncResult {
+        profile_id: "work".into(),
+        trigger: None,
+        failure: None,
+        outcomes: vec![merged.clone()],
+        partial: false,
+    };
+    assert_eq!(
+        result.failures().collect::<Vec<_>>(),
+        [("session", None, "worker proxy disconnected")]
     );
 }
 

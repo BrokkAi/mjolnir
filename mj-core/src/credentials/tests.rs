@@ -807,6 +807,23 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
         ),
         &profile,
     );
+    // The session's whole sync failed (its connection) although an AWS result
+    // was merged beside it: nothing was compared either.
+    rejected.observe(
+        &result(
+            CredentialSyncReason::AuthenticationFailure,
+            vec![CredentialSyncOutcome {
+                session_id: "child-1".into(),
+                outcome: Ok(vec![CredentialSyncAction::SkillsPushed]),
+                step_failures: vec![StepFailure {
+                    step: SyncStep::Session,
+                    detail: "worker unreachable".into(),
+                }],
+            }],
+            None,
+        ),
+        &profile,
+    );
     assert_eq!(rejected.refusal("codex4"), None);
     // An empty answer is not an auth failure.
     rejected.observe(
