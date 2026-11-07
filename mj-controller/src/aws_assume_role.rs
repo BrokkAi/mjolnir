@@ -486,33 +486,42 @@ fn mint(
     AwsCredentials::from_assume_role(host_profile, &output.stdout)
 }
 
-/// What to tell the person about a failed call. Only the AWS error itself is
-/// quoted, never other output, because a custom credential helper can print
-/// secrets. AWS CLI v2 prints `aws: [ERROR]: An error occurred (<Code>) when
-/// calling the AssumeRole operation: <message>`; a client-side range check
-/// prints `An error occurred (ParamValidation): Parameter validation failed:`
-/// followed by the offending parameter on the next line.
+/// What to tell the person about a failed call. The command's output is
+/// sensitive (a custom credential helper can print secrets to either stream),
+/// so only identifier-shaped fields are taken from the AWS CLI's error line,
+/// `An error occurred (<Code>) when calling the <Operation> operation: ...`:
+/// the error code and the operation, each checked against `[A-Za-z0-9.]+`. The
+/// free-text message is dropped. A client-side range check prints no
+/// operation, only `An error occurred (ParamValidation): ...`.
 fn assume_role_failure(stderr: &[u8], status: i32) -> String {
-    const LIMIT: usize = 600;
+    let identifier = |text: &str| {
+        !text.is_empty() && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+    };
     let text = String::from_utf8_lossy(stderr);
-    let mut lines = text.lines().map(|line| {
+    for line in text.lines() {
         let line = line.trim();
-        line.strip_prefix("aws: [ERROR]: ").unwrap_or(line)
-    });
-    while let Some(line) = lines.next() {
-        if !line.starts_with("An error occurred (") {
+        let line = line.strip_prefix("aws: [ERROR]: ").unwrap_or(line);
+        let Some((code, rest)) = line
+            .strip_prefix("An error occurred (")
+            .and_then(|line| line.split_once(')'))
+        else {
+            continue;
+        };
+        if !identifier(code) {
             continue;
         }
-        let mut message = line.to_owned();
-        if line.contains("(ParamValidation)")
-            && let Some(detail) = lines
-                .next()
-                .filter(|detail| detail.starts_with("Invalid value for parameter"))
-        {
-            message = format!("{message} {detail}");
-        }
-        message.truncate(message.floor_char_boundary(LIMIT));
-        return format!("AWS refused AssumeRole: {message}");
+        let operation = rest
+            .trim_start()
+            .strip_prefix("when calling the ")
+            .and_then(|rest| rest.split_once(" operation"))
+            .map(|(operation, _)| operation)
+            .filter(|operation| identifier(operation));
+        return match operation {
+            Some(operation) if operation != "AssumeRole" => {
+                format!("AWS refused AssumeRole: {code} (operation {operation})")
+            }
+            _ => format!("AWS refused AssumeRole: {code}"),
+        };
     }
     format!("the AWS CLI exited with status {status} (its output is not shown)")
 }
@@ -573,6 +582,7 @@ mod tests {
         AwsCredentialSource {
             environment: BTreeMap::from([("AWS_PROFILE".into(), "work".into())]),
             role: Some(role),
+            unresolved: None,
         }
     }
 
@@ -776,10 +786,6 @@ mod tests {
         // The person is told what AWS said and how to proceed; the helper's
         // other output (here, key material on stdout) is never repeated.
         assert!(reported.contains("AccessDenied"), "{reported}");
-        assert!(
-            reported.contains("is not authorized to perform: sts:AssumeRole"),
-            "{reported}"
-        );
         // The remedy is the trust-policy fix only; the scope is never offered
         // for removal, which would widen access.
         assert!(
@@ -905,21 +911,36 @@ mod tests {
         assert!(!format!("{error:#}").contains("example-secret"));
     }
 
+    // The command's output is sensitive: the notice holds the error code and
+    // the operation, both identifier-shaped, and never free text from the
+    // CLI or from a helper it ran.
     #[test]
-    fn aws_cli_failures_quote_only_the_aws_error() {
+    fn aws_cli_failures_report_only_the_error_code_and_operation() {
         let denied = include_str!("../tests/fixtures/aws-sts-assume-role-access-denied.txt");
-        let message = assume_role_failure(format!("noise with secret\n{denied}").as_bytes(), 254);
+        // A multiline stderr: a helper's lines before and after, one of them
+        // a token-like secret, around the CLI's own error.
+        let stderr = format!(
+            "credential helper: token sk-live-0123456789abcdef\n{denied}\nhelper trace: AKIAIOSFODNN7EXAMPLE secret-access-key\n"
+        );
+        let message = assume_role_failure(stderr.as_bytes(), 254);
+        assert_eq!(message, "AWS refused AssumeRole: AccessDenied");
+        // Another operation is named; a range check has none.
+        let other = "aws: [ERROR]: An error occurred (ThrottlingException) when calling the GetCallerIdentity operation: token sk-live-0123456789abcdef\n";
         assert_eq!(
-            message,
-            format!(
-                "AWS refused AssumeRole: {}",
-                denied.trim().strip_prefix("aws: [ERROR]: ").unwrap()
-            )
+            assume_role_failure(other.as_bytes(), 254),
+            "AWS refused AssumeRole: ThrottlingException (operation GetCallerIdentity)"
         );
         let range = "\naws: [ERROR]: An error occurred (ParamValidation): Parameter validation failed:\nInvalid value for parameter DurationSeconds, value: 100, valid min value: 900\n";
         assert_eq!(
             assume_role_failure(range.as_bytes(), 252),
-            "AWS refused AssumeRole: An error occurred (ParamValidation): Parameter validation failed: Invalid value for parameter DurationSeconds, value: 100, valid min value: 900"
+            "AWS refused AssumeRole: ParamValidation"
+        );
+        // A code or operation that is not identifier-shaped is not repeated.
+        let spoofed = "An error occurred (sk-live-0123456789abcdef!) when calling the AssumeRole operation: x\nAn error occurred (AccessDenied) when calling the Assume Role/secret operation: x\n";
+        let message = assume_role_failure(spoofed.as_bytes(), 255);
+        assert!(
+            !message.contains("sk-live") && !message.contains("secret"),
+            "{message}"
         );
         let helper = "Traceback: secret-token-value";
         let message = assume_role_failure(helper.as_bytes(), 255);

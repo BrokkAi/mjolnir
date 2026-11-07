@@ -61,6 +61,16 @@ impl Controller {
         crate::aws_credentials::source(profile, &backend, &environment)
     }
 
+    /// [`Self::aws_credential_source`] for the credential sync, which keeps
+    /// managing a session whose profile configuration cannot be read.
+    pub(crate) fn aws_credential_sync_source(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<mj_core::aws_credentials::AwsCredentialSource>> {
+        let (profile, backend, environment) = self.aws_session_inputs(session_id)?;
+        crate::aws_credentials::sync_source(profile, &backend, &environment)
+    }
+
     /// A notice for the person when the profile's `[profiles.<id>.aws]` role
     /// cannot apply to this session, and why: its target is raw local or EC2,
     /// or sets its own AWS credentials, or the profile is not a Bedrock one.

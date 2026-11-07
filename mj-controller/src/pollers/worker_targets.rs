@@ -127,7 +127,7 @@ pub(crate) fn credential_sync_targets_from_sources(
                     return None;
                 }
             };
-            let aws_credentials = match controller.aws_credential_source(&session.id) {
+            let aws_credentials = match controller.aws_credential_sync_source(&session.id) {
                 Ok(source) => source,
                 Err(error) => {
                     tracing::warn!(session_id = %session.id, "could not select AWS credential sync source: {error:#}");

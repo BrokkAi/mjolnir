@@ -80,6 +80,13 @@ pub struct AwsCredentialSource {
     /// credentials. Part of the source, and so of the sync target's identity:
     /// a configuration change makes obsolete queued work compare unequal.
     pub role: Option<crate::config::AwsRoleConfig>,
+    /// Why the AWS profile this session should use could not be determined
+    /// (the profile's Codex configuration could not be read), when that is so.
+    /// The session stays managed as role-scoped, and nothing is minted for it:
+    /// credentials the controller issued are kept until they expire, anything
+    /// else is withdrawn, and the sync reports this. Part of the sync target's
+    /// identity.
+    pub unresolved: Option<String>,
 }
 
 impl std::fmt::Debug for AwsCredentialSource {

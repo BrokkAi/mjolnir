@@ -510,12 +510,16 @@ impl CredentialSyncCoordinator {
                         if let Some(report) = aws_report {
                             // The trigger's answer includes the renewal's
                             // outcome, so it is sent when both have ended.
-                            // The renewal task answers once its cycle ends;
-                            // none answers when the task was stopped, and its
-                            // replacement reports for itself.
-                            if let Ok(Some(report)) = report.await {
-                                merge_report(&mut outcomes, report);
-                            }
+                            // A renewal task stopped before it answered
+                            // (its session closed or its target changed)
+                            // leaves the outcome unknown, which the answer
+                            // says; its replacement reports for itself.
+                            let report = report.await.unwrap_or_else(|_| {
+                                unknown_renewal_outcome(
+                                    trigger.cause.as_ref().map_or("", |c| &c.session_id),
+                                )
+                            });
+                            merge_report(&mut outcomes, report);
                         }
                         if completed_tx
                             .send(PassEvent::Finished(CredentialSyncResult {
@@ -677,7 +681,10 @@ pub(super) async fn reconcile_profile_guarded(
             let exported = tokio::task::spawn_blocking(move || {
                 crate::aws_credentials::export(
                     &source,
-                    &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
+                    // No deadline of our own: a credential_process may take
+                    // as long as it takes, and the AWS CLI bounds its own
+                    // network calls.
+                    &crate::targets::ProcessExecutor,
                 )
             })
             .await
@@ -794,6 +801,18 @@ pub(super) fn merge_step_outcome(
         }
     }
     outcome.step_failures.extend(failures);
+}
+
+/// The outcome of a woken renewal that never answered.
+fn unknown_renewal_outcome(session_id: &str) -> CredentialSyncOutcome {
+    CredentialSyncOutcome {
+        session_id: session_id.to_owned(),
+        outcome: Ok(Vec::new()),
+        step_failures: vec![StepFailure {
+            step: SyncStep::Aws,
+            detail: "AWS credentials: the session's renewal stopped before it answered, so whether its credentials are valid is unknown".into(),
+        }],
+    }
 }
 
 /// Fold the outcome of a session's own AWS cycle into the profile pass's
@@ -1190,20 +1209,36 @@ pub(super) async fn aws_cycle(
             Err(error) => return (session_id, Err(error)),
         }
     }
-    let aws = match start_scoped_mint(target, force_new) {
-        Some(mint) => match mint
-            .await
-            .context("AWS role assumption task stopped")
-            .and_then(|result| result)
-        {
-            Ok(credentials) => AwsSync::Install(credentials),
-            Err(error) => AwsSync::Unavailable {
-                error: format!("{error:#}"),
-                scoped_required: true,
-                expected_scope: ScopeExpectation::of(target),
-            },
+    let unresolved = target
+        .aws_credentials
+        .as_ref()
+        .and_then(|source| source.unresolved.as_deref());
+    let aws = match unresolved {
+        // Nothing can be minted without knowing which AWS login to use. The
+        // session stays managed: what the controller issued is kept until it
+        // expires, anything else is withdrawn, and the error is reported.
+        Some(why) => AwsSync::Unavailable {
+            error: format!(
+                "the profile's AWS identity could not be determined, so no credentials were renewed: {why}"
+            ),
+            scoped_required: true,
+            expected_scope: ScopeExpectation::of(target),
         },
-        None => AwsSync::Unmanaged,
+        None => match start_scoped_mint(target, force_new) {
+            Some(mint) => match mint
+                .await
+                .context("AWS role assumption task stopped")
+                .and_then(|result| result)
+            {
+                Ok(credentials) => AwsSync::Install(credentials),
+                Err(error) => AwsSync::Unavailable {
+                    error: format!("{error:#}"),
+                    scoped_required: true,
+                    expected_scope: ScopeExpectation::of(target),
+                },
+            },
+            None => AwsSync::Unmanaged,
+        },
     };
     // Takes its turn with the same session's login step instead of competing
     // with it for the admission slot, where a refusal would skip the install.
@@ -1217,23 +1252,23 @@ pub(super) async fn aws_cycle(
 
 /// What a session's renewal task needs, shared by all of them.
 #[derive(Clone)]
-struct RenewalEnv {
-    relays: SessionRelays,
-    gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
-    runtime: Option<Arc<crate::daemon::RuntimeState>>,
-    steps: SessionSteps,
+pub(super) struct RenewalEnv {
+    pub(super) relays: SessionRelays,
+    pub(super) gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
+    pub(super) runtime: Option<Arc<crate::daemon::RuntimeState>>,
+    pub(super) steps: SessionSteps,
     /// Orders one session's renewals, so a replaced task's cycle finishes
     /// before its successor's begins.
-    installs: SessionSteps,
-    results: mpsc::UnboundedSender<CredentialSyncResult>,
+    pub(super) installs: SessionSteps,
+    pub(super) results: mpsc::UnboundedSender<CredentialSyncResult>,
     /// How long after a cycle that did not complete cleanly the next is tried.
-    retry: Duration,
+    pub(super) retry: Duration,
 }
 
 /// A request to renew a session's credentials now, with new ones, and to
 /// answer with the cycle's outcome.
-struct RenewalWake {
-    reply: tokio::sync::oneshot::Sender<Option<CredentialSyncOutcome>>,
+pub(super) struct RenewalWake {
+    pub(super) reply: tokio::sync::oneshot::Sender<CredentialSyncOutcome>,
 }
 
 struct RenewalTask {
@@ -1293,7 +1328,7 @@ impl RenewalTasks {
     fn wake(
         &self,
         session_id: &str,
-    ) -> Option<tokio::sync::oneshot::Receiver<Option<CredentialSyncOutcome>>> {
+    ) -> Option<tokio::sync::oneshot::Receiver<CredentialSyncOutcome>> {
         let task = self.0.get(session_id)?;
         let (reply, answer) = tokio::sync::oneshot::channel();
         task.wakes.send(RenewalWake { reply }).ok()?;
@@ -1314,7 +1349,7 @@ impl Drop for RenewalTasks {
 /// cycle of a replaced task still queued or running, and ends on any path by
 /// releasing it. A wake renews now, with new credentials, and answers with the
 /// cycle's outcome.
-async fn renew_session_aws(
+pub(super) async fn renew_session_aws(
     env: RenewalEnv,
     target: CredentialSyncTarget,
     mut wakes: mpsc::UnboundedReceiver<RenewalWake>,
@@ -1375,8 +1410,13 @@ async fn renew_session_aws(
         // A trigger that woke this cycle receives its full outcome. The task
         // still reports what the cycle checked, without the actions the
         // trigger's result now carries.
-        if let (Some(wake), Some(full)) = (wake.take(), report.clone())
-            && wake.reply.send(Some(full)).is_ok()
+        // A cycle that reached the session answers the trigger that woke it.
+        // A deferred cycle (the actor was busy) does not consume the wake: the
+        // next cycle, still a forced one, answers it.
+        if checked
+            && let Some(wake) = wake.take()
+            && let Some(full) = report.clone()
+            && wake.reply.send(full).is_ok()
         {
             report = report.map(|outcome| CredentialSyncOutcome {
                 outcome: Ok(Vec::new()),
@@ -1469,7 +1509,8 @@ fn start_scoped_mint(
         cache.credentials_for(
             &session_id,
             &source,
-            &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
+            // No deadline of our own, as for the unscoped export.
+            &crate::targets::ProcessExecutor,
         )
     }))
 }

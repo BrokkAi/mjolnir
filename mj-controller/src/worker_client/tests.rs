@@ -1586,6 +1586,7 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
             ),
         ]),
         role: None,
+        unresolved: None,
     });
     let targets = [local, remote];
     for generation in ["initial", "renewed"] {
@@ -1681,6 +1682,7 @@ async fn role_scoped_sessions_receive_assumed_credentials_and_never_the_unscoped
             duration_seconds: None,
             source_identity: false,
         }),
+        unresolved: None,
     };
     let granted_received = scratch.path().join("granted");
     let denied_received = scratch.path().join("denied");
@@ -1802,6 +1804,7 @@ async fn role_scoped_mints_for_one_profile_run_together() {
                     duration_seconds: None,
                     source_identity: false,
                 }),
+                unresolved: None,
             });
             target
         })
@@ -1876,6 +1879,7 @@ async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
                 duration_seconds: None,
                 source_identity: false,
             }),
+            unresolved: None,
         });
         target
     };
@@ -2047,6 +2051,7 @@ fn aws_sync_session_named(
             ("AWS_PROFILE".into(), "bedrock".into()),
         ]),
         role: Some(role_config()),
+        unresolved: None,
     });
     target
 }
@@ -2761,6 +2766,7 @@ async fn the_credential_cache_is_swept_on_the_schedule_even_with_no_sessions() {
     let source = mj_core::aws_credentials::AwsCredentialSource {
         environment: BTreeMap::from([("AWS_PROFILE".into(), "bedrock".into())]),
         role: Some(role_config()),
+        unresolved: None,
     };
     let cache = crate::aws_assume_role::ScopedAwsCredentials::shared();
     cache
@@ -2997,6 +3003,20 @@ async fn a_stalled_session_does_not_keep_another_session_from_being_renewed_on_a
     std::fs::write(&release, "").unwrap();
 }
 
+/// Ends a stalled `aws` stub when it drops, even if the test failed first: the
+/// mint has no deadline of its own, and a stub still waiting would keep the
+/// test runtime from shutting down. (The stub also ends when its directory is
+/// removed, in case it polls only after that.)
+#[cfg(unix)]
+struct ReleaseOnDrop(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, "");
+    }
+}
+
 // A triggered session's renewal can stall in STS or behind its actor. The
 // trigger's answer waits for it, but the profile's slot does not: the profile's
 // other syncs (login, GitHub token, skills) run meanwhile.
@@ -3018,14 +3038,16 @@ async fn a_stalled_triggered_renewal_does_not_hold_the_profiles_other_syncs() {
     std::fs::write(
         cli.join("aws"),
         format!(
-            "#!/bin/sh\n/usr/bin/touch {started}\nwhile [ ! -e {release} ]; do /bin/sleep 0.05; done\nexec /bin/cat {output}\n",
+            "#!/bin/sh\n/usr/bin/touch {started}\nwhile [ ! -e {release} ] && [ -d {dir} ]; do /bin/sleep 0.05; done\nexec /bin/cat {output}\n",
             started = started.display(),
             release = release.display(),
+            dir = scratch.path().display(),
             output = scratch.path().join("granted.json").display(),
         ),
     )
     .unwrap();
     std::fs::set_permissions(cli.join("aws"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _release_on_exit = ReleaseOnDrop(release.clone());
     let root = scratch.path().join("session");
     std::fs::create_dir(&root).unwrap();
     let target = aws_sync_session_named(home.path(), &root, &token, &cli, "stalled", None);
@@ -3241,6 +3263,194 @@ async fn a_stopped_renewals_job_is_dropped_if_queued_and_finishes_if_running() {
         !root.join("aws").exists(),
         "the running job did not finish its work"
     );
+}
+
+// A cycle the session actor could not take (the session was busy) checked
+// nothing, so it leaves the trigger's wake for the next cycle, which answers.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_deferred_renewal_cycle_leaves_the_wake_for_the_next_one() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "deferred", None);
+    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    // Another holder (a recovery copy, say) has the session: cycles defer.
+    let held = gate.try_start("deferred").unwrap();
+    let (results, mut results_rx) = mpsc::unbounded_channel();
+    let env = credential_sync::RenewalEnv {
+        relays: SessionRelays::Direct,
+        gate: Some(gate.clone()),
+        runtime: None,
+        steps: Default::default(),
+        installs: Default::default(),
+        results,
+        retry: Duration::from_millis(50),
+    };
+    let (wakes, wake_rx) = mpsc::unbounded_channel();
+    let renewal = tokio::spawn(credential_sync::renew_session_aws(
+        env,
+        target.clone(),
+        wake_rx,
+    ));
+    let (reply, mut answer) = tokio::sync::oneshot::channel();
+    wakes.send(credential_sync::RenewalWake { reply }).unwrap();
+
+    // Several deferred cycles go by without answering, installing, or saying
+    // anything.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), &mut answer)
+            .await
+            .is_err(),
+        "a deferred cycle answered the trigger"
+    );
+    assert!(!root.join("aws").exists());
+    assert!(results_rx.try_recv().is_err());
+
+    // The session frees: the next cycle, forced by the trigger, answers.
+    drop(held);
+    let outcome = tokio::time::timeout(Duration::from_secs(20), answer)
+        .await
+        .expect("the next cycle answered")
+        .expect("the wake was kept until a cycle could answer it");
+    assert_eq!(outcome.session_id, "deferred");
+    assert_eq!(outcome.outcome, Ok(vec![CredentialSyncAction::Pushed]));
+    assert!(root.join("aws").exists());
+    renewal.abort();
+}
+
+// A renewal stopped (its target changed) before it answered a trigger leaves
+// the renewal's outcome unknown, and the trigger's answer says so.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_trigger_whose_renewal_is_stopped_reports_the_outcome_as_unknown() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let (started, release) = (
+        scratch.path().join("sts-started"),
+        scratch.path().join("sts-release"),
+    );
+    std::fs::write(
+        cli.join("aws"),
+        format!(
+            "#!/bin/sh\n/usr/bin/touch {started}\nwhile [ ! -e {release} ] && [ -d {dir} ]; do /bin/sleep 0.05; done\nexec /bin/cat {output}\n",
+            started = started.display(),
+            release = release.display(),
+            dir = scratch.path().display(),
+            output = scratch.path().join("granted.json").display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(cli.join("aws"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _release_on_exit = ReleaseOnDrop(release.clone());
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "replaced", None);
+    let mut coordinator = CredentialSyncCoordinator::spawn();
+    let handle = coordinator.handle();
+    handle.set_targets(vec![target.clone()]);
+    let github = root.join("github");
+    let wait_for = async |what: &str, condition: &(dyn Fn() -> bool + Sync)| {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    };
+    wait_for("the first pass", &|| github.exists()).await;
+    wait_for("the STS call", &|| started.exists()).await;
+    // The trigger's pass runs (so its wake has been sent to the renewal, which
+    // is stuck in STS).
+    std::fs::write(&token, "pat-2").unwrap();
+    handle.sync_profile_now(
+        &target.profile_id,
+        Some(mj_core::credentials::CredentialSyncCause {
+            session_id: "replaced".into(),
+            reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+        }),
+    );
+    wait_for("the trigger's pass", &|| {
+        std::fs::read_to_string(&github).is_ok_and(|text| text == "pat-2")
+    })
+    .await;
+
+    // The role is edited: the stalled renewal's task is replaced, and the
+    // wake it never answered is dropped with it.
+    let mut changed = target.clone();
+    changed
+        .aws_credentials
+        .as_mut()
+        .unwrap()
+        .environment
+        .insert("AWS_REGION".into(), "us-east-2".into());
+    handle.set_targets(vec![changed]);
+    let answered = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let result = coordinator.result().await.expect("coordinator stopped");
+            if result.trigger.is_some() {
+                return result;
+            }
+        }
+    })
+    .await
+    .expect("the trigger was answered");
+    let failure = answered
+        .failures()
+        .map(|(_, _, detail)| detail.to_owned())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(failure.contains("is unknown"), "{answered:?}");
+}
+
+// When the controller cannot read the profile's Codex configuration it cannot
+// tell which AWS login to use, so nothing is minted. The session stays managed
+// as role-scoped: credentials the controller did not issue (the host's own,
+// from before the role) are withdrawn, and the read error is reported.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unreadable_provider_configuration_withdraws_unscoped_credentials_and_reports_it() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let token = root.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    // Minting would be refused with AccessDenied; it must not be tried.
+    let cli = refusing_aws_cli(root.path());
+    std::fs::write(
+        root.path().join("aws"),
+        br#"{"Version":1,"AccessKeyId":"AKIA"}"#,
+    )
+    .unwrap();
+    let mut target = aws_sync_session(home.path(), root.path(), &token, &cli);
+    target.aws_credentials.as_mut().unwrap().unresolved =
+        Some("parse Codex configuration config.toml: expected `]`".into());
+
+    let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
+
+    assert!(!root.path().join("aws").exists(), "{outcomes:?}");
+    let failure = outcomes[0].failure_text().unwrap();
+    assert!(
+        failure.contains("could not be determined")
+            && failure.contains("parse Codex configuration"),
+        "{failure}"
+    );
+    assert!(
+        !failure.contains("AccessDenied"),
+        "minted anyway: {failure}"
+    );
+    assert_eq!(outcomes[0].step_failures.len(), 1, "{failure}");
+    assert_eq!(outcomes[0].step_failures[0].step, SyncStep::Aws);
 }
 
 // A job queued behind an actor that is busy with something else holds the

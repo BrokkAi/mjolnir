@@ -116,7 +116,9 @@ pub(crate) fn credentials_withheld(
     host: SessionHost,
     target_environment: &BTreeMap<String, String>,
 ) -> Option<CredentialsWithheld> {
-    if profile.auth_scheme() != AuthScheme::AwsCredentialChain {
+    if profile.auth_scheme() != AuthScheme::AwsCredentialChain
+        && unreadable_provider(profile).is_none()
+    {
         return Some(CredentialsWithheld::NotBedrock);
     }
     match host {
@@ -132,6 +134,21 @@ pub(crate) fn credentials_withheld(
     }
     has_credential_source(profile.environment.resolved())
         .then_some(CredentialsWithheld::ProfileEnvironment)
+}
+
+/// Why the profile's Codex configuration cannot be read, when a role is
+/// configured and it cannot. Unreadable is unknown, not "not Bedrock": the
+/// worker still runs the configuration it was staged with, so a profile with a
+/// role is treated as Bedrock until its configuration can be read, and an
+/// error is reported rather than the session's AWS credentials left unmanaged.
+fn unreadable_provider(profile: &HarnessProfile) -> Option<String> {
+    if profile.aws.is_none() || profile.kind != mj_core::config::HarnessKind::Codex {
+        return None;
+    }
+    profile
+        .codex_provider()
+        .err()
+        .map(|error| format!("{error:#}"))
 }
 
 pub(crate) fn receives_synced_credentials(
@@ -171,21 +188,33 @@ pub(crate) fn source(
     selected_source(profile).map(Some)
 }
 
+/// [`source`] for the credential sync, which keeps managing a session whose
+/// profile configuration cannot be read. The source then names the role and
+/// says why nothing can be minted (`unresolved`), so the sync keeps what the
+/// controller issued, withdraws anything else, and reports the error, instead
+/// of leaving the session's unscoped host credentials unmanaged. Launch uses
+/// [`source`], which fails.
+pub(crate) fn sync_source(
+    profile: &HarnessProfile,
+    backend: &TargetLocator,
+    target_environment: &BTreeMap<String, String>,
+) -> Result<Option<AwsCredentialSource>> {
+    match source(profile, backend, target_environment) {
+        Err(error) if unreadable_provider(profile).is_some() => {
+            let mut source = base_source(profile);
+            source.unresolved = Some(format!("{error:#}"));
+            Ok(Some(source))
+        }
+        other => other,
+    }
+}
+
 /// The environment the AWS CLI runs in to resolve this profile's identity on
 /// the controller host: the profile's own environment with the AWS profile
 /// it selects. Callers have already decided that the profile receives synced
 /// credentials.
 pub(crate) fn selected_source(profile: &HarnessProfile) -> Result<AwsCredentialSource> {
-    let environment = profile.environment.resolved();
-    let mut environment = environment.clone();
-    let selected = environment
-        .get("AWS_PROFILE")
-        .or_else(|| environment.get("AWS_DEFAULT_PROFILE"))
-        .cloned()
-        .or_else(|| std::env::var("AWS_PROFILE").ok())
-        .or_else(|| std::env::var("AWS_DEFAULT_PROFILE").ok())
-        .unwrap_or_else(|| "default".into());
-    environment.insert("AWS_PROFILE".into(), selected);
+    let mut source = base_source(profile);
     // Codex can select its AWS profile inside the provider table.
     if profile.kind == mj_core::config::HarnessKind::Codex
         && let Some(config) = mj_core::codex_provider::ConfigFiles::read_with(
@@ -204,13 +233,31 @@ pub(crate) fn selected_source(profile: &HarnessProfile) -> Result<AwsCredentialS
                 .and_then(|provider| provider.get("aws"))
             && let Some(selected) = aws.get("profile").and_then(toml::Value::as_str)
         {
-            environment.insert("AWS_PROFILE".into(), selected.into());
+            source
+                .environment
+                .insert("AWS_PROFILE".into(), selected.into());
         }
     }
-    Ok(AwsCredentialSource {
+    Ok(source)
+}
+
+/// The profile's own environment with the AWS profile it names, before the
+/// harness's configuration is consulted.
+fn base_source(profile: &HarnessProfile) -> AwsCredentialSource {
+    let mut environment = profile.environment.resolved().clone();
+    let selected = environment
+        .get("AWS_PROFILE")
+        .or_else(|| environment.get("AWS_DEFAULT_PROFILE"))
+        .cloned()
+        .or_else(|| std::env::var("AWS_PROFILE").ok())
+        .or_else(|| std::env::var("AWS_DEFAULT_PROFILE").ok())
+        .unwrap_or_else(|| "default".into());
+    environment.insert("AWS_PROFILE".into(), selected);
+    AwsCredentialSource {
         environment,
         role: profile.aws.clone(),
-    })
+        unresolved: None,
+    }
 }
 
 pub(crate) fn export(
@@ -267,6 +314,57 @@ mod tests {
         }
     }
 
+    // An unreadable provider configuration is unknown, not "not Bedrock": a
+    // profile with a role stays managed by the sync (which then keeps or
+    // withdraws credentials and reports why), where launch fails.
+    #[test]
+    fn an_unreadable_codex_configuration_keeps_a_role_scoped_session_managed() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        let role = mj_core::config::AwsRoleConfig {
+            role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+            session_policy: None,
+            session_policy_arns: Vec::new(),
+            duration_seconds: None,
+            source_identity: false,
+        };
+        let mut profile = HarnessProfile::new(mj_core::config::HarnessKind::Codex, home.path());
+        profile.aws = Some(role);
+        let container = TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: "c".repeat(64),
+            workspace_storage: Default::default(),
+        };
+        let none = BTreeMap::new();
+
+        // Readable: Bedrock, resolved.
+        std::fs::write(
+            &config,
+            "model_provider = \"amazon-bedrock-runtime\"\n[model_providers.amazon-bedrock-runtime.aws]\nregion = \"us-east-1\"\n",
+        )
+        .unwrap();
+        let source = sync_source(&profile, &container, &none).unwrap().unwrap();
+        assert_eq!(source.unresolved, None);
+
+        // Malformed: still managed as role-scoped, with the reason.
+        std::fs::write(&config, "model_provider = [unterminated").unwrap();
+        let source = sync_source(&profile, &container, &none).unwrap().unwrap();
+        assert!(source.role.is_some());
+        let why = source.unresolved.expect("the read error is carried");
+        assert!(why.contains("TOML parse error"), "{why}");
+        // Launch refuses to proceed on the same input.
+        assert!(super::source(&profile, &container, &none).is_err());
+        // The decision about the host does not depend on the configuration:
+        // a raw local session is still withheld, for its own reason.
+        assert_eq!(
+            credentials_withheld(&profile, SessionHost::RawLocal, &none),
+            Some(CredentialsWithheld::RawLocal)
+        );
+        // Without a role, nothing is managed on a guess.
+        profile.aws = None;
+        assert_eq!(sync_source(&profile, &container, &none).unwrap(), None);
+    }
+
     // Hard-won: #1385: copying profile selection left isolated Bedrock workers without credentials.
     // Hard-won: #1390: background installation omitted the native process-provider configuration.
     #[cfg(unix)]
@@ -302,6 +400,7 @@ mod tests {
                 ("AWS_EC2_METADATA_DISABLED".into(), "true".into()),
             ]),
             role: None,
+            unresolved: None,
         };
         for generation in ["original", "renewed"] {
             std::fs::write(
@@ -365,6 +464,7 @@ mod tests {
         let source = AwsCredentialSource {
             environment: BTreeMap::new(),
             role: None,
+            unresolved: None,
         };
         let error = export(&source, &FailedExport).err().unwrap();
         assert!(!format!("{error:#}").contains("private-"));
