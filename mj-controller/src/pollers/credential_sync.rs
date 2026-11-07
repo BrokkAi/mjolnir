@@ -239,8 +239,18 @@ impl CredentialSyncNotices {
         }
         // A key that stopped failing is forgotten silently, so the same failure
         // after a clean cycle is reported again.
-        self.last_failures
-            .retain(|key, _| key.0 != result.profile_id || failures.contains_key(key));
+        // A result about a few sessions only can end only their failures.
+        self.last_failures.retain(|key, _| {
+            key.0 != result.profile_id
+                || failures.contains_key(key)
+                || (result.partial
+                    && !key.1.as_ref().is_some_and(|session| {
+                        result
+                            .outcomes
+                            .iter()
+                            .any(|outcome| outcome.session_id == *session)
+                    }))
+        });
         let mut notice = None;
         for (key, message) in failures {
             if self.last_failures.get(&key) != Some(&message) {

@@ -795,7 +795,6 @@ fn pending_launch_recorded_by_an_older_daemon(token: &str) -> PreparedMoveDestin
     }
 }
 
-// Hard-won: 7e7806ea8: adding HttpTokens to a retried launch changed the parameters of an accepted client token, which EC2 refuses, orphaning the instance.
 #[test]
 fn an_older_pending_launch_is_replayed_exactly_and_imdsv2_is_enforced_on_the_instance() {
     if !isolated(
@@ -836,7 +835,6 @@ fn an_older_pending_launch_is_replayed_exactly_and_imdsv2_is_enforced_on_the_ins
     assert!(!purposes.contains(&"terminate exact EC2 session instance"));
 }
 
-// Hard-won: 7e7806ea8: a destination persisted as Created before any check booted without an IMDS check.
 #[test]
 fn a_created_destination_found_after_a_crash_is_checked_before_it_boots() {
     if !isolated("a_created_destination_found_after_a_crash_is_checked_before_it_boots") {
@@ -875,7 +873,6 @@ fn a_created_destination_found_after_a_crash_is_checked_before_it_boots() {
     ));
 }
 
-// Hard-won: 7e7806ea8: an instance that cannot be made to require IMDSv2 must fail the Move visibly and be cleaned up.
 #[test]
 fn a_destination_that_cannot_require_imdsv2_fails_the_move_and_is_terminated() {
     if !isolated("a_destination_that_cannot_require_imdsv2_fails_the_move_and_is_terminated") {

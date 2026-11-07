@@ -6255,7 +6255,6 @@ fn installing_a_local_stage_links_the_login_and_never_writes_through_an_earlier_
     );
 }
 
-// Hard-won: 3d008e66e: refreshing a session's profile configuration left the AWS scope record behind, to vouch later for credentials it no longer described.
 #[test]
 fn refreshing_profile_configuration_clears_every_aws_file_including_the_scope_record() {
     let executor = SshHostExecutor::default();
@@ -6284,7 +6283,6 @@ fn refreshing_profile_configuration_clears_every_aws_file_including_the_scope_re
     }
 }
 
-// Hard-won: db9e62ed7: a Bedrock profile's role was silently ignored when the session launched on a raw local target.
 #[test]
 fn launching_where_the_role_cannot_apply_announces_why() {
     let home = tempfile::tempdir().unwrap();

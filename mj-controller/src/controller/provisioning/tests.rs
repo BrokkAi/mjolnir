@@ -1996,7 +1996,6 @@ impl CommandExecutor for Imds {
     }
 }
 
-// Hard-won: 7e7806ea8: an accepted instance that allows IMDSv1 must be changed in place, not trusted or terminated.
 #[test]
 fn an_instance_that_allows_imdsv1_is_changed_in_place_and_verified_again() {
     let executor = Imds::new(true);
@@ -2040,7 +2039,6 @@ fn an_instance_that_allows_imdsv1_is_changed_in_place_and_verified_again() {
     assert_eq!(compliant.purposes_run(), ["describe-instances"]);
 }
 
-// Hard-won: 7e7806ea8: an instance that cannot be made to require IMDSv2 must never be reported as ready.
 #[test]
 fn an_instance_that_cannot_be_made_to_require_imdsv2_is_an_error() {
     let mut refused = Imds::new(true);
@@ -2073,7 +2071,6 @@ fn an_instance_that_cannot_be_made_to_require_imdsv2_is_an_error() {
     );
 }
 
-// Hard-won: 7e7806ea8: a launch whose instance could not be secured must fail provisioning and remove the instance.
 #[test]
 fn a_launch_whose_instance_cannot_require_imdsv2_is_terminated() {
     let ssh = SshTarget {
@@ -2175,7 +2172,6 @@ impl VirtualClock {
     }
 }
 
-// Hard-won: cf6c771c4: the change was trusted while EC2 still reported its state as pending, leaving IMDSv1 reachable.
 #[test]
 fn a_pending_imdsv2_change_is_adopted_only_once_it_is_applied() {
     // Required by the request but not yet applied, as right after a launch.
@@ -2213,7 +2209,6 @@ fn a_pending_imdsv2_change_is_adopted_only_once_it_is_applied() {
     );
 }
 
-// Hard-won: cf6c771c4: a change that never applies must fail visibly within the launch's own deadline, not wait forever or be trusted.
 #[test]
 fn an_imdsv2_change_that_never_applies_fails_at_the_deadline() {
     let executor = Imds::new(false).pending_for(usize::MAX);
@@ -2252,7 +2247,6 @@ fn an_imdsv2_change_that_never_applies_fails_at_the_deadline() {
     assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
 }
 
-// Hard-won: 96c0993ac: the wait for IMDSv2 slept in one piece, so cancelling provisioning was noticed only when the pause ended.
 #[test]
 fn cancelling_during_the_imdsv2_wait_ends_it_promptly() {
     let executor = Imds::new(false).pending_for(usize::MAX);

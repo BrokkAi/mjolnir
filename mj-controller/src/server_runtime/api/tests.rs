@@ -2053,6 +2053,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
                 outcome: Ok(Vec::new()),
                 step_failure: None,
             }],
+            partial: false,
         },
         &profile,
     );

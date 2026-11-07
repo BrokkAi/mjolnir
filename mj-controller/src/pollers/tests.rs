@@ -1402,6 +1402,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
             outcome: Ok(Vec::new()),
             step_failure: None,
         }],
+        partial: false,
     };
 
     let claude = CredentialSyncNotices::default()
@@ -1430,6 +1431,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
             outcome: Err("worker proxy disconnected".into()),
             step_failure: None,
         }],
+        partial: false,
         ..result
     };
     let claude_failure = CredentialSyncNotices::default()
@@ -1457,6 +1459,7 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failure: None,
         }],
+        partial: false,
     };
     let notice = CredentialSyncNotices::default()
         .notice(&result, None, &State::default())
@@ -1478,6 +1481,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         }),
         failure: Some("controller credential file is unreadable".into()),
         outcomes: Vec::new(),
+        partial: false,
     };
     let leveled = CredentialSyncNotices::default()
         .leveled_notice(&result, None, &State::default())
@@ -1503,6 +1507,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
             outcome: Err(detail.to_owned()),
             step_failure: None,
         }],
+        partial: false,
     };
     let mut notices = CredentialSyncNotices::default();
 
@@ -1543,6 +1548,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failure: None,
         }],
+        partial: false,
     };
     assert_eq!(notices.notice(&healthy, None, &State::default()), None);
     assert!(
@@ -1562,6 +1568,7 @@ fn a_repeated_whole_sync_failure_is_reported_once_per_profile() {
         trigger: None,
         failure: Some("controller home is unreadable".into()),
         outcomes: Vec::new(),
+        partial: false,
     };
     let mut notices = CredentialSyncNotices::default();
 
@@ -2009,6 +2016,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
                     }]
                 })
                 .unwrap_or_default(),
+            partial: false,
         };
     let results = [
         triggered(
@@ -2050,6 +2058,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
                 outcome: Err("worker proxy disconnected".into()),
                 step_failure: None,
             }],
+            partial: false,
         },
     ];
     for result in &results {
@@ -2109,6 +2118,7 @@ fn a_deferred_credential_sync_does_not_claim_the_login_was_checked() {
             }),
             failure: None,
             outcomes: Vec::new(),
+            partial: false,
         };
         assert!(
             CredentialSyncNotices::default()
@@ -2245,4 +2255,62 @@ async fn only_the_apple_container_refresh_waits_for_its_startup() {
     settled.cancel();
     let apple = apple.await.unwrap();
     assert_eq!(apple.map(|(host, ..)| host).as_deref(), Some("apple"));
+}
+
+#[test]
+fn a_result_about_one_sessions_aws_renewal_does_not_end_other_sessions_failures() {
+    use mj_core::credentials::{CredentialSyncOutcome, CredentialSyncResult};
+
+    let outcome = |session: &str, detail: Option<&str>| CredentialSyncOutcome {
+        session_id: session.into(),
+        outcome: match detail {
+            Some(detail) => Err(detail.to_owned()),
+            None => Ok(Vec::new()),
+        },
+        step_failure: None,
+    };
+    let result = |partial, outcomes| CredentialSyncResult {
+        profile_id: "work".into(),
+        trigger: None,
+        failure: None,
+        outcomes,
+        partial,
+    };
+    let mut notices = CredentialSyncNotices::default();
+    // The first session sorts before the second, so if its failure were forgotten it
+    // would be the notice's first new message.
+    let both_failing = || {
+        result(
+            false,
+            vec![
+                outcome("0-first-session", Some("container is gone")),
+                outcome("a-second-session", Some("worker is gone")),
+            ],
+        )
+    };
+    assert!(
+        notices
+            .notice(&both_failing(), None, &State::default())
+            .is_some()
+    );
+    assert_eq!(
+        notices.notice(&both_failing(), None, &State::default()),
+        None
+    );
+
+    // The second session's AWS renewal succeeds. That ends its failure and says nothing
+    // about the first's, which must not be announced again.
+    assert_eq!(
+        notices.notice(
+            &result(true, vec![outcome("a-second-session", None)]),
+            None,
+            &State::default()
+        ),
+        None
+    );
+    let again = notices
+        .notice(&both_failing(), None, &State::default())
+        .unwrap();
+    assert!(again.contains("a-second"), "{again}");
+    assert!(!again.contains("0-first-"), "{again}");
 }

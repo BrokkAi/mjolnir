@@ -111,7 +111,26 @@ pub struct CredentialSyncCoordinator {
 impl CredentialSyncCoordinator {
     #[cfg(test)]
     pub fn spawn() -> Self {
-        Self::spawn_inner(SessionRelays::Direct, None, None, unknown_slopcop_login)
+        Self::spawn_inner(
+            SessionRelays::Direct,
+            None,
+            None,
+            unknown_slopcop_login,
+            SYNC_INTERVAL,
+        )
+    }
+
+    /// A coordinator that retries a role-scoped session's AWS renewal after
+    /// `retry` instead of after the sync interval.
+    #[cfg(test)]
+    pub fn spawn_with_renewal_retry(retry: Duration) -> Self {
+        Self::spawn_inner(
+            SessionRelays::Direct,
+            None,
+            None,
+            unknown_slopcop_login,
+            retry,
+        )
     }
 
     pub fn spawn_guarded(
@@ -124,6 +143,7 @@ impl CredentialSyncCoordinator {
             Some(gate),
             Some(runtime),
             mj_core::slopcop::host_login,
+            SYNC_INTERVAL,
         )
     }
 
@@ -132,6 +152,7 @@ impl CredentialSyncCoordinator {
         gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
         runtime: Option<Arc<crate::daemon::RuntimeState>>,
         slopcop_login: SlopcopLoginSource,
+        renewal_retry: Duration,
     ) -> Self {
         let targets_tx = runtime
             .as_ref()
@@ -152,7 +173,20 @@ impl CredentialSyncCoordinator {
             // reconciled twice at once.
             let mut busy = BTreeSet::<String>::new();
             let mut queue = VecDeque::<SyncTrigger>::new();
-            let aws_installs = AwsInstalls::default();
+            // Role-scoped AWS credentials are renewed by a task per session,
+            // never by the profile's pass: a pass that waits on one stalled
+            // session must not hold back another session's renewal.
+            let renewals_env = RenewalEnv {
+                relays: relays.clone(),
+                gate: gate.clone(),
+                runtime: runtime.clone(),
+                steps: SessionSteps::default(),
+                installs: AwsInstalls::default(),
+                results: results_tx.clone(),
+                retry: renewal_retry,
+            };
+            let steps = renewals_env.steps.clone();
+            let mut renewals = RenewalTasks::default();
             let mut previous_targets = BTreeMap::<String, CredentialSyncTarget>::new();
             loop {
                 tokio::select! {
@@ -160,6 +194,7 @@ impl CredentialSyncCoordinator {
                         // Whether or not any session is left to sync, the
                         // cache of issued credentials drops what has expired.
                         crate::aws_assume_role::ScopedAwsCredentials::shared().sweep_expired();
+                        renewals.sync(&targets_rx.borrow(), &renewals_env);
                         for profile_id in profiles_with_targets(&targets_rx.borrow()) {
                             enqueue(&mut queue, SyncTrigger { profile_id, cause: None });
                         }
@@ -169,6 +204,7 @@ impl CredentialSyncCoordinator {
                         // Compare the publication we consume, not its order.
                         // Removed sessions have nothing left to reconcile.
                         let targets = targets_rx.borrow_and_update();
+                        renewals.sync(&targets, &renewals_env);
                         let changed_profiles: BTreeSet<_> = targets.iter()
                             .filter(|target| previous_targets.get(&target.session_id) != Some(target))
                             .map(|target| target.profile_id.clone())
@@ -224,6 +260,7 @@ impl CredentialSyncCoordinator {
                                     trigger: trigger.cause,
                                     failure: None,
                                     outcomes: Vec::new(),
+                                    partial: false,
                                 })
                                 .is_err()
                             {
@@ -250,7 +287,7 @@ impl CredentialSyncCoordinator {
                     let gate = gate.clone();
                     let relays = relays.clone();
                     let runtime = runtime.clone();
-                    let aws_installs = aws_installs.clone();
+                    let steps = steps.clone();
                     tokio::spawn(async move {
                         let joined = tokio::spawn(async move {
                             reconcile_profile_guarded(
@@ -260,7 +297,7 @@ impl CredentialSyncCoordinator {
                                 gate.as_ref(),
                                 runtime.as_ref(),
                                 slopcop_login,
-                                &aws_installs,
+                                &steps,
                             )
                             .await
                         })
@@ -276,6 +313,7 @@ impl CredentialSyncCoordinator {
                                 trigger: trigger.cause,
                                 failure,
                                 outcomes,
+                                partial: false,
                             })
                             .is_err()
                         {
@@ -317,21 +355,43 @@ impl CredentialSyncCoordinator {
     }
 }
 
+/// What the coordinator does over time, once: the profile's pass, and one AWS
+/// cycle for each role-scoped session.
 #[cfg(all(test, unix))]
 pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
 ) -> Vec<CredentialSyncOutcome> {
-    reconcile_profile_guarded(
+    let steps = SessionSteps::default();
+    let login = reconcile_profile_guarded(
         &SessionRelays::Direct,
         targets,
         triggered_by,
         None,
         None,
         unknown_slopcop_login,
-        &AwsInstalls::default(),
-    )
-    .await
+        &steps,
+    );
+    let cycles = futures::future::join_all(
+        targets
+            .iter()
+            .filter(|target| {
+                target
+                    .aws_credentials
+                    .as_ref()
+                    .is_some_and(|source| source.role.is_some())
+            })
+            .map(|target| aws_cycle(&SessionRelays::Direct, None, None, target, &steps)),
+    );
+    let (outcomes, cycles) = tokio::join!(Box::pin(login), Box::pin(cycles));
+    let mut outcomes = outcomes
+        .into_iter()
+        .map(|outcome| (outcome.session_id.clone(), outcome))
+        .collect::<BTreeMap<_, _>>();
+    for (session_id, result) in cycles {
+        merge_aws_cycle(&mut outcomes, &session_id, result);
+    }
+    outcomes.into_values().collect()
 }
 
 /// Reconcile one profile with every live session that runs it.
@@ -344,10 +404,9 @@ pub(super) async fn reconcile_profile(
 /// enough: the second cannot pull anything the first did not already see
 /// unless a harness refreshed mid-cycle, and that lands in the next cycle.
 ///
-/// The role-scoped AWS credentials of each session are the one thing that is
-/// independent per session: each is minted and installed on its own, as its
-/// mint completes, alongside that sequence, so a session that does not answer
-/// delays only its own AWS install.
+/// The role-scoped AWS credentials are not part of this pass at all: each
+/// session has a renewal task of its own (see `RenewalTasks`), so a session
+/// that does not answer stalls this pass and its own renewal, and nothing else.
 ///
 /// A session that already agreed is left out of the outcomes, except
 /// `triggered_by`, the session whose failure asked for this sync: that it was
@@ -360,7 +419,7 @@ pub(super) async fn reconcile_profile_guarded(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
     slopcop_login: SlopcopLoginSource,
-    aws_installs: &AwsInstalls,
+    steps: &SessionSteps,
 ) -> Vec<CredentialSyncOutcome> {
     let Some(first) = targets.first().cloned() else {
         return Vec::new();
@@ -386,25 +445,6 @@ pub(super) async fn reconcile_profile_guarded(
     } else {
         HostSlopcopLogin::Unknown
     };
-    // Each role-scoped session is claimed once, here, before its mint: the
-    // claim is the only decision about whether its AWS install runs. The cache
-    // also drops expired credentials, so a stopped session's secrets do not
-    // outlive them.
-    crate::aws_assume_role::ScopedAwsCredentials::shared().sweep_expired();
-    let steps = SessionSteps::default();
-    let scoped = futures::stream::FuturesUnordered::new();
-    for target in targets {
-        if target
-            .aws_credentials
-            .as_ref()
-            .is_some_and(|source| source.role.is_some())
-            && let Some(claim) = aws_installs.claim(&target.session_id)
-        {
-            scoped.push(Box::pin(install_scoped_aws(
-                relays, gate, runtime, target, claim, &steps,
-            )));
-        }
-    }
     // Without a role, every session of the profile receives the same export,
     // so it is taken once per pass.
     let unscoped_aws_credentials = match targets.iter().find_map(|target| {
@@ -443,7 +483,7 @@ pub(super) async fn reconcile_profile_guarded(
         skills: &skills,
         slopcop_login: &slopcop_login,
         triggered_by,
-        steps: &steps,
+        steps,
     };
     // The AWS step of the sequential pass: the profile's one export. A
     // role-scoped session's AWS credentials are installed by its own
@@ -494,48 +534,14 @@ pub(super) async fn reconcile_profile_guarded(
         }
         outcomes
     };
-    let scoped_pass = async {
-        let mut results = Vec::new();
-        let mut scoped = scoped;
-        while let Some(result) = futures::StreamExt::next(&mut scoped).await {
-            results.push(result);
-        }
-        results
-    };
-    // Boxed: these futures nest every sync step's, which is too much to keep
-    // on a thread's stack in a debug build.
-    let (mut outcomes, installs) = tokio::join!(Box::pin(login_pass), Box::pin(scoped_pass));
-    for (session_id, result) in installs {
-        match result {
-            Ok(Some(SessionSync { actions, failures })) => {
-                merge_step_outcome(
-                    &mut outcomes,
-                    &session_id,
-                    actions,
-                    joined_failures(&failures),
-                );
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %error,
-                    "AWS credential synchronization failed for relay session"
-                );
-                merge_step_outcome(
-                    &mut outcomes,
-                    &session_id,
-                    Vec::new(),
-                    Some(format!("AWS credentials: {error:#}")),
-                );
-            }
-        }
-    }
+    let outcomes = login_pass.await;
     outcomes.into_values().collect()
 }
 
-/// Fold one more step's result into a session's outcome.
-fn merge_step_outcome(
+/// Fold one more step's result into a session's outcome. A session whose
+/// whole login step failed keeps that failure as a step failure, so the
+/// other step's actions are recorded beside it.
+pub(super) fn merge_step_outcome(
     outcomes: &mut BTreeMap<String, CredentialSyncOutcome>,
     session_id: &str,
     actions: Vec<CredentialSyncAction>,
@@ -551,20 +557,51 @@ fn merge_step_outcome(
             outcome: Ok(Vec::new()),
             step_failure: None,
         });
-    match &mut outcome.outcome {
-        Ok(existing) => existing.extend(actions),
+    let mut earlier = outcome.step_failure.take();
+    match std::mem::replace(&mut outcome.outcome, Ok(Vec::new())) {
+        Ok(mut existing) => {
+            existing.extend(actions);
+            outcome.outcome = Ok(existing);
+        }
         Err(message) => {
-            if let Some(failure) = &failure {
-                message.push_str("; ");
-                message.push_str(failure);
-            }
-            return;
+            earlier = match earlier {
+                Some(earlier) => Some(format!("{message}; {earlier}")),
+                None => Some(message),
+            };
+            outcome.outcome = Ok(actions);
         }
     }
-    outcome.step_failure = match (outcome.step_failure.take(), failure) {
+    outcome.step_failure = match (earlier, failure) {
         (Some(earlier), Some(later)) => Some(format!("{earlier}; {later}")),
         (earlier, later) => earlier.or(later),
     };
+}
+
+/// Fold one AWS cycle's result into a session's outcome.
+fn merge_aws_cycle(
+    outcomes: &mut BTreeMap<String, CredentialSyncOutcome>,
+    session_id: &str,
+    result: Result<Option<SessionSync>>,
+) {
+    match result {
+        Ok(Some(SessionSync { actions, failures })) => {
+            merge_step_outcome(outcomes, session_id, actions, joined_failures(&failures));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                error = %error,
+                "AWS credential synchronization failed for relay session"
+            );
+            merge_step_outcome(
+                outcomes,
+                session_id,
+                Vec::new(),
+                Some(format!("AWS credentials: {error:#}")),
+            );
+        }
+    }
 }
 
 /// A pass that reached the session and found nothing wrong ends the failure an
@@ -629,15 +666,20 @@ pub(super) struct ScopeExpectation {
     /// narrower policy than the one the credentials were issued under makes
     /// them broader than configured, so they do not match.
     pub(super) session_policy_fingerprint: String,
+    /// The `SourceIdentity` the credentials must have been issued with: the
+    /// role session name when `source_identity` is on, nothing when it is off.
+    pub(super) source_identity: Option<String>,
 }
 
 impl ScopeExpectation {
     fn of(target: &CredentialSyncTarget) -> Option<Self> {
         let role = target.aws_credentials.as_ref()?.role.as_ref()?;
+        let role_session_name = crate::aws_assume_role::session_name(&target.session_id);
         Some(Self {
             role_arn: role.role_arn.clone(),
-            role_session_name: crate::aws_assume_role::session_name(&target.session_id),
             session_policy_fingerprint: role.session_policy_fingerprint(),
+            source_identity: role.source_identity.then(|| role_session_name.clone()),
+            role_session_name,
         })
     }
 
@@ -645,6 +687,7 @@ impl ScopeExpectation {
         recorded.role_arn == self.role_arn
             && recorded.role_session_name == self.role_session_name
             && recorded.session_policy_fingerprint == self.session_policy_fingerprint
+            && recorded.source_identity == self.source_identity
             && recorded.expires_at_epoch_millis > mj_core::clock::epoch_millis()
     }
 }
@@ -849,16 +892,13 @@ async fn reconcile_target(
     }
 }
 
-/// One role-scoped session's AWS install, independent of every other session:
-/// mint (or take from the cache), then install on the session's own
-/// connection, or withdraw what must not stay. Holds the session's claim until
-/// it ends.
-async fn install_scoped_aws(
+/// One role-scoped session's AWS cycle: mint (or take from the cache), then
+/// install on the session's own connection, or withdraw what must not stay.
+pub(super) async fn aws_cycle(
     relays: &SessionRelays,
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
     target: &CredentialSyncTarget,
-    _claim: AwsInstallClaim,
     steps: &SessionSteps,
 ) -> (String, Result<Option<SessionSync>>) {
     let session_id = target.session_id.clone();
@@ -893,10 +933,126 @@ async fn install_scoped_aws(
     // with it for the admission slot, where a refusal would skip the install.
     let _turn = steps.enter(&target.session_id).await;
     let result = admitted(gate, runtime, target, async {
-        run_on_session(relays, target, SyncWork::Aws(aws)).await
+        run_on_session(relays, target, SyncWork::Aws(Box::new(aws))).await
     })
     .await;
     (session_id, result)
+}
+
+/// What a session's renewal task needs, shared by all of them.
+#[derive(Clone)]
+struct RenewalEnv {
+    relays: SessionRelays,
+    gate: Option<Arc<crate::recovery_gate::RecoveryGate>>,
+    runtime: Option<Arc<crate::daemon::RuntimeState>>,
+    steps: SessionSteps,
+    installs: AwsInstalls,
+    results: mpsc::UnboundedSender<CredentialSyncResult>,
+    /// How long after a cycle that did not complete cleanly the next is tried.
+    retry: Duration,
+}
+
+/// One renewal task per role-scoped session, started and stopped as the
+/// published targets change. A session's AWS credentials are renewed on their
+/// own schedule, at half their lifetime, by a task that is not part of any
+/// profile pass: a stalled session holds its own renewal and nothing else.
+#[derive(Default)]
+struct RenewalTasks(BTreeMap<String, (CredentialSyncTarget, tokio::task::JoinHandle<()>)>);
+
+impl RenewalTasks {
+    fn sync(&mut self, targets: &[CredentialSyncTarget], env: &RenewalEnv) {
+        let wanted = targets
+            .iter()
+            .filter(|target| {
+                target
+                    .aws_credentials
+                    .as_ref()
+                    .is_some_and(|source| source.role.is_some())
+            })
+            .collect::<Vec<_>>();
+        // A session that went away, or whose target changed (a role edit, a
+        // new worker), has its task replaced; the rest are left alone.
+        self.0.retain(|session_id, (running, handle)| {
+            let keep = wanted
+                .iter()
+                .any(|target| target.session_id == *session_id && **target == *running);
+            if !keep {
+                handle.abort();
+            }
+            keep
+        });
+        for target in wanted {
+            if !self.0.contains_key(&target.session_id) {
+                let handle = tokio::spawn(renew_session_aws(env.clone(), target.clone()));
+                self.0
+                    .insert(target.session_id.clone(), (target.clone(), handle));
+            }
+        }
+    }
+}
+
+impl Drop for RenewalTasks {
+    fn drop(&mut self) {
+        for (_, handle) in self.0.values() {
+            handle.abort();
+        }
+    }
+}
+
+/// Keep one session's AWS credentials renewed until the task is aborted. Each
+/// cycle holds the session's claim, the single decision about whether a
+/// renewal runs, and ends on any path by releasing it.
+async fn renew_session_aws(env: RenewalEnv, target: CredentialSyncTarget) {
+    let mut failed_before = false;
+    loop {
+        let mut delay = env.retry;
+        if let Some(claim) = env.installs.claim(&target.session_id) {
+            let (_, result) = aws_cycle(
+                &env.relays,
+                env.gate.as_ref(),
+                env.runtime.as_ref(),
+                &target,
+                &env.steps,
+            )
+            .await;
+            drop(claim);
+            let completed = matches!(&result, Ok(Some(sync)) if sync.failures.is_empty());
+            let mut outcomes = BTreeMap::new();
+            merge_aws_cycle(&mut outcomes, &target.session_id, result);
+            let failed = outcomes
+                .values()
+                .any(|outcome| outcome.step_failure.is_some() || outcome.outcome.is_err());
+            // Said when there is something to say: work done, a failure, or the
+            // end of a failure, so a persistent one is not repeated.
+            if let Some(outcome) = outcomes.remove(&target.session_id).or_else(|| {
+                (failed_before && completed).then(|| CredentialSyncOutcome {
+                    session_id: target.session_id.clone(),
+                    outcome: Ok(Vec::new()),
+                    step_failure: None,
+                })
+            }) {
+                let sent = env.results.send(CredentialSyncResult {
+                    profile_id: target.profile_id.clone(),
+                    trigger: None,
+                    failure: None,
+                    partial: true,
+                    outcomes: vec![outcome],
+                });
+                if sent.is_err() {
+                    return;
+                }
+            }
+            failed_before = failed;
+            if completed
+                && let Some(source) = &target.aws_credentials
+                && let Some(until) = crate::aws_assume_role::ScopedAwsCredentials::shared()
+                    .renew_in(&target.session_id, source)
+            {
+                delay = until;
+            }
+        }
+        tokio::time::sleep(delay).await;
+    }
 }
 
 /// Start the AWS role assumption for a session whose profile names a role,
@@ -1067,7 +1223,7 @@ pub(super) enum SyncWork {
     /// Every sync step of the profile's pass.
     Full(Box<SessionCanonical>),
     /// Only the session's AWS credentials.
-    Aws(AwsSync),
+    Aws(Box<AwsSync>),
 }
 
 /// Reconcile one session. Returns every action taken, where an empty list
@@ -1305,6 +1461,9 @@ async fn reconcile_aws(
                 && let Some(expected) = expected_scope
                 && let Some(recorded) = client.aws_credentials_scope().await?
                 && expected.matches(&recorded)
+                // The record is the session's to write; only one the
+                // controller made, for this very secret, counts.
+                && crate::aws_assume_role::scope_is_authentic(&recorded, &held.fingerprint)
             {
                 return Ok(None);
             }

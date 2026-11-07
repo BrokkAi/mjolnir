@@ -2084,7 +2084,6 @@ fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
         &ok,
     ));
     let probe = ok.commands.borrow();
-    // Hard-won: cf6c771c4: a probe named `mj-doctor` was refused by trust policies that allow only `mj-<32 hex>`.
     let name = probe[0]
         .args
         .windows(2)
@@ -2116,9 +2115,6 @@ fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
     ));
     let mixed_role = role;
 
-    // Hard-won: db9e62ed7: doctor stayed quiet about a role that could not
-    // apply to some targets as long as another target was scoped. Each target
-    // it cannot apply to is reported by itself, with the reason.
     let mixed: BTreeMap<String, TargetTemplate> = [
         (
             "podman".to_owned(),

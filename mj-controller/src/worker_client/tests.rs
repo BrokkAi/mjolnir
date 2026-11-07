@@ -1740,7 +1740,6 @@ async fn role_scoped_sessions_receive_assumed_credentials_and_never_the_unscoped
     assert_eq!(calls_after, calls_before + 1);
 }
 
-// Hard-won: 7e7806ea8: per-session mints ran one after another, so slow AWS calls starved later sessions of their refresh window.
 #[cfg(unix)]
 #[tokio::test]
 async fn role_scoped_mints_for_one_profile_run_together() {
@@ -1818,7 +1817,6 @@ async fn role_scoped_mints_for_one_profile_run_together() {
     );
 }
 
-// Hard-won: cf6c771c4: every session of a profile waited for the slowest AssumeRole call before any received its credentials.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
@@ -2131,7 +2129,6 @@ fn slow_counting_aws_cli(dir: &std::path::Path, millis: u32) -> std::path::PathB
     bin
 }
 
-// Hard-won: ca9a1d9ca: a session holding the host's unscoped credentials kept them, with no expiry for static keys, when the newly configured role could not be assumed.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_session_holding_the_hosts_credentials_loses_them_when_its_new_role_fails() {
@@ -2162,7 +2159,6 @@ async fn a_session_holding_the_hosts_credentials_loses_them_when_its_new_role_fa
     );
 }
 
-// Hard-won: ca9a1d9ca: a failed AssumeRole skipped the whole session's sync, so GitHub token and skills changes also waited for STS.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_failing_mint_does_not_stop_the_sessions_other_sync_steps() {
@@ -2199,6 +2195,7 @@ async fn a_failing_mint_does_not_stop_the_sessions_other_sync_steps() {
         trigger: None,
         failure: None,
         outcomes: outcomes.clone(),
+        partial: false,
     };
     assert_eq!(result.skills_sessions(), 1);
     assert_eq!(result.github_token_pushed_sessions(), 1);
@@ -2214,7 +2211,6 @@ async fn a_failing_mint_does_not_stop_the_sessions_other_sync_steps() {
     );
 }
 
-// Hard-won: 96c0993ac: a failed GitHub token lookup ended the session's sync before its AWS credentials were installed or the host's withdrawn.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_failed_github_lookup_does_not_stop_the_aws_step() {
@@ -2254,7 +2250,6 @@ async fn a_failed_github_lookup_does_not_stop_the_aws_step() {
     );
 }
 
-// Hard-won: 96c0993ac: withdrawal trusted the reported state, which is "absent" when a provider file is missing even though the secret file still exists.
 #[cfg(unix)]
 #[tokio::test]
 async fn the_secret_is_withdrawn_even_when_the_worker_reports_the_credentials_absent() {
@@ -2280,7 +2275,6 @@ async fn the_secret_is_withdrawn_even_when_the_worker_reports_the_credentials_ab
     );
 }
 
-// Hard-won: 96c0993ac: sessions were reconciled one after another, so a slow session actor kept already-minted credentials from reaching later sessions.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_slow_session_does_not_hold_up_another_sessions_install() {
@@ -2319,7 +2313,6 @@ async fn a_slow_session_does_not_hold_up_another_sessions_install() {
     assert!(slow_root.join("aws").exists());
 }
 
-// Hard-won: ca9a1d9ca, a064656da, 3d008e66e: credentials issued for the role must survive a failed renewal until they expire, recognised by the scope the worker recorded and not by the daemon's memory; anything else is withdrawn, including credentials issued under a broader policy than the one configured now.
 #[cfg(unix)]
 #[tokio::test]
 async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
@@ -2332,19 +2325,31 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
     let role_arn = "arn:aws:iam::123456789012:role/mj-bedrock";
     let session_name = format!("mj-{SESSION_ID}");
     let policy_fingerprint = role_config().session_policy_fingerprint();
-    let issued = |expiration: &str, session_name: &str, policy_fingerprint: &str| {
+    // `sign`: made by the controller; unsigned is what a session could write.
+    let issued = |expiration: &str,
+                  session_name: &str,
+                  policy_fingerprint: &str,
+                  source_identity: Option<&str>,
+                  sign: bool| {
         let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/aws-sts-assume-role.json"
         ))
         .unwrap();
         recorded["Credentials"]["Expiration"] = expiration.into();
-        mj_core::aws_credentials::AwsCredentials::from_assume_role(
+        let credentials = mj_core::aws_credentials::AwsCredentials::from_assume_role(
             "bedrock",
             &serde_json::to_vec(&recorded).unwrap(),
         )
         .unwrap()
-        .issued_for(role_arn, session_name, policy_fingerprint)
-        .unwrap()
+        .issued_for(role_arn, session_name, policy_fingerprint, source_identity)
+        .unwrap();
+        if sign {
+            credentials
+                .sign_scope(crate::aws_assume_role::sign_scope)
+                .unwrap()
+        } else {
+            credentials
+        }
     };
     // What a restarted daemon has: no cache, only the configured scope.
     let unavailable = credential_sync::AwsSync::Unavailable {
@@ -2354,19 +2359,25 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
             role_arn: role_arn.into(),
             role_session_name: session_name.clone(),
             session_policy_fingerprint: policy_fingerprint.clone(),
+            source_identity: None,
         }),
     };
     let skills = Arc::new(CanonicalSkills::collect(&target));
-    let reconcile = || {
-        reconcile_session(
-            &SessionRelays::Direct,
-            &target,
-            &skills,
-            &credential_sync::GithubSync::Known(None),
-            &unavailable,
-            &credential_sync::HostSlopcopLogin::Unknown,
-        )
+    let reconcile_for = |aws: credential_sync::AwsSync| {
+        let (target, skills) = (&target, &skills);
+        async move {
+            reconcile_session(
+                &SessionRelays::Direct,
+                target,
+                skills,
+                &credential_sync::GithubSync::Known(None),
+                &aws,
+                &credential_sync::HostSlopcopLogin::Unknown,
+            )
+            .await
+        }
     };
+    let reconcile = || reconcile_for(unavailable.clone());
     // Install as a worker does, then move the files to where the relay
     // fixture keeps them.
     let install = |credentials: mj_core::aws_credentials::AwsCredentials| {
@@ -2389,6 +2400,8 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
         "2099-01-01T00:00:00+00:00",
         &session_name,
         &policy_fingerprint,
+        None,
+        true,
     ));
     let sync = reconcile().await.unwrap().unwrap();
     assert!(root.path().join("aws").exists());
@@ -2404,6 +2417,8 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
         "2099-01-01T00:00:00+00:00",
         "mj-someone-else",
         &policy_fingerprint,
+        None,
+        true,
     ));
     let sync = reconcile().await.unwrap().unwrap();
     assert!(!root.path().join("aws").exists());
@@ -2417,6 +2432,8 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
         "2099-01-01T00:00:00+00:00",
         &session_name,
         "fingerprint-of-the-policy-before-it-was-narrowed",
+        None,
+        true,
     ));
     let sync = reconcile().await.unwrap().unwrap();
     assert!(
@@ -2428,11 +2445,94 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
             .contains(&CredentialSyncAction::AwsCredentialsRemoved)
     );
 
+    // `source_identity` has been enabled since: credentials issued without
+    // it are withdrawn, and ones issued with it are kept.
+    let wants_source_identity = credential_sync::AwsSync::Unavailable {
+        error: "AWS refused AssumeRole".into(),
+        scoped_required: true,
+        expected_scope: Some(credential_sync::ScopeExpectation {
+            role_arn: role_arn.into(),
+            role_session_name: session_name.clone(),
+            session_policy_fingerprint: policy_fingerprint.clone(),
+            source_identity: Some(session_name.clone()),
+        }),
+    };
+    install(issued(
+        "2099-01-01T00:00:00+00:00",
+        &session_name,
+        &policy_fingerprint,
+        None,
+        true,
+    ));
+    let sync = reconcile_for(wants_source_identity.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !root.path().join("aws").exists(),
+        "credentials without the attribution now configured were kept"
+    );
+    assert!(
+        sync.actions
+            .contains(&CredentialSyncAction::AwsCredentialsRemoved)
+    );
+    install(issued(
+        "2099-01-01T00:00:00+00:00",
+        &session_name,
+        &policy_fingerprint,
+        Some(&session_name),
+        true,
+    ));
+    reconcile_for(wants_source_identity.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(root.path().join("aws").exists());
+    // A record the session could have written itself, matching in every
+    // field but not made by the controller: withdrawn.
+    install(issued(
+        "2099-01-01T00:00:00+00:00",
+        &session_name,
+        &policy_fingerprint,
+        None,
+        false,
+    ));
+    let sync = reconcile().await.unwrap().unwrap();
+    assert!(!root.path().join("aws").exists(), "a forged record vouched");
+    assert!(
+        sync.actions
+            .contains(&CredentialSyncAction::AwsCredentialsRemoved)
+    );
+    // The same record with the controller's tag, then tampered with after
+    // signing, no longer verifies either.
+    install(issued(
+        "2099-01-01T00:00:00+00:00",
+        &session_name,
+        &policy_fingerprint,
+        None,
+        true,
+    ));
+    let stored = root.path().join("aws-scope.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&stored).unwrap()).unwrap();
+    // A later expiry: every other field still matches, the tag no longer does.
+    record["scope"]["expires_at_epoch_millis"] =
+        (record["scope"]["expires_at_epoch_millis"].as_i64().unwrap() + 1000).into();
+    std::fs::write(&stored, serde_json::to_vec(&record).unwrap()).unwrap();
+    let sync = reconcile().await.unwrap().unwrap();
+    assert!(!root.path().join("aws").exists());
+    assert!(
+        sync.actions
+            .contains(&CredentialSyncAction::AwsCredentialsRemoved)
+    );
+
     // No scope record at all (the host's own, installed before the role): withdrawn.
     install(issued(
         "2099-01-01T00:00:00+00:00",
         &session_name,
         &policy_fingerprint,
+        None,
+        true,
     ));
     std::fs::write(
         root.path().join("aws"),
@@ -2447,7 +2547,6 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
     );
 }
 
-// Hard-won: 3d008e66e: one slow session actor stalled the whole sync when every step ran concurrently; only the AWS install is independent, and one session that does not answer delays only its own.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_stuck_session_delays_only_its_own_aws_install() {
@@ -2494,7 +2593,6 @@ async fn a_stuck_session_delays_only_its_own_aws_install() {
     assert!(stuck_root.join("aws").exists());
 }
 
-// Hard-won: 3d008e66e: sessions of a profile were reconciled concurrently, so a pull and a push could interleave and install the older login.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_pull_and_a_push_in_one_pass_leave_every_session_on_the_newest_login() {
@@ -2531,7 +2629,6 @@ async fn a_pull_and_a_push_in_one_pass_leave_every_session_on_the_newest_login()
     assert_eq!(std::fs::read(&ahead_file).unwrap(), codex_login(newest));
 }
 
-// Hard-won: 3d008e66e: a worker replaced by an upgrade kept the secret it had been given before it could record a scope, and the matching secret meant the scope was never written.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_matching_secret_without_a_scope_record_is_installed_again() {
@@ -2574,7 +2671,6 @@ async fn a_matching_secret_without_a_scope_record_is_installed_again() {
     );
 }
 
-// Hard-won: 3d008e66e: a failure reported by an earlier pass stayed the session's result after a later pass reached it cleanly.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_clean_later_pass_replaces_the_failure_an_earlier_one_reported() {
@@ -2608,7 +2704,6 @@ async fn a_clean_later_pass_replaces_the_failure_an_earlier_one_reported() {
     assert_eq!(puller.outcome, Ok(vec![CredentialSyncAction::Pulled]));
 }
 
-// Hard-won: 3d008e66e: the cache was swept only by a pass over a profile that still had sessions, so the last session's expired credentials stayed in daemon memory.
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn the_credential_cache_is_swept_on_the_schedule_even_with_no_sessions() {
@@ -2653,7 +2748,6 @@ async fn the_credential_cache_is_swept_on_the_schedule_even_with_no_sessions() {
     assert!(!cache.holds("swept-last-session"));
 }
 
-// Hard-won: db9e62ed7: the AWS install and the session's login step both needed the session's one admission slot, and the install was skipped, silently and again at every sync, whenever the login step held it when the mint completed.
 #[cfg(unix)]
 #[tokio::test]
 async fn the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skipped() {
@@ -2677,8 +2771,9 @@ async fn the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skip
     // The production path: background admission through a gate.
     super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
     let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
-    let pass = tokio::spawn({
-        let (gate, target) = (gate.clone(), target.clone());
+    let steps = credential_sync::SessionSteps::default();
+    let login = tokio::spawn({
+        let (gate, target, steps) = (gate.clone(), target.clone(), steps.clone());
         async move {
             credential_sync::reconcile_profile_guarded(
                 &SessionRelays::Direct,
@@ -2687,9 +2782,16 @@ async fn the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skip
                 Some(&gate),
                 None,
                 credential_sync::unknown_slopcop_login,
-                &Default::default(),
+                &steps,
             )
             .await
+        }
+    });
+    let install = tokio::spawn({
+        let (gate, target, steps) = (gate.clone(), target.clone(), steps.clone());
+        async move {
+            credential_sync::aws_cycle(&SessionRelays::Direct, Some(&gate), None, &target, &steps)
+                .await
         }
     });
     // The login step holds the session's slot; the mint finishes meanwhile.
@@ -2709,17 +2811,13 @@ async fn the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skip
 
     // The slot frees; the install happens, once.
     std::fs::write(&release_login, "").unwrap();
-    let outcomes = pass.await.unwrap();
+    login.await.unwrap();
+    let (_, installed) = install.await.unwrap();
+    assert!(root.join("aws").exists(), "the install was skipped");
     assert!(
-        root.join("aws").exists(),
-        "the install was skipped: {outcomes:?}"
-    );
-    assert!(
-        outcomes[0]
-            .outcome
-            .as_ref()
-            .is_ok_and(|actions| actions.contains(&CredentialSyncAction::Pushed)),
-        "{outcomes:?}"
+        installed
+            .unwrap()
+            .is_some_and(|sync| sync.actions.contains(&CredentialSyncAction::Pushed))
     );
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("mints"))
@@ -2730,7 +2828,6 @@ async fn the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skip
     );
 }
 
-// Hard-won: db9e62ed7: every AWS error was labelled "withdrawal", though install errors come through the same step.
 #[cfg(unix)]
 #[tokio::test]
 async fn aws_errors_are_labelled_by_the_branch_that_failed() {
@@ -2762,7 +2859,6 @@ async fn aws_errors_are_labelled_by_the_branch_that_failed() {
     );
 }
 
-// Hard-won: db9e62ed7: the AssumeRole call was made before checking that the session was still current.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_session_that_is_no_longer_current_is_not_minted_for() {
@@ -2778,25 +2874,116 @@ async fn a_session_that_is_no_longer_current_is_not_minted_for() {
     super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(false));
     let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
 
-    let outcomes = credential_sync::reconcile_profile_guarded(
+    let (_, result) = credential_sync::aws_cycle(
         &SessionRelays::Direct,
-        &[target],
-        None,
         Some(&gate),
         None,
-        credential_sync::unknown_slopcop_login,
+        &target,
         &Default::default(),
     )
     .await;
+    let outcomes = result;
 
     assert!(
         !scratch.path().join("mints").exists(),
-        "AssumeRole was called: {outcomes:?}"
+        "AssumeRole was called: {:?}",
+        outcomes.as_ref().map(|sync| sync.is_some())
     );
     assert!(!root.join("aws").exists());
 }
 
-// Hard-won: a064656da: a worker before protocol 55 cannot withdraw, and the person was told to restart the session by hand.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stalled_session_does_not_keep_another_session_from_being_renewed_on_a_later_cycle() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let (stuck_root, ok_root) = (scratch.path().join("stuck"), scratch.path().join("ok"));
+    std::fs::create_dir(&stuck_root).unwrap();
+    std::fs::create_dir(&ok_root).unwrap();
+    // The stuck session never answers about its AWS credentials (until the
+    // end of the test). The other one's worker refuses its first install, so
+    // its first renewal cycle fails and a second is needed.
+    let release = scratch.path().join("release-the-stuck-session");
+    std::fs::write(ok_root.join("install-fails"), "").unwrap();
+    let mut coordinator =
+        CredentialSyncCoordinator::spawn_with_renewal_retry(Duration::from_millis(200));
+    coordinator.handle().set_targets(vec![
+        aws_sync_session_named(
+            home.path(),
+            &stuck_root,
+            &token,
+            &cli,
+            "stuck-session",
+            Some(&release),
+        ),
+        aws_sync_session_named(home.path(), &ok_root, &token, &cli, "ok-session", None),
+    ]);
+
+    // First cycle: the other session's install fails and says so.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let result = coordinator.result().await.expect("coordinator stopped");
+            if result.partial
+                && result
+                    .failures()
+                    .any(|(session, _)| session == "ok-session")
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the first renewal cycle reported its failure");
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !stuck_root.join("waiting").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the stuck session's cycle reached its worker");
+
+    // Second cycle, with the stuck session still stuck: renewed.
+    std::fs::remove_file(ok_root.join("install-fails")).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !ok_root.join("aws").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the stalled session kept the other one from being renewed");
+    assert!(!stuck_root.join("aws").exists());
+    std::fs::write(&release, "").unwrap();
+}
+
+#[test]
+fn a_failed_login_step_keeps_the_aws_steps_actions_in_the_outcome() {
+    let mut outcomes = BTreeMap::from([(
+        "session".to_owned(),
+        CredentialSyncOutcome {
+            session_id: "session".into(),
+            outcome: Err("worker proxy disconnected".into()),
+            step_failure: None,
+        },
+    )]);
+
+    credential_sync::merge_step_outcome(
+        &mut outcomes,
+        "session",
+        vec![CredentialSyncAction::Pushed],
+        None,
+    );
+
+    let merged = &outcomes["session"];
+    assert_eq!(merged.outcome, Ok(vec![CredentialSyncAction::Pushed]));
+    assert_eq!(
+        merged.step_failure.as_deref(),
+        Some("worker proxy disconnected")
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_worker_before_protocol_55_is_left_to_the_automatic_upgrade_and_then_withdrawn() {
@@ -2837,7 +3024,6 @@ async fn a_worker_before_protocol_55_is_left_to_the_automatic_upgrade_and_then_w
     assert!(!root.path().join("aws").exists());
 }
 
-// Hard-won: a064656da: the coordinator ran a trigger the moment its session was held and lost it; it now waits for the session to be free and then reports its outcome.
 #[cfg(unix)]
 #[tokio::test]
 async fn the_coordinator_runs_a_trigger_for_a_held_session_once_it_is_free() {

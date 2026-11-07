@@ -420,8 +420,6 @@ mod notice_tests {
         profile
     }
 
-    // Hard-won: 96c0993ac: sessions of a non-Bedrock profile with an `aws` table were refused instead of running with a notice.
-    // Hard-won: db9e62ed7: a role on a raw local, EC2 or self-credentialed target was ignored without a word.
     #[test]
     fn a_role_that_cannot_apply_is_a_notice_that_names_why_not_a_refusal() {
         let home = tempfile::tempdir().unwrap();
