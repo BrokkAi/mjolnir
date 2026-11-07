@@ -65,6 +65,7 @@ use mj_core::config::{
     CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, PermissionMode, ProjectBundle,
     ProjectRepository, SshConnection,
 };
+use mj_core::remote_git::Shorthand;
 use mj_core::state::{ProjectSourceIdentity, STATE_VERSION, SessionRecord};
 
 pub(super) fn sample_config_state() -> (Config, AppState) {
@@ -1516,8 +1517,11 @@ fn viewer_session_applies_a_resolved_source_without_publishing_it() {
         .into_iter()
         .next()
         .expect("session");
-    let source = ProjectSourceIdentity::git_remote("git@github.com:BrokkAi/bifrost-dev.git")
-        .expect("GitHub source");
+    let source = ProjectSourceIdentity::git_remote(
+        "git@github.com:BrokkAi/bifrost-dev.git",
+        Shorthand::Allowed,
+    )
+    .expect("GitHub source");
 
     viewer.set_project_source(&source);
 

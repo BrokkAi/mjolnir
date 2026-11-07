@@ -1275,6 +1275,27 @@ fn bundle_rejects_non_github_sources() {
     );
 }
 
+/// A rejected `github` value fails the whole configuration, so every value
+/// that loaded before the shared GitHub parser must keep loading, including
+/// ones the parser does not call GitHub (the last three).
+#[test]
+fn bundle_keeps_loading_github_values_accepted_before_the_shared_parser() {
+    for source in [
+        "BrokkAi/hel",
+        "https://github.com/BrokkAi/hel.git",
+        "ssh://git@github.com/BrokkAi/hel.git",
+        "git@gitlab.example:BrokkAi/hel.git",
+        "BrokkAi/hel+fork",
+        "https://github.com/BrokkAi/hel?ref=main",
+    ] {
+        let mut config = sample_config();
+        config.bundles.get_mut("hel").unwrap().repositories[0].github = Some(source.into());
+        config
+            .validate()
+            .unwrap_or_else(|error| panic!("{source}: {error:#}"));
+    }
+}
+
 #[test]
 fn bundle_accepts_one_absolute_local_source() {
     let mut config = sample_config();

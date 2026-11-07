@@ -664,6 +664,7 @@ pub fn render_human(checks: &[DoctorCheck], output: &mut impl Write) -> Result<(
 }
 
 pub fn setup_instructions(platform: InstructionsPlatform) -> String {
+    let github_rewrites = github::rewrite_commands().join("\n");
     match platform {
         InstructionsPlatform::Linux => format!(
             "# Mjolnir setup instructions for Linux\n\n\
@@ -689,8 +690,7 @@ SSH key to the host and trust GitHub's host key (check `ssh -T git@github.com`\n
 there), or use HTTPS: run `gh auth login` and `gh auth setup-git` on the host,\n\
 then send SSH GitHub URLs over HTTPS:\n\n\
 ```console\n\
-git config --global --add url.https://github.com/.insteadOf git@github.com:\n\
-git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/\n\
+{github_rewrites}\n\
 ```\n\n\
 `mj doctor` reports `github.*` checks per bare target. A target that never uses\n\
 GitHub can ignore them.\n\n\
@@ -735,8 +735,7 @@ SSH key to the host and trust GitHub's host key (check `ssh -T git@github.com`\n
 there), or use HTTPS: run `gh auth login` and `gh auth setup-git` on the host,\n\
 then send SSH GitHub URLs over HTTPS:\n\n\
 ```console\n\
-git config --global --add url.https://github.com/.insteadOf git@github.com:\n\
-git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/\n\
+{github_rewrites}\n\
 ```\n\n\
 `mj doctor` reports `github.*` checks per bare target. A target that never uses\n\
 GitHub can ignore them.\n\n\

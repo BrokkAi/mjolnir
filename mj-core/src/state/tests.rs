@@ -3,6 +3,7 @@ use crate::config::{
     CONFIG_VERSION, ContainerTemplate, HarnessProfile, ProjectBundle, ProjectRepository,
     TargetTemplate,
 };
+use crate::remote_git::Shorthand;
 use crate::targets::MountAccess;
 
 #[test]
@@ -908,12 +909,18 @@ fn project_source_uses_bundle_repository_and_ignores_managed_worktree_destinatio
     assert_eq!(source.short, "hel");
     assert_eq!(source.full, "BrokkAi/hel");
     assert_eq!(
-        ProjectSourceIdentity::git_remote("git@github.com:BrokkAi/bifrost-dev.git"),
-        ProjectSourceIdentity::git_remote("https://github.com/BrokkAi/bifrost-dev.git")
+        ProjectSourceIdentity::git_remote(
+            "git@github.com:BrokkAi/bifrost-dev.git",
+            Shorthand::Allowed
+        ),
+        ProjectSourceIdentity::git_remote(
+            "https://github.com/BrokkAi/bifrost-dev.git",
+            Shorthand::Allowed
+        )
     );
     assert_ne!(
-        ProjectSourceIdentity::git_remote("BrokkAi/bifrost-dev"),
-        ProjectSourceIdentity::git_remote("OtherOrg/bifrost-dev")
+        ProjectSourceIdentity::git_remote("BrokkAi/bifrost-dev", Shorthand::Allowed),
+        ProjectSourceIdentity::git_remote("OtherOrg/bifrost-dev", Shorthand::Allowed)
     );
 
     session.project_directory = Some(PathBuf::from(
@@ -1018,6 +1025,168 @@ fn multi_repository_bundle_identity_ignores_repository_order_and_primary_selecti
     );
 }
 
+/// Stored identities (`RepositoryIdentity` in sessions, project locations and
+/// project-memory directory names) come from these functions, so each remote
+/// spelling must keep mapping to the identity recorded before the shared GitHub
+/// parser. The expected values were captured from the parsers it replaced. The
+/// last four rows are the defects it fixed.
+#[test]
+fn git_remote_keeps_the_identities_stored_for_each_remote_spelling() {
+    use crate::repository::RepositoryIdentity;
+    // (input, key, short, full); `None` is not a network remote.
+    type Expected = Option<(&'static str, &'static str, &'static str)>;
+    let table: &[(&str, Expected)] = &[
+        (
+            "owner/repo",
+            Some(("github:owner/repo", "repo", "owner/repo")),
+        ),
+        (
+            "owner/repo.git",
+            Some(("github:owner/repo", "repo", "owner/repo")),
+        ),
+        (
+            "mirror/repo.git",
+            Some(("github:mirror/repo", "repo", "mirror/repo")),
+        ),
+        ("https://github.com/o/r", Some(("github:o/r", "r", "o/r"))),
+        (
+            "https://github.com/o/r.git",
+            Some(("github:o/r", "r", "o/r")),
+        ),
+        ("https://github.com/o/r/", Some(("github:o/r", "r", "o/r"))),
+        (
+            "https://github.com/o/r/extra",
+            Some((
+                "git:https://github.com/o/r/extra",
+                "extra",
+                "https://github.com/o/r/extra",
+            )),
+        ),
+        ("http://github.com/o/r", Some(("github:o/r", "r", "o/r"))),
+        (
+            "https://user:pass@github.com/o/r.git",
+            Some(("github:o/r", "r", "o/r")),
+        ),
+        (
+            "https://github.com:443/o/r",
+            Some(("github:o/r", "r", "o/r")),
+        ),
+        (
+            "https://github.com:444/o/r",
+            Some((
+                "git:https://github.com:444/o/r",
+                "r",
+                "https://github.com:444/o/r",
+            )),
+        ),
+        ("git@github.com:o/r.git", Some(("github:o/r", "r", "o/r"))),
+        ("github.com:o/r.git", Some(("github:o/r", "r", "o/r"))),
+        (
+            "ssh://git@github.com/o/r.git",
+            Some(("github:o/r", "r", "o/r")),
+        ),
+        ("ssh://github.com/o/r.git", Some(("github:o/r", "r", "o/r"))),
+        ("foo@github.com:o/r", Some(("github:o/r", "r", "o/r"))),
+        (
+            "ssh://git@github.com:22/o/r.git",
+            Some((
+                "git:ssh://github.com:22/o/r",
+                "r",
+                "ssh://github.com:22/o/r",
+            )),
+        ),
+        (
+            "ssh://git@ssh.github.com:443/o/r.git",
+            Some((
+                "git:ssh://ssh.github.com:443/o/r",
+                "r",
+                "ssh://ssh.github.com:443/o/r",
+            )),
+        ),
+        (
+            "ssh://ssh.github.com:443/o/r.git",
+            Some((
+                "git:ssh://ssh.github.com:443/o/r",
+                "r",
+                "ssh://ssh.github.com:443/o/r",
+            )),
+        ),
+        ("https://GITHUB.com/O/R", Some(("github:o/r", "R", "O/R"))),
+        ("./o/r", None),
+        ("/o/r", None),
+        (
+            "https://gist.github.com/o/r",
+            Some((
+                "git:https://gist.github.com/o/r",
+                "r",
+                "https://gist.github.com/o/r",
+            )),
+        ),
+        (
+            "https://github.example.com/o/r",
+            Some((
+                "git:https://github.example.com/o/r",
+                "r",
+                "https://github.example.com/o/r",
+            )),
+        ),
+        (
+            "https://notgithub.com/o/r",
+            Some((
+                "git:https://notgithub.com/o/r",
+                "r",
+                "https://notgithub.com/o/r",
+            )),
+        ),
+        // Fixed: the host's letter case defeated the GitHub match, which stored
+        // `Network("github.com:O/R")` and no label.
+        ("git@GitHub.com:O/R.git", Some(("github:o/r", "R", "O/R"))),
+        // Fixed: a query was taken for part of the repository name.
+        (
+            "https://github.com/o/r?x=1",
+            Some((
+                "git:https://github.com/o/r?x=1",
+                "r?x=1",
+                "https://github.com/o/r?x=1",
+            )),
+        ),
+        // Fixed: a name GitHub cannot have was a GitHub identity.
+        (
+            "https://github.com/o/r$",
+            Some((
+                "git:https://github.com/o/r$",
+                "r$",
+                "https://github.com/o/r$",
+            )),
+        ),
+    ];
+    for (input, expected) in table {
+        let actual = ProjectSourceIdentity::git_remote(input, Shorthand::Allowed)
+            .map(|source| (source.key, source.short, source.full));
+        let expected =
+            expected.map(|(key, short, full)| (key.to_owned(), short.to_owned(), full.to_owned()));
+        assert_eq!(actual, expected, "{input:?}");
+
+        // A remote read from `git config` cannot be shorthand.
+        let rejected = ProjectSourceIdentity::git_remote(input, Shorthand::Rejected)
+            .map(|source| (source.key, source.short, source.full));
+        let shorthand = ["owner/repo", "owner/repo.git", "mirror/repo.git"].contains(input);
+        assert_eq!(rejected, if shorthand { None } else { actual }, "{input:?}");
+    }
+    assert_eq!(
+        serde_json::to_string(&RepositoryIdentity::from_remote("git@github.com:O/R.git").unwrap())
+            .unwrap(),
+        r#"{"github":["o","r"]}"#
+    );
+    assert_eq!(
+        serde_json::to_string(
+            &RepositoryIdentity::from_remote("ssh://git@ssh.github.com:443/o/r.git").unwrap()
+        )
+        .unwrap(),
+        r#"{"network":"ssh://ssh.github.com:443/o/r"}"#
+    );
+}
+
 #[test]
 fn duplicate_repository_sources_collapse_to_the_single_repository_identity() {
     let mut config = sample_config();
@@ -1042,7 +1211,7 @@ fn duplicate_repository_sources_collapse_to_the_single_repository_identity() {
     let source = session.project_source(&config);
     assert_eq!(
         source,
-        ProjectSourceIdentity::git_remote("BrokkAi/hel").unwrap()
+        ProjectSourceIdentity::git_remote("BrokkAi/hel", Shorthand::Allowed).unwrap()
     );
 }
 

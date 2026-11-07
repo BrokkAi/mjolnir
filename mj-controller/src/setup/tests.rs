@@ -398,25 +398,12 @@ fn claude_credential_evidence_requires_a_nonempty_login_secret() {
     assert!(!claude_credentials_contain_login(b"not json"));
 }
 
+// Hard-won: f1af21f10: a relative-path remote was taken for GitHub owner/repo.
 #[test]
-fn github_origin_parser_accepts_standard_https_and_ssh_forms() {
-    for origin in [
-        "github.com:BrokkAi/hel",
-        "https://github.com/BrokkAi/hel.git",
-        "git@github.com:BrokkAi/hel.git",
-        "ssh://git@github.com/BrokkAi/hel.git",
-        "ssh://git@ssh.github.com:443/BrokkAi/hel.git",
-    ] {
-        assert_eq!(
-            github_repository_from_origin(origin),
-            Some(GithubRepository {
-                owner: "BrokkAi".into(),
-                repository: "hel".into(),
-            })
-        );
-    }
+fn a_relative_path_origin_is_not_a_github_repository() {
+    let executor = RuntimeProbeExecutor::new([ok(b"mirror/repo.git\n")]);
     assert_eq!(
-        github_repository_from_origin("https://example.com/hel"),
+        discover_github_repository(&executor, Path::new("/work/mirror")),
         None
     );
 }

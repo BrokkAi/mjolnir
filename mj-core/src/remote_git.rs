@@ -327,49 +327,155 @@ fn expand_github_source(source: &str) -> Result<String> {
     Ok(expanded)
 }
 
-/// Return the GitHub owner and repository named by a supported GitHub source.
+/// Whether [`parse_github_remote`] accepts a bare `owner/repository`.
 ///
-/// This accepts the same HTTPS, SSH, and `owner/repository` spellings as
-/// [`resolve_repository`]. Other Git hosts return `None`.
-pub fn github_owner_repo(source: &str) -> Option<(String, String)> {
+/// Text typed into a `github =` setting, the CLI or the API may be shorthand.
+/// Text read from `git config remote.origin.url` may not: there `mirror/repo`
+/// is a relative filesystem path, not GitHub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shorthand {
+    Allowed,
+    Rejected,
+}
+
+/// How a GitHub remote was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubSpelling {
+    /// A bare `owner/repository`.
+    Shorthand,
+    Https,
+    Http,
+    /// `[git@]github.com:owner/repository`.
+    Scp,
+    /// `ssh://[git@]host[:port]/owner/repository`.
+    Ssh,
+}
+
+/// Which GitHub host a remote names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubHost {
+    /// `github.com`, and shorthand, which means `github.com`.
+    GithubCom,
+    /// `ssh.github.com`, GitHub's SSH endpoint on port 443.
+    SshGithubCom,
+}
+
+/// A remote that names a repository on GitHub. Owner and repository keep the
+/// case they were written in; callers that compare case-insensitively lower
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubRemote {
+    pub owner: String,
+    pub repository: String,
+    pub spelling: GithubSpelling,
+    pub host: GithubHost,
+    /// A port written in the remote that is not the scheme's default. The
+    /// default ports of `http` and `https` are never reported.
+    pub port: Option<u16>,
+}
+
+impl GithubRemote {
+    /// Whether the remote names GitHub's main endpoint without an explicit
+    /// port. `ssh://git@github.com:22/...` and `ssh.github.com` are the same
+    /// repository over another route, and identities keep them apart.
+    pub fn is_default_endpoint(&self) -> bool {
+        self.host == GithubHost::GithubCom && self.port.is_none()
+    }
+}
+
+/// The two SSH spellings Git can rewrite to HTTPS with
+/// `url.https://github.com/.insteadOf`.
+pub const GITHUB_SSH_REWRITE_PREFIXES: [&str; 2] = ["git@github.com:", "ssh://git@github.com/"];
+
+/// Whether `remote` begins with one of [`GITHUB_SSH_REWRITE_PREFIXES`], which
+/// is exactly when such a rewrite applies to it.
+pub fn uses_github_ssh_rewrite_prefix(remote: &str) -> bool {
+    GITHUB_SSH_REWRITE_PREFIXES
+        .iter()
+        .any(|prefix| remote.starts_with(prefix))
+}
+
+/// Parse a GitHub remote: `owner/repository` (with [`Shorthand::Allowed`]),
+/// `https://` and `http://` URLs for `github.com` (userinfo ignored),
+/// `[git@]github.com:owner/repository`, `ssh://[git@]github.com[:22]/...`, and
+/// `ssh://[git@]ssh.github.com:443/...`. The host is case-insensitive. A
+/// trailing `/` and one `.git` are removed. Other hosts, ports, schemes, SSH
+/// users, extra path segments, queries and fragments return `None`, as do
+/// owner or repository names GitHub cannot have.
+pub fn parse_github_remote(source: &str, shorthand: Shorthand) -> Option<GithubRemote> {
     let source = source.trim();
-    let path = if !source.contains("://") {
-        if let Some((authority, path)) = source.split_once(':') {
-            let host = authority.rsplit('@').next()?;
-            if !matches!(
-                host.to_ascii_lowercase().as_str(),
-                "github.com" | "ssh.github.com"
-            ) {
-                return None;
-            }
-            if authority.contains('@')
-                && authority
-                    .rsplit_once('@')
-                    .is_none_or(|(user, _)| user != "git")
-            {
-                return None;
-            }
-            path.to_owned()
-        } else if !source.contains('@') {
-            source.to_owned()
-        } else {
-            return None;
-        }
-    } else {
+    let (spelling, host, port, path) = if source.contains("://") {
         let url = Url::parse(source).ok()?;
-        let host = url.host_str()?.to_ascii_lowercase();
-        let github_host = match (url.scheme(), host.as_str()) {
-            ("http" | "https" | "git", "github.com") => true,
-            ("ssh", "github.com") => true,
-            ("ssh", "ssh.github.com") => url.port() == Some(443),
-            _ => false,
-        };
-        if !github_host || url.query().is_some() || url.fragment().is_some() {
+        if url.query().is_some() || url.fragment().is_some() {
             return None;
         }
-        url.path().strip_prefix('/')?.to_owned()
+        let host_name = url.host_str()?;
+        let (spelling, host, port) = match url.scheme() {
+            "https" | "http" => {
+                let spelling = if url.scheme() == "https" {
+                    GithubSpelling::Https
+                } else {
+                    GithubSpelling::Http
+                };
+                if !host_name.eq_ignore_ascii_case("github.com") || url.port().is_some() {
+                    return None;
+                }
+                (spelling, GithubHost::GithubCom, None)
+            }
+            "ssh" => {
+                if (!url.username().is_empty() && url.username() != "git")
+                    || url.password().is_some()
+                {
+                    return None;
+                }
+                let (host, port_ok) = if host_name.eq_ignore_ascii_case("github.com") {
+                    (GithubHost::GithubCom, matches!(url.port(), None | Some(22)))
+                } else if host_name.eq_ignore_ascii_case("ssh.github.com") {
+                    (GithubHost::SshGithubCom, url.port() == Some(443))
+                } else {
+                    return None;
+                };
+                if !port_ok {
+                    return None;
+                }
+                (GithubSpelling::Ssh, host, url.port())
+            }
+            _ => return None,
+        };
+        (
+            spelling,
+            host,
+            port,
+            url.path().strip_prefix('/')?.to_owned(),
+        )
+    } else if let Some((authority, path)) = source.split_once(':') {
+        let host = match authority.rsplit_once('@') {
+            Some(("git", host)) => host,
+            Some(_) => return None,
+            None => authority,
+        };
+        if !host.eq_ignore_ascii_case("github.com") {
+            return None;
+        }
+        (
+            GithubSpelling::Scp,
+            GithubHost::GithubCom,
+            None,
+            path.to_owned(),
+        )
+    } else if shorthand == Shorthand::Allowed && !source.contains('@') {
+        (
+            GithubSpelling::Shorthand,
+            GithubHost::GithubCom,
+            None,
+            source.to_owned(),
+        )
+    } else {
+        return None;
     };
-    let path = path.strip_suffix(".git").unwrap_or(&path);
+
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
     let mut parts = path.split('/');
     let owner = parts.next()?;
     let repository = parts.next()?;
@@ -379,7 +485,20 @@ pub fn github_owner_repo(source: &str) -> Option<(String, String)> {
     {
         return None;
     }
-    Some((owner.to_owned(), repository.to_owned()))
+    Some(GithubRemote {
+        owner: owner.to_owned(),
+        repository: repository.to_owned(),
+        spelling,
+        host,
+        port,
+    })
+}
+
+/// The owner and repository of a GitHub source, in the case written. Accepts
+/// the spellings [`resolve_repository`] does, including `owner/repository`.
+pub fn github_owner_repo(source: &str) -> Option<(String, String)> {
+    let remote = parse_github_remote(source, Shorthand::Allowed)?;
+    Some((remote.owner, remote.repository))
 }
 
 fn valid_github_repository_name(repository: &str) -> bool {
@@ -495,31 +614,142 @@ mod tests {
     }
 
     #[test]
-    fn github_owner_repo_understands_supported_remote_spellings() {
-        for source in [
-            "acme/widget",
-            "acme/widget.git",
-            "github.com:acme/widget",
-            "git@github.com:acme/widget.git",
-            "https://github.com/acme/widget.git",
-            "ssh://git@github.com/acme/widget.git",
-            "ssh://git@ssh.github.com:443/acme/widget.git",
-        ] {
+    fn github_remote_parser_separates_real_remotes_from_relative_paths_and_other_hosts() {
+        // (input, result with shorthand allowed, whether only shorthand makes
+        // it GitHub). Results read `owner/repo spelling host port`.
+        let table: &[(&str, Option<&str>, bool)] = &[
+            (
+                "owner/repo",
+                Some("owner/repo Shorthand GithubCom None"),
+                true,
+            ),
+            (
+                "owner/repo.git",
+                Some("owner/repo Shorthand GithubCom None"),
+                true,
+            ),
+            (
+                "mirror/repo.git",
+                Some("mirror/repo Shorthand GithubCom None"),
+                true,
+            ),
+            (
+                "https://github.com/o/r",
+                Some("o/r Https GithubCom None"),
+                false,
+            ),
+            (
+                "https://github.com/o/r.git",
+                Some("o/r Https GithubCom None"),
+                false,
+            ),
+            (
+                "https://github.com/o/r/",
+                Some("o/r Https GithubCom None"),
+                false,
+            ),
+            ("https://github.com/o/r/extra", None, false),
+            (
+                "http://github.com/o/r",
+                Some("o/r Http GithubCom None"),
+                false,
+            ),
+            (
+                "https://user:pass@github.com/o/r.git",
+                Some("o/r Https GithubCom None"),
+                false,
+            ),
+            (
+                "https://github.com:443/o/r",
+                Some("o/r Https GithubCom None"),
+                false,
+            ),
+            ("https://github.com:444/o/r", None, false),
+            ("http://github.com:443/o/r", None, false),
+            (
+                "git@github.com:o/r.git",
+                Some("o/r Scp GithubCom None"),
+                false,
+            ),
+            ("github.com:o/r.git", Some("o/r Scp GithubCom None"), false),
+            (
+                "ssh://git@github.com/o/r.git",
+                Some("o/r Ssh GithubCom None"),
+                false,
+            ),
+            (
+                "ssh://github.com/o/r.git",
+                Some("o/r Ssh GithubCom None"),
+                false,
+            ),
+            (
+                "ssh://git@github.com:22/o/r.git",
+                Some("o/r Ssh GithubCom Some(22)"),
+                false,
+            ),
+            ("ssh://git@github.com:443/o/r.git", None, false),
+            (
+                "ssh://git@ssh.github.com:443/o/r.git",
+                Some("o/r Ssh SshGithubCom Some(443)"),
+                false,
+            ),
+            (
+                "ssh://ssh.github.com:443/o/r.git",
+                Some("o/r Ssh SshGithubCom Some(443)"),
+                false,
+            ),
+            ("ssh://git@ssh.github.com/o/r", None, false),
+            (
+                "git@GitHub.com:O/R.git",
+                Some("O/R Scp GithubCom None"),
+                false,
+            ),
+            (
+                "https://GITHUB.com/O/R",
+                Some("O/R Https GithubCom None"),
+                false,
+            ),
+            (
+                "  git@github.com:o/r.git\n",
+                Some("o/r Scp GithubCom None"),
+                false,
+            ),
+            ("./o/r", None, false),
+            ("/o/r", None, false),
+            ("https://github.com/o/r?x=1", None, false),
+            ("https://github.com/o/r#readme", None, false),
+            ("https://gist.github.com/o/r", None, false),
+            ("https://github.example.com/o/r", None, false),
+            ("https://notgithub.com/o/r", None, false),
+            ("git@gitlab.com:o/r", None, false),
+            ("git@ssh.github.com:o/r", None, false),
+            ("alice@github.com:o/r", None, false),
+            ("ssh://alice@github.com/o/r", None, false),
+            ("git://github.com/o/r", None, false),
+            ("acme/widget/child", None, false),
+            ("-o/r", None, false),
+            ("o/r$", None, false),
+        ];
+        let describe = |remote: Option<GithubRemote>| {
+            remote.map(|remote| {
+                format!(
+                    "{}/{} {:?} {:?} {:?}",
+                    remote.owner, remote.repository, remote.spelling, remote.host, remote.port
+                )
+            })
+        };
+        for (input, allowed, shorthand_only) in table {
             assert_eq!(
-                github_owner_repo(source),
-                Some(("acme".into(), "widget".into())),
-                "source {source:?}"
+                describe(parse_github_remote(input, Shorthand::Allowed)).as_deref(),
+                *allowed,
+                "{input:?} with shorthand allowed"
+            );
+            assert_eq!(
+                describe(parse_github_remote(input, Shorthand::Rejected)).as_deref(),
+                if *shorthand_only { None } else { *allowed },
+                "{input:?} with shorthand rejected"
             );
         }
-        assert_eq!(
-            github_owner_repo("https://gitlab.com/acme/widget.git"),
-            None
-        );
-        assert_eq!(
-            github_owner_repo("ssh://git@ssh.github.com/acme/widget"),
-            None
-        );
-        assert_eq!(github_owner_repo("acme/widget/child"), None);
     }
 
     #[test]

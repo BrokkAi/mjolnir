@@ -2355,7 +2355,9 @@ fn repository_source_identity(repository: &ProjectRepository) -> Option<ProjectS
     repository
         .github
         .as_deref()
-        .and_then(ProjectSourceIdentity::git_remote)
+        .and_then(|source| {
+            ProjectSourceIdentity::git_remote(source, crate::remote_git::Shorthand::Allowed)
+        })
         .or_else(|| {
             repository
                 .local
@@ -2409,10 +2411,12 @@ impl ProjectSourceIdentity {
     }
 
     /// Canonicalizes a Git remote so raw checkouts group as the same project
-    /// even when their worktree paths differ.
-    pub fn git_remote(source: &str) -> Option<Self> {
-        let identity = crate::repository::RepositoryIdentity::from_remote(source)?;
-        let full = crate::repository::RepositoryIdentity::remote_label(source)?;
+    /// even when their worktree paths differ. `shorthand` says whether a bare
+    /// `owner/repository` is GitHub; text read from `git config` must not
+    /// allow it, because there it is a relative path.
+    pub fn git_remote(source: &str, shorthand: crate::remote_git::Shorthand) -> Option<Self> {
+        let identity = crate::repository::RepositoryIdentity::from_remote_with(source, shorthand)?;
+        let full = crate::repository::RepositoryIdentity::remote_label_with(source, shorthand)?;
         Some(Self {
             key: identity.key(),
             short: full.rsplit(['/', ':']).next()?.to_owned(),
