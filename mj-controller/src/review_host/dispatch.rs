@@ -282,7 +282,23 @@ impl HostState {
                         .await;
                         let step = match exists {
                             Ok(Ok(false)) => ReviewStep::PushOwnerGone,
-                            _ => ReviewStep::PushRetry(error),
+                            Ok(Ok(true)) => ReviewStep::PushRetry(error),
+                            Ok(Err(lookup)) => {
+                                tracing::warn!(
+                                    session_id = %owner,
+                                    error = %lookup,
+                                    "could not check whether the review's session still exists; retrying delivery"
+                                );
+                                ReviewStep::PushRetry(error)
+                            }
+                            Err(join) => {
+                                tracing::warn!(
+                                    session_id = %owner,
+                                    error = %join,
+                                    "the session lookup task failed; retrying delivery"
+                                );
+                                ReviewStep::PushRetry(error)
+                            }
                         };
                         let _ = events.send(HostEvent::Step {
                             session_id: owner,

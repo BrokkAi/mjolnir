@@ -121,9 +121,19 @@ fn rfc3339(time: SystemTime) -> String {
 /// recorded daemon is not running, so the record is a leftover and not a
 /// daemon that is still shutting down.
 pub(super) fn report_unclean_previous_daemon() {
-    let Ok(previous) = read_metadata_any() else {
-        // No record is a clean stop; an unreadable one tells nothing we can name.
-        return;
+    let previous = match read_metadata_any() {
+        Ok(previous) => previous,
+        // No record is a clean stop.
+        Err(error) if daemon_not_running(&error).is_some() => return,
+        // A record that is there but unreadable is not a clean stop either;
+        // say so, though it names no previous daemon.
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "the previous daemon left a daemon.json that could not be read; it did not shut down cleanly"
+            );
+            return;
+        }
     };
     // A container daemon's record carries PID 0 and its guard is in the
     // container, so holding the host guard says nothing about it.

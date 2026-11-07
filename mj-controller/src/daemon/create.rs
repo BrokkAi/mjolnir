@@ -285,7 +285,9 @@ impl RuntimeState {
         let mut waiting = PostCreateWait::new("open its session");
         let handle = loop {
             self.reviewer_child_can_still_start(child, &mut waiting)?;
-            if let Ok(handle) = self.session_manager.session(child.to_owned()).await {
+            // `None` is the normal wait for the actor; a stopped session
+            // manager is a real failure and ends the start now.
+            if let Some(handle) = self.session_manager.find_session(child.to_owned()).await? {
                 break handle;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
