@@ -334,6 +334,82 @@ pub(super) fn local_engine_installed(host: &ImageHost, path: Option<&std::ffi::O
     }
 }
 
+/// Whether a host's engine is up, so a background refresh may use it.
+///
+/// A refresh is a chore, not a launch: it only observes Apple's service and
+/// never starts one the user stopped. The next launch preflight starts it
+/// when a session needs it.
+pub(super) fn host_is_running(host: &ImageHost, executor: &impl CommandExecutor) -> Result<bool> {
+    match host {
+        ImageHost::AppleContainer => Ok(matches!(
+            crate::targets::apple_container_runtime_status(executor)?,
+            crate::targets::AppleContainerStatus::Running
+        )),
+        _ => Ok(true),
+    }
+}
+
+/// One host's turn in a refresh tick. Answers `None` when there is nothing to
+/// record: the host is stopped, or the daemon is leaving.
+pub(super) fn refresh_one_host(
+    refresh: ImageRefresh,
+    executor: &impl CommandExecutor,
+    report: &dyn Fn(ImageRefreshReport),
+) -> Option<(String, String, Option<String>)> {
+    let host = refresh.host.label();
+    // `None` means the host's engine is stopped: nothing to refresh.
+    let outcome = host_is_running(&refresh.host, executor).and_then(|running| {
+        if !running {
+            return Ok(None);
+        }
+        // A launch that needs this image waits on the same lock, so it
+        // never starts a second download of what this tick is fetching.
+        let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
+        let held = crate::image_pull_gate::hold_image_pull(
+            &lock,
+            || executor.cancellation_requested(),
+            || {},
+        );
+        held.and_then(|guard| {
+            let outcome = refresh_host_image(&refresh, executor, report);
+            drop(guard);
+            outcome.map(Some)
+        })
+    });
+    let error = match outcome {
+        Ok(Some(_)) => None,
+        Ok(None) => {
+            tracing::debug!(
+                host,
+                image = refresh.image,
+                "the container engine is not running; skipping the image refresh"
+            );
+            return None;
+        }
+        Err(error) if executor.cancellation_requested() => {
+            // The daemon is leaving. That is not a fault of the host,
+            // and it is not news for the user either.
+            tracing::debug!(
+                host,
+                image = refresh.image,
+                error = format!("{error:#}"),
+                "container image refresh cancelled"
+            );
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(
+                host,
+                image = refresh.image,
+                error = format!("{error:#}"),
+                "could not refresh a container image"
+            );
+            Some(format!("{error:#}"))
+        }
+    };
+    Some((host, refresh.image, error))
+}
+
 pub(super) async fn refresh_images(
     plan: Vec<ImageRefresh>,
     report: &Arc<dyn Fn(ImageRefreshReport) + Send + Sync>,
@@ -366,53 +442,7 @@ pub(super) async fn refresh_images(
         // blocking thread, never on the runtime.
         let executor = CancellableProcessExecutor::new(cancelled.clone());
         let report = report.clone();
-        hosts.spawn_blocking(move || {
-            let host = refresh.host.label();
-            let ensure = if refresh.host == ImageHost::AppleContainer {
-                crate::targets::ensure_apple_container_runtime(&executor).map(|_| ())
-            } else {
-                Ok(())
-            };
-            let outcome = ensure.and_then(|()| {
-                // A launch that needs this image waits on the same lock, so it
-                // never starts a second download of what this tick is fetching.
-                let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
-                let held = crate::image_pull_gate::hold_image_pull(
-                    &lock,
-                    || executor.is_cancelled(),
-                    || {},
-                );
-                held.and_then(|guard| {
-                    let outcome = refresh_host_image(&refresh, &executor, &*report);
-                    drop(guard);
-                    outcome
-                })
-            });
-            let error = match outcome {
-                Ok(_) => None,
-                Err(error) if executor.is_cancelled() => {
-                    // The daemon is leaving. That is not a fault of the host,
-                    // and it is not news for the user either.
-                    tracing::debug!(
-                        host,
-                        image = refresh.image,
-                        error = format!("{error:#}"),
-                        "container image refresh cancelled"
-                    );
-                    return None;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        host,
-                        image = refresh.image,
-                        error = format!("{error:#}"),
-                        "could not refresh a container image"
-                    );
-                    Some(format!("{error:#}"))
-                }
-            };
-            Some((host, refresh.image, error))
-        });
+        hosts.spawn_blocking(move || refresh_one_host(refresh, &executor, &*report));
     }
     let mut cancelling = false;
     loop {

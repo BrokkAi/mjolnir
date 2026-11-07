@@ -1591,6 +1591,78 @@ impl RefreshReports {
     }
 }
 
+// Hard-won: #1358: the image refresher restarted an Apple container service the user had stopped
+#[test]
+fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_it() {
+    struct AppleExecutor {
+        service_running: bool,
+        commands: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for AppleExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let line = format!("{} {}", command.program, command.args.join(" "));
+            let stopped = line == "container system status" && !self.service_running;
+            self.commands.lock().unwrap().push(line);
+            Ok(CommandOutput {
+                status: i32::from(stopped),
+                stdout: b"sha256:1111\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let refresh = || {
+        crate::targets::image_refresh(
+            crate::targets::ImageHost::AppleContainer,
+            "ghcr.io/example/dev:latest",
+            None,
+            mj_core::config::ImagePullPolicy::Auto,
+        )
+        .expect("a remote latest image is refreshed")
+    };
+    let reports = RefreshReports::default();
+
+    let stopped = AppleExecutor {
+        service_running: false,
+        commands: std::sync::Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        refresh_one_host(refresh(), &stopped, &reports.record()),
+        None
+    );
+    assert_eq!(
+        *stopped.commands.lock().unwrap(),
+        ["container system status"],
+        "a stopped service is observed, never started, and nothing is pulled"
+    );
+    assert!(reports.taken().is_empty());
+
+    let running = AppleExecutor {
+        service_running: true,
+        commands: std::sync::Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        refresh_one_host(refresh(), &running, &reports.record()),
+        Some((
+            "apple container".to_owned(),
+            "ghcr.io/example/dev:latest".to_owned(),
+            None
+        ))
+    );
+    let commands = running.commands.lock().unwrap();
+    assert!(
+        commands
+            .iter()
+            .any(|line| line.starts_with("container image pull")),
+        "{commands:?}"
+    );
+    assert!(
+        !commands.iter().any(|line| line.contains("system start")),
+        "{commands:?}"
+    );
+}
+
 /// A background refresh is a chore, not a launch. One host that cannot
 /// reach its registry must not cost the other hosts their pull, and the
 /// failure has to say which host, which image, and what the engine
