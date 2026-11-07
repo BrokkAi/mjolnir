@@ -1165,19 +1165,24 @@ impl ProfileCatalog {
                     // the home state the failed probe read, else the state
                     // the entry serves — so a pass whose current digest
                     // differs is a fresh edit and bypasses it, even for an
-                    // entry a cache-served publish never settled. The window
-                    // is cleared by the home watch when it observes every
-                    // served entry settled, never by a probe.
+                    // entry a cache-served publish never settled. With no
+                    // digest known at all, the window stays unarmed: any
+                    // current digest could be a fresh edit's, and the window
+                    // must not suppress it. The window is cleared by the home
+                    // watch when it observes every served entry settled,
+                    // never by a probe.
                     let armed = error
                         .home_digest
                         .or_else(|| inner.home_settled.get(&key).copied());
                     match inner.home_edit_retry_after.get_mut(&key.0) {
                         Some((after, _)) => *after = Instant::now() + self.home_edit_retry_wait(),
                         None => {
-                            inner.home_edit_retry_after.insert(
-                                key.0.clone(),
-                                (Instant::now() + self.home_edit_retry_wait(), armed),
-                            );
+                            if let Some(armed) = armed {
+                                inner.home_edit_retry_after.insert(
+                                    key.0.clone(),
+                                    (Instant::now() + self.home_edit_retry_wait(), Some(armed)),
+                                );
+                            }
                         }
                     }
                     return;
