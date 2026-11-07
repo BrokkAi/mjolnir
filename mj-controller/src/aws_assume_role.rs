@@ -74,6 +74,16 @@ impl ScopedAwsCredentials {
         );
     }
 
+    /// Whether the cache holds credentials for the session.
+    #[cfg(test)]
+    pub(crate) fn holds(&self, session_id: &str) -> bool {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .any(|key| key.session_id == session_id)
+    }
+
     pub(crate) fn shared() -> Arc<Self> {
         static SHARED: OnceLock<Arc<ScopedAwsCredentials>> = OnceLock::new();
         Arc::clone(SHARED.get_or_init(|| Arc::new(Self::with_clock(Arc::new(SystemTime::now)))))
@@ -140,7 +150,11 @@ impl ScopedAwsCredentials {
             .and_then(|credentials| {
                 // Recorded beside the secret on the worker, so what Mjolnir
                 // issued for this session's role is recognisable later.
-                credentials.issued_for(&role.role_arn, &session_name(session_id))
+                credentials.issued_for(
+                    &role.role_arn,
+                    &session_name(session_id),
+                    &role.session_policy_fingerprint(),
+                )
             })
             .with_context(|| {
             format!(

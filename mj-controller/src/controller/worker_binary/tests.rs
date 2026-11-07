@@ -6254,3 +6254,32 @@ fn installing_a_local_stage_links_the_login_and_never_writes_through_an_earlier_
         "profile login"
     );
 }
+
+// Hard-won: 3d008e66e: refreshing a session's profile configuration left the AWS scope record behind, to vouch later for credentials it no longer described.
+#[test]
+fn refreshing_profile_configuration_clears_every_aws_file_including_the_scope_record() {
+    let executor = SshHostExecutor::default();
+    install::clear_profile_configuration(
+        &executor,
+        &targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: "c".repeat(64),
+            workspace_storage: Default::default(),
+        },
+        "0123456789abcdef0123456789abcdef",
+        "/home/agent/.codex",
+        HarnessKind::Codex,
+    )
+    .unwrap();
+    let commands = executor.commands.borrow();
+    let script = commands
+        .last()
+        .unwrap()
+        .args
+        .iter()
+        .find(|argument| argument.contains("rm -rf"))
+        .expect("the removal script runs");
+    for name in mj_core::aws_credentials::FILES {
+        assert!(script.contains(name), "{name} is not cleared: {script}");
+    }
+}

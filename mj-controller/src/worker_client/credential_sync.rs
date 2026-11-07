@@ -33,80 +33,40 @@ pub(super) fn unknown_slopcop_login() -> Result<Option<mj_core::slopcop::Slopcop
     bail!("tests do not read the host's slopcop login")
 }
 
-/// Which sessions a reconciliation is working on, and the one thing sessions
-/// of a profile must not do at once.
+/// The role-scoped AWS installs in progress, one claim per session.
 ///
-/// A session is reconciled by at most one pass at a time, so a session whose
-/// actor does not answer holds only itself: the next pass skips it and serves
-/// the profile's other sessions on schedule. What truly must not overlap is
-/// rewriting the profile's canonical login, so that has a lock of its own per
-/// profile, held only around the compare-and-write, never across a call to a
-/// worker.
+/// A session's AWS credentials are installed by an operation of their own,
+/// separate from the profile's sequential login pass, so one session whose
+/// actor does not answer delays only its own AWS install. The claim is taken
+/// once, before the mint, and is the only decision about whether the install
+/// runs; it is released on any exit path.
 #[derive(Clone, Default)]
-pub(super) struct SessionsInFlight(Arc<InFlightState>);
+pub(super) struct AwsInstalls(Arc<std::sync::Mutex<BTreeSet<String>>>);
 
-#[derive(Default)]
-struct InFlightState {
-    sessions: std::sync::Mutex<BTreeSet<String>>,
-    pulls: std::sync::Mutex<BTreeMap<String, Arc<std::sync::Mutex<()>>>>,
-    released: tokio::sync::Notify,
-}
-
-/// A session's reconciliation in progress. Dropping it, on any exit path,
-/// frees the session.
-pub(super) struct SessionClaim {
-    state: Arc<InFlightState>,
+pub(super) struct AwsInstallClaim {
+    installs: Arc<std::sync::Mutex<BTreeSet<String>>>,
     session_id: String,
 }
 
-impl Drop for SessionClaim {
+impl Drop for AwsInstallClaim {
     fn drop(&mut self) {
-        self.state
-            .sessions
+        self.installs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.session_id);
-        self.state.released.notify_one();
     }
 }
 
-impl SessionsInFlight {
-    /// The session, unless a pass is already reconciling it.
-    pub(super) fn claim(&self, session_id: &str) -> Option<SessionClaim> {
+impl AwsInstalls {
+    pub(super) fn claim(&self, session_id: &str) -> Option<AwsInstallClaim> {
         self.0
-            .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id.to_owned())
-            .then(|| SessionClaim {
-                state: Arc::clone(&self.0),
+            .then(|| AwsInstallClaim {
+                installs: Arc::clone(&self.0),
                 session_id: session_id.to_owned(),
             })
-    }
-
-    pub(super) fn is_claimed(&self, session_id: &str) -> bool {
-        self.0
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(session_id)
-    }
-
-    /// The lock around rewriting this profile's canonical login.
-    pub(super) fn login_pull_lock(&self, profile_id: &str) -> Arc<std::sync::Mutex<()>> {
-        Arc::clone(
-            self.0
-                .pulls
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .entry(profile_id.to_owned())
-                .or_default(),
-        )
-    }
-
-    /// Completes when some session has been freed since the last time.
-    async fn released(&self) {
-        self.0.released.notified().await;
     }
 }
 
@@ -147,8 +107,7 @@ impl CredentialSyncCoordinator {
         let mut targets_rx = targets_tx.subscribe();
         let handle_targets = targets_tx.clone();
         let (triggers_tx, mut triggers_rx) = mpsc::unbounded_channel::<SyncTrigger>();
-        let (completed_tx, mut completed_rx) =
-            mpsc::unbounded_channel::<(CredentialSyncResult, Option<SyncTrigger>)>();
+        let (completed_tx, mut completed_rx) = mpsc::unbounded_channel::<CredentialSyncResult>();
         let (results_tx, results_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval_at(
@@ -156,14 +115,18 @@ impl CredentialSyncCoordinator {
                 SYNC_INTERVAL,
             );
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // Sessions are reconciled one pass at a time each; a profile's
-            // other sessions are not held up by one that does not answer.
-            let in_flight = SessionsInFlight::default();
+            // A pull rewrites the canonical file, so one profile is never
+            // reconciled twice at once.
+            let mut busy = BTreeSet::<String>::new();
             let mut queue = VecDeque::<SyncTrigger>::new();
+            let aws_installs = AwsInstalls::default();
             let mut previous_targets = BTreeMap::<String, CredentialSyncTarget>::new();
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
+                        // Whether or not any session is left to sync, the
+                        // cache of issued credentials drops what has expired.
+                        crate::aws_assume_role::ScopedAwsCredentials::shared().sweep_expired();
                         for profile_id in profiles_with_targets(&targets_rx.borrow()) {
                             enqueue(&mut queue, SyncTrigger { profile_id, cause: None });
                         }
@@ -188,15 +151,9 @@ impl CredentialSyncCoordinator {
                         let Some(trigger) = trigger else { break };
                         enqueue(&mut queue, trigger);
                     }
-                    // A session finished: a trigger waiting for it can run.
-                    _ = in_flight.released() => {}
                     completed = completed_rx.recv() => {
-                        let Some((result, requeue)) = completed else { break };
-                        // A trigger whose session was held by another pass is
-                        // not dropped: it waits for the session to be free.
-                        if let Some(trigger) = requeue {
-                            enqueue(&mut queue, trigger);
-                        }
+                        let Some(result) = completed else { break };
+                        busy.remove(&result.profile_id);
                         if result.trigger.is_some()
                             || result.failure.is_some()
                             || !result.outcomes.is_empty()
@@ -215,6 +172,10 @@ impl CredentialSyncCoordinator {
 
                 let mut deferred = VecDeque::new();
                 while let Some(trigger) = queue.pop_front() {
+                    if busy.contains(&trigger.profile_id) {
+                        deferred.push_back(trigger);
+                        continue;
+                    }
                     let targets: Vec<_> = targets_rx
                         .borrow()
                         .iter()
@@ -242,24 +203,8 @@ impl CredentialSyncCoordinator {
                         }
                         continue;
                     }
-                    // The session whose failure asked for this sync is reached
-                    // or the sync waits for it. With every session in flight
-                    // there is nothing to serve; the next schedule retries.
-                    if trigger
-                        .cause
-                        .as_ref()
-                        .is_some_and(|cause| in_flight.is_claimed(&cause.session_id))
-                        || targets
-                            .iter()
-                            .all(|target| in_flight.is_claimed(&target.session_id))
-                    {
-                        if trigger.cause.is_some() {
-                            deferred.push_back(trigger);
-                        }
-                        continue;
-                    }
+                    busy.insert(trigger.profile_id.clone());
                     let completed_tx = completed_tx.clone();
-                    let in_flight = in_flight.clone();
                     // The join is awaited so a panicked reconcile is reported
                     // and its profile always leaves the busy set. The reconcile
                     // runs as an ordinary task, never as `Handle::block_on` on
@@ -272,6 +217,7 @@ impl CredentialSyncCoordinator {
                     let gate = gate.clone();
                     let relays = relays.clone();
                     let runtime = runtime.clone();
+                    let aws_installs = aws_installs.clone();
                     tokio::spawn(async move {
                         let joined = tokio::spawn(async move {
                             reconcile_profile_guarded(
@@ -281,34 +227,23 @@ impl CredentialSyncCoordinator {
                                 gate.as_ref(),
                                 runtime.as_ref(),
                                 slopcop_login,
-                                &in_flight,
+                                &aws_installs,
                             )
                             .await
                         })
                         .await;
-                        let (failure, outcomes, skipped) = match joined {
-                            Ok(pass) => (None, pass.outcomes, pass.trigger_skipped),
-                            Err(error) => (
-                                Some(format!("sync task stopped: {error}")),
-                                Vec::new(),
-                                false,
-                            ),
+                        let (failure, outcomes) = match joined {
+                            Ok(outcomes) => (None, outcomes),
+                            Err(error) => (Some(format!("sync task stopped: {error}")), Vec::new()),
                         };
                         let profile_id = trigger.profile_id.clone();
-                        // The sync that was asked for did not reach its
-                        // session, so it is reported to nobody as done and
-                        // runs again once the session is free.
-                        let requeue = skipped.then(|| trigger.clone());
                         if completed_tx
-                            .send((
-                                CredentialSyncResult {
-                                    profile_id: trigger.profile_id,
-                                    trigger: if skipped { None } else { trigger.cause },
-                                    failure,
-                                    outcomes,
-                                },
-                                requeue,
-                            ))
+                            .send(CredentialSyncResult {
+                                profile_id: trigger.profile_id,
+                                trigger: trigger.cause,
+                                failure,
+                                outcomes,
+                            })
                             .is_err()
                         {
                             tracing::debug!(
@@ -354,17 +289,6 @@ pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
 ) -> Vec<CredentialSyncOutcome> {
-    reconcile_profile_with(&SessionsInFlight::default(), targets, triggered_by)
-        .await
-        .outcomes
-}
-
-#[cfg(all(test, unix))]
-pub(super) async fn reconcile_profile_with(
-    in_flight: &SessionsInFlight,
-    targets: &[CredentialSyncTarget],
-    triggered_by: Option<&str>,
-) -> ProfilePass {
     reconcile_profile_guarded(
         &SessionRelays::Direct,
         targets,
@@ -372,17 +296,25 @@ pub(super) async fn reconcile_profile_with(
         None,
         None,
         unknown_slopcop_login,
-        in_flight,
+        &AwsInstalls::default(),
     )
     .await
 }
 
 /// Reconcile one profile with every live session that runs it.
 ///
-/// A pull makes every other session's copy stale by definition, so the pass
-/// runs again once with the new canonical bytes. Two passes are enough: the
-/// second cannot pull anything the first did not already see unless a harness
-/// refreshed mid-cycle, and that lands in the next cycle.
+/// The profile's login, skills, GitHub token and slopcop login are
+/// reconciled one session after another: the canonical login is one fact for
+/// the whole profile, and a push or pull decided against it must not overlap
+/// another. A pull makes every other session's copy stale by definition, so
+/// the pass runs again once with the new canonical bytes. Two passes are
+/// enough: the second cannot pull anything the first did not already see
+/// unless a harness refreshed mid-cycle, and that lands in the next cycle.
+///
+/// The role-scoped AWS credentials of each session are the one thing that is
+/// independent per session: each is minted and installed on its own, as its
+/// mint completes, alongside that sequence, so a session that does not answer
+/// delays only its own AWS install.
 ///
 /// A session that already agreed is left out of the outcomes, except
 /// `triggered_by`, the session whose failure asked for this sync: that it was
@@ -395,30 +327,10 @@ pub(super) async fn reconcile_profile_guarded(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
     slopcop_login: SlopcopLoginSource,
-    in_flight: &SessionsInFlight,
-) -> ProfilePass {
-    // The one decision about who works on a session, taken before any work for
-    // it (the mint, the export, anything): a session another pass holds is
-    // that pass's to finish. The claim is held until the session's own
-    // reconciliation ends, so a session that never answers holds only itself.
-    let mut claims = Vec::new();
-    let mut claimed = Vec::new();
-    let mut trigger_skipped = false;
-    for target in targets {
-        match in_flight.claim(&target.session_id) {
-            Some(claim) => {
-                claims.push(Some(claim));
-                claimed.push(target.clone());
-            }
-            None => trigger_skipped |= triggered_by == Some(target.session_id.as_str()),
-        }
-    }
-    let targets = claimed.as_slice();
+    aws_installs: &AwsInstalls,
+) -> Vec<CredentialSyncOutcome> {
     let Some(first) = targets.first().cloned() else {
-        return ProfilePass {
-            outcomes: Vec::new(),
-            trigger_skipped,
-        };
+        return Vec::new();
     };
     // Read once per pass, and only when a session needs a copy: a raw
     // localhost session reads the host's own login.
@@ -441,16 +353,22 @@ pub(super) async fn reconcile_profile_guarded(
     } else {
         HostSlopcopLogin::Unknown
     };
-    // Each role-scoped session's mint is an independent AWS call that can take
-    // seconds. They all start now and run together, and each session is
-    // reconciled as its own mint completes, so one slow or failing call never
-    // delays another session's install. The cache also drops expired
-    // credentials here, so a stopped session's secrets do not outlive them.
+    // Each role-scoped session is claimed once, here, before its mint: the
+    // claim is the only decision about whether its AWS install runs. The cache
+    // also drops expired credentials, so a stopped session's secrets do not
+    // outlive them.
     crate::aws_assume_role::ScopedAwsCredentials::shared().sweep_expired();
-    let mut minting = futures::stream::FuturesUnordered::new();
-    for (index, target) in targets.iter().enumerate() {
-        if let Some(mint) = start_scoped_mint(target) {
-            minting.push(async move { (index, mint.await) });
+    let scoped = futures::stream::FuturesUnordered::new();
+    for target in targets {
+        if target
+            .aws_credentials
+            .as_ref()
+            .is_some_and(|source| source.role.is_some())
+            && let Some(claim) = aws_installs.claim(&target.session_id)
+        {
+            scoped.push(Box::pin(install_scoped_aws(
+                relays, gate, runtime, target, claim,
+            )));
         }
     }
     // Without a role, every session of the profile receives the same export,
@@ -491,15 +409,14 @@ pub(super) async fn reconcile_profile_guarded(
         skills: &skills,
         slopcop_login: &slopcop_login,
         triggered_by,
-        in_flight,
     };
-    // What each session's AWS credentials turned out to be, as they arrive.
-    let mut aws_credentials = targets
+    // The AWS step of the sequential pass: the profile's one export. A
+    // role-scoped session's AWS credentials are installed by its own
+    // operation above.
+    let aws_for_login = targets
         .iter()
         .map(|target| match &target.aws_credentials {
-            None => Some(AwsSync::Unmanaged),
-            Some(source) if source.role.is_some() => None,
-            Some(_) => Some(match &unscoped_aws_credentials {
+            Some(source) if source.role.is_none() => match &unscoped_aws_credentials {
                 Ok(Some(credentials)) => AwsSync::Install(credentials.clone()),
                 Ok(None) => AwsSync::Unmanaged,
                 Err(error) => AwsSync::Unavailable {
@@ -507,108 +424,123 @@ pub(super) async fn reconcile_profile_guarded(
                     scoped_required: false,
                     expected_scope: None,
                 },
-            }),
+            },
+            _ => AwsSync::Unmanaged,
         })
-        .collect::<Vec<Option<AwsSync>>>();
-    let mut outcomes = BTreeMap::<String, CredentialSyncOutcome>::new();
-    for pass in 0..2 {
-        let mut pulled = false;
-        // Every session is reconciled as soon as its own AWS credentials are
-        // known, and all of them together: a slow mint or a slow session actor
-        // holds only itself. Results are taken as they finish.
-        let mut running = futures::stream::FuturesUnordered::new();
-        let dispatch = |index: usize, aws: AwsSync, reported: bool, claim: SessionClaim| {
-            let target = &targets[index];
-            let context = &pass_context;
-            async move {
-                (
-                    index,
-                    reconcile_target(context, target, aws, pass, reported, claim).await,
-                )
-            }
-        };
-        // The second pass claims each session again: the first released it
-        // when its reconciliation ended.
-        if pass == 1 {
-            for index in 0..targets.len() {
-                claims[index] = in_flight.claim(&targets[index].session_id);
-            }
-        }
-        for index in 0..targets.len() {
-            // Only a session whose credentials are known starts now; the claim
-            // of one still minting stays held until its mint arrives.
-            if let Some(aws) = &aws_credentials[index]
-                && let Some(claim) = claims[index].take()
-            {
-                let reported = outcomes.contains_key(&targets[index].session_id);
-                running.push(dispatch(index, aws.clone(), reported, claim));
-            }
-        }
-        loop {
-            tokio::select! {
-                Some((index, minted)) = futures::StreamExt::next(&mut minting),
-                    if !minting.is_empty() =>
-                {
-                    let aws = match minted
-                        .context("AWS role assumption task stopped")
-                        .and_then(|result| result)
-                    {
-                        Ok(credentials) => AwsSync::Install(credentials),
-                        Err(error) => AwsSync::Unavailable {
-                            error: format!("{error:#}"),
-                            scoped_required: true,
-                            // What the worker's recorded scope must match for
-                            // its credentials to stay: issued for this role
-                            // and this session.
-                            expected_scope: targets[index]
-                                .aws_credentials
-                                .as_ref()
-                                .and_then(|source| source.role.as_ref())
-                                .map(|role| {
-                                    (
-                                        role.role_arn.clone(),
-                                        crate::aws_assume_role::session_name(
-                                            &targets[index].session_id,
-                                        ),
-                                    )
-                                }),
-                        },
-                    };
-                    aws_credentials[index] = Some(aws.clone());
-                    if let Some(claim) = claims[index].take() {
-                        let reported = outcomes.contains_key(&targets[index].session_id);
-                        running.push(dispatch(index, aws, reported, claim));
+        .collect::<Vec<_>>();
+    let login_pass = async {
+        let mut outcomes = BTreeMap::<String, CredentialSyncOutcome>::new();
+        for pass in 0..2 {
+            let mut pulled = false;
+            for (index, target) in targets.iter().enumerate() {
+                let reported = outcomes.contains_key(&target.session_id);
+                let result = Box::pin(reconcile_target(
+                    &pass_context,
+                    target,
+                    &aws_for_login[index],
+                    pass,
+                    reported,
+                ))
+                .await;
+                pulled |= result.pulled;
+                match result.outcome {
+                    Some(outcome) => {
+                        outcomes.insert(target.session_id.clone(), outcome);
                     }
+                    // A later pass that reached the session cleanly replaces
+                    // the failure an earlier pass reported for it.
+                    None if result.clean => clear_failure(&mut outcomes, &target.session_id),
+                    None => {}
                 }
-                Some((index, result)) = futures::StreamExt::next(&mut running),
-                    if !running.is_empty() =>
-                {
-                    pulled |= result.pulled;
-                    if let Some(outcome) = result.outcome {
-                        outcomes.insert(targets[index].session_id.clone(), outcome);
-                    }
-                }
-                else => break,
+            }
+            if !pulled || pass == 1 {
+                break;
             }
         }
-        if !pulled || pass == 1 {
-            break;
+        outcomes
+    };
+    let scoped_pass = async {
+        let mut results = Vec::new();
+        let mut scoped = scoped;
+        while let Some(result) = futures::StreamExt::next(&mut scoped).await {
+            results.push(result);
+        }
+        results
+    };
+    // Boxed: these futures nest every sync step's, which is too much to keep
+    // on a thread's stack in a debug build.
+    let (mut outcomes, installs) = tokio::join!(Box::pin(login_pass), Box::pin(scoped_pass));
+    for (session_id, result) in installs {
+        match result {
+            Ok(Some(SessionSync { actions, failures })) => {
+                merge_step_outcome(
+                    &mut outcomes,
+                    &session_id,
+                    actions,
+                    joined_failures(&failures),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "AWS credential synchronization failed for relay session"
+                );
+                merge_step_outcome(
+                    &mut outcomes,
+                    &session_id,
+                    Vec::new(),
+                    Some(format!("AWS credentials: {error:#}")),
+                );
+            }
         }
     }
-    ProfilePass {
-        outcomes: outcomes.into_values().collect(),
-        trigger_skipped,
-    }
+    outcomes.into_values().collect()
 }
 
-/// What one pass over a profile found.
-#[derive(Debug)]
-pub(super) struct ProfilePass {
-    pub(super) outcomes: Vec<CredentialSyncOutcome>,
-    /// The session whose failure asked for this sync was held by another pass
-    /// and was not reached. The trigger must run again when it is free, not
-    /// be dropped.
-    pub(super) trigger_skipped: bool,
+/// Fold one more step's result into a session's outcome.
+fn merge_step_outcome(
+    outcomes: &mut BTreeMap<String, CredentialSyncOutcome>,
+    session_id: &str,
+    actions: Vec<CredentialSyncAction>,
+    failure: Option<String>,
+) {
+    if actions.is_empty() && failure.is_none() {
+        return;
+    }
+    let outcome = outcomes
+        .entry(session_id.to_owned())
+        .or_insert_with(|| CredentialSyncOutcome {
+            session_id: session_id.to_owned(),
+            outcome: Ok(Vec::new()),
+            step_failure: None,
+        });
+    match &mut outcome.outcome {
+        Ok(existing) => existing.extend(actions),
+        Err(message) => {
+            if let Some(failure) = &failure {
+                message.push_str("; ");
+                message.push_str(failure);
+            }
+            return;
+        }
+    }
+    outcome.step_failure = match (outcome.step_failure.take(), failure) {
+        (Some(earlier), Some(later)) => Some(format!("{earlier}; {later}")),
+        (earlier, later) => earlier.or(later),
+    };
+}
+
+/// A pass that reached the session and found nothing wrong ends the failure an
+/// earlier pass reported for it; what that pass did stays.
+fn clear_failure(outcomes: &mut BTreeMap<String, CredentialSyncOutcome>, session_id: &str) {
+    if let Some(outcome) = outcomes.get_mut(session_id) {
+        if outcome.outcome.is_err() {
+            outcome.outcome = Ok(Vec::new());
+        }
+        outcome.step_failure = None;
+    }
 }
 
 /// What a sync pass does about one session's AWS credentials.
@@ -628,11 +560,11 @@ pub(super) enum AwsSync {
         /// configured; unless it provably holds `scoped_held`, they are
         /// withdrawn rather than left in place. Static host keys never expire.
         scoped_required: bool,
-        /// The role and role session name credentials the worker holds must
-        /// have been issued for to stay (until they expire): the worker
-        /// records that beside the secret, so this holds across a daemon
-        /// restart. Anything else it holds is withdrawn.
-        expected_scope: Option<(String, String)>,
+        /// What credentials the worker holds must have been issued for to stay
+        /// (until they expire): the worker records that beside the secret, so
+        /// this holds across a daemon restart. Anything else it holds is
+        /// withdrawn.
+        expected_scope: Option<ScopeExpectation>,
     },
 }
 
@@ -653,6 +585,35 @@ pub(super) struct SessionSync {
     pub(super) failures: Vec<String>,
 }
 
+/// The role, role session and session policy credentials were issued for.
+#[derive(Clone)]
+pub(super) struct ScopeExpectation {
+    pub(super) role_arn: String,
+    pub(super) role_session_name: String,
+    /// Fingerprint of the effective session policy (inline and managed): a
+    /// narrower policy than the one the credentials were issued under makes
+    /// them broader than configured, so they do not match.
+    pub(super) session_policy_fingerprint: String,
+}
+
+impl ScopeExpectation {
+    fn of(target: &CredentialSyncTarget) -> Option<Self> {
+        let role = target.aws_credentials.as_ref()?.role.as_ref()?;
+        Some(Self {
+            role_arn: role.role_arn.clone(),
+            role_session_name: crate::aws_assume_role::session_name(&target.session_id),
+            session_policy_fingerprint: role.session_policy_fingerprint(),
+        })
+    }
+
+    fn matches(&self, recorded: &mj_core::aws_credentials::AwsCredentialScope) -> bool {
+        recorded.role_arn == self.role_arn
+            && recorded.role_session_name == self.role_session_name
+            && recorded.session_policy_fingerprint == self.session_policy_fingerprint
+            && recorded.expires_at_epoch_millis > mj_core::clock::epoch_millis()
+    }
+}
+
 /// What one reconcile pass shares between its sessions.
 struct PassContext<'a> {
     relays: &'a SessionRelays,
@@ -661,8 +622,6 @@ struct PassContext<'a> {
     skills: &'a Arc<CanonicalSkills>,
     slopcop_login: &'a HostSlopcopLogin,
     triggered_by: Option<&'a str>,
-    /// Only for the lock around rewriting the profile's canonical login.
-    in_flight: &'a SessionsInFlight,
 }
 
 /// What reconciling one session in one pass found.
@@ -670,6 +629,9 @@ struct TargetResult {
     outcome: Option<CredentialSyncOutcome>,
     /// A fresher copy of the profile's login was pulled from the session.
     pulled: bool,
+    /// The session was reached and every step succeeded, whether or not it
+    /// has anything to report.
+    clean: bool,
 }
 
 /// The failures of a session's sync steps, as one message. A lost connection
@@ -684,16 +646,61 @@ fn joined_failures(failures: &[String]) -> Option<String> {
     (!unique.is_empty()).then(|| unique.join("; "))
 }
 
+/// Whether the session is still the one this target describes. A lifecycle
+/// may have completed since the dashboard published its target list.
+async fn target_is_current(
+    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    target: &CredentialSyncTarget,
+) -> Result<bool> {
+    if let Some(runtime) = runtime {
+        return runtime.credential_target_is_current(target);
+    }
+    let candidate = target.clone();
+    tokio::task::spawn_blocking(move || {
+        // Read only: cancellation may leave this blocking read finishing
+        // after admission has been released.
+        let controller = crate::controller::Controller {
+            config: mj_core::config::Config::load()?,
+            state: crate::database::load_state()?,
+        };
+        Ok::<_, anyhow::Error>(crate::pollers::credential_sync_target_is_current(
+            controller, &candidate,
+        ))
+    })
+    .await
+    .context("reload credential sync target")?
+}
+
+/// Run `work` for the session under background admission, when the session is
+/// still current. `None` means the work was deferred.
+async fn admitted<T>(
+    gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
+    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    target: &CredentialSyncTarget,
+    work: impl std::future::Future<Output = Result<Option<T>>>,
+) -> Result<Option<T>> {
+    match gate {
+        Some(gate) => gate
+            .run_background(&target.session_id, async {
+                if !target_is_current(runtime, target).await? {
+                    return Ok(None);
+                }
+                work.await
+            })
+            .await
+            .unwrap_or_else(|| Ok(None)),
+        None => work.await,
+    }
+}
+
 /// One session's reconciliation in one pass. `reported` says an earlier pass
 /// already recorded an outcome for it.
 async fn reconcile_target(
     context: &PassContext<'_>,
     target: &CredentialSyncTarget,
-    aws_credentials: AwsSync,
+    aws_credentials: &AwsSync,
     pass: usize,
     reported: bool,
-    // Held until this session's reconciliation ends, on any path.
-    _claim: SessionClaim,
 ) -> TargetResult {
     let PassContext {
         relays,
@@ -702,82 +709,41 @@ async fn reconcile_target(
         skills,
         slopcop_login,
         triggered_by,
-        in_flight,
     } = context;
-    // A failed GitHub token lookup is that step's failure, not the session's:
-    // the AWS credentials, skills and logins do not depend on it.
-    let github_token = |target: &CredentialSyncTarget| {
-        let (session_id, github) = (target.session_id.clone(), target.github.clone());
-        let wanted = target.sync_github_token;
-        async move {
-            if !wanted {
-                return GithubSync::Known(None);
-            }
-            match crate::controller::github_token_for_session(session_id, github).await {
+    let result = admitted(*gate, *runtime, target, async {
+        // A failed GitHub token lookup is that step's failure, not the
+        // session's: the AWS credentials, skills and logins do not depend on it.
+        let github = if target.sync_github_token {
+            match crate::controller::github_token_for_session(
+                target.session_id.clone(),
+                target.github.clone(),
+            )
+            .await
+            {
                 Ok(token) => GithubSync::Known(token),
                 Err(error) => GithubSync::Unavailable(format!("{error:#}")),
             }
-        }
-    };
-    let result = match *gate {
-        Some(gate) => {
-            gate.run_background(&target.session_id, async {
-                let current = if let Some(runtime) = *runtime {
-                    runtime.credential_target_is_current(target)?
-                } else {
-                    let candidate = target.clone();
-                    tokio::task::spawn_blocking(move || {
-                        // Read only: cancellation may leave this blocking
-                        // read finishing after admission has been released.
-                        let controller = crate::controller::Controller {
-                            config: mj_core::config::Config::load()?,
-                            state: crate::database::load_state()?,
-                        };
-                        Ok::<_, anyhow::Error>(crate::pollers::credential_sync_target_is_current(
-                            controller, &candidate,
-                        ))
-                    })
-                    .await
-                    .context("reload credential sync target")??
-                };
-                if !current {
-                    return Ok(None);
-                }
-                let github = github_token(target).await;
-                reconcile_session(
-                    relays,
-                    target,
-                    skills,
-                    &github,
-                    &aws_credentials,
-                    slopcop_login,
-                    &in_flight.login_pull_lock(&target.profile_id),
-                )
-                .await
-            })
-            .await
-            .unwrap_or_else(|| Ok(None))
-        }
-        None => {
-            let github = github_token(target).await;
-            reconcile_session(
-                relays,
-                target,
-                skills,
-                &github,
-                &aws_credentials,
-                slopcop_login,
-                &in_flight.login_pull_lock(&target.profile_id),
-            )
-            .await
-        }
-    };
+        } else {
+            GithubSync::Known(None)
+        };
+        reconcile_session(
+            relays,
+            target,
+            skills,
+            &github,
+            aws_credentials,
+            slopcop_login,
+        )
+        .await
+    })
+    .await;
     match result {
         // Deferral is not a successful credential check: in particular
         // it must not mark an authentication-triggered login refused.
         Ok(None) => TargetResult {
             outcome: None,
             pulled: false,
+            clean: false,
         },
         Ok(Some(SessionSync { actions, failures }))
             if actions.is_empty()
@@ -787,6 +753,7 @@ async fn reconcile_target(
             TargetResult {
                 outcome: None,
                 pulled: false,
+                clean: true,
             }
         }
         Ok(Some(SessionSync { actions, failures })) => {
@@ -802,6 +769,7 @@ async fn reconcile_target(
             }
             TargetResult {
                 pulled: actions.contains(&CredentialSyncAction::Pulled),
+                clean: step_failure.is_none(),
                 outcome: Some(CredentialSyncOutcome {
                     session_id: target.session_id.clone(),
                     outcome: Ok(actions),
@@ -819,6 +787,7 @@ async fn reconcile_target(
             );
             TargetResult {
                 pulled: false,
+                clean: false,
                 outcome: Some(CredentialSyncOutcome {
                     session_id: target.session_id.clone(),
                     outcome: Err(format!("{error:#}")),
@@ -827,6 +796,39 @@ async fn reconcile_target(
             }
         }
     }
+}
+
+/// One role-scoped session's AWS install, independent of every other session:
+/// mint (or take from the cache), then install on the session's own
+/// connection, or withdraw what must not stay. Holds the session's claim until
+/// it ends.
+async fn install_scoped_aws(
+    relays: &SessionRelays,
+    gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
+    runtime: Option<&Arc<crate::daemon::RuntimeState>>,
+    target: &CredentialSyncTarget,
+    _claim: AwsInstallClaim,
+) -> (String, Result<Option<SessionSync>>) {
+    let aws = match start_scoped_mint(target) {
+        Some(mint) => match mint
+            .await
+            .context("AWS role assumption task stopped")
+            .and_then(|result| result)
+        {
+            Ok(credentials) => AwsSync::Install(credentials),
+            Err(error) => AwsSync::Unavailable {
+                error: format!("{error:#}"),
+                scoped_required: true,
+                expected_scope: ScopeExpectation::of(target),
+            },
+        },
+        None => AwsSync::Unmanaged,
+    };
+    let result = admitted(gate, runtime, target, async {
+        run_on_session(relays, target, SyncWork::Aws(aws)).await
+    })
+    .await;
+    (target.session_id.clone(), result)
 }
 
 /// Start the AWS role assumption for a session whose profile names a role,
@@ -951,8 +953,6 @@ pub(super) struct SessionCanonical {
     pub(super) github: GithubSync,
     pub(super) aws: AwsSync,
     pub(super) slopcop_login: HostSlopcopLogin,
-    /// Held around rewriting the profile's canonical login.
-    pub(super) login_pull: Arc<std::sync::Mutex<()>>,
 }
 
 impl SessionCanonical {
@@ -990,9 +990,16 @@ impl SessionCanonical {
             github,
             aws: AwsSync::Unmanaged,
             slopcop_login: HostSlopcopLogin::Unknown,
-            login_pull: Arc::default(),
         }
     }
+}
+
+/// What a session's worker connection is asked to do.
+pub(super) enum SyncWork {
+    /// Every sync step of the profile's pass.
+    Full(Box<SessionCanonical>),
+    /// Only the session's AWS credentials.
+    Aws(AwsSync),
 }
 
 /// Reconcile one session. Returns every action taken, where an empty list
@@ -1005,12 +1012,19 @@ pub(super) async fn reconcile_session(
     github: &GithubSync,
     aws: &AwsSync,
     slopcop_login: &HostSlopcopLogin,
-    login_pull: &Arc<std::sync::Mutex<()>>,
 ) -> Result<Option<SessionSync>> {
     let mut canonical = SessionCanonical::read(target, skills.clone(), github.clone());
-    canonical.login_pull = Arc::clone(login_pull);
     canonical.aws = aws.clone();
     canonical.slopcop_login = slopcop_login.clone();
+    run_on_session(relays, target, SyncWork::Full(Box::new(canonical))).await
+}
+
+/// Run `work` on the session's worker connection.
+pub(super) async fn run_on_session(
+    relays: &SessionRelays,
+    target: &CredentialSyncTarget,
+    work: SyncWork,
+) -> Result<Option<SessionSync>> {
     match relays {
         SessionRelays::Actors(manager) => {
             let Some(handle) = manager.find_session(target.session_id.clone()).await? else {
@@ -1024,7 +1038,7 @@ pub(super) async fn reconcile_session(
             handle
                 .run_on_connection(Box::new(CredentialSyncJob {
                     target: target.clone(),
-                    canonical,
+                    work,
                     reply,
                 }))
                 .await;
@@ -1047,7 +1061,7 @@ pub(super) async fn reconcile_session(
         #[cfg(test)]
         SessionRelays::Direct => {
             let mut client = RelayClient::connect(&target.spec, &target.session_id).await?;
-            let result = reconcile_on(&mut client, target, &canonical).await;
+            let result = run_work(&mut client, target, work).await;
             if let Err(error) = client.detach().await {
                 tracing::warn!(
                     session_id = %target.session_id,
@@ -1055,6 +1069,24 @@ pub(super) async fn reconcile_session(
                 );
             }
             result.map(Some)
+        }
+    }
+}
+
+async fn run_work(
+    client: &mut RelayClient,
+    target: &CredentialSyncTarget,
+    work: SyncWork,
+) -> Result<SessionSync> {
+    match work {
+        SyncWork::Full(canonical) => reconcile_on(client, target, &canonical).await,
+        SyncWork::Aws(aws) => {
+            let mut sync = SessionSync {
+                actions: Vec::new(),
+                failures: Vec::new(),
+            };
+            reconcile_aws_step(client, &aws, &mut sync).await;
+            Ok(sync)
         }
     }
 }
@@ -1070,17 +1102,13 @@ pub(super) async fn reconcile_on(
     target: &CredentialSyncTarget,
     canonical: &SessionCanonical,
 ) -> Result<SessionSync> {
-    let mut actions = Vec::new();
-    let mut failures = Vec::new();
+    let mut sync = SessionSync {
+        actions: Vec::new(),
+        failures: Vec::new(),
+    };
+    reconcile_aws_step(client, &canonical.aws, &mut sync).await;
+    let SessionSync { actions, failures } = &mut sync;
     let mut note = |step: &str, error: String| failures.push(format!("{step}: {error}"));
-
-    match reconcile_aws(client, &canonical.aws).await {
-        Ok(action) => actions.extend(action),
-        Err(error) => note("AWS credentials withdrawal", format!("{error:#}")),
-    }
-    if let AwsSync::Unavailable { error, .. } = &canonical.aws {
-        note("AWS credentials", error.clone());
-    }
     // Profiles without a harness login file already receive credentials
     // through their environment or target credential chain.
     if !target.skips_login_file_sync {
@@ -1092,8 +1120,7 @@ pub(super) async fn reconcile_on(
                     &login.path,
                     &login.credential,
                     &login.bytes,
-                    &canonical.login_pull,
-                    &mut actions,
+                    actions,
                 )
                 .await
                 {
@@ -1129,7 +1156,21 @@ pub(super) async fn reconcile_on(
         Ok(action) => actions.extend(action),
         Err(error) => note("slopcop login", format!("{error:#}")),
     }
-    Ok(SessionSync { actions, failures })
+    Ok(sync)
+}
+
+/// The AWS step of a session's sync, recorded on `sync`. It fails on its own:
+/// the other steps do not depend on STS.
+async fn reconcile_aws_step(client: &mut RelayClient, aws: &AwsSync, sync: &mut SessionSync) {
+    match reconcile_aws(client, aws).await {
+        Ok(action) => sync.actions.extend(action),
+        Err(error) => sync
+            .failures
+            .push(format!("AWS credentials withdrawal: {error:#}")),
+    }
+    if let AwsSync::Unavailable { error, .. } = aws {
+        sync.failures.push(format!("AWS credentials: {error}"));
+    }
 }
 
 /// Converge the session's AWS credentials, or withdraw the host's own when
@@ -1142,7 +1183,16 @@ async fn reconcile_aws(
         AwsSync::Unmanaged => Ok(None),
         AwsSync::Install(credentials) => {
             let expected = mj_core::aws_credentials::snapshot(&credentials.encode()?);
-            if client.aws_credentials_state().await? == expected {
+            // The secret alone does not say the worker holds what Mjolnir
+            // issued: a worker replaced by an upgrade keeps the secret it was
+            // given before it could record a scope. Install again until the
+            // worker's record matches, so a later outage or restart keeps
+            // these credentials instead of withdrawing them.
+            let scope_current = credentials.scope().is_none()
+                || client.protocol_version()
+                    < mj_core::relay::RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL
+                || client.aws_credentials_scope().await?.as_ref() == credentials.scope();
+            if scope_current && client.aws_credentials_state().await? == expected {
                 return Ok(None);
             }
             let installed = client.install_aws_credentials(credentials).await?;
@@ -1180,11 +1230,9 @@ async fn reconcile_aws(
             // keys never expire. The record is the worker's, so this holds
             // across a daemon restart.
             if held.present
-                && let Some((role_arn, role_session_name)) = expected_scope
+                && let Some(expected) = expected_scope
                 && let Some(recorded) = client.aws_credentials_scope().await?
-                && recorded.role_arn == *role_arn
-                && recorded.role_session_name == *role_session_name
-                && recorded.expires_at_epoch_millis > mj_core::clock::epoch_millis()
+                && expected.matches(&recorded)
             {
                 return Ok(None);
             }
@@ -1208,7 +1256,7 @@ async fn reconcile_aws(
 /// One session's reconciliation, run by its actor on the actor's connection.
 struct CredentialSyncJob {
     target: CredentialSyncTarget,
-    canonical: SessionCanonical,
+    work: SyncWork,
     reply: tokio::sync::oneshot::Sender<Result<SessionSync>>,
 }
 
@@ -1217,10 +1265,10 @@ impl RelayConnectionJob for CredentialSyncJob {
         Box::pin(async move {
             let Self {
                 target,
-                canonical,
+                work,
                 reply,
             } = *self;
-            let result = reconcile_on(client, &target, &canonical).await;
+            let result = run_work(client, &target, work).await;
             if reply.send(result).is_err() {
                 tracing::debug!(
                     session_id = %target.session_id,
@@ -1246,7 +1294,6 @@ pub(super) async fn reconcile_credentials(
     canonical_path: &Path,
     canonical: &CredentialSnapshot,
     canonical_bytes: &[u8],
-    login_pull: &std::sync::Mutex<()>,
     actions: &mut Vec<CredentialSyncAction>,
 ) -> Result<()> {
     let session = client.credential_state().await?;
@@ -1257,44 +1304,26 @@ pub(super) async fn reconcile_credentials(
         }
         return Ok(());
     }
-    // Push and pull are one decision, taken against the canonical login as it
-    // is now, under the profile's lock: the snapshot this session was
-    // dispatched with may be minutes old, and another session may have pulled
-    // a fresher login since. Writing from the old snapshot could replace a
-    // fresher login with an older one, and rotated refresh tokens do not
-    // forgive that. The lock is released before any call to a worker.
-    let decision = {
-        let _deciding = login_pull
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (now, now_bytes) = read_credential_file(target.harness, canonical_path)?;
-        match reconcile(&now, &session) {
-            SyncAction::None => {
-                if now.present
-                    && session.present
-                    && now.fingerprint != session.fingerprint
-                    && now.freshness_epoch_ms.is_none()
-                    && session.freshness_epoch_ms.is_none()
-                {
-                    tracing::warn!(
-                        session_id = %target.session_id,
-                        profile_id = %target.profile_id,
-                        "credential copies differ but neither reports a refresh time; leaving both alone"
-                    );
-                }
-                None
+    match reconcile(canonical, &session) {
+        SyncAction::None => {
+            if canonical.present
+                && session.present
+                && canonical.fingerprint != session.fingerprint
+                && canonical.freshness_epoch_ms.is_none()
+                && session.freshness_epoch_ms.is_none()
+            {
+                tracing::warn!(
+                    session_id = %target.session_id,
+                    profile_id = %target.profile_id,
+                    "credential copies differ but neither reports a refresh time; leaving both alone"
+                );
             }
-            SyncAction::Push => Some((SyncAction::Push, now_bytes)),
-            SyncAction::Pull => Some((SyncAction::Pull, Vec::new())),
         }
-    };
-    match decision {
-        None => {}
-        Some((SyncAction::Push, fresh_bytes)) => {
-            client.install_credentials(&fresh_bytes).await?;
+        SyncAction::Push => {
+            client.install_credentials(canonical_bytes).await?;
             actions.push(CredentialSyncAction::Pushed);
         }
-        Some(_) => {
+        SyncAction::Pull => {
             let bytes = client.read_credentials().await?;
             validate_credential_payload(target.harness, &bytes).with_context(|| {
                 format!(
@@ -1302,23 +1331,13 @@ pub(super) async fn reconcile_credentials(
                     target.session_id
                 )
             })?;
-            // The session's bytes are in hand; decide again against the file
-            // as it is now, and write only if this is still the fresher copy.
-            let _rewriting = login_pull
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let (now, _) = read_credential_file(target.harness, canonical_path)?;
-            if matches!(reconcile(&now, &session), SyncAction::Pull) {
-                write_credential_file(target.harness, canonical_path, &bytes).with_context(
-                    || {
-                        format!(
-                            "install fresher credentials from session {} for profile {}",
-                            target.session_id, target.profile_id
-                        )
-                    },
-                )?;
-                actions.push(CredentialSyncAction::Pulled);
-            }
+            write_credential_file(target.harness, canonical_path, &bytes).with_context(|| {
+                format!(
+                    "install fresher credentials from session {} for profile {}",
+                    target.session_id, target.profile_id
+                )
+            })?;
+            actions.push(CredentialSyncAction::Pulled);
         }
     }
     Ok(())
