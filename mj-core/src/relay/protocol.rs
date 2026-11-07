@@ -155,6 +155,9 @@ pub enum RelayRequest {
     },
     /// Connection-only CPU measurement; never journaled.
     CpuUsage,
+    /// Connection-only observation of the processes this session's agent left
+    /// running and of its working tree; never journaled.
+    WorkFacts,
     /// Report non-secret metadata for this session's harness credentials.
     /// The runtime handles credential requests on the connection and never
     /// passes them through the durable relay.
@@ -385,6 +388,7 @@ impl RelayRequest {
             Self::InstallAttachment { .. } => "install_attachment",
             Self::ReadAttachment { .. } => "read_attachment",
             Self::CpuUsage => "cpu_usage",
+            Self::WorkFacts => "work_facts",
             Self::CredentialState => "credential_state",
             Self::ReadCredentials => "read_credentials",
             Self::InstallCredentials { .. } => "install_credentials",
@@ -426,6 +430,7 @@ impl RelayRequest {
             | Self::InstallSlopcopLogin { .. }
             | Self::RemoveSlopcopLogin => super::RELAY_SLOPCOP_LOGIN_PROTOCOL,
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
+            Self::WorkFacts => super::RELAY_WORK_FACTS_PROTOCOL,
             Self::DrainMailbox { .. } | Self::AckMailbox { .. } => 33,
             Self::ReserveIdle { .. } => 21,
             Self::HistoryQuery { .. }
@@ -644,6 +649,9 @@ pub enum RelayResponsePayload {
     /// value is secret.
     CpuUsage {
         usage: Option<crate::cpu_usage::SessionCpuUsage>,
+    },
+    WorkFacts {
+        facts: crate::work_facts::WorkFacts,
     },
     CredentialState {
         present: bool,

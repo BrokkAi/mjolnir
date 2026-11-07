@@ -1,0 +1,599 @@
+//! Worker-owned observation of what a session's agent left running and of its
+//! working tree, answered on the relay connection (`RelayRequest::WorkFacts`).
+//!
+//! The processes of a session are those that descend from this worker (the
+//! harness and everything its tools start) plus any process anywhere that
+//! carries the session's `MJ_SESSION_ID`. The second set matters: a process
+//! started with `setsid`, or whose launching shell exited, has been handed to
+//! PID 1 and no walk of parent links finds it. The controller exports the
+//! variable to every harness, and tool shells pass it on.
+//!
+//! Helpers the harness needs are not work. They are excluded by what they are:
+//! Mjolnir's own executable, anything run from a managed harness or Node
+//! installation, and every descendant that started before the harness session
+//! was configured. A descendant that started after that moment was started by
+//! the agent.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+
+use mj_core::work_facts::{
+    COMMAND_CHARS, ChangedPath, HeadCommit, Observed, ProcessFacts, ProcessIdentity,
+    RunningProcess, SHOWN_PATHS, SHOWN_PROCESSES, WorkFacts, WorktreeFacts,
+};
+
+/// Everything the worker knows that the observation needs. Cloned into each
+/// relay connection; the timestamp is shared with the relay, which writes it.
+#[derive(Clone, Debug)]
+pub struct WorkObserver {
+    /// Session whose `MJ_SESSION_ID` marks its processes.
+    pub session_id: String,
+    /// The worker's own process: its descendants are the harness tree.
+    pub worker_pid: u32,
+    /// The agent's working directory.
+    pub directory: PathBuf,
+    /// Epoch milliseconds at which the harness session was last configured, or
+    /// 0 while no configured harness exists.
+    pub harness_ready_ms: Arc<AtomicI64>,
+}
+
+/// One process as the platform reader sees it. Cheap fields only; the text of
+/// the command line and the start identity are read for the survivors.
+#[derive(Clone, Debug)]
+pub(crate) struct ProcRow {
+    pub pid: u32,
+    pub ppid: u32,
+    /// Milliseconds the process has existed, on the host's monotonic clock.
+    pub age_ms: i64,
+    pub zombie: bool,
+    /// The environment holds this session's `MJ_SESSION_ID`.
+    pub marked: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Described {
+    /// Raw command line; arguments separated by one space.
+    pub command: String,
+    pub exe: Option<PathBuf>,
+    pub identity: String,
+}
+
+pub(crate) struct ScanContext<'a> {
+    pub worker_pid: u32,
+    /// Age of the harness's configured session in ms; `None` before it exists.
+    pub harness_age_ms: Option<i64>,
+    /// File name of Mjolnir's own executable.
+    pub own_exe_name: Option<&'a std::ffi::OsStr>,
+    /// Directories whose programs are harness runtime, not agent work.
+    pub helper_roots: &'a [PathBuf],
+}
+
+/// Decide which rows are the agent's work. Pure: the platform readers feed it.
+pub(crate) fn select_processes(
+    rows: &[ProcRow],
+    ctx: &ScanContext<'_>,
+    describe: impl Fn(&ProcRow) -> Described,
+) -> ProcessFacts {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut children = BTreeMap::<u32, Vec<u32>>::new();
+    for row in rows {
+        children.entry(row.ppid).or_default().push(row.pid);
+    }
+    let mut tree = BTreeSet::new();
+    let mut pending = vec![ctx.worker_pid];
+    while let Some(pid) = pending.pop() {
+        for &child in children.get(&pid).into_iter().flatten() {
+            if tree.insert(child) {
+                pending.push(child);
+            }
+        }
+    }
+    let mut work = Vec::new();
+    for row in rows {
+        if row.pid == ctx.worker_pid || row.zombie {
+            continue;
+        }
+        let in_tree = tree.contains(&row.pid);
+        if !in_tree && !row.marked {
+            continue;
+        }
+        // A descendant that existed when the harness session was configured is
+        // part of the harness. Before that moment nothing is the agent's.
+        if in_tree && ctx.harness_age_ms.is_none_or(|age| row.age_ms >= age) {
+            continue;
+        }
+        let described = describe(row);
+        if let Some(exe) = &described.exe {
+            if ctx.own_exe_name.is_some() && exe.file_name() == ctx.own_exe_name {
+                continue;
+            }
+            if ctx.helper_roots.iter().any(|root| exe.starts_with(root)) {
+                continue;
+            }
+        }
+        work.push((row, described, !in_tree));
+    }
+    // Longest running first; the process ID makes the order total.
+    work.sort_by_key(|(row, _, _)| (std::cmp::Reverse(row.age_ms), row.pid));
+    let running = u32::try_from(work.len()).unwrap_or(u32::MAX);
+    let shown: Vec<RunningProcess> = work
+        .iter()
+        .take(SHOWN_PROCESSES)
+        .map(|(row, described, detached)| RunningProcess {
+            pid: row.pid,
+            elapsed_secs: u64::try_from(row.age_ms / 1000).unwrap_or(0),
+            command: command_text(&described.command),
+            detached: *detached,
+        })
+        .collect();
+    ProcessFacts {
+        running,
+        omitted: running.saturating_sub(u32::try_from(shown.len()).unwrap_or(u32::MAX)),
+        shown,
+        identities: work
+            .iter()
+            .map(|(row, described, _)| ProcessIdentity {
+                pid: row.pid,
+                start: described.identity.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// One line, free of terminal controls and secrets, cut for reading.
+fn command_text(raw: &str) -> String {
+    let clean = mj_core::transcript::sanitize_terminal_text(raw);
+    let clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clean = mj_core::redact::redact_secrets(&clean);
+    if clean.chars().count() <= COMMAND_CHARS {
+        return clean;
+    }
+    let cut: String = clean.chars().take(COMMAND_CHARS).collect();
+    format!("{cut}…")
+}
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+
+fn scan_processes(observer: &WorkObserver) -> Observed<ProcessFacts> {
+    let own_exe = std::env::current_exe().ok();
+    let own_exe_name = own_exe.as_deref().and_then(Path::file_name);
+    let helper_roots = helper_roots();
+    let ready_ms = observer.harness_ready_ms.load(Ordering::Acquire);
+    #[cfg(target_os = "linux")]
+    let table = linux::read_table(&observer.session_id);
+    #[cfg(target_os = "macos")]
+    let table = macos::read_table(&observer.session_id);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let table: anyhow::Result<(Vec<ProcRow>, ProcessReader)> = Err(anyhow::anyhow!(
+        "this platform does not expose process environments"
+    ));
+    let (rows, reader) = match table {
+        Ok(table) => table,
+        Err(error) => return Observed::unavailable(format!("{error:#}")),
+    };
+    let now_ms = mj_core::clock::epoch_millis();
+    let ctx = ScanContext {
+        worker_pid: observer.worker_pid,
+        // The configured moment is wall-clock; ages are monotonic, so convert
+        // through the present.
+        harness_age_ms: (ready_ms > 0).then(|| now_ms.saturating_sub(ready_ms)),
+        own_exe_name,
+        helper_roots: &helper_roots,
+    };
+    Observed::Known(select_processes(&rows, &ctx, |row| reader.describe(row)))
+}
+
+/// Reads the text and identity of a process the scan kept.
+pub(crate) struct ProcessReader {
+    describe: Box<dyn Fn(&ProcRow) -> Described + Send>,
+}
+
+impl ProcessReader {
+    pub(crate) fn new(describe: impl Fn(&ProcRow) -> Described + Send + 'static) -> Self {
+        Self {
+            describe: Box::new(describe),
+        }
+    }
+
+    fn describe(&self, row: &ProcRow) -> Described {
+        (self.describe)(row)
+    }
+}
+
+fn helper_roots() -> Vec<PathBuf> {
+    let xdg = std::env::var_os("XDG_CACHE_HOME");
+    let home = std::env::var_os("HOME");
+    [
+        mj_core::harness_runtime::managed_harness_cache_root(xdg.as_deref(), home.as_deref()),
+        mj_core::harness_runtime::managed_node_cache_root(xdg.as_deref(), home.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// What `git status` and `git log` say about `directory`.
+fn read_worktree(directory: &Path) -> Observed<WorktreeFacts> {
+    let status = match run_git(directory, &["status", "--porcelain=v2", "-z", "--branch"]) {
+        Ok(output) => output,
+        Err(reason) => return Observed::unavailable(reason),
+    };
+    let mut facts = parse_status(&String::from_utf8_lossy(&status), directory);
+    if let Some(head) = &mut facts.head {
+        // A subject that cannot be read leaves the commit id, which is the
+        // fact; an empty subject is not an error.
+        if let Ok(subject) = run_git(
+            directory,
+            &["log", "-1", "--format=%s", "--no-show-signature"],
+        ) {
+            head.subject = command_text(String::from_utf8_lossy(&subject).trim());
+        }
+    }
+    Observed::Known(facts)
+}
+
+fn run_git(directory: &Path, args: &[&str]) -> std::result::Result<Vec<u8>, String> {
+    let mut command = std::process::Command::new("git");
+    // `GIT_OPTIONAL_LOCKS=0` keeps this read from taking the index lock a
+    // concurrent `git commit` of the agent's would need.
+    command
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let output = match mj_core::subprocess::run_with_input(&mut command, &[]) {
+        Ok(output) => output,
+        Err(error) => return Err(format!("could not run git: {error:#}")),
+    };
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr.lines().next().unwrap_or("").trim();
+    Err(if detail.is_empty() {
+        format!("git failed with {}", output.status)
+    } else {
+        detail.to_owned()
+    })
+}
+
+/// Parse `git status --porcelain=v2 -z --branch`: header records beginning
+/// `# `, then NUL-separated change records. A rename record is followed by one
+/// more field, the original path.
+fn parse_status(text: &str, directory: &Path) -> WorktreeFacts {
+    let mut head_sha = None;
+    let mut branch = None;
+    let (mut changed, mut modified, mut untracked) = (0_u32, 0_u32, 0_u32);
+    let mut shown = Vec::new();
+    let mut fields = text.split('\0');
+    while let Some(field) = fields.next() {
+        if let Some(header) = field.strip_prefix("# ") {
+            match header.split_once(' ') {
+                Some(("branch.oid", oid)) if oid != "(initial)" => head_sha = Some(oid.to_owned()),
+                Some(("branch.head", name)) if name != "(detached)" => {
+                    branch = Some(name.to_owned());
+                }
+                _ => {}
+            }
+            continue;
+        }
+        let (status, path) = match field.split_at_checked(2) {
+            Some(("? ", path)) => ("?".to_owned(), path),
+            // `1 XY sub mH mI mW hH hI path`, `2 XY ... score path` and
+            // `u XY ... path` put the path after the eighth, ninth and tenth
+            // space-separated fields; paths may contain spaces.
+            Some(("1 ", rest)) => change_record(rest, 8),
+            Some(("2 ", rest)) => {
+                // The original path of a rename is its own field.
+                fields.next();
+                change_record(rest, 9)
+            }
+            Some(("u ", rest)) => change_record(rest, 10),
+            _ => continue,
+        };
+        changed = changed.saturating_add(1);
+        match status.as_str() {
+            "?" => untracked = untracked.saturating_add(1),
+            "M" => modified = modified.saturating_add(1),
+            _ => {}
+        }
+        if shown.len() < SHOWN_PATHS {
+            shown.push(ChangedPath {
+                status,
+                path: command_text(path),
+            });
+        }
+    }
+    let shown_count = u32::try_from(shown.len()).unwrap_or(u32::MAX);
+    WorktreeFacts {
+        directory: directory.display().to_string(),
+        head: head_sha.map(|sha| HeadCommit {
+            sha,
+            subject: String::new(),
+        }),
+        branch,
+        changed,
+        modified,
+        untracked,
+        omitted: changed.saturating_sub(shown_count),
+        shown,
+    }
+}
+
+/// The status letter and path of a `1`, `2` or `u` record whose text after the
+/// record type is `rest`; `leading` fields precede the path.
+fn change_record(rest: &str, leading: usize) -> (String, &str) {
+    let mut parts = rest.splitn(leading, ' ');
+    let xy = parts.next().unwrap_or("..");
+    let path = parts.last().unwrap_or("");
+    let mut letters = xy.chars();
+    let (index, tree) = (letters.next().unwrap_or('.'), letters.next().unwrap_or('.'));
+    let letter = if index == 'U' || tree == 'U' {
+        'U'
+    } else if index != '.' {
+        index
+    } else {
+        tree
+    };
+    (letter.to_string(), path)
+}
+
+/// Observe the processes and the working tree, concurrently. Always returns:
+/// a part that fails says why, and neither part can stall the other.
+pub async fn collect(observer: &WorkObserver) -> WorkFacts {
+    let scan = {
+        let observer = observer.clone();
+        tokio::task::spawn_blocking(move || scan_processes(&observer))
+    };
+    let tree = {
+        let directory = observer.directory.clone();
+        tokio::task::spawn_blocking(move || read_worktree(&directory))
+    };
+    let (processes, worktree) = tokio::join!(scan, tree);
+    WorkFacts {
+        observed_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0),
+        processes: processes
+            .unwrap_or_else(|error| Observed::unavailable(format!("process scan failed: {error}"))),
+        worktree: worktree
+            .unwrap_or_else(|error| Observed::unavailable(format!("Git read failed: {error}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    const WORKER: u32 = 100;
+
+    fn row(pid: u32, ppid: u32, age_ms: i64, marked: bool) -> ProcRow {
+        ProcRow {
+            pid,
+            ppid,
+            age_ms,
+            zombie: false,
+            marked,
+        }
+    }
+
+    fn describe(row: &ProcRow) -> Described {
+        let (command, exe) = match row.pid {
+            // The harness's own helpers.
+            101..=104 => ("hel worker acp-supervisor".to_owned(), "/bin/hel"),
+            105 => ("node bridge.js".to_owned(), "/usr/bin/node"),
+            106 => (
+                "claude --output-format stream-json".to_owned(),
+                "/cache/mjolnir/harnesses/claude/bin/claude",
+            ),
+            _ => (format!("cargo test --job {}", row.pid), "/usr/bin/cargo"),
+        };
+        Described {
+            command,
+            exe: Some(exe.into()),
+            identity: format!("boot:{}", row.pid),
+        }
+    }
+
+    // A busy host: 300 unrelated processes, the harness helpers started before
+    // the session was configured, and the agent's own work: a still-parented
+    // build and a `setsid` process that has been handed to PID 1.
+    fn busy_table() -> Vec<ProcRow> {
+        let mut rows: Vec<ProcRow> = (1000..1300)
+            .map(|pid| row(pid, 1, 500_000, false))
+            .collect();
+        rows.push(row(WORKER, 1, 900_000, false));
+        for pid in 101..=104 {
+            rows.push(row(pid, WORKER, 800_000, true));
+        }
+        rows.push(row(105, 101, 800_000, true));
+        // Started after the configuration, from the harness's own executable.
+        rows.push(row(106, 105, 10_000, true));
+        for pid in 200..210 {
+            rows.push(row(pid, 105, 10_000 + i64::from(pid), true));
+        }
+        rows.push(row(300, 1, 20_000, true));
+        rows
+    }
+
+    fn context<'a>(roots: &'a [PathBuf], own: &'a OsStr) -> ScanContext<'a> {
+        ScanContext {
+            worker_pid: WORKER,
+            harness_age_ms: Some(700_000),
+            own_exe_name: Some(own),
+            helper_roots: roots,
+        }
+    }
+
+    #[test]
+    fn processes_exclude_helpers_and_keep_exact_counts_beyond_what_is_shown() {
+        let roots = [PathBuf::from("/cache/mjolnir/harnesses")];
+        let facts = select_processes(&busy_table(), &context(&roots, OsStr::new("hel")), describe);
+        // Ten still-parented builds and the reparented process; no helper, no
+        // unrelated process among the 300.
+        assert_eq!(facts.running, 11);
+        assert_eq!(facts.identities.len(), 11);
+        assert_eq!(facts.shown.len(), SHOWN_PROCESSES);
+        assert_eq!(facts.omitted, 6);
+        // Longest running first: the detached process is 20 s old, the builds
+        // 10 s, so it leads and is the only one marked detached.
+        assert_eq!(facts.shown[0].pid, 300);
+        assert!(facts.shown[0].detached);
+        assert!(facts.shown[1..].iter().all(|process| !process.detached));
+        assert!(
+            facts
+                .identities
+                .iter()
+                .all(|identity| identity.start == format!("boot:{}", identity.pid))
+        );
+    }
+
+    #[test]
+    fn nothing_is_agent_work_before_the_harness_is_configured() {
+        let roots = [];
+        let mut context = context(&roots, OsStr::new("hel"));
+        context.harness_age_ms = None;
+        let facts = select_processes(&busy_table(), &context, describe);
+        // Only the process outside the harness tree remains.
+        assert_eq!(facts.running, 1);
+        assert_eq!(facts.shown[0].pid, 300);
+    }
+
+    #[test]
+    fn long_commands_are_redacted_and_cut() {
+        let secret = "ghp_".to_owned() + &"a1B2".repeat(12);
+        let text = command_text(&format!(
+            "curl -H token:{secret}\n  --data {}",
+            "word ".repeat(100)
+        ));
+        assert!(!text.contains(&secret), "{text}");
+        assert!(!text.contains('\n'));
+        assert_eq!(text.chars().count(), COMMAND_CHARS + 1);
+        assert!(text.ends_with('…'));
+    }
+
+    fn git(directory: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    // Git writes more than a pipe holds when thousands of paths are dirty, so
+    // a collector that writes before it reads, or that stops at the first
+    // buffer, shows up here.
+    #[test]
+    fn worktree_counts_thousands_of_dirty_paths_exactly_and_shows_eight() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path();
+        git(directory, &["init", "-q", "-b", "task"]);
+        std::fs::write(directory.join("tracked.txt"), "one\n").unwrap();
+        git(directory, &["add", "tracked.txt"]);
+        git(
+            directory,
+            &["commit", "-qm", "Fix parser, with unicode: naïve"],
+        );
+        std::fs::write(directory.join("tracked.txt"), "two\n").unwrap();
+        for index in 0..5000 {
+            std::fs::write(
+                directory.join(format!("untracked-file-with-a-long-name-{index:05}.txt")),
+                "",
+            )
+            .unwrap();
+        }
+        let Observed::Known(facts) = read_worktree(directory) else {
+            panic!("worktree unavailable");
+        };
+        assert_eq!(facts.changed, 5001);
+        assert_eq!(facts.modified, 1);
+        assert_eq!(facts.untracked, 5000);
+        assert_eq!(facts.shown.len(), SHOWN_PATHS);
+        assert_eq!(facts.omitted, 5001 - 8);
+        assert_eq!(facts.branch.as_deref(), Some("task"));
+        let head = facts.head.unwrap();
+        assert_eq!(head.sha.len(), 40);
+        assert_eq!(head.subject, "Fix parser, with unicode: naïve");
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_repository_is_unavailable_not_clean() {
+        let temp = tempfile::tempdir().unwrap();
+        match read_worktree(temp.path()) {
+            Observed::Unavailable { reason } => {
+                assert!(reason.contains("not a git repository"), "{reason}")
+            }
+            Observed::Known(facts) => {
+                panic!("reported {facts:?} for a directory outside any repository")
+            }
+        }
+    }
+
+    #[test]
+    fn renames_and_paths_with_spaces_are_one_change_each() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path();
+        git(directory, &["init", "-q"]);
+        std::fs::write(
+            directory.join("old name.txt"),
+            "content that is long enough to be a rename\n",
+        )
+        .unwrap();
+        git(directory, &["add", "."]);
+        git(directory, &["commit", "-qm", "first"]);
+        git(directory, &["mv", "old name.txt", "new name.txt"]);
+        let Observed::Known(facts) = read_worktree(directory) else {
+            panic!("worktree unavailable");
+        };
+        assert_eq!(facts.changed, 1);
+        assert_eq!(facts.shown[0].status, "R");
+        assert_eq!(facts.shown[0].path, "new name.txt");
+    }
+
+    // The case issue 1350 turned on: the agent's process has no parent in the
+    // harness tree. A real process started with `setsid` from a shell that has
+    // exited is found through its environment alone.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_real_setsid_orphan_is_found_by_its_session_marker_and_identified_like_the_park_script() {
+        let session = format!("work-facts-test-{}", std::process::id());
+        let launched = std::process::Command::new("sh")
+            .args(["-c", "setsid sleep 61 >/dev/null 2>&1 &"])
+            .env("MJ_SESSION_ID", &session)
+            .status()
+            .unwrap();
+        assert!(launched.success());
+        let observer = WorkObserver {
+            session_id: session,
+            worker_pid: std::process::id(),
+            directory: std::env::temp_dir(),
+            harness_ready_ms: Arc::new(AtomicI64::new(0)),
+        };
+        let mut found = None;
+        for _ in 0..100 {
+            if let Observed::Known(facts) = scan_processes(&observer) {
+                if facts.running == 1 {
+                    found = Some(facts);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let facts = found.expect("the orphan was not found");
+        let process = &facts.shown[0];
+        let pid = process.pid;
+        let identity = mj_core::subprocess::process_birth_identity(pid).unwrap();
+        // Stop it before asserting so a failure leaves nothing behind.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        assert!(process.detached);
+        assert_eq!(process.command, "sleep 61");
+        assert_eq!(facts.identities[0].start, identity);
+    }
+}

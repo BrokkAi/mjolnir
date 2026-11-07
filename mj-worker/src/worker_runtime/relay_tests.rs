@@ -7875,6 +7875,75 @@ async fn cpu_usage_answers_from_the_sampler_without_journaling() {
     task.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn work_facts_answer_on_the_connection_without_journaling() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+    ));
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("notes.txt"), "draft\n").unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (wake, _wakes) = mpsc::channel(1);
+    let (fatal, _errors) = mpsc::channel(1);
+    let (server, client) = tokio::net::UnixStream::pair().unwrap();
+    let task = tokio::spawn(unix::serve_client_with_memory(
+        server,
+        relay.clone(),
+        wake,
+        Err("no credentials".into()),
+        unix::ConnectionRuntime {
+            work: Some(crate::work_facts::WorkObserver {
+                session_id: SESSION_ID.into(),
+                worker_pid: std::process::id(),
+                directory: directory.path().to_path_buf(),
+                harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
+            }),
+            ..Default::default()
+        },
+        fatal,
+    ));
+    let mut client = BufReader::new(client);
+    let request = RelayRequestEnvelope {
+        request_id: "facts".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::WorkFacts,
+    };
+    let mut bytes = serde_json::to_vec(&request).unwrap();
+    bytes.push(b'\n');
+    client.get_mut().write_all(&bytes).await.unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.read_line(&mut line),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::WorkFacts { facts },
+    } = response.body
+    else {
+        panic!("{line}");
+    };
+    let tree = facts.worktree.known().expect("worktree observed");
+    assert_eq!((tree.changed, tree.untracked), (1, 1));
+    assert_eq!(tree.shown[0].path, "notes.txt");
+    assert!(facts.processes.known().is_some(), "{:?}", facts.processes);
+    assert_eq!(relay.lock().unwrap().latest_ordinal(), 0);
+    drop(client);
+    task.await.unwrap().unwrap();
+}
+
 #[test]
 fn push_gate_startup_and_environment_follow_harness_and_primary_ownership() {
     for harness in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Muse] {

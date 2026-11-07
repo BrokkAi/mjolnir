@@ -1734,6 +1734,34 @@ sys.stdin.read()
     assert_eq!(client.next_request, before);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn work_facts_from_a_protocol_54_worker_say_unavailable_without_writing_a_request() {
+    let script = format!(
+        r#"python3 -c '
+import json, sys
+req = json.loads(sys.stdin.readline())
+print(json.dumps({{"request_id":req["request_id"], "protocol_version":54, "result":"ok", "payload":{{"type":"hello", "data":{{"negotiated":54, "relay_version":"facts-old", "session_id":{session:?}}}}}}}), flush=True)
+sys.stdin.read()
+'"#,
+        session = SESSION_ID
+    );
+    let spec = CommandSpec::new("sh", ["-c", &script]).purpose("old work facts relay fixture");
+    let mut client = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let before = client.next_request;
+    let facts = client.work_facts().await.unwrap();
+    // Unknown, never zero: a parent must not read "0 processes" from a worker
+    // that cannot count them.
+    assert!(matches!(
+        &facts.processes,
+        mj_core::work_facts::Observed::Unavailable { reason } if reason.contains("protocol 54")
+    ));
+    assert!(facts.worktree.known().is_none());
+    assert_eq!(client.next_request, before);
+}
+
 // Hard-won: adc0d368: a worker whose harness preparation failed rejected
 // sub-agent polling, so its session could not sync, suspend or close.
 #[cfg(unix)]

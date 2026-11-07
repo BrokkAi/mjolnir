@@ -11,6 +11,22 @@ impl RelayClient {
         }
     }
 
+    /// What this session's agent left running and the state of its working
+    /// tree, as its worker observes them. A worker that predates the request
+    /// answers with facts that say so: that is an unknown, never a zero.
+    pub async fn work_facts(&mut self) -> Result<mj_core::work_facts::WorkFacts> {
+        if !RelayRequest::WorkFacts.supported_at(self.protocol_version) {
+            return Ok(mj_core::work_facts::WorkFacts::unavailable(format!(
+                "the worker predates work facts (relay protocol {})",
+                self.protocol_version
+            )));
+        }
+        match self.call(RelayRequest::WorkFacts).await? {
+            RelayResponsePayload::WorkFacts { facts } => Ok(facts),
+            _ => bail!("relay returned an unexpected work facts response"),
+        }
+    }
+
     pub async fn history_requests(&mut self) -> Result<Vec<mj_core::history::HistoryRequest>> {
         if !RelayRequest::HistoryRequests.supported_at(self.protocol_version) {
             return Ok(Vec::new());

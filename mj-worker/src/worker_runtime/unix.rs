@@ -847,6 +847,12 @@ pub async fn run_daemon_owned(
         durable_relay.record_observation(RelayObservation::SessionRestarted)?;
     }
 
+    let work = crate::work_facts::WorkObserver {
+        session_id: config.session_id.clone(),
+        worker_pid: std::process::id(),
+        directory: config.cwd.clone(),
+        harness_ready_ms: durable_relay.harness_ready_clock(),
+    };
     let relay = Arc::new(Mutex::new(durable_relay));
     // Client tasks are detached, so a durable failure they cannot recover
     // from has to travel back here to stop the daemon.
@@ -903,6 +909,7 @@ pub async fn run_daemon_owned(
             ConnectionRuntime {
                 project_memory,
                 cpu: Some(cpu_rx),
+                work: Some(work),
                 ..Default::default()
             },
             fatal_tx,
@@ -939,6 +946,7 @@ pub async fn run_daemon_owned(
         ConnectionRuntime {
             project_memory,
             cpu: Some(cpu_rx),
+            work: Some(work),
             preparation: Some(preparation_rx.clone()),
             preparation_cancel: Some(preparation_cancel.clone()),
             has_subagent_tools,
@@ -1943,6 +1951,7 @@ pub(super) struct ConnectionRuntime {
     pub(super) reviewer: Option<Arc<ReviewCapture>>,
     pub(super) subagents: Option<super::subagents::SubagentEndpoint>,
     pub(super) cpu: Option<tokio::sync::watch::Receiver<crate::cpu_usage::CpuRead>>,
+    pub(super) work: Option<crate::work_facts::WorkObserver>,
     pub(super) preparation: Option<watch::Receiver<PreparationSnapshot>>,
     pub(super) preparation_cancel: Option<CancellationToken>,
     pub(super) has_subagent_tools: bool,
@@ -1985,6 +1994,7 @@ pub(super) async fn serve_client_with_memory(
         reviewer,
         subagents,
         cpu,
+        work,
         preparation,
         preparation_cancel,
         has_subagent_tools,
@@ -2144,6 +2154,28 @@ pub(super) async fn serve_client_with_memory(
                 };
                 let response = RelayResponseEnvelope { request_id: envelope.request_id, protocol_version: envelope.protocol_version, body };
                 write_logged_response(&mut writer, &response, &session_id, "cpu_usage").await?;
+                continue;
+            }
+            if matches!(&envelope.request, RelayRequest::WorkFacts) {
+                // The scan reads `/proc` and runs Git, so it never runs on
+                // this loop, and it holds no relay lock. A controller that
+                // goes away cancels the wait.
+                let facts = match &work {
+                    Some(observer) => tokio::select! {
+                        facts = crate::work_facts::collect(observer) => facts,
+                        disconnected = reader.fill_buf() => match disconnected {
+                            Ok(_) => return Ok(()),
+                            Err(error) => return Err(error.into()),
+                        },
+                    },
+                    None => mj_core::work_facts::WorkFacts::unavailable("this worker does not observe work"),
+                };
+                let response = RelayResponseEnvelope {
+                    request_id: envelope.request_id,
+                    protocol_version: envelope.protocol_version,
+                    body: RelayResponseBody::Ok { payload: RelayResponsePayload::WorkFacts { facts } },
+                };
+                write_logged_response(&mut writer, &response, &session_id, "work_facts").await?;
                 continue;
             }
             if matches!(

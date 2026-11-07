@@ -5594,6 +5594,7 @@ fn credential_requests_cannot_enter_durable_relay_state() {
 
     for (request_id, request) in [
         ("cpu-usage", RelayRequest::CpuUsage),
+        ("work-facts", RelayRequest::WorkFacts),
         ("credential-state", RelayRequest::CredentialState),
         ("read-credentials", RelayRequest::ReadCredentials),
         (

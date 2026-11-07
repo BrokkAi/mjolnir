@@ -46,6 +46,8 @@ use std::fs;
 use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate};
 use anyhow::{Context, Result, anyhow, bail};
@@ -118,6 +120,10 @@ pub struct DurableRelay {
     worker_build: Option<String>,
     /// Current ACP process readiness; never recovered from the journal.
     acp_ready: bool,
+    /// Epoch milliseconds at which `acp_ready` last became true, or 0 while it
+    /// is false. The work-facts scan reads it to tell the harness's own
+    /// processes, which exist by then, from work the agent started.
+    harness_ready_ms: Arc<AtomicI64>,
     /// A bridge has connected and its session is not open yet: the load or
     /// new-session request and the model and mode applied after it. Output
     /// in this window answers no prompt (R8-4). Never recovered from the
@@ -479,6 +485,7 @@ impl DurableRelay {
             relay_version: relay_version.into(),
             worker_build: Some(mj_core::worker_build::WORKER_BUILD_ID.to_owned()),
             acp_ready: false,
+            harness_ready_ms: Arc::new(AtomicI64::new(0)),
             session_setup: false,
             checkpoint_only,
             reviewer_admissions: BTreeMap::new(),
@@ -785,9 +792,28 @@ impl DurableRelay {
         state
     }
 
+    fn set_acp_ready(&mut self, ready: bool) {
+        // A second configuration of an open session is not a new harness: the
+        // instant stays that of the first, or work started in between would
+        // read as part of the harness.
+        if ready && !self.acp_ready {
+            self.harness_ready_ms
+                .store(epoch_millis(), Ordering::Release);
+        } else if !ready {
+            self.harness_ready_ms.store(0, Ordering::Release);
+        }
+        self.acp_ready = ready;
+    }
+
+    /// The instant the harness session was last configured, shared with
+    /// connections that observe work.
+    pub fn harness_ready_clock(&self) -> Arc<AtomicI64> {
+        self.harness_ready_ms.clone()
+    }
+
     /// A stopped bridge cannot become ready again until its replacement configures.
     pub fn clear_acp_readiness(&mut self) {
-        self.acp_ready = false;
+        self.set_acp_ready(false);
         self.steering_supported = None;
         self.automatic_steering = false;
     }
@@ -1136,7 +1162,7 @@ impl DurableRelay {
         }
         let ordinal = self.append_relay_event(None, observation)?;
         if let Some(ready) = acp_ready {
-            self.acp_ready = ready;
+            self.set_acp_ready(ready);
         }
         if let Some(setup) = session_setup {
             self.session_setup = setup;
