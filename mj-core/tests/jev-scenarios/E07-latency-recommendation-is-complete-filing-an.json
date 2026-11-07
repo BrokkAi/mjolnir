@@ -268,7 +268,7 @@
   "expected": {
     "failure": "none",
     "input": "required",
-    "work": "waiting",
+    "work": "finished",
     "quiet": null,
     "action": "await_input",
     "wrong_actions": [

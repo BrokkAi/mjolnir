@@ -65,13 +65,15 @@ struct Facts {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-// These recorded answer fields remain required so fixture shape drift is
-// rejected, even though the two replay checks use different axes.
+// Unknown fields are rejected so fixture shape drift fails, even though the
+// two replay checks use different axes. Mined fixtures may leave `work`,
+// `reply` and `action` out when nobody labeled that axis.
 #[allow(dead_code)]
 struct Expected {
     failure: String,
     input: String,
-    work: String,
+    #[serde(default)]
+    work: Option<String>,
     /// What the final reply signals about whether the agent will continue now.
     #[serde(default)]
     reply: Option<String>,
@@ -82,7 +84,8 @@ struct Expected {
     /// `None` when the runtime facts were not recorded, so quiet is unknown.
     quiet: Option<bool>,
     /// The right Mjolnir action given a correct verdict.
-    action: String,
+    #[serde(default)]
+    action: Option<String>,
     /// Actions that would have been harmful on this turn.
     #[serde(default)]
     wrong_actions: Vec<String>,

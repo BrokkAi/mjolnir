@@ -349,6 +349,7 @@ def report(args):
     false_closing_valid = 0
     false_closing = 0
     input_unscored = 0
+    partially_labeled = 0
     for identity in sorted(by_id):
         fixture = fixtures.get(identity)
         if not fixture:
@@ -406,12 +407,17 @@ def report(args):
                 input_stats["detected"] += expected["input"] == "required" and required_high
                 input_stats["missed"] += expected["input"] == "required" and not required_high
                 input_stats["false_required"] += expected["input"] != "required" and required_high
-            agree = all(verdict[axis]["choice"] == expected[axis] for axis in ("failure", "input", "work"))
-            above = all(verdict[axis]["confidence"] >= ACT_CONFIDENCE for axis in ("failure", "input", "work"))
+            # Mined fixtures label only the axes someone judged; an absent work
+            # label or action is unknown, not a claim to score against.
+            labeled = [axis for axis in ("failure", "input", "work") if expected.get(axis) is not None]
+            if len(labeled) < 3 or expected.get("action") is None:
+                partially_labeled += 1
+            agree = all(verdict[axis]["choice"] == expected[axis] for axis in labeled)
+            above = all(verdict[axis]["confidence"] >= ACT_CONFIDENCE for axis in labeled)
             act = record["action"]
             stats["axes_agree"] += agree
             stats["above"] += agree and above
-            stats["action_ok"] += act == expected["action"]
+            stats["action_ok"] += expected.get("action") is not None and act == expected["action"]
             wrong = act in expected.get("wrong_actions", [])
             stats["wrong_high"] += wrong
             cells = " ".join(f"{axis[0]}={verdict[axis]['choice']}:{verdict[axis]['confidence']:.2f}" for axis in ("failure", "input", "work"))
@@ -419,14 +425,15 @@ def report(args):
                 cells += f" b={verdict['background']['choice']}:{verdict['background']['confidence']:.2f}"
                 if expected.get("background") and verdict["background"]["choice"] != expected["background"]:
                     agree = False
-            rows.append((identity, fixture["category"], record["repeat"], cells, act, expected["action"], "agree" if agree else "differ", "WRONG" if wrong else ""))
+            rows.append((identity, fixture["category"], record["repeat"], cells, act, expected.get("action") or "unlabeled", "agree" if agree else "differ", "WRONG" if wrong else ""))
     lines = ["# Jev scenario replay", "", f"Results: `{args.output / 'results.jsonl'}`", ""]
     if (args.output / "stopped.json").exists():
         stopped = json.loads((args.output / "stopped.json").read_text())
         lines += [f"Incomplete run: {stopped['reason']}. Counts below cover recorded requests only; remaining requests were not sent.", ""]
     lines += [
         f"Input is scored independently of failure and work. Detection policy: `{policy}`. Confidence columns remain separate diagnostics. Errors count as unsuccessful requests.",
-        f"Ambiguous cases excluded from strict input counts: {input_unscored} requests. Their hypothesized axes remain in the full-verdict table.", "",
+        f"Ambiguous cases excluded from strict input counts: {input_unscored} requests. Their hypothesized axes remain in the full-verdict table.",
+        f"Requests on fixtures without a work label or action: {partially_labeled}; axes agree over the labeled axes only, and action as expected counts labeled actions only.", "",
         "| expected input | requests | choice agrees | agrees >= 0.85 | required detected | required missed | false required | errors |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]

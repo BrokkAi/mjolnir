@@ -63,8 +63,8 @@
   "expected": {
     "failure": "none",
     "input": "required",
-    "work": "waiting",
-    "reply": "continuing",
+    "work": "finished",
+    "reply": "closing",
     "quiet": null,
     "action": "await_input",
     "wrong_actions": [

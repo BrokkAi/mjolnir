@@ -433,15 +433,12 @@
   "recorded_verdict": null,
   "expected": {
     "input": "required",
-    "action": "await_input",
     "wrong_actions": [
       "continue",
       "finished",
       "wait"
     ],
     "failure": "none",
-    "work": "waiting",
-    "reply": "continuing",
     "quiet": null
   },
   "known_failure": [],

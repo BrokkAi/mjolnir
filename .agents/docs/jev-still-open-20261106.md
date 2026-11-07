@@ -8,7 +8,7 @@ Does Jev recognize that a session needs the user when an agent's turn-ending rep
 
 Mined from the controller database (Mjolnir records only, never harness-native files): every agent reply in a mjolnir or bifrost-dev session that contains "still open" or "needs you" and ends a turn. 1,163 matches, 196 turn endings, 106 sessions. At most three cases per session gave 158 fixtures; `L3101` (this analysis session) and `L0102`/`L0103` (harness `deepseek`, which `HarnessKind` cannot represent) were removed, leaving 155 (`mj-core/tests/jev-scenarios/L*.json`).
 
-Labels: a first pass by straightforward children, then a blind second pass by subtle children that read every reply since the latest real user message. The passes disagreed on 27 of 145 cases, mostly first-pass `none` where a request existed, so the blind labels are authoritative. A third check of the 19 hardest misses confirmed 10, marked 7 ambiguous (excluded from strict scoring), and moved 2 to `none`. Each fixture's `outcome` keeps the label, request kind (`approval_gate`, `blocking_decision`, `user_action`, `next_work_menu`), request positions, and rationale.
+Labels: a first pass by straightforward children, then a blind second pass by subtle children that read every reply since the latest real user message. The passes disagreed on 27 of 145 cases, mostly first-pass `none` where a request existed, so the blind labels are authoritative. A third check of the 19 hardest misses confirmed 10, marked 7 ambiguous (excluded from strict scoring), and moved 2 to `none`. Each fixture's `outcome` keeps the label, request kind (`approval_gate`, `blocking_decision`, `user_action`, `next_work_menu`), request positions, and rationale. The labels cover only the input axis: `expected` gives `failure`, `input` and the harmful `wrong_actions`, and leaves `work`, `reply` and `action` out because nobody judged them (the fixture schema and `scripts/jev-scenarios-eval.py` treat an absent axis as unknown, so these fixtures do not distort the work and reply statistics).
 
 ## Baseline
 
@@ -20,7 +20,7 @@ Miss patterns: a decision stated as a fact in a closing "Still open"/"Needs your
 
 - Any approval request needs the user, whether or not the user asked for that step. Asking permission for work the user already assigned stays `redundant_request`, so automatic continuation still applies (confirmed after review).
 - A menu of next steps was to count only when the user's instructions asked for it. Measured, Jev could not separate solicited from unsolicited menus (candidate c2 flagged 1 of 14 either way), so Jonathan's fallback applies: any menu, choice, or offer awaiting the user's answer needs the user. Exceptions: already authorized work (`redundant_request`), answered or rhetorical questions, questions addressed to another agent.
-- Existing fixtures relabeled under that rule: D02, E07, E08, N01, N02 (offers after a delivered result), O01 ("I'll stop here unless you want me to watch for it"), S03 (an earlier menu still unanswered after a side question). Each records the old label in `outcome.policy`.
+- Existing fixtures relabeled under that rule: D02, E07, E08, N01, N02 (offers after a delivered result), O01 ("I'll stop here unless you want me to watch for it"), S03 (an earlier menu still unanswered after a side question). Only `input`, `action` and `wrong_actions` changed; `work` and `reply` are independent axes and keep their labels (a delivered answer that ends with an offer is still `finished` and `closing`). Each records the old label in `outcome.policy`.
 
 ## Candidates
 
@@ -36,7 +36,7 @@ The corpus was split by session into development (90 fixtures) and held-out (65)
 
 ## Result of c5 (adopted)
 
-Held-out half, three repeats: 72/84 non-menu requests (86%, baseline 50/84), 0/93 false alerts (baseline 0/93), offers 12/15 (baseline 6/15). Development half plus existing suite, two repeats: existing required 103/104, carry-over questions 24/28 (baseline 32/42), false alerts on existing `none` 7/346 (baseline 11/519). Harmful actions fell on both corpora (3/375 vs 15/465; 9/464 vs 15/696); correct `finished`, `continue`, and `wait` rates did not fall.
+Held-out half, three repeats: 72/84 non-menu requests (86%, baseline 50/84), 0/93 false alerts (baseline 0/93), offers 12/15 (baseline 6/15). Development half plus existing suite, two repeats: existing required 103/104, carry-over questions 24/28 (baseline 32/42), false alerts on existing `none` 7/346 (baseline 11/519). Harmful actions fell on both corpora (3/375 vs 15/465; 9/464 vs 15/696); on the existing suite, correct `finished`, `continue`, and `wait` rates did not fall.
 
 Remaining misses and alerts: L2308 (an evaluation lane's "decide whether the latency guard should be rerun" to its judge, 0.55 required), D15 (pausing for a pending SHA, 0.65), W16/W17 near the ratio; W01, D07 (long-standing) and W22 (1 of 2) false alerts.
 

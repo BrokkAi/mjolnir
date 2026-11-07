@@ -97,13 +97,10 @@
   "recorded_verdict": null,
   "expected": {
     "input": "none",
-    "action": "finished",
     "wrong_actions": [
       "await_input"
     ],
     "failure": "none",
-    "work": "finished",
-    "reply": "closing",
     "quiet": null
   },
   "known_failure": [],
