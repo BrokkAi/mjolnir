@@ -1021,10 +1021,9 @@ impl ProfileCatalog {
         // A failed re-probe records nothing, so the identity stays stale and
         // the next pass tries again; bound how often the re-probe repeats,
         // matching the expiry refresh cadence for persistent failures.
-        // Launches and failed re-probes arm the window, against the digest
-        // that made the identity stale; a pass whose current digest differs
-        // from the armed one is a fresh edit and bypasses the window, and a
-        // launch re-arms against the new digest. An identity observed
+        // Only failures arm the window, against the digest they were
+        // correcting: a pass whose current digest differs from the armed
+        // one is a fresh edit and bypasses it. An identity observed
         // converged this pass has nothing left to retry: its window is
         // cleared before deciding what launches, so a follow-up edit after
         // a success re-probes on the next pass instead of waiting it out.
@@ -1033,7 +1032,6 @@ impl ProfileCatalog {
             .flat_map(|identities| identities.iter().map(String::as_str))
             .collect();
         let now = tokio::time::Instant::now();
-        let retry_wait = self.home_edit_retry_wait();
         let due: Vec<String> = {
             let mut inner = self.lock();
             inner.home_edit_retry_after.retain(|identity, _| {
@@ -1053,13 +1051,14 @@ impl ProfileCatalog {
                 .cloned()
                 .collect()
         };
-        let launched = if due.is_empty() {
-            Vec::new()
-        } else {
+        if !due.is_empty() {
             let due: BTreeSet<&str> = due.iter().map(String::as_str).collect();
-            self.refresh(|key, _| due.contains(key.0.as_str()))
-        };
-        let launched_identities: BTreeSet<String> = launched.into_iter().map(|key| key.0).collect();
+            // No window is armed here: the refreshing map already keeps the
+            // launched probes from doubling, and a failure re-arms with the
+            // digest it was correcting. Arming a successful launch would let
+            // the window suppress a lagging sibling that never failed.
+            self.refresh(|key, _| due.contains(key.0.as_str()));
+        }
         let mut inner = self.lock();
         for (home, files) in updates {
             inner.home_stats.insert(home, files);
@@ -1072,12 +1071,6 @@ impl ProfileCatalog {
         inner
             .home_settled
             .retain(|key, _| watched.contains(key.0.as_str()));
-        for identity in launched_identities {
-            let armed = digest_by_identity.get(&identity).copied();
-            inner
-                .home_edit_retry_after
-                .insert(identity, (now + retry_wait, armed));
-        }
     }
 
     /// How long after a failed edit re-probe the home watch tries again.
@@ -2818,6 +2811,83 @@ mod tests {
         // and re-probes from the current home. This pass's probes are
         // spawned, so convergence proves they ran.
         catalog.watch_homes();
+        converge_on(&catalog, "solo", "solo-second").await;
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+    }
+
+    // Hard-won: #1337 review: an edit landing while one entry's probe was
+    // in flight re-armed the retry window at launch, so the lagging entry
+    // — which never failed — waited out the window behind its sibling.
+    #[tokio::test]
+    async fn a_lagging_entry_reprimes_on_the_next_pass_after_its_sibling_launched() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_home_model(root, "solo", "solo-first");
+        let calls = calls();
+        let (config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
+        let (release, gate) = tokio::sync::watch::channel(true);
+        let held_homes = homes.clone();
+        let model_homes = homes;
+        let held_calls = calls.clone();
+        let model_calls = calls.clone();
+        let catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            Arc::new(move |profile| {
+                let homes = held_homes.clone();
+                let mut gate = gate.clone();
+                let calls = held_calls.clone();
+                Box::pin(async move {
+                    // Count after the read so a test can tell the home was
+                    // read before it edits the file.
+                    let choices = read_home_choices(&homes, &profile)?;
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if !*gate.borrow_and_update() {
+                        let _ = gate.changed().await;
+                    }
+                    Ok(choices)
+                })
+            }),
+            Arc::new(move |profile, model| {
+                model_calls.fetch_add(1, Ordering::SeqCst);
+                let homes = model_homes.clone();
+                Box::pin(async move {
+                    let mut choices = read_home_choices(&homes, &profile)?;
+                    choices.model = Some(model);
+                    Ok(choices)
+                })
+            }),
+        );
+        catalog.sync_now(&config).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        catalog.watch_homes();
+
+        // An expiry-style refresh holds the default entry's probe in flight,
+        // having read the home before the edit.
+        release.send(false).unwrap();
+        catalog.refresh(|key, _| key.1.is_none());
+        while calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+        write_home_model(root, "solo", "solo-second");
+        catalog.watch_homes();
+        // The pass joins the held probe and launches only the sibling.
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        // Let the held probe publish the pre-edit answer it already read;
+        // the sibling publishes the edit.
+        release.send(true).unwrap();
+        while !catalog.lock().refreshing.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        // The held probe published the pre-edit answer; the sibling
+        // published the edit. Nothing failed, so no window bounds the
+        // lagging entry: the next pass re-probes it. The lagging default
+        // probe counts after it reads, so convergence proves both ran.
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "the next pass launches the lagging entry's re-probe at once"
+        );
         converge_on(&catalog, "solo", "solo-second").await;
         assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
