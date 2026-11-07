@@ -225,6 +225,37 @@ profile home, and is passed to new and resumed Claude sessions as
 `CLAUDE_CODE_OAUTH_TOKEN`. It authorizes model requests; it does not enable
 Claude Remote Control or claude.ai connectors.
 
+## SSH host keys are trusted on first use
+
+By default, Mjolnir's own SSH connections accept a host key they have never
+seen, record it in `known_hosts`, and refuse a key that later changes
+(`StrictHostKeyChecking=accept-new`). That covers its connections to SSH
+machines and EC2 instances, whose key is always new at first contact, and the
+Git fetches it runs for its clone cache and checkpoint checks, whether those run
+on the controller or on an SSH machine that hosts a target's containers. Someone
+who can intercept a first connection can present their own key, and it is
+trusted from then on. Other Git commands that run on a target follow that
+target's own SSH settings. A `StrictHostKeyChecking` option in a machine's
+`extra_args` (or an EC2 machine's `ssh_args`) changes the checking for
+Mjolnir's connections to that machine. Setting `GIT_SSH_COMMAND` does not
+reliably change it for Mjolnir's Git fetches: some of them set their own
+command.
+
+A key that is already in `known_hosts` is checked, not trusted anew, unless an
+SSH option you set turns checking off. To avoid first-use trust:
+
+- Before the first connection, add the verified key of each Git host and each
+  machine to the `known_hosts` file of the account Mjolnir uses, on every
+  machine involved: the controller and each SSH machine you use as a target.
+  Take the expected fingerprint from a source you trust, such as the SSH key
+  fingerprints your Git host publishes, and compare it with the key you add.
+  `ssh-keyscan` only reports what the network presents, so it is not a check by
+  itself.
+- To refuse unknown keys outright on an SSH machine, add
+  `"-o", "StrictHostKeyChecking=yes"` to its `extra_args`; Mjolnir puts
+  `extra_args` first, so it wins. EC2 machines take the same option in
+  `ssh_args`. This covers Mjolnir's connection to the machine, not Git.
+
 ## Isolated sessions use independent network clones
 
 A bundle repository declared with `local = "/absolute/path"` supplies its
