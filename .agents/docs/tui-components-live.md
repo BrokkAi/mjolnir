@@ -9,8 +9,8 @@ python3 tests/e2e/tui_components_tmux.py --seed 515
 
 On a busy host the fixed waits (15 s for the TUI, 20 s for the lab, 8 s in the
 dialog probes) can expire before a daemon or session is up. Set
-`MJ_E2E_TIMEOUT_SCALE=4` to multiply every wait; the default, 1, changes
-nothing. Run it from a quiet shell too: the lab removes the host session's
+`MJ_E2E_TIMEOUT_SCALE=4` to multiply the waits of 20 s or less (the 150 s review
+waits are left alone); the default, 1, changes nothing. Run it from a quiet shell too: the lab removes the host session's
 `CLAUDE*`, `CODEX_*` and `MJ_*` variables from the daemon's environment, so a
 real profile is not picked up.
 

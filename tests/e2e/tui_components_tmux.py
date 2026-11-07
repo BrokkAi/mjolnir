@@ -246,7 +246,7 @@ class TmuxController:
             # is scoped to the unique socket and is the fallback for a wedged
             # pane, including failure paths.
             self.run("kill-server", check=False)
-            deadline = time.monotonic() + 2
+            deadline = time.monotonic() + 2 * TIMEOUT_SCALE
             while self.socket_path.exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
         if self.run("list-sessions", check=False).returncode == 0:
