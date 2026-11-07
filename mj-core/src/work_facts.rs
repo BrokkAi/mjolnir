@@ -465,3 +465,43 @@ fn render_worktree(tree: &WorktreeFacts) -> Vec<String> {
     }
     lines
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hard-won: a195a62bc: a process that was gone after the park was reported
+    // as stopped by it, though it may have exited on its own before the check.
+    #[test]
+    fn a_process_that_is_gone_is_never_said_to_have_been_stopped_by_the_park() {
+        let process = |pid: u32| RunningProcess {
+            pid,
+            elapsed_secs: 3,
+            command: "cargo build".into(),
+            detached: false,
+        };
+        let snapshot = Observed::Known(ProcessFacts {
+            unattributed: 0,
+            running: 2,
+            shown: vec![process(10), process(11)],
+            omitted: 0,
+            identities: vec![
+                ProcessIdentity {
+                    pid: 10,
+                    start: "boot:10".into(),
+                },
+                ProcessIdentity {
+                    pid: 11,
+                    start: "boot:11".into(),
+                },
+            ],
+        });
+        let park = ParkFacts::settled(snapshot, &[11]);
+        let text = park.message_lines().join("\n") + &park.render_lines().join("\n");
+        assert!(!text.contains("Parking stopped"), "{text}");
+        assert!(!text.contains("stopped by"), "{text}");
+        assert!(text.contains("no longer running"), "{text}");
+        assert!(text.contains("cannot tell whether the park stopped"), "{text}");
+        assert_eq!((park.gone, park.survived), (1, 1));
+    }
+}
