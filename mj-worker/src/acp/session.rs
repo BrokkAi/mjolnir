@@ -561,26 +561,34 @@ pub(super) async fn serve_session(
     )
     .await?
     {
-        // A new session the harness refuses the mode for keeps the harness's
-        // own mode rather than failing the worker, which left a resumed
-        // session suspended on every retry (R8-2). A reloaded session still
-        // fails: it has history, opened in this mode before.
-        if resumed {
-            return Err(refusal.error);
-        }
-        emit_runtime_event(
-            events,
-            RuntimeEvent::Warning {
-                message: refused_policy_warning(
-                    spec.harness,
-                    enforcement,
-                    &refusal,
-                    modes.as_ref(),
-                    &config_options,
-                ),
-            },
+        // A session the harness refuses the mode for stays usable rather than
+        // failing the worker, which left a resumed session suspended on every
+        // retry (R8-2). Claude takes its default mode, new or reloaded, so a
+        // restored mode such as bypassPermissions never survives. Another
+        // harness keeps its own mode for a new session; a reloaded one fails,
+        // since it opened in this mode before.
+        let message = match take_safe_mode(
+            connection,
+            &session_id,
+            spec.harness,
+            enforcement,
+            &mut config_options,
+            &mut modes,
+            &refusal,
         )
-        .await?;
+        .await?
+        {
+            Some(message) => message,
+            None if resumed => return Err(refusal.error),
+            None => refused_policy_warning(
+                spec.harness,
+                enforcement,
+                &refusal,
+                modes.as_ref(),
+                &config_options,
+            ),
+        };
+        emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
     }
     let memory = if spec.clear_context_request.is_some() && spec.harness != HarnessKind::Claude {
         if let Some(memory) = spec.project_memory.clone() {

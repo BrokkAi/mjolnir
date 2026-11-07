@@ -792,6 +792,15 @@ impl PlanProbe {
             assert_eq!(mode["params"]["value"], enforced);
             if refuse_mode {
                 probe.refuse(&mode).await;
+                // Claude answers a refusal by taking its default mode.
+                if harness == HarnessKind::Claude {
+                    let default = probe.message().await;
+                    assert_eq!(default["method"], "session/set_config_option");
+                    assert_eq!(default["params"]["value"], "default");
+                    probe
+                        .result(&default, json!({"configOptions": mode_config("default")}))
+                        .await;
+                }
             } else {
                 probe
                     .result(&mode, json!({"configOptions": mode_config(enforced)}))

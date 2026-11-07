@@ -1641,22 +1641,21 @@ async fn a_mode_the_harness_refuses_for_a_new_session_leaves_its_default_mode_an
 #[tokio::test]
 async fn resume_and_context_restore_preserve_only_active_plan_under_guardian() {
     // A bridge that offers Plan only on its `mode` selector saves it among
-    // the selectors, not as the context's mode.
-    for (resume_plan, saved_mode, saved_selectors, expected) in [
-        (true, None, vec![], "plan"),
-        (false, Some("plan"), vec![], "plan"),
-        (
-            false,
-            None,
-            vec![("mode".to_owned(), "plan".to_owned())],
-            "plan",
-        ),
-        (false, Some("acceptEdits"), vec![], "auto"),
+    // the selectors, not as the context's mode. A bridge that refuses Auto
+    // would leave a restored bypassPermissions behind; the session takes
+    // Claude's default mode instead.
+    let selector = |value: &str| vec![("mode".to_owned(), value.to_owned())];
+    for (resume_plan, saved_mode, saved_selectors, refuse_auto, expected) in [
+        (true, None, vec![], false, "plan"),
+        (false, Some("plan"), vec![], false, "plan"),
+        (false, None, selector("plan"), false, "plan"),
+        (false, Some("acceptEdits"), vec![], false, "auto"),
+        (false, None, selector("bypassPermissions"), true, "default"),
     ] {
         let root = tempfile::tempdir().unwrap();
         let mut spec = launch(
             root.path(),
-            claude_mode_harness(root.path(), false, resume_plan),
+            claude_mode_harness(root.path(), refuse_auto, resume_plan),
             AcceptedSessionConfig {
                 model: Some("sonnet".into()),
                 effort: None,

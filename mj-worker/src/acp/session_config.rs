@@ -811,6 +811,42 @@ pub(super) fn refused_policy_warning(
 /// is never looser than the policy, and Plan can always be left.
 const PLAN_EXIT_DEFAULT_MODE: &str = "default";
 
+/// Answer a refused policy mode. Claude takes its default mode, which asks
+/// before every change, so whatever mode the session held (a restored
+/// bypassPermissions included) never outlives the refusal. Returns the
+/// warning to show, or `None` for a harness with no such safe mode, whose
+/// caller decides.
+pub(super) async fn take_safe_mode(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    config_options: &mut Vec<SessionConfigOption>,
+    modes: &mut Option<SessionModeState>,
+    refusal: &ModeRefusal,
+) -> Result<Option<String>> {
+    if harness != HarnessKind::Claude {
+        return Ok(None);
+    }
+    enforce_execution_mode(
+        connection,
+        session_id,
+        harness,
+        None,
+        PLAN_EXIT_DEFAULT_MODE,
+        config_options,
+        modes,
+    )
+    .await?;
+    Ok(Some(refused_policy_warning(
+        harness,
+        enforcement,
+        refusal,
+        modes.as_ref(),
+        config_options,
+    )))
+}
+
 /// Leave Plan for the policy mode, returning the warning to show when the
 /// harness refused it and the session took Claude's default mode instead.
 /// A policy that sets no mode leaves Plan for the harness default.
@@ -850,31 +886,25 @@ pub(super) async fn leave_plan_for_policy(
     else {
         return Ok(None);
     };
-    if harness != HarnessKind::Claude {
-        return Err(refusal.error);
-    }
-    enforce_execution_mode(
+    match take_safe_mode(
         connection,
         session_id,
         harness,
-        None,
-        PLAN_EXIT_DEFAULT_MODE,
+        enforcement,
         config_options,
         modes,
-    )
-    .await?;
-    Ok(Some(refused_policy_warning(
-        harness,
-        enforcement,
         &refusal,
-        modes.as_ref(),
-        config_options,
-    )))
+    )
+    .await?
+    {
+        Some(warning) => Ok(Some(warning)),
+        None => Err(refusal.error),
+    }
 }
 
 /// Reassert the policy after the session's model moved. A harness that
-/// refuses the policy mode keeps its own mode with a warning, as at startup:
-/// the session stays usable instead of ending.
+/// refuses the policy mode stays usable with a warning instead of ending:
+/// Claude takes its default mode, another harness keeps its own.
 ///
 /// A model change can move the bridge's mode, and its answer need not say
 /// so (a legacy mode list, or an empty catalogue the worker keeps its own
@@ -906,13 +936,26 @@ pub(super) async fn reconcile_execution_policy(
     else {
         return Ok(());
     };
-    let message = refused_policy_warning(
+    let message = match take_safe_mode(
+        connection,
+        session_id,
         harness,
         enforcement,
-        &refusal,
-        modes.as_ref(),
         config_options,
-    );
+        modes,
+        &refusal,
+    )
+    .await?
+    {
+        Some(message) => message,
+        None => refused_policy_warning(
+            harness,
+            enforcement,
+            &refusal,
+            modes.as_ref(),
+            config_options,
+        ),
+    };
     emit_runtime_event(events, RuntimeEvent::Warning { message }).await
 }
 
