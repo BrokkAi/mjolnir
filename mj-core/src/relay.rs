@@ -110,11 +110,11 @@ pub const RELAY_TURN_CAPTURE_REMOVED_PROTOCOL: u32 = 53;
 /// child failed) under its own heading, and says when a child whose turn
 /// failed can still take a message. Older workers get the report as text.
 pub const RELAY_SUBAGENT_REPORT_STATE_PROTOCOL: u32 = 54;
-/// 56 adds the connection-only WorkFacts request (the processes a session's
+/// 55 adds the connection-only WorkFacts request (the processes a session's
 /// agent left running and its working tree) and the SubagentParked mailbox
 /// body and finish-report facts that carry its answers. Older workers get
 /// those events as text.
-pub const RELAY_WORK_FACTS_PROTOCOL: u32 = 56;
+pub const RELAY_WORK_FACTS_PROTOCOL: u32 = 55;
 pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_WORK_FACTS_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
