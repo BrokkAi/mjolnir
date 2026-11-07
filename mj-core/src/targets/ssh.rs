@@ -907,15 +907,34 @@ pub fn is_runtime_container_id(value: &str) -> bool {
 /// command never produces it, so the remote side provably never ran.
 pub const SSH_TRANSPORT_EXIT_STATUS: i32 = 255;
 
-/// Stderr fragments OpenSSH prints when the server hangs up before
-/// authentication. `sshd`'s `MaxStartups` produces exactly these when it drops
-/// an unauthenticated connection, and so does a server that is still starting.
-const TRANSPORT_REJECTION_MARKERS: [&str; 4] = [
-    "Connection closed by",
-    "Connection reset by",
-    "kex_exchange_identification",
-    "Connection timed out during banner exchange",
-];
+/// Stderr lines OpenSSH prints only when the server hangs up before
+/// authentication. `sshd`'s `MaxStartups` produces these when it drops an
+/// unauthenticated connection, and so does a server that is still starting.
+///
+/// The packet layer reports a close or reset during key exchange or
+/// authentication as "Connection closed by ADDR port N" or "Connection reset
+/// by ADDR port N". Once the session runs, the client reports the same events
+/// differently ("Connection to HOST closed by remote host.", "Read from remote
+/// host HOST: Connection reset by peer"), and those must not match: the remote
+/// command may already be running, even if its start marker never arrived.
+fn is_pre_authentication_hangup(line: &str) -> bool {
+    if line.contains("kex_exchange_identification")
+        || line.contains("Connection timed out during banner exchange")
+    {
+        return true;
+    }
+    ["Connection closed by ", "Connection reset by "]
+        .iter()
+        .any(|prefix| {
+            line.split_once(prefix).is_some_and(|(_, peer)| {
+                peer.trim_end()
+                    .rsplit_once(" port ")
+                    .is_some_and(|(_, port)| {
+                        !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())
+                    })
+            })
+        })
+}
 
 /// Whether a finished `ssh` process was turned away by the transport rather
 /// than by the remote command.
@@ -1210,9 +1229,9 @@ pub fn ssh_refusal_in_stderr(stderr: &str) -> Option<SshRefusal> {
     if stderr.contains(SESSION_REFUSAL_MARKER) {
         return Some(SshRefusal::SessionLimit);
     }
-    TRANSPORT_REJECTION_MARKERS
-        .iter()
-        .any(|marker| stderr.contains(marker))
+    stderr
+        .lines()
+        .any(is_pre_authentication_hangup)
         .then_some(SshRefusal::BeforeAuthentication)
 }
 
@@ -4075,9 +4094,10 @@ mod tests {
         );
     }
 
+    // Hard-won: 75da0c2b0: a reset after the remote command started was read as a pre-authentication refusal and the command ran again
     #[test]
     fn transport_rejection_matches_only_sshd_hangups() {
-        let cases: [(i32, &str, bool); 7] = [
+        let cases: [(i32, &str, bool); 10] = [
             (255, "Connection closed by 192.168.1.77 port 22", true),
             (
                 255,
@@ -4093,6 +4113,18 @@ mod tests {
                 false,
             ),
             (1, "Connection closed by 192.168.1.77 port 22", false),
+            // The same events once the session runs: the command may have started.
+            (255, "Connection to h closed by remote host.", false),
+            (
+                255,
+                "Read from remote host h: Connection reset by peer",
+                false,
+            ),
+            (
+                255,
+                "client_loop: send disconnect: Connection reset by peer",
+                false,
+            ),
         ];
         for (status, stderr, expected) in cases {
             assert_eq!(
