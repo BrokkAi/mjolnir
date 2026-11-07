@@ -1669,6 +1669,12 @@ pub fn resolve_machine_input_path(
 
 fn execute_checked(executor: &impl CommandExecutor, command: CommandSpec) -> Result<CommandOutput> {
     let output = executor.execute(&command)?;
+    check_output(&command, output)
+}
+
+/// `output` of `command` when it succeeded, otherwise the error its stderr
+/// describes.
+fn check_output(command: &CommandSpec, output: CommandOutput) -> Result<CommandOutput> {
     if output.status != 0 {
         let detail = command_error_detail(&output.stderr);
         if detail.is_empty() {

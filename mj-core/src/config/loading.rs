@@ -372,10 +372,23 @@ pub fn validate_relative_destination(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether a bundle repository's `github` value may load.
+///
+/// The shared GitHub parser is tried first. The looser rule after it keeps
+/// loading every value that loaded before the parser existed, because a
+/// rejected value here fails the whole configuration: anything with exactly
+/// one `/`, such as `git@gitlab.com:o/r`, which resolution uses as a plain
+/// Git URL, or a shorthand with a name GitHub would not allow, which
+/// resolution rejects when the repository is used.
 pub(super) fn is_github_source(source: &str) -> bool {
     let source = source.trim();
     if source.is_empty() || source.starts_with('-') || source.chars().any(char::is_whitespace) {
         return false;
+    }
+    if crate::remote_git::parse_github_remote(source, crate::remote_git::Shorthand::Allowed)
+        .is_some()
+    {
+        return true;
     }
     let repository_path = source
         .strip_prefix("https://github.com/")

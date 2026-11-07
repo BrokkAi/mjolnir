@@ -38,7 +38,7 @@ impl RelayClient {
         handshake_timeout: Duration,
     ) -> Result<Self> {
         let purpose = format!("{} for session {expected_session_id}", spec.purpose);
-        let mut refusals = 0;
+        let mut refusals = mj_core::targets::SshRefusalRetry::for_command(spec);
         let mut socket_waits = 0;
         loop {
             let outcome = Self::connect_attempt(
@@ -46,6 +46,7 @@ impl RelayClient {
                 expected_session_id,
                 request_timeout,
                 handshake_timeout,
+                refusals.walk(),
             )
             .await;
             let (error, retry) = match outcome {
@@ -57,20 +58,23 @@ impl RelayClient {
                 }) => (error, retry),
             };
             let delay = match retry {
-                // Logged by the routine every other refused ssh command uses:
-                // a MaxSessions refusal is routine while sessions start and
-                // goes to debug, one before authentication stays a warning
-                // (R7-1).
-                ConnectRetry::Refused(refusal, stderr) => {
-                    refusals += 1;
+                // The shared routine every refused ssh command uses decides
+                // the wait and the logging: a MaxSessions refusal is routine
+                // while sessions start and goes to debug, one before
+                // authentication stays a warning (R7-1). A refusal that lasts
+                // its time bound fails the connect with the error naming its
+                // causes; the caller that no longer wants the worker ends the
+                // retries sooner by dropping this future.
+                ConnectRetry::Refused {
+                    refusal,
+                    stderr,
+                    walks_on,
+                } => {
                     let destination = spec.ssh_destination.as_deref().unwrap_or_default();
-                    if refusals == SSH_RETRY_ATTEMPTS {
-                        refusal.log_exhausted(destination, &purpose, &stderr);
-                        return Err(error);
+                    match refusals.next(refusal, walks_on, destination, &purpose, &stderr) {
+                        Ok(delay) => delay,
+                        Err(persisted) => return Err(error.context(persisted)),
                     }
-                    let delay = mj_core::targets::ssh_retry_delay(refusals);
-                    refusal.log_retry(destination, &purpose, refusals, delay, &stderr);
-                    delay
                 }
                 ConnectRetry::SocketMissing => {
                     let Some(&delay) = WORKER_SOCKET_RETRY_DELAYS.get(socket_waits) else {
@@ -85,6 +89,10 @@ impl RelayClient {
                         return Err(error);
                     };
                     socket_waits += 1;
+                    // The session ran, so its shard accepted it: only a
+                    // refusal advances the walk. The retry starts on the same
+                    // shard instead of visiting, and maybe opening, another.
+                    refusals.walk().retry_last_shard();
                     tracing::debug!(
                         session_id = %expected_session_id,
                         purpose = %purpose,
@@ -103,46 +111,43 @@ impl RelayClient {
     ///
     /// When the proxy runs over a shared SSH connection, a session is leased
     /// first (opening a master if needed) and kept for the life of the
-    /// proxy. An admission permit is then taken before the proxy is spawned
-    /// and released once hello completes: `sshd` counts only unauthenticated
-    /// connections against `MaxStartups`, so the long-lived relay stops
-    /// occupying a slot as soon as it is authenticated and talking.
+    /// proxy.
     pub(super) async fn connect_attempt(
         spec: &CommandSpec,
         expected_session_id: &str,
         request_timeout: Duration,
         handshake_timeout: Duration,
+        walk: &mut mj_core::targets::SshWalk,
     ) -> std::result::Result<Self, ConnectFailure> {
-        let Some(destination) = spec
-            .ssh_destination
-            .clone()
-            // SSH runs on the node, which leases the session and the
-            // admission slot itself, beside the connection it shares.
-            .filter(|_| mj_core::targets::command_host(spec).is_none())
-        else {
+        // SSH that runs on the node is leased there, beside the connection
+        // it shares.
+        if spec.ssh_destination.is_none() || mj_core::targets::command_host(spec).is_some() {
             return Self::spawn_and_handshake(
                 spec,
                 expected_session_id,
                 request_timeout,
                 handshake_timeout,
                 None,
-                None,
             )
             .await;
-        };
+        }
         let requested = spec.clone();
         let executor =
             crate::targets::CancellableProcessExecutor::with_timeout(SSH_MASTER_OPEN_TIMEOUT);
         let _cancel_preparation = executor.cancel_on_drop();
+        let mut walked = std::mem::take(walk);
         let prepared = tokio::task::spawn_blocking(move || {
-            // Lease before taking the permit: opening a master takes a
-            // permit of its own.
-            let (spec, lease) = requested.open_ssh_session(&executor)?.into_parts();
-            let permit = SshAdmission::acquire_unless(&destination, &|| executor.is_cancelled())?;
-            Ok::<_, anyhow::Error>((spec, lease, permit))
+            let prepared = requested
+                .open_ssh_session(&executor, &mut walked)
+                .map(mj_core::targets::SessionCommand::into_parts);
+            (prepared, walked)
         })
         .await;
-        let (spec, lease, permit) = match prepared {
+        let prepared = prepared.map(|(prepared, walked)| {
+            *walk = walked;
+            prepared
+        });
+        let (spec, lease) = match prepared {
             Ok(Ok(prepared)) => prepared,
             Ok(Err(error)) => {
                 return Err(ConnectFailure::plain(
@@ -151,7 +156,7 @@ impl RelayClient {
             }
             Err(error) => {
                 return Err(ConnectFailure::plain(anyhow!(
-                    "SSH admission for the relay proxy was cancelled: {error}"
+                    "SSH session preparation for the relay proxy failed: {error}"
                 )));
             }
         };
@@ -160,7 +165,6 @@ impl RelayClient {
             expected_session_id,
             request_timeout,
             handshake_timeout,
-            Some(permit),
             lease,
         )
         .await
@@ -171,7 +175,6 @@ impl RelayClient {
         expected_session_id: &str,
         request_timeout: Duration,
         handshake_timeout: Duration,
-        permit: Option<SshPermit>,
         ssh_session: Option<SshSessionLease>,
     ) -> std::result::Result<Self, ConnectFailure> {
         let proxy::ProxyStdio {
@@ -179,16 +182,18 @@ impl RelayClient {
             stdin: input,
             stdout: output,
             stderr: errors,
-        } = proxy::spawn_proxy(spec).await.map_err(|error| {
-            tracing::warn!(
-                session_id = %expected_session_id,
-                operation = "connect",
-                purpose = %spec.purpose,
-                error = %format!("{error:#}"),
-                "could not start relay proxy"
-            );
-            error
-        })?;
+        } = proxy::spawn_session_proxy(spec, ssh_session.as_ref())
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    session_id = %expected_session_id,
+                    operation = "connect",
+                    purpose = %spec.purpose,
+                    error = %format!("{error:#}"),
+                    "could not start relay proxy"
+                );
+                error
+            })?;
         let stderr_tail: ProxyStderrTail = Default::default();
         let handshake_done = Arc::new(AtomicBool::new(false));
         let draining = Some({
@@ -242,9 +247,6 @@ impl RelayClient {
             .await
         {
             Ok(()) => {
-                // Hello succeeded, so this connection is past authentication
-                // and no longer counts against the server's startup budget.
-                drop(permit);
                 handshake_done.store(true, Ordering::Release);
                 // The drain task keeps logging for the life of the connection.
                 Ok(client)
@@ -273,23 +275,31 @@ impl RelayClient {
                 };
                 let tail = Self::proxy_stderr_tail(draining, &stderr_tail).await;
                 let stderr = tail.join("\n");
-                // Only an SSH launch can be turned away by the transport.
+                // Only an SSH launch can be turned away by the transport, and a
+                // session whose command printed the start marker has started:
+                // its exit 255 is a failure of the worker, not a refusal.
                 let refusal = spec
                     .ssh_destination
                     .as_ref()
                     .and(status)
-                    .and_then(|status| ssh_refusal(status, &stderr));
-                drop(permit);
-                // A session turned away by the transport usually means its
-                // master died; make the retry check and reopen it.
-                if refusal == Some(SshRefusal::BeforeAuthentication)
-                    && let Some(lease) = &client.ssh_session
-                {
-                    lease.invalidate();
-                }
+                    .and_then(|status| match &client.ssh_session {
+                        Some(lease) => lease.gate().refusal(status, &stderr),
+                        None => ssh_refusal(status, &stderr),
+                    });
+                // The lease tells the ledger what the refusal means: a dead
+                // master is rechecked, and a full one sends the next attempt
+                // down the walk to another master.
+                let walks_on = match (refusal, &client.ssh_session) {
+                    (Some(refusal), Some(lease)) => lease.note_refusal(refusal),
+                    _ => false,
+                };
                 let error = Self::attach_proxy_stderr(error, tail);
                 let retry = match refusal {
-                    Some(refusal) => Some(ConnectRetry::Refused(refusal, stderr)),
+                    Some(refusal) => Some(ConnectRetry::Refused {
+                        refusal,
+                        stderr,
+                        walks_on,
+                    }),
                     None if status.is_some() && worker_socket_missing(&stderr) => {
                         Some(ConnectRetry::SocketMissing)
                     }
