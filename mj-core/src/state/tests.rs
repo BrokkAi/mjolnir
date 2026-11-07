@@ -1111,6 +1111,12 @@ fn git_remote_keeps_the_identities_stored_for_each_remote_spelling() {
                 "ssh://ssh.github.com:443/o/r",
             )),
         ),
+        // An owner/repo parse must not turn this route into the GitHub
+        // identity: identities are stored, and it was a network remote.
+        (
+            "git@ssh.github.com:o/r.git",
+            Some(("git:ssh.github.com:o/r", "r", "ssh.github.com:o/r")),
+        ),
         ("https://GITHUB.com/O/R", Some(("github:o/r", "R", "O/R"))),
         ("./o/r", None),
         ("/o/r", None),

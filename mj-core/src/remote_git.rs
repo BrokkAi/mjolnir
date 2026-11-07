@@ -454,15 +454,16 @@ pub fn parse_github_remote(source: &str, shorthand: Shorthand) -> Option<GithubR
             Some(_) => return None,
             None => authority,
         };
-        if !host.eq_ignore_ascii_case("github.com") {
+        // `ssh.github.com` is GitHub's SSH-over-443 endpoint; the person's SSH
+        // configuration selects the port for this spelling.
+        let host = if host.eq_ignore_ascii_case("github.com") {
+            GithubHost::GithubCom
+        } else if host.eq_ignore_ascii_case("ssh.github.com") {
+            GithubHost::SshGithubCom
+        } else {
             return None;
-        }
-        (
-            GithubSpelling::Scp,
-            GithubHost::GithubCom,
-            None,
-            path.to_owned(),
-        )
+        };
+        (GithubSpelling::Scp, host, None, path.to_owned())
     } else if shorthand == Shorthand::Allowed && !source.contains('@') {
         (
             GithubSpelling::Shorthand,
@@ -765,7 +766,11 @@ mod tests {
             ("https://github.example.com/o/r", None, false),
             ("https://notgithub.com/o/r", None, false),
             ("git@gitlab.com:o/r", None, false),
-            ("git@ssh.github.com:o/r", None, false),
+            (
+                "git@ssh.github.com:o/r",
+                Some("o/r Scp SshGithubCom None"),
+                false,
+            ),
             ("alice@github.com:o/r", None, false),
             ("ssh://alice@github.com/o/r", None, false),
             ("git://github.com/o/r", None, false),
