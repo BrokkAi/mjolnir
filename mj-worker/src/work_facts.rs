@@ -578,11 +578,11 @@ mod tests {
         };
         let mut found = None;
         for _ in 0..100 {
-            if let Observed::Known(facts) = scan_processes(&observer) {
-                if facts.running == 1 {
-                    found = Some(facts);
-                    break;
-                }
+            if let Observed::Known(facts) = scan_processes(&observer)
+                && facts.running == 1
+            {
+                found = Some(facts);
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }

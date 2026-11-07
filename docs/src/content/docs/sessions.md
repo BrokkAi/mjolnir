@@ -202,7 +202,15 @@ sub-agent holds hundreds of processes and threads against the container's
 process limit, even when it is only waiting. So when a sub-agent's turn ends
 and its parent has been told, Mjolnir parks it:
 
-- Its worker and harness stop, so it holds no processes.
+- Its worker and harness stop, so it holds no harness processes. The park
+  stops what is still running under the harness. A process the agent started
+  detached, for example with `setsid`, is not part of that tree and may keep
+  running, so before it parks the child Mjolnir asks its worker which
+  processes the agent left running and what its working tree holds, and
+  records both. The report the parent receives lists them as Mjolnir's
+  observation, ahead of the child's own text; after the park, `list_agents`
+  shows what the park stopped and what survived, and the parent gets one more
+  message when the park stopped or spared a process.
 - Its conversation, its report, and the files on its target stay. Its row
   shows the idle symbol and reads "Parked". The report message the parent
   receives and `list_agents` show it as finished, with `"parked": true`.

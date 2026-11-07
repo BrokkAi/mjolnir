@@ -73,8 +73,20 @@ impl std::fmt::Display for RelayJobDeferred {
 impl std::error::Error for RelayJobDeferred {}
 
 impl RelayJobDeferred {
+    /// The reason an actor gives while a lifecycle operation (a checkpoint, a
+    /// park, an upgrade) holds its connection. That ends by itself, so a
+    /// caller that needs the connection may wait for it.
+    pub const LIFECYCLE_HOLD: &'static str = "a lifecycle operation holds the relay connection";
+
     pub fn marks(error: &anyhow::Error) -> bool {
         error.downcast_ref::<Self>().is_some()
+    }
+
+    /// Whether `error` is the deferral that a lifecycle operation causes.
+    pub fn is_lifecycle_hold(error: &anyhow::Error) -> bool {
+        error
+            .downcast_ref::<Self>()
+            .is_some_and(|deferred| deferred.0 == Self::LIFECYCLE_HOLD)
     }
 }
 

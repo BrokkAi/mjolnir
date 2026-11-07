@@ -318,21 +318,35 @@ impl RuntimeState {
     /// What the session's agent left running and what its working tree holds,
     /// as its worker observes them. Only a running session has a worker to
     /// ask; a stopped one says what state it is in.
+    ///
+    /// A lifecycle operation of the session (an idle checkpoint right after
+    /// its turn, for one) holds the actor's connection for a while and ends
+    /// by itself, so the request waits for it, asking again with a growing
+    /// pause. Each attempt checks again that the session still runs, which is
+    /// what ends the wait when the session does.
     pub async fn session_work_facts(
         &self,
         session_id: &str,
     ) -> Result<mj_core::work_facts::WorkFacts> {
-        let record = self.session_record(session_id).context("unknown session")?;
-        ensure!(
-            record.state == SessionState::Running && record.target.is_some(),
-            "the session is {}, so its worker is stopped",
-            record.state.as_str()
-        );
-        self.session_manager
-            .session(session_id.to_owned())
-            .await?
-            .work_facts()
-            .await
+        let mut pause = Duration::from_millis(25);
+        loop {
+            let record = self.session_record(session_id).context("unknown session")?;
+            ensure!(
+                record.state == SessionState::Running && record.target.is_some(),
+                "the session is {}, so its worker is stopped",
+                record.state.as_str()
+            );
+            let handle = self.session_manager.session(session_id.to_owned()).await?;
+            match handle.work_facts().await {
+                Err(error)
+                    if crate::session_manager::RelayJobDeferred::is_lifecycle_hold(&error) =>
+                {
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(Duration::from_secs(1));
+                }
+                observed => return observed,
+            }
+        }
     }
 
     /// Checkpoint a session now and publish the result, the way the daemon's

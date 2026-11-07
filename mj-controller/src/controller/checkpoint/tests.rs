@@ -4272,6 +4272,14 @@ async fn a_relay_job_runs_on_the_actors_own_connection_and_defers_to_a_lease() {
         crate::session_manager::RelayJobDeferred::marks(&deferred),
         "{deferred:#}"
     );
+    // A request for work facts is deferred the same way, and its refusal says
+    // a lifecycle operation holds the connection, which ends by itself: the
+    // daemon waits for exactly that and for no other deferral.
+    let facts_deferred = handle.work_facts().await.unwrap_err();
+    assert!(
+        crate::session_manager::RelayJobDeferred::is_lifecycle_hold(&facts_deferred),
+        "{facts_deferred:#}"
+    );
     lease.release();
     wait_until_the_actor_serves_again(&handle).await;
     run_status(&handle).await.unwrap();

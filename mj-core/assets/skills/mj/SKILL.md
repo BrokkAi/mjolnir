@@ -94,7 +94,10 @@ child sessions in the same target and filesystem:
   `task_type` and the parent delegates straightforward work. The user configures model/effort choices globally in Settings →
   Sub-agents; returns `child_session_id` at once, before the child has started
   running.
-- `list_agents` — this parent's children and their status.
+- `list_agents` — this parent's children and their status. An entry's `facts` hold
+  what Mjolnir observed when the child finished (processes its agent left running,
+  its working tree) and, while it is parked, what the park stopped and what survived.
+  Read them against the child's own report.
 - `send_message` — send follow-up work to one child. With a worker that supports
   structured events, a running child receives it at its next tool boundary without its turn being cancelled; an idle child wakes and
   a parked child starts again. Several messages sent while the child is busy
