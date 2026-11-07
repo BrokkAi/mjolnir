@@ -297,12 +297,19 @@ impl MailboxEventBody {
     /// Earliest relay protocol that understands this body's wire shape.
     /// Protocol 33 can translate the previously shipped event bodies to
     /// legacy text, but it cannot preserve peer sender identity.
-    pub const fn minimum_relay_protocol(&self) -> u32 {
+    pub fn minimum_relay_protocol(&self) -> u32 {
         match self {
             Self::OperatorAway { .. } | Self::OperatorBack { .. } => {
                 crate::relay::RELAY_OPERATOR_AWAY_PROTOCOL
             }
             Self::ReviewVerdict { .. } => crate::relay::RELAY_PUSH_REVIEW_PROTOCOL,
+            // A worker before 54 heads every report "finished" and does not
+            // know `promptable`, so such a report reaches it rendered here.
+            Self::SubagentFinished { report }
+                if !report.finished || report.promptable.is_some() =>
+            {
+                crate::relay::RELAY_SUBAGENT_REPORT_STATE_PROTOCOL
+            }
             Self::SubagentFinished { .. } => crate::relay::RELAY_SUBAGENT_FINISHED_PROTOCOL,
             Self::SessionMessage { .. } => crate::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
             Self::ParentMessage { .. } => crate::relay::RELAY_STRUCTURED_MAILBOX_PROTOCOL,
