@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) type Probe = dyn Fn(String) -> BoxFuture<'static, Result<ProfileConfig>> + Send + Sync;
 #[cfg(test)]
 type ModelProbe = dyn Fn(String, String) -> BoxFuture<'static, Result<ProfileConfig>> + Send + Sync;
-type Attempt = Shared<BoxFuture<'static, Result<ProfileConfig, AttemptError>>>;
+type Attempt = Shared<BoxFuture<'static, Result<ProbeOutcome, AttemptError>>>;
 type CacheKey = (String, Option<String>);
 type NoticeCallback = Arc<dyn Fn(String) + Send + Sync>;
 pub(crate) type QuotaReports = Arc<Mutex<BTreeMap<String, ProfileQuota>>>;
@@ -44,28 +44,40 @@ const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// How often the owner checks every distinct profile home for catalog-input
 /// edits. A pass stats the three inputs per home and reads a file only when
-/// its stat changed, so the steady state does no file I/O beyond the stats.
+/// its stat changed or the file may have been written inside one mtime tick
+/// of the last pass, so the steady state does no file I/O beyond the stats.
 const HOME_WATCH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long after a failed re-probe the home watch tries the same edit again.
+/// Matches the expiry refresh cadence: a failure that persists, such as a
+/// missing login, is retried rarely rather than every pass.
+const HOME_EDIT_RETRY_WAIT: Duration = Duration::from_secs(5 * 60);
+
+/// A file written more recently than this is re-hashed on every pass, even
+/// when its stat matches the stored one: filesystems with one-second mtime
+/// granularity can hide a same-length rewrite inside an unchanged (mtime,
+/// size) pair, and the recency read catches it on the next pass.
+const RECENT_EDIT_WINDOW: Duration = Duration::from_secs(2 * 30);
 
 /// The files in a profile home that decide what a session advertises: the
 /// harness's own configuration, which names the model provider and the
 /// default model, and the model catalog Mjolnir merges over a provider's
 /// list. Staging copies `home/<name>` verbatim, so the owner watches exactly
-/// what a probe will stage. Reads never touch these; only the home watch
-/// does, from its background task.
+/// what a probe will stage. Reads never touch these from a read path; the
+/// home watch and the probes read them, from background tasks.
 const HOME_CATALOG_INPUTS: [&str; 3] = ["config.toml", "models.json", "settings.json"];
 
 /// One watched input's cheap identity. `None` is an absent file.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct FileStat {
     mtime: Option<SystemTime>,
     size: u64,
 }
 
 /// One catalog input's observed state: its stat and the hash of its
-/// contents, taken when the stat last changed. Both are `None` for an
-/// absent file.
-#[derive(Clone, PartialEq)]
+/// contents, taken when the stat last changed or the file may have been
+/// rewritten inside one mtime tick. Both are `None` for an absent file.
+#[derive(Clone, PartialEq, Debug)]
 struct WatchedInput {
     stat: Option<FileStat>,
     hash: Option<[u8; 32]>,
@@ -78,6 +90,16 @@ struct WatchedInput {
 struct HomeFiles {
     inputs: [WatchedInput; 3],
     digest: [u8; 32],
+}
+
+/// What one probe answers, and the catalog-input digest of the profile home
+/// as the probe started — what its staged copy was cut from. Recorded when
+/// the probe succeeds, so the home watch compares what the catalog serves
+/// against what it was built from, never against when the probe finished.
+#[derive(Clone)]
+struct ProbeOutcome {
+    choices: ProfileConfig,
+    home_digest: Option<[u8; 32]>,
 }
 
 /// Delays before the owner of a failed entry tries again. Every attempt
@@ -139,15 +161,6 @@ struct Definition {
     cancellation: CancellationToken,
 }
 
-/// One refresh pass launched by a caller that detected out-of-date entries.
-#[derive(Default)]
-struct RefreshLaunch {
-    /// Keys whose probes this pass started.
-    launched: Vec<CacheKey>,
-    /// Selected keys an earlier pass is already re-probing. The caller
-    /// cannot settle their change until those finish.
-    in_flight: Vec<CacheKey>,
-}
 #[derive(Default)]
 struct Inner {
     live: Option<Config>,
@@ -161,9 +174,19 @@ struct Inner {
     /// Probes replacing out-of-date ready entries, which stay served
     /// until a probe succeeds.
     refreshing: BTreeMap<CacheKey, Attempt>,
-    /// The catalog-input state of each watched home, written only by the
-    /// home watch. Presence means the watch has observed the home once.
-    home_watches: BTreeMap<PathBuf, HomeFiles>,
+    /// The catalog-input state of each watched home, a pure polling
+    /// optimization: content hashes are reused while a file's stat holds,
+    /// so a pass that no edit touched reads no file.
+    home_stats: BTreeMap<PathBuf, HomeFiles>,
+    /// The catalog-input digest each identity's served answer was probed
+    /// from, recorded when a probe succeeds. The home watch compares these
+    /// against the current files, so an edit stays pending until a probe
+    /// that read the edited home actually published.
+    home_settled: BTreeMap<String, [u8; 32]>,
+    /// When the watch may launch the next re-probe for an identity whose
+    /// edit re-probe failed. Bounded like the expiry refresh: a persistent
+    /// failure is retried rarely, not every pass.
+    home_edit_retry_after: BTreeMap<String, tokio::time::Instant>,
 }
 
 impl Inner {
@@ -204,6 +227,10 @@ pub(crate) struct ProfileCatalog {
     quota_reports: Mutex<Option<QuotaReports>>,
     #[cfg(test)]
     probe: Option<(Arc<Probe>, Arc<ModelProbe>)>,
+    /// How long the home watch waits before re-probing an identity whose
+    /// edit re-probe failed. Tests shorten this to observe the retry.
+    #[cfg(test)]
+    home_edit_retry_wait: Duration,
 }
 impl ProfileCatalog {
     pub(crate) fn new(cancellation: CancellationToken) -> Arc<Self> {
@@ -218,6 +245,8 @@ impl ProfileCatalog {
             quota_reports: Mutex::new(None),
             #[cfg(test)]
             probe: None,
+            #[cfg(test)]
+            home_edit_retry_wait: HOME_EDIT_RETRY_WAIT,
         })
     }
 
@@ -849,12 +878,17 @@ impl ProfileCatalog {
         });
     }
 
-    /// One pass over every distinct profile home. A home whose catalog
-    /// inputs now hash differently from the pass that last settled it had
-    /// its files edited; re-probe exactly the profiles that use that home,
-    /// through the same keep-serving-the-old-answer path as expiry refresh.
+    /// One pass over every distinct profile home. For each profile, compare
+    /// the digest its served answer was probed from — recorded when its last
+    /// probe succeeded — against the digest of the home's files now. A
+    /// mismatch means the home was edited after that probe read it (or no
+    /// probe has succeeded yet), so re-probe exactly that profile through
+    /// the keep-serving-the-old-answer refresh path. An edit therefore
+    /// stays pending until a probe that read the edited home published:
+    /// one that read it earlier records the old digest, and one that fails
+    /// records nothing.
     fn watch_homes(self: &Arc<Self>) {
-        let (identities_by_home, baselines) = {
+        let (identities_by_home, stats, settled) = {
             let inner = self.lock();
             let mut identities_by_home: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
             for (identity, definition) in &inner.definitions {
@@ -871,100 +905,119 @@ impl ProfileCatalog {
                     .or_default()
                     .insert(identity.clone());
             }
-            (identities_by_home, inner.home_watches.clone())
+            (
+                identities_by_home,
+                inner.home_stats.clone(),
+                inner.home_settled.clone(),
+            )
         };
         let mut polled = BTreeMap::new();
         for home in identities_by_home.keys() {
-            polled.insert(home.clone(), poll_home_files(home, baselines.get(home)));
+            polled.insert(home.clone(), poll_home_files(home, stats.get(home)));
         }
-        let mut changed = BTreeSet::new();
+        let mut stale = BTreeSet::new();
+        let mut converged = BTreeSet::new();
         let mut updates: Vec<(PathBuf, HomeFiles)> = Vec::new();
         for (home, current) in &polled {
             let Some(current) = current else {
-                // A hard read error keeps the previous baseline, so the next
-                // pass compares against the state the last probe saw.
+                // A hard read error keeps the previous stats, so the next
+                // pass compares against the same knowledge.
                 continue;
             };
-            match baselines.get(home) {
-                // First sight: the discovery generation that put these
-                // entries in place already read the home, so observe it
-                // without re-probing. This is also the restart case.
-                None => updates.push((home.clone(), current.clone())),
-                Some(previous) if previous.digest == current.digest => {
-                    // No content change. Store the refreshed stats so the
-                    // next pass stays a stat-only pass.
-                    updates.push((home.clone(), current.clone()));
+            // The stat cache is only a polling optimization; store whatever
+            // the pass observed.
+            updates.push((home.clone(), current.clone()));
+            for identity in &identities_by_home[home] {
+                if settled.get(identity) == Some(&current.digest) {
+                    converged.insert(identity.clone());
+                } else {
+                    stale.insert(identity.clone());
                 }
-                Some(_) => changed.extend(identities_by_home[home].iter().cloned()),
             }
         }
-        let launch = if changed.is_empty() {
-            RefreshLaunch::default()
-        } else {
-            self.refresh(|key, _| changed.contains(&key.0))
-        };
-        // A detected change only settles once re-probes launched for a
-        // profile of that home and nothing selected for the home is still
-        // being re-probed by an earlier pass: an in-flight probe staged the
-        // home as it was before this edit, so its published answer would
-        // re-introduce the old state the next pass compares against. Homes
-        // whose entries were pending or failed keep their previous baseline,
-        // so the next pass detects the edit again instead of losing it to a
-        // probe that was already running.
-        let launched_identities: BTreeSet<&str> =
-            launch.launched.iter().map(|key| key.0.as_str()).collect();
-        let in_flight_identities: BTreeSet<&str> =
-            launch.in_flight.iter().map(|key| key.0.as_str()).collect();
-        for (home, identities) in &identities_by_home {
-            if !identities
+        // A failed re-probe records nothing, so the identity stays stale and
+        // the next pass tries again; bound how often the re-probe repeats,
+        // matching the expiry refresh cadence for persistent failures.
+        let now = tokio::time::Instant::now();
+        let retry_wait = self.home_edit_retry_wait();
+        let due: Vec<String> = {
+            let inner = self.lock();
+            stale
                 .iter()
-                .any(|identity| launched_identities.contains(identity.as_str()))
-                || identities
-                    .iter()
-                    .any(|identity| in_flight_identities.contains(identity.as_str()))
-            {
-                continue;
-            }
-            if let Some(Some(current)) = polled.get(home) {
-                updates.push((home.clone(), current.clone()));
-            }
-        }
+                .filter(|identity| {
+                    !matches!(
+                        inner.home_edit_retry_after.get(*identity),
+                        Some(after) if *after > now
+                    )
+                })
+                .cloned()
+                .collect()
+        };
+        let launched = if due.is_empty() {
+            Vec::new()
+        } else {
+            let due: BTreeSet<&str> = due.iter().map(String::as_str).collect();
+            self.refresh(|key, _| due.contains(key.0.as_str()))
+        };
+        let launched_identities: BTreeSet<String> = launched.into_iter().map(|key| key.0).collect();
         let mut inner = self.lock();
         for (home, files) in updates {
-            inner.home_watches.insert(home, files);
+            inner.home_stats.insert(home, files);
         }
-        // Homes no profile uses anymore stop being watched.
+        // Homes no profile uses anymore stop being watched, and identities
+        // no definition serves stop being settled or throttled. A converged
+        // identity's failure history no longer matters.
+        let watched: BTreeSet<&str> = identities_by_home
+            .values()
+            .flat_map(|identities| identities.iter().map(String::as_str))
+            .collect();
         inner
-            .home_watches
+            .home_stats
             .retain(|home, _| identities_by_home.contains_key(home));
+        inner
+            .home_settled
+            .retain(|identity, _| watched.contains(identity.as_str()));
+        inner.home_edit_retry_after.retain(|identity, _| {
+            watched.contains(identity.as_str()) && !converged.contains(identity)
+        });
+        for identity in launched_identities {
+            inner
+                .home_edit_retry_after
+                .insert(identity, now + retry_wait);
+        }
+    }
+
+    /// How long after a failed edit re-probe the home watch tries again.
+    fn home_edit_retry_wait(&self) -> Duration {
+        #[cfg(test)]
+        {
+            self.home_edit_retry_wait
+        }
+        #[cfg(not(test))]
+        {
+            HOME_EDIT_RETRY_WAIT
+        }
     }
 
     /// Probe again every ready entry that `expired` selects. Readers keep
-    /// the entry until a probe succeeds; a failed probe leaves it in place.
-    /// The launch outcome lets a caller that detected a change settle it
-    /// only once nothing selected for it is still being re-probed.
+    /// the entry until a probe succeeds; a failed probe leaves it in place
+    /// and records nothing. Returns the keys whose probes launched.
     fn refresh(
         self: &Arc<Self>,
         expired: impl Fn(&CacheKey, &ProfileConfig) -> bool,
-    ) -> RefreshLaunch {
+    ) -> Vec<CacheKey> {
         let mut started = Vec::new();
-        let mut launch = RefreshLaunch::default();
-        let mut keys = Vec::new();
         {
             let mut inner = self.lock();
-            for (key, entry) in &inner.entries {
-                let Entry::Ready(choices) = entry else {
-                    continue;
-                };
-                if !expired(key, choices) {
-                    continue;
-                }
-                if inner.refreshing.contains_key(key) {
-                    launch.in_flight.push(key.clone());
-                } else {
-                    keys.push(key.clone());
-                }
-            }
+            let keys = inner
+                .entries
+                .iter()
+                .filter(|(key, entry)| {
+                    matches!(entry, Entry::Ready(choices) if expired(key, choices))
+                        && !inner.refreshing.contains_key(*key)
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
             for key in keys {
                 let Some(definition) = inner
                     .definitions
@@ -979,14 +1032,14 @@ impl ProfileCatalog {
                 started.push((key, attempt, definition.cancellation));
             }
         }
-        launch.launched = started
+        let launched = started
             .iter()
             .map(|(key, _, _)| key.clone())
             .collect::<Vec<_>>();
         for (key, attempt, cancellation) in started {
             tokio::spawn(self.clone().drive_refresh(key, attempt, cancellation));
         }
-        launch
+        launched
     }
 
     async fn drive_refresh(
@@ -1009,12 +1062,16 @@ impl ProfileCatalog {
                 return;
             }
             inner.refreshing.remove(&key);
-            let Some(Ok(choices)) = result else {
+            let Some(Ok(outcome)) = result else {
                 return;
             };
             let Some(Entry::Ready(previous)) = inner.entries.get(&key).cloned() else {
                 return;
             };
+            if let Some(digest) = outcome.home_digest {
+                inner.home_settled.insert(key.0.clone(), digest);
+            }
+            let choices = outcome.choices;
             inner
                 .entries
                 .insert(key.clone(), Entry::Ready(choices.clone()));
@@ -1056,25 +1113,52 @@ impl ProfileCatalog {
         model: Option<String>,
         refresh: bool,
     ) -> Attempt {
-        #[cfg(test)]
-        if let Some((probe, model_probe)) = &self.probe {
-            let future = match model {
-                None => probe(definition.id.clone()),
-                Some(model) => model_probe(definition.id.clone(), model),
-            };
-            return future
-                .map_err(|error| AttemptError::new(&error))
+        let probe: BoxFuture<'static, Result<ProfileConfig>> = {
+            #[cfg(test)]
+            if let Some((probe, model_probe)) = &self.probe {
+                match model {
+                    None => probe(definition.id.clone()),
+                    Some(model) => model_probe(definition.id.clone(), model),
+                }
+            } else {
+                crate::controller::profile_config::discover_for(
+                    (*definition.config).clone(),
+                    definition.id.clone(),
+                    model,
+                    definition.cancellation.clone(),
+                    refresh,
+                )
                 .boxed()
-                .shared();
+            }
+            #[cfg(not(test))]
+            {
+                crate::controller::profile_config::discover_for(
+                    (*definition.config).clone(),
+                    definition.id.clone(),
+                    model,
+                    definition.cancellation.clone(),
+                    refresh,
+                )
+                .boxed()
+            }
+        };
+        let home = definition_home(definition);
+        async move {
+            // Read the catalog inputs before the probe stages them. The home
+            // watch later compares what a probe read, not when it finished,
+            // so an edit that lands mid-probe is re-detected, and a failed
+            // probe records nothing and stays pending.
+            let digest_at_start = home
+                .as_deref()
+                .and_then(hash_home_inputs)
+                .map(|inputs| home_digest(&inputs));
+            let choices = probe.await?;
+            Ok(ProbeOutcome {
+                choices,
+                home_digest: digest_at_start,
+            })
         }
-        crate::controller::profile_config::discover_for(
-            (*definition.config).clone(),
-            definition.id.clone(),
-            model,
-            definition.cancellation.clone(),
-            refresh,
-        )
-        .map_err(|error| AttemptError::new(&error))
+        .map_err(|error: anyhow::Error| AttemptError::new(&error))
         .boxed()
         .shared()
     }
@@ -1113,17 +1197,20 @@ impl ProfileCatalog {
                         return;
                     }
                     match &result {
-                        Ok(choices) => {
+                        Ok(outcome) => {
+                            if let Some(digest) = outcome.home_digest {
+                                inner.home_settled.insert(key.0.clone(), digest);
+                            }
                             inner
                                 .entries
-                                .insert(key.clone(), Entry::Ready(choices.clone()));
+                                .insert(key.clone(), Entry::Ready(outcome.choices.clone()));
                             if key.1.is_none() {
                                 let definition = inner.definitions[&key.0].clone();
                                 started.extend(self.claim_models(
                                     &mut inner,
                                     &definition,
                                     &key.0,
-                                    choices,
+                                    &outcome.choices,
                                 ));
                             }
                         }
@@ -1214,6 +1301,7 @@ impl ProfileCatalog {
                     attempt
                         .await
                         .map_err(|error| anyhow::anyhow!("{}", error.message))?
+                        .choices
                         .model
                 }
                 Some(Entry::Failed { error, .. }) => bail!("{error}"),
@@ -1354,6 +1442,7 @@ impl ProfileCatalog {
         attempt
             .await
             .map_err(|error| anyhow::anyhow!("{}", error.message))
+            .map(|outcome| outcome.choices)
     }
 
     pub(crate) fn live(&self) -> Result<Config> {
@@ -1551,12 +1640,44 @@ fn upgrade_definitions(config: &Config) -> Vec<UpgradeDefinition> {
         .collect()
 }
 
+/// The expanded home directory a definition's probe stages from, when the
+/// profile is still enabled in the definition's configuration.
+fn definition_home(definition: &Definition) -> Option<PathBuf> {
+    let profile = definition.config.enabled_profile(&definition.id)?;
+    Some(mj_core::path_input::expand_local(&profile.home).unwrap_or_else(|_| profile.home.clone()))
+}
+
+/// The catalog-input state of `home`, read in full. `poll_home_files` calls
+/// this only for inputs whose stat changed or may have been rewritten inside
+/// one mtime tick; probes call it at launch to record what they staged from.
+fn hash_home_inputs(home: &Path) -> Option<[WatchedInput; 3]> {
+    let mut inputs = Vec::with_capacity(HOME_CATALOG_INPUTS.len());
+    for name in HOME_CATALOG_INPUTS {
+        let path = home.join(name);
+        let stat = match std::fs::metadata(&path) {
+            Ok(metadata) => Some(FileStat {
+                mtime: metadata.modified().ok(),
+                size: metadata.len(),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return None,
+        };
+        inputs.push(WatchedInput {
+            hash: hash_home_input(&path, stat.is_some()),
+            stat,
+        });
+    }
+    inputs.try_into().ok()
+}
+
 /// The current catalog-input state of `home`. `previous` is the state the
 /// last watch pass saw: an input whose stat is unchanged keeps its content
-/// hash, so a pass that no edit touched reads no file. A hard I/O error
-/// (anything but a missing input) returns `None`; the home keeps its
-/// previous baseline and is retried on the next pass rather than being
-/// treated as edited.
+/// hash, so a pass that no edit touched reads no file. An input whose mtime
+/// is recent is re-hashed even when its stat matches: filesystems with
+/// one-second mtime granularity can hide a same-length rewrite inside an
+/// unchanged (mtime, size) pair. A hard I/O error (anything but a missing
+/// input) returns `None`; the home keeps its previous state and is retried
+/// on the next pass rather than being treated as edited.
 fn poll_home_files(home: &Path, previous: Option<&HomeFiles>) -> Option<HomeFiles> {
     let mut inputs = Vec::with_capacity(HOME_CATALOG_INPUTS.len());
     let mut content_changed = previous.is_none();
@@ -1574,7 +1695,14 @@ fn poll_home_files(home: &Path, previous: Option<&HomeFiles>) -> Option<HomeFile
             }
         };
         let previous_input = previous.map(|files| &files.inputs[index]);
-        let input = if previous_input.is_some_and(|input| input.stat == stat) {
+        let recently_written = stat.is_some_and(|stat| {
+            stat.mtime.is_some_and(|mtime| {
+                SystemTime::now()
+                    .duration_since(mtime)
+                    .is_ok_and(|age| age < RECENT_EDIT_WINDOW)
+            })
+        });
+        let input = if !recently_written && previous_input.is_some_and(|input| input.stat == stat) {
             previous_input.expect("checked above").clone()
         } else {
             WatchedInput {
@@ -1789,6 +1917,26 @@ mod tests {
             calls.fetch_add(1, Ordering::SeqCst);
             let homes = homes.clone();
             Box::pin(async move { read_home_choices(&homes, &profile) })
+        })
+    }
+
+    /// A home-reading probe that fails while the flag is set, so a test can
+    /// drive a failed edit re-probe and its retry.
+    fn flaky_home_model_probe(
+        homes: BTreeMap<String, PathBuf>,
+        calls: Arc<AtomicUsize>,
+        failing: Arc<AtomicBool>,
+    ) -> Arc<Probe> {
+        Arc::new(move |profile: String| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let homes = homes.clone();
+            let failing = failing.clone();
+            Box::pin(async move {
+                if failing.load(Ordering::SeqCst) {
+                    anyhow::bail!("provider is offline")
+                }
+                read_home_choices(&homes, &profile)
+            })
         })
     }
 
@@ -2269,6 +2417,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn home_watch_rehash_catches_a_same_size_rewrite_with_an_unchanged_stat() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        std::fs::write(home.join("config.toml"), "model = \"one\"\n").unwrap();
+        let first = poll_home_files(home, None).unwrap();
+        let stored_mtime = first.inputs[0].stat.unwrap().mtime.unwrap();
+
+        // A rewrite that keeps the byte length and restores the mtime is
+        // invisible to the stat; only the recency re-hash catches it, the
+        // way a same-second edit lands on a one-second-granularity filesystem.
+        std::fs::write(home.join("config.toml"), "model = \"two\"\n").unwrap();
+        std::fs::File::open(home.join("config.toml"))
+            .unwrap()
+            .set_modified(stored_mtime)
+            .unwrap();
+        let rewritten = poll_home_files(home, Some(&first)).unwrap();
+        assert_eq!(first.inputs[0].stat, rewritten.inputs[0].stat);
+        assert_ne!(
+            first.digest, rewritten.digest,
+            "a same-size rewrite with an unchanged stat is still an edit"
+        );
+    }
+
     // Hard-won: #1337: editing a profile's harness home never reached the catalog.
     #[tokio::test]
     async fn an_edited_home_republishes_within_one_watch_pass_and_reprimes_only_that_home() {
@@ -2403,11 +2575,76 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 3);
 
-        // The watch never settled the edit against that probe's answer: the
-        // next pass detects it again and re-probes from the current home.
-        // This pass's probes are spawned, so convergence proves they ran.
+        // The completing probes record the digest they read, which predates
+        // the edit, so the edit stays pending: the next pass re-detects it
+        // and re-probes from the current home. This pass's probes are
+        // spawned, so convergence proves they ran.
         catalog.watch_homes();
         converge_on(&catalog, "solo", "solo-second").await;
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+    }
+
+    // Hard-won: #1337: a failed edit re-probe recorded nothing, so the edit
+    // looked settled until the one-hour expiry refresh.
+    #[tokio::test]
+    async fn a_failed_home_edit_reprobe_is_retried_until_it_succeeds() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_home_model(root, "solo", "solo-first");
+        let calls = calls();
+        let failing = Arc::new(AtomicBool::new(false));
+        let (config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
+        let flaky = flaky_home_model_probe(homes, calls.clone(), failing.clone());
+        let mut catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            flaky.clone(),
+            Arc::new(move |id, _| flaky(id)),
+        );
+        Arc::get_mut(&mut catalog).unwrap().home_edit_retry_wait = Duration::from_millis(50);
+        catalog.sync_now(&config).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        catalog.watch_homes();
+
+        failing.store(true, Ordering::SeqCst);
+        write_home_model(root, "solo", "solo-second");
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "the edit re-probes every served entry at once"
+        );
+        // Let the launched probes run, and confirm they ran while the flag
+        // was set: they fail, the old choices stay, and nothing settles.
+        while !catalog.lock().refreshing.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            current_model(&catalog, "solo").await.as_deref(),
+            Some("solo-first"),
+            "a failed re-probe keeps serving the old choices"
+        );
+
+        // The failure recorded nothing, so the edit stays pending; only the
+        // retry cadence keeps a persistent failure from probing every pass.
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "the failed re-probe waits for its retry window"
+        );
+
+        failing.store(false, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                catalog.watch_homes();
+                if current_model(&catalog, "solo").await.as_deref() == Some("solo-second") {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the failed re-probe is retried until the edit converges");
         assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
 

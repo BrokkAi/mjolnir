@@ -17,6 +17,7 @@ The observable behavior: edit `model = "deepseek-v4-pro"` to `model = "deepseek-
 - [x] (2026-11-06) Replaced `harness_home_files_do_not_invalidate_configured_capabilities` with the acceptance-rule tests: edited-home re-publishes within one tick and re-probes only that home (plus metadata-only rewrite and baselining assertions), shared-home re-primes each profile and no others, a new catalog generation discovers the current home (stopped-daemon rule), an edit detected during an in-flight re-probe is not lost, and `home_watch_digest_tracks_content_not_metadata` for the stat/hash rule. Focused suites pass: 34 profile_catalog tests, 12 profile_config tests.
 - [x] (2026-11-06) Committed the implementation as ae57c376f and merged origin/master (advanced to 552633a03 with the settings-golden refresh f97dcce09 and review-host changes) cleanly as b351954b6. Requested review of the merge commit against the merge base (request 820747a2).
 - [ ] Full workspace suite and clippy on the merged tree, then address the review verdict, push, open the PR for issue 1337, merge when green.
+- [x] (2026-11-07) Review round 1 found four real defects in the launch-gated baseline design: failures settled silently for up to an hour, pending probes that read pre-edit files were invisible to the gate (first-sight and shared-home windows), and same-size rewrites inside one mtime tick were never hashed. Redesigned to settle-on-success digests recorded per identity from what the probe read (captured at probe start), with a 5-minute retry wait after failed re-probes and a 60-second recency re-hash. Added the failure-retry and fixed-mtime-rewrite regression tests; 36 profile_catalog tests and 12 profile_config tests pass, clippy clean, repeated runs stable.
 
 ## Surprises & Discoveries
 
@@ -51,9 +52,21 @@ The observable behavior: edit `model = "deepseek-v4-pro"` to `model = "deepseek-
   Rationale: Entries are not persisted across daemon processes, so a restart re-probes every profile and reads current files; there is no stored digest that could go stale. The acceptance rule "an edit made while the daemon is stopped is picked up when it starts" is satisfied by construction and pinned by a regression test.
   Date/Author: 2026-11-06, agent.
 
+- Decision: Detection and settlement are digest-per-identity, recorded at probe success from a digest captured when the probe started. Every attempt reads the home's three catalog inputs before staging; `drive` and `drive_refresh` record `home_settled[identity]` only on success. The watch compares each identity's settled digest against the current files and re-probes mismatches. There is no per-home baseline to advance: a probe that staged the pre-edit home records the pre-edit digest, a failed probe records nothing, and a pending probe records nothing yet, so all three stay pending for the next 30-second pass. This is the issue's "store the home-input digest with each persisted entry", kept in memory because entries already live only as long as the daemon.
+  Rationale: The first design advanced a per-home baseline when a re-probe launched; review found it could settle on a failure (silent for up to an hour) or on a still-pending probe that read pre-edit files (restart-and-edit window, shared homes). Recording what a probe actually read removes both races structurally instead of gating the advance.
+  Date/Author: 2026-11-07, agent.
+
+- Decision: A failed edit re-probe is retried after `HOME_EDIT_RETRY_WAIT` (5 minutes), matching the expiry refresh cadence, instead of every pass.
+  Rationale: Review accepted settling-on-success only with bounded retries; every-pass retries would violate this file's rule that persistent failures (missing login, full disk) are retried rarely rather than every minute.
+  Date/Author: 2026-11-07, agent.
+
+- Decision: An input whose mtime is within `RECENT_EDIT_WINDOW` (60 seconds) of now is re-hashed on every pass even when its stat matches the stored one.
+  Rationale: Filesystems with one-second mtime granularity (the NFS case the poll was chosen for) can hide a same-length rewrite inside an unchanged (mtime, size) pair; the recency read catches it on the next pass at the cost of hashing recently-written files for a minute. A rewrite with a restored old mtime (cp -p) remains undetected until some other change; reading every file every pass is the only complete fix and was rejected with b39c0e69c.
+  Date/Author: 2026-11-07, agent.
+
 - Decision: The watch does not settle a detected change while any entry selected for it is already re-probing (`refresh` reports those keys as in-flight); the home's baseline advances only once re-probes launched for it and nothing about it is in flight.
   Rationale: A probe already running when the edit lands staged the pre-edit home and will publish that answer; advancing the baseline against it would re-introduce the old state and leave it until the one-hour expiry refresh. Re-detecting on the next pass costs one tick.
-  Date/Author: 2026-11-06, agent.
+  Date/Author: 2026-11-06, agent. Superseded on 2026-11-07 by the settle-on-success digest design above, which handles the same race structurally; the in-flight regression test is kept.
 
 - Decision: Replace `harness_home_files_do_not_invalidate_configured_capabilities` with new tests rather than keep it.
   Rationale: The issue's acceptance criteria say it is replaced by tests for the new rules. The property it guarded (the cache key stays definition-only and does no home-file I/O on read paths) remains guarded by `discovery_fingerprint_ignores_creation_defaults_and_unrelated_profile_preferences`, `setup_token_rotation_preserves_configured_capabilities`, and the b39c0e69c concurrency tests, all of which must keep passing unchanged.
