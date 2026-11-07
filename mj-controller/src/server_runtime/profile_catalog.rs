@@ -959,12 +959,34 @@ impl ProfileCatalog {
         let mut stale = BTreeSet::new();
         let mut converged = BTreeSet::new();
         let mut updates: Vec<(PathBuf, HomeFiles)> = Vec::new();
-        for (home, current) in &polled {
-            let Some(current) = current else {
+        for (home, current) in polled {
+            let Some(mut current) = current else {
                 // A hard read error keeps the previous stats, so the next
                 // pass compares against the same knowledge.
                 continue;
             };
+            // A probe reads the whole home; the poll may reuse a hash taken
+            // before a timestamp-preserving rewrite (cp -p) hid an edit from
+            // the stat. When the poll saw no change yet a settled digest
+            // disagrees, the poll is behind: re-hash in full so the identity
+            // converges instead of churning a re-probe every pass.
+            let poll_blind = stats
+                .get(&home)
+                .is_some_and(|previous| previous.digest == current.digest)
+                && identities_by_home[&home].iter().any(|identity| {
+                    served.iter().any(|key| {
+                        key.0 == *identity
+                            && settled
+                                .get(key)
+                                .is_some_and(|digest| *digest != current.digest)
+                    })
+                });
+            if poll_blind && let Some(fresh) = hash_home_inputs(&home) {
+                current = HomeFiles {
+                    digest: home_digest(&fresh),
+                    inputs: fresh,
+                };
+            }
             // The stat cache is only a polling optimization; store whatever
             // the pass observed.
             updates.push((home.clone(), current.clone()));
@@ -973,7 +995,7 @@ impl ProfileCatalog {
             // supervisor retries it with backoff, and its success records a
             // digest that joins the check — so it neither settles nor blocks
             // convergence.
-            for identity in &identities_by_home[home] {
+            for identity in &identities_by_home[&home] {
                 let every_entry_settled = served
                     .iter()
                     .filter(|key| key.0 == *identity)
@@ -2550,6 +2572,65 @@ mod tests {
         assert_ne!(
             first.digest, rewritten.digest,
             "a same-size rewrite with an unchanged stat is still an edit"
+        );
+    }
+
+    // Hard-won: #1337 review: a timestamp-preserving rewrite hid from the
+    // poll while a probe recorded the fresh digest, so the identity looked
+    // stale every pass and re-probed forever.
+    #[tokio::test]
+    async fn a_stat_hidden_rewrite_converges_once_a_probe_reads_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let old = SystemTime::now() - Duration::from_secs(120);
+        write_home_model(root, "solo", "aaa");
+        std::fs::File::open(root.join("solo").join("config.toml"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let calls = calls();
+        let (config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
+        let catalog = ProfileCatalog::with_probe(home_model_probe(homes, calls.clone()));
+        catalog.sync_now(&config).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        catalog.watch_homes();
+
+        // A timestamp-preserving rewrite of the same length is invisible to
+        // the stat poll and stays undetected while no probe reads the home.
+        write_home_model(root, "solo", "bbb");
+        std::fs::File::open(root.join("solo").join("config.toml"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a stat-hidden rewrite stays undetected until something reads the home"
+        );
+
+        // A probe reads the whole home — the guaranteed one-hour expiry
+        // refresh is one — and records the fresh digest. The poll, still
+        // blind, must catch up from the probe's read instead of churning a
+        // re-probe every pass.
+        catalog.refresh(|_, _| true);
+        while !catalog.lock().refreshing.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            current_model(&catalog, "solo").await.as_deref(),
+            Some("bbb")
+        );
+        for _ in 0..3 {
+            catalog.watch_homes();
+            while !catalog.lock().refreshing.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "the poll reconciles with the probe's read and stays quiet"
         );
     }
 
