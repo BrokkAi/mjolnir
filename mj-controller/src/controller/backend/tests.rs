@@ -330,6 +330,7 @@ fn github_token_is_inherited_only_by_managed_containers() {
             url: Some("git@github.com:example/app.git".into()),
             push_urls: vec![
                 "git@github.com:fork/app.git".into(),
+                "git://github.com/legacy/app.git".into(),
                 "ssh://git@example.test/app.git".into(),
             ],
             destination: "app".into(),
@@ -347,6 +348,7 @@ fn github_token_is_inherited_only_by_managed_containers() {
         bundle.repositories[0].push_urls,
         [
             "https://github.com/fork/app.git",
+            "https://github.com/legacy/app.git",
             "ssh://git@example.test/app.git"
         ]
     );
@@ -926,6 +928,63 @@ fn local_engine_readiness_tells_a_missing_engine_from_one_that_did_not_answer() 
         local_engine_readiness("ssh-docker", &NoDockerExecutor),
         None
     );
+}
+
+/// An executor that records every command and answers `container system
+/// status` as a stopped or a running service would.
+struct RecordingAppleExecutor {
+    status: i32,
+    commands: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingAppleExecutor {
+    fn new(status: i32) -> Self {
+        Self {
+            status,
+            commands: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn commands(&self) -> Vec<String> {
+        self.commands.lock().unwrap().clone()
+    }
+}
+
+impl CommandExecutor for RecordingAppleExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands.lock().unwrap().push(format!(
+            "{} {}",
+            command.program,
+            command.args.join(" ")
+        ));
+        Ok(CommandOutput {
+            status: self.status,
+            stdout: Vec::new(),
+            stderr: if self.status == 0 {
+                Vec::new()
+            } else {
+                b"service is stopped".to_vec()
+            },
+        })
+    }
+}
+
+// Hard-won: #1357: the launch options readiness probe started a stopped Apple container service
+#[test]
+fn apple_container_readiness_observes_the_service_and_never_starts_it() {
+    let stopped = RecordingAppleExecutor::new(1);
+    assert_eq!(
+        local_engine_readiness("apple-container", &stopped),
+        Some(LocalEngineReadiness::NotReady)
+    );
+    assert_eq!(stopped.commands(), ["container system status"]);
+
+    let running = RecordingAppleExecutor::new(0);
+    assert_eq!(
+        local_engine_readiness("apple-container", &running),
+        Some(LocalEngineReadiness::Ready)
+    );
+    assert_eq!(running.commands(), ["container system status"]);
 }
 
 /// Launch finding R5-3: the session wizard said "local Docker is not ready.

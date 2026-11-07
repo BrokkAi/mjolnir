@@ -340,6 +340,8 @@ impl ViewerSnapshot {
                     is_idle: false,
                     activity_state: None,
                     question_message: None,
+                    execution_enforcement: session.execution_enforcement(config),
+                    policy_config_keys: Vec::new(),
                     config_options: Vec::new(),
                     plan_mode_active: None,
                     turn_review: None,
@@ -730,6 +732,10 @@ pub struct ViewerSession {
     /// The settings the harness advertised, with the values it accepts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_options: Vec<ViewerConfigOption>,
+    #[serde(skip)]
+    pub execution_enforcement: Option<mj_core::config::ExecutionEnforcement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_config_keys: Vec<String>,
     /// Whether plan mode is on, or `None` when this harness has no plan mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_mode_active: Option<bool>,

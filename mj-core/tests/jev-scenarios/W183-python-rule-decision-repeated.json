@@ -65,64 +65,14 @@
           "text": "172 draft .rqlp files from the campaign under .agents/records/codeql-parity-2026-10/python/verification/\n\nthe fuck, we did a big campaign and then didn't generate actual rules?"
         },
         {
-          "id": "user:13496",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:13506",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:13551",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:13745",
           "role": "user",
           "text": "the PRs are merged I think. yes, start the authoring. follow the pack authoring guidelines on public/premium pls"
         },
         {
-          "id": "user:16509",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:16982",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:17805",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:17820",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:18494",
           "role": "user",
           "text": "mj is fixed"
-        },
-        {
-          "id": "user:18710",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:18715",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:19326",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "user:19841",
@@ -140,29 +90,9 @@
           "text": "ok, let's do it, but if things get messier than expected let's re-evaluate"
         },
         {
-          "id": "user:21797",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:22187",
           "role": "user",
           "text": "Recs accepted "
-        },
-        {
-          "id": "user:22606",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:22645",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:22882",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "user:23582",
@@ -215,19 +145,9 @@
           "text": "Both checks are running against master 28189a3fef. Both are read-only, so nothing in the pack repos changes until I review the results.\n\n- **Sweep of shipped rules:** about 76 shipped public Python rules, plus the uninitialized-local rule from #97. Each runs over its fixture and its CodeQL upstream tests and is compared with the recorded results. Each rule is marked unchanged, improved or regressed, and every regression comes with the exact rows that differ.\n- **Re-test of held-back rules:** every unshipped public candidate that has a policy file. That includes the call-argument rules, bad-tag-filter, redos, the three return-value rules, the import rules, and anything else in the original triage. Each one gets the shipping gate and is reported as pass, or fail with a one-line blocker.\n\nThe pass list becomes the next pack batch. Any regression comes back to me before anything is changed."
         },
         {
-          "id": "user:24283",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:24449",
           "role": "assistant",
           "text": "Both checks are back. Nothing shipped has broken, and seven more rules are ready.\n\n**Sweep of shipped rules** (84 rules, on master 28189a3fef):\n- **81 unchanged.**\n- **2 improved.** `unnecessary-lambda` now finds all 6 of 6 rows on a complete run (it was 3 of 6, inconclusive). `comparison-using-is` also changed for the better.\n- **1 location change.** `unexpected-raise-in-special-method` now reports its fixture finding on the `def __getitem__` line instead of the `raise` line. The upstream result is still 6 of 6. The method is where CodeQL anchors this query, so the new location is closer to CodeQL. A read-only check is finding which change caused it and whether it was deliberate, using the binaries we already have. If it was, I'll update that fixture's README.\n- `iter-returns-non-self` went from complete to inconclusive, but kept both expected rows. The new diagnostics are on three methods CodeQL considers clean.\n\n**Re-test of held-back rules:** 7 lexical-variable rules pass the gate cleanly:\n- `local-shadows-builtin` and `local-shadows-global`;\n- `nested-loops-with-same-variable` and `nested-loops-with-same-variable-reused`;\n- `unused-local-variable`, `unused-loop-variable` and `unused-parameter`.\n\nTheir engine work (#4691) landed early in the campaign, and I left them out of the earlier pack batches. A child is now adding them as pack batch 4, re-running the gate itself first.\n\n**Still failing, each with a specific engine blocker:**\n- **Call-argument rules:** calls at module level have no enclosing procedure, and class-call bindings are incomplete.\n- **bad-tag-filter:** misses 6 rows.\n- **redos:** misses 32 rows and has 10 extra findings.\n- **Return-value rules:** extra findings for explicit-return-in-init and procedure-return-value-used, and an incomplete tuple-return group for mismatched-multiple-assignment.\n\nThese are the candidates for the next round of engine work."
-        },
-        {
-          "id": "user:24575",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:24645",
@@ -255,19 +175,9 @@
           "text": "The literal-pack fix is now being implemented. It expands `*(...)`, `*[...]` and string-keyed `**{...}` where the Python call shape is built, so the shared binder doesn't change. A name operand like `t3` expands only if an existing helper proves it has a single literal assignment. It re-runs all four call-argument rules against CodeQL's tests and should unblock call-wrong-named-argument and call-wrong-named-class-argument.\n\nTwo decisions from my previous message are still yours:\n- **3. A Python module initializer procedure.** I recommend an ExecPlan first, following the JavaScript and Ruby design, because it changes how every Python file is analyzed.\n- **4. The real defect CodeQL misses** (`f4(q=4)` where `f4(x, **y)` is missing `x`). I recommend counting it as a true positive and documenting the difference in the fixture."
         },
         {
-          "id": "user:25044",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:25086",
           "role": "assistant",
           "text": "The literal-pack lane is implementing again, with my three decisions:\n1. **Literal packs only.** Named operands like `*t3` stay unexpanded until someone writes a proof that their contents don't change.\n2. **No new provenance field.**\n3. **Keyword names from the decoded string value.**\n\nThat should be enough for `call-wrong-named-argument` and `call-wrong-named-class-argument` to pass.\n\nThe two decisions from earlier are still yours: the Python module initializer procedure, where I recommend an ExecPlan first, and counting the `f4(q=4)` defect that CodeQL misses as a true positive."
-        },
-        {
-          "id": "user:25141",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:25193",

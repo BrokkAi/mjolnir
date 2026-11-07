@@ -60,11 +60,6 @@
           "text": "While the lanes run, I'll read the crate-ownership rules in the architecture guidance, since the split design must follow them."
         },
         {
-          "id": "user:259",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:298",
           "role": "assistant",
           "text": "Now I'll run the profiling myself. First step: let cargo build the unit-test target once through mbx, verbosely, to capture the exact rustc command line."
@@ -83,16 +78,6 @@
           "id": "agent:366",
           "role": "assistant",
           "text": "Waiting on four investigation lanes and the verbose test build that captures the rustc command line. Profiling runs start once that build finishes."
-        },
-        {
-          "id": "user:386",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:430",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:432",

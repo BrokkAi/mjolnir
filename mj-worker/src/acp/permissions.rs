@@ -17,44 +17,25 @@ pub(super) struct RestoredPlanMode {
     pub(super) config_options: Vec<SessionConfigOption>,
     pub(super) modes: Option<SessionModeState>,
     pub(super) plan: String,
-    pub(super) transition: PlanModeTransition,
-}
-
-/// Tracks the mode Claude had before Plan, including an explicit mode change
-/// made while planning so plan completion cannot overwrite the user's choice.
-#[derive(Debug, Clone, Default)]
-pub(super) enum PlanModeTransition {
-    #[default]
-    Inactive,
-    Planning {
-        restore_mode: Option<String>,
-    },
-    ExplicitModeChange,
-}
-
-impl PlanModeTransition {
-    pub(super) fn mode_applied(&mut self, mode: &str, previous: Option<String>) {
-        if mode == "plan" {
-            if previous.as_deref() != Some("plan") {
-                *self = Self::Planning {
-                    restore_mode: previous,
-                };
-            }
-        } else if matches!(self, Self::Planning { .. }) {
-            *self = Self::ExplicitModeChange;
-        }
-    }
+    /// Set when Claude refused the policy mode and Plan was left for its
+    /// default mode instead.
+    pub(super) warning: Option<String>,
 }
 
 pub(super) fn current_session_mode(
     config_options: &[SessionConfigOption],
     modes: &Option<SessionModeState>,
 ) -> Option<String> {
-    surface::config_current_value(config_options, "mode").or_else(|| {
-        modes
-            .as_ref()
-            .map(|state| state.current_mode_id.to_string())
-    })
+    config_options
+        .iter()
+        .find(|option| option.category == Some(SessionConfigOptionCategory::Mode))
+        .and_then(|option| surface::config_current_value(config_options, &option.id.to_string()))
+        .or_else(|| surface::config_current_value(config_options, "mode"))
+        .or_else(|| {
+            modes
+                .as_ref()
+                .map(|state| state.current_mode_id.to_string())
+        })
 }
 
 pub(super) type PlanModeRestoration<'a> =
@@ -65,36 +46,21 @@ pub(super) async fn restore_plan_execution_mode(
     session_id: SessionId,
     mut state: RestoredPlanMode,
     permission_sent: oneshot::Receiver<bool>,
+    enforcement: Option<ExecutionEnforcement>,
 ) -> Result<RestoredPlanMode> {
     ensure!(
         permission_sent.await.unwrap_or(false),
         "Claude's plan permission response could not be delivered"
     );
-    let transition = state.transition.clone();
-    let desired = match transition {
-        PlanModeTransition::Planning {
-            restore_mode: Some(mode),
-        } => mode,
-        PlanModeTransition::Planning { restore_mode: None } => {
-            bail!("Claude's mode before Plan was not reported")
-        }
-        PlanModeTransition::ExplicitModeChange => {
-            state.transition = PlanModeTransition::default();
-            return Ok(state);
-        }
-        PlanModeTransition::Inactive => "bypassPermissions".to_owned(),
-    };
-    enforce_execution_mode(
+    state.warning = leave_plan_for_policy(
         connection,
         &session_id,
         HarnessKind::Claude,
-        None,
-        &desired,
+        enforcement,
         &mut state.config_options,
         &mut state.modes,
     )
     .await?;
-    state.transition = PlanModeTransition::default();
     Ok(state)
 }
 
@@ -188,8 +154,9 @@ pub(super) struct PermissionAnswers {
 /// Claude's own plan approval (claude-agent-acp 0.84 `exit-plan-*` options,
 /// which reach this form when Claude wrote no plan file) must not change the
 /// session's execution policy. The option that continues under that policy
-/// becomes a plain "Yes"; an option that would raise a Guardian session to
-/// bypassPermissions is not offered at all. Lower modes stay available.
+/// becomes a plain "Yes", and no option for another mode is offered. When
+/// Claude does not offer the policy's mode, lower modes stay so the plan can
+/// still be approved; bypassPermissions is never offered to a Guardian session.
 pub(super) fn permission_choices(
     request: &RequestPermissionRequest,
     harness: HarnessKind,
@@ -226,6 +193,12 @@ fn offered_permission_choices(
     }
     let policy_mode = claude_policy_mode(policy);
     let yes = claude_policy_plan_option(request, policy);
+    // Any option in the policy's mode, its clear-context one included, lets
+    // the plan be approved without another mode.
+    let policy_offered = request.options.iter().any(|option| {
+        claude_plan_option_mode(&option.option_id.to_string())
+            .is_some_and(|(mode, _)| mode == policy_mode)
+    });
     let mut choices: Vec<_> = yes
         .map(|option| PermissionChoice {
             option_id: option.option_id.clone(),
@@ -239,6 +212,10 @@ fn offered_permission_choices(
         }
         let mode = claude_plan_option_mode(&option.option_id.to_string());
         let title = match mode {
+            // The policy owns the mode: with its own mode on offer, no other
+            // mode is. Without it, lower modes stay so the plan can still be
+            // approved.
+            Some((mode, _)) if policy_offered && mode != policy_mode => continue,
             Some(("bypassPermissions", _)) if policy_mode != "bypassPermissions" => continue,
             Some((mode, true)) if mode == policy_mode => "Yes, clear context".to_owned(),
             _ => option.name.clone(),
@@ -536,46 +513,66 @@ fn gh_script(script: &str) -> bool {
 
 /// Calls to Mjolnir's own MCP servers, for a harness that cannot be told to
 /// trust them. Under configured approvals DSH asks before every MCP tool call
-/// and has no per-server rule, so the worker allows calls to the servers this
-/// launch registered itself, as Claude's allowed tools and Codex's server
+/// and has no per-server rule, so the worker allows the tools the servers this
+/// launch registered itself list, as Claude's allowed tools and Codex's server
 /// approval mode do for those harnesses. Every other request still reaches a
-/// person.
+/// person. A title is matched against each owned tool's full name, never a
+/// server prefix, and DSH's double separator keeps server and tool apart.
+///
+/// OpenCode gets no such answers. It titles a call `<server>_<tool>`, and
+/// server names may contain `_`, so another server (for example one a
+/// project's own configuration adds, named `mj-agents_send` with a `message`
+/// tool) can produce exactly an owned title. Nothing in the request says which
+/// server a call belongs to, so its person decides, and can allow always.
 #[derive(Debug, Clone, Default)]
 pub(super) struct OwnedMcpApprovals {
-    /// The start of the permission title of each owned server's tool calls.
-    title_prefixes: Vec<String>,
+    /// The permission title of each owned server's tool calls, without any
+    /// argument the harness appends.
+    titles: Vec<String>,
+    /// Whether the harness follows the title with a space and an argument.
+    appends_argument: bool,
 }
 
 impl OwnedMcpApprovals {
     pub(super) fn for_launch(spec: &LaunchSpec) -> Self {
-        if spec.harness != HarnessKind::Dsh
-            || spec.execution_policy != ExecutionPolicy::ConfiguredApprovals
-        {
+        if spec.execution_policy != ExecutionPolicy::ConfiguredApprovals {
             return Self::default();
         }
         // dsh-acp names an MCP tool `mcp__<server>__<tool>` and titles its
         // call with that name, underscores shown as spaces, then any `path`
         // argument.
-        let title_prefixes = owned_acp_mcp_server_names(spec)
-            .into_iter()
-            .map(|server| format!("mcp__{server}__").replace('_', " "))
+        if spec.harness != HarnessKind::Dsh {
+            return Self::default();
+        }
+        let titles = owned_acp_mcp_tools(spec)
+            .iter()
+            .flat_map(|(server, tools)| {
+                tools
+                    .iter()
+                    .map(move |tool| format!("mcp__{server}__{tool}").replace('_', " "))
+            })
             .collect();
-        Self { title_prefixes }
+        Self {
+            titles,
+            appends_argument: true,
+        }
     }
 
-    /// The allowing answer when `request` is a call to an owned server.
+    /// The allowing answer when `request` is a call to an owned tool.
     pub(super) fn response(
         &self,
         request: &RequestPermissionRequest,
     ) -> Option<RequestPermissionResponse> {
         let title = request.tool_call.fields.title.as_deref()?;
-        let owned = self.title_prefixes.iter().any(|prefix| {
-            // No owned tool name starts with an underscore, so a space here
-            // means a longer server name, such as `mj-agents_`, that merely
-            // begins with an owned one.
-            title
-                .strip_prefix(prefix.as_str())
-                .is_some_and(|tool| !tool.is_empty() && !tool.starts_with(' '))
+        let owned = self.titles.iter().any(|owned| {
+            title == owned
+                || (self.appends_argument
+                    // One space then the argument; more spaces mean a longer
+                    // server or tool name that merely begins with an owned one.
+                    && title
+                        .strip_prefix(owned.as_str())
+                        .and_then(|rest| rest.strip_prefix(' '))
+                        .is_some_and(|argument| !argument.is_empty() && !argument.starts_with(' ')))
         });
         if owned {
             allow_permission_response(request)

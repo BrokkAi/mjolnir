@@ -1,0 +1,174 @@
+{
+  "id": "L2202",
+  "title": "L2202",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "8ac122e96794b66af702945f9cf2d437",
+    "session_title": "bifrost via claude4",
+    "reply_position": 2684,
+    "captured_at": "2026-10-09T01:14:05.292Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:1389",
+          "role": "user",
+          "text": "Dave asked us to tackle #4741"
+        },
+        {
+          "id": "agent:1392",
+          "role": "assistant",
+          "text": "I'll start by reading the issue."
+        },
+        {
+          "id": "agent:1401",
+          "role": "assistant",
+          "text": "Let me orient in parallel: claim the issue, read my notes on the #4437 work, and get a first look at the code and related issues."
+        },
+        {
+          "id": "agent:1461",
+          "role": "assistant",
+          "text": "While the children work, I'll read the selection and receipt code myself since the design depends on it."
+        },
+        {
+          "id": "agent:1482",
+          "role": "assistant",
+          "text": "I have the selection and receipt flow. Next I need the manifest structs, the rest of the pair preparation, inventory loading, and the engine profile. Those are independent reads."
+        },
+        {
+          "id": "agent:1512",
+          "role": "assistant",
+          "text": "I now have the full picture of the current implementation. Let me collect the children's reports before settling the design."
+        },
+        {
+          "id": "agent:1774",
+          "role": "assistant",
+          "text": "While both children work, I'll checkpoint the plan on the branch so the design is recorded, then wait for reports."
+        },
+        {
+          "id": "agent:1792",
+          "role": "assistant",
+          "text": "Both children are still working after an hour, which is expected for a 5,000-line module rewrite plus a first test link. I'll keep waiting."
+        },
+        {
+          "id": "agent:1855",
+          "role": "assistant",
+          "text": "The drift check named a file none of us touched. I'll check whether that complaint pre-exists on master (and whether it is fatal), and keep waiting for the library child."
+        },
+        {
+          "id": "agent:1877",
+          "role": "assistant",
+          "text": "The drift complaint is pre-existing on master (the check exits 1 there too, from `83c429509f`), so it is not ours. I'll note it in the PR and continue waiting for the library child."
+        },
+        {
+          "id": "agent:1945",
+          "role": "assistant",
+          "text": "Now I'll review the library's core: the request types and failure mapping, the request validation, the selector, and the outcome builder. These are independent reads."
+        },
+        {
+          "id": "agent:2172",
+          "role": "assistant",
+          "text": "The library compiles. Now I'll update the outcome schema and docs for `selection.selection_reason` and the prerelease range rule, and hand the test fixes back to the matrix child."
+        },
+        {
+          "id": "agent:2215",
+          "role": "assistant",
+          "text": "B's CLI work compiles and `suite_mcp_cli` is green; `suite_bench_policy` has 14 failures that I need to classify (environment, transient, or ours). I'll read B's failure list now."
+        },
+        {
+          "id": "agent:2405",
+          "role": "assistant",
+          "text": "While validation runs, I'll review the two consequential pieces I have not yet read: B's CLI implementation and the docs chapter the service will read."
+        },
+        {
+          "id": "agent:2462",
+          "role": "assistant",
+          "text": "Validation is still in the bin clippy build (the merge pulled upstream crate changes, so it is a larger rebuild). I'll draft the PR description now so it is ready when validation finishes."
+        },
+        {
+          "id": "agent:2481",
+          "role": "assistant",
+          "text": "Validation (bin clippy, crate suite, CLI suites, bin tests, fmt) is running in the background after the master merge; the PR body is drafted with a validation placeholder. Next steps once it finishes: a live smoke of the built binary against the real public and premium repositories (expected typed `no-compatible-release`/`incompatible-strict-selection` outcomes on today's engine), then push and open the PR."
+        },
+        {
+          "id": "agent:2634",
+          "role": "assistant",
+          "text": "Waiting on the bin check (background task `b532cb540`) before committing; nothing else is independent of it. I'll proceed when it reports."
+        },
+        {
+          "id": "agent:2660",
+          "role": "assistant",
+          "text": "Bin compiles. Now commit, push with an explicit refspec (the `push.default=upstream` gotcha from my notes), and open the PR as ready: the work is complete and validated."
+        },
+        {
+          "id": "agent:2684",
+          "role": "assistant",
+          "text": "Done. PR #4749 is open and ready (not draft, base `master`), queued for MergeMarshall; a progress comment is on #4741.\n\n## What landed\n\n`bifrost prepare-open-packs` now takes a request document and always writes a typed outcome:\n\n- **Request (v1):** root `pack_id` + repository, optional inventory pin, `selection` of mode `strict` (version + manifest digest; never substitutes) or `preferred` (preferred version, SemVer range, stable/prerelease channel), optional dependency pins. `PACK_SOURCE` keeps its meaning by converting to a strict public request.\n- **One selector** for every path: candidates are checked in a fixed order and every rejection is recorded with a reason and detail. Premium-shaped roots (plain tags, ZIP, zero dependencies) select through the same code; a private 404 is `access-denied`, never an empty registry or public fallback.\n- **Receipt v3** with an embedded strict `replay` request; **outcome v1** with 13 failure classes, `retryable`, engine identity and executable digest, the run's inventory snapshot and rejections; exit 0/1/2. JSON schemas in `schemas/`, docs chapter, and the CI action/workflow consumers updated.\n\n## Validation\n\nPost-merge with `origin/master`: bin and crate clippy clean; 88 crate tests, 113 `suite_mcp_cli`, 3 new CLI tests, 24 bin tests; fmt clean. A 53-case fake-registry matrix with golden outcomes validated against the schemas found and pinned three real selector defects before any live run (prerelease range matching, replay after an inventory refresh, order-dependent index digest). Live smoke against GitHub matched the contract in all six cases (public/premium preferred, premium strict, premium without token, no network), with no token in any output.\n\nTwo caveats, both pre-existing on master: the pack-authoring drift check fails on an unchanged Node notice file, and nine policy goldens differ on this host because of an installed Java pack.\n\n## Still open on #4741\n\nPublishing the interface in a checksum-verifiable release and consumer-contract tests against that executable are release work with #4709 (v0.13.1). On today's engine profile nothing can select; every live case correctly ends in a typed incompatibility. I left the issue open and assigned.\n\n`★ Insight ─────────────────────────────────────`\n- The selection identity deliberately excludes constraints, reason, and the inventory snapshot: a strict *replay* of a preferred-mode selection must land on the same cache directory and reuse verified bytes. Warm reuse compares content identity only; the run's own snapshot lives in the outcome, the original's in the immutable receipt.\n- `semver::VersionReq` follows Cargo's rule that prerelease versions only match a comparator that itself names a prerelease, so `\"*\"` silently excludes every `-rc`. Matching the range against the base version and letting the channel decide prerelease admission keeps the two concerns separate.\n- The fake-registry matrix paid for itself before the live run: three of the four defects it found were in replay/reproducibility paths that a live smoke against a stable registry cannot exercise.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Dave asked us to tackle #4741",
+    "assistant_text_tail": " bin tests; fmt clean. A 53-case fake-registry matrix with golden outcomes validated against the schemas found and pinned three real selector defects before any live run (prerelease range matching, replay after an inventory refresh, order-dependent index digest). Live smoke against GitHub matched the contract in all six cases (public/premium preferred, premium strict, premium without token, no network), with no token in any output.\n\nTwo caveats, both pre-existing on master: the pack-authoring drift check fails on an unchanged Node notice file, and nine policy goldens differ on this host because of an installed Java pack.\n\n## Still open on #4741\n\nPublishing the interface in a checksum-verifiable release and consumer-contract tests against that executable are release work with #4709 (v0.13.1). On today's engine profile nothing can select; every live case correctly ends in a typed incompatibility. I left the issue open and assigned.\n\n`★ Insight ─────────────────────────────────────`\n- The selection identity deliberately excludes constraints, reason, and the inventory snapshot: a strict *replay* of a preferred-mode selection must land on the same cache directory and reuse verified bytes. Warm reuse compares content identity only; the run's own snapshot lives in the outcome, the original's in the immutable receipt.\n- `semver::VersionReq` follows Cargo's rule that prerelease versions only match a comparator that itself names a prerelease, so `\"*\"` silently excludes every `-rc`. Matching the range against the base version and letting the channel decide prerelease admission keeps the two concerns separate.\n- The fake-registry matrix paid for itself before the live run: three of the four defects it found were in replay/reproducibility paths that a live smoke against a stable registry cannot exercise.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 1389,
+    "input_rationale": "PR #4749 is open and queued. The remaining items are release work tracked on other issues, with #4741 left open and assigned to the agent. No decision or action is requested of the user.",
+    "label": "none",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-09T01:14:13.340Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

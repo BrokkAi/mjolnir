@@ -34,6 +34,8 @@ pub struct RuntimeStateUpdate {
     pub workspace_names: std::collections::BTreeMap<String, String>,
     pub revision: u64,
     pub records: SnapshotMap<String, SessionRecord>,
+    /// Live worker views, including the controller-owned session config policy.
+    pub sessions: SnapshotMap<String, mj_client::daemon::RuntimeSessionView>,
     pub lifecycles: Vec<daemon::RuntimeLifecycleView>,
     pub moves: SnapshotMap<String, mj_core::state::MoveOperation>,
     /// Parent/child relations for the sessions in `records`, so a surface can
@@ -259,6 +261,9 @@ where
             }
         }
         previous_transcripts = snapshot.transcripts.clone();
+        // The snapshot keeps its live views: the dashboard reads each
+        // session's policy-owned settings from them.
+        snapshot.sessions = sessions.clone();
         if tx
             .send(RuntimeFeedUpdate::Snapshot(Box::new(snapshot)))
             .await

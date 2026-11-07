@@ -1,4 +1,4 @@
-//! Mjolnir-owned delegation tools for Claude, Codex, and DSH sessions.
+//! Mjolnir-owned delegation tools for Claude, Codex, DSH, and OpenCode sessions.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -629,6 +629,26 @@ fn call_with_budget_and_options(
             if instructions.is_empty() {
                 bail!("spawn instructions cannot be empty");
             }
+            // An absolute path stands alone, so it still works after the
+            // parent's own directory was deleted or renamed.
+            let resolved_working_directory = if args.working_directory.is_absolute() {
+                args.working_directory.clone()
+            } else {
+                let parent_directory = std::env::current_dir().context(
+                    "the parent's working directory is gone; pass an absolute working_directory",
+                )?;
+                if args.working_directory.as_os_str().is_empty() {
+                    parent_directory
+                } else {
+                    mj_core::target_path::join(&parent_directory, &args.working_directory)
+                }
+            };
+            if !resolved_working_directory.is_dir() {
+                bail!(
+                    "spawn working directory {} does not exist or is not a directory; pass an existing directory (relative paths resolve against the parent's working directory)",
+                    resolved_working_directory.display()
+                );
+            }
             // A subtle request without a subtle choice still reaches the
             // daemon: the configuration may have gained one since launch.
             let task_type = match args.task_type {
@@ -843,7 +863,7 @@ fn spawn_tool(subtle_subagents: bool) -> Value {
     tool(
         "spawn",
         &format!(
-            "{lead} Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting {selection}. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
+            "{lead} Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting {selection}. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child whose record is in error, lost or stopped cannot be re-prompted; a child whose last turn failed can: send_message resumes it. A login the provider has refused stays unavailable until repaired with `mj login`."
         ),
         json!({
             "type":"object",
@@ -872,7 +892,7 @@ fn tool_definitions_with_options(
         spawn_tool(options.subtle_subagents),
         read_only(tool(
             "list_agents",
-            "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A finished child has parked true when its processes were released. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
+            "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A failed delivery does not change the child's state. A child whose last turn failed and whose entry has promptable true can be resumed with send_message. A finished child has parked true when its processes were released. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
             json!({"type":"object","additionalProperties":false}),
         )),
         send_message_tool(),
@@ -1172,7 +1192,7 @@ mod tests {
         let spawn = spawn_definition(ParentTools::default());
         assert_eq!(
             spawn["description"],
-            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
+            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child whose record is in error, lost or stopped cannot be re-prompted; a child whose last turn failed can: send_message resumes it. A login the provider has refused stays unavailable until repaired with `mj login`."
         );
         assert_eq!(
             spawn["inputSchema"]["properties"]["task_type"]["enum"],

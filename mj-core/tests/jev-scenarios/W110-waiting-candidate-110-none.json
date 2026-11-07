@@ -25,51 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:27",
-          "role": "user",
-          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /home/jonathan/Projects/bifrost2/.mj/agents/238f0567ef7ce08a27c17a1f40e64cb1. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nYour assignment is in /tmp/lanes/jvm-gates/brief-8745-r2.txt. Read the whole file first, then follow it exactly. Write everything under /tmp/lanes/jvm-gates/8745-r2/ (inputs.txt already exists there; append). The worktree is /home/jonathan/Projects/bifrost2/.mj/lanes/jvm-gate-8745-r2, checked out detached at the candidate. The base binary is shared: /tmp/lanes/jvm-gates/shared-base-dd19cb7d72-bifrost; only the candidate builds. The author's census is at /tmp/lanes/jvm-gates/8745/census/census.tsv (read only), with a measured replacement possibly appearing at /tmp/lanes/jvm-gates/8745-r2/census/census.tsv as the brief states. Do not change code. Do not launch any cloud resource. Hand back only when /tmp/lanes/jvm-gates/8745-r2/REPORT.md carries PASS or FAIL after every surface in the brief has been run and classified against the census; a report without a verdict, or a FAIL that names unrun surfaces instead of an out-of-class difference, is a checkpoint, not a handback."
-        },
-        {
-          "id": "user:803",
-          "role": "user",
-          "text": "Checkpoint received; the assignment continues from exactly where you stopped, with the retained archive, source and binaries. Do not clean up anything before the captures and the manual goldens are done; the brief's cleanup is the last step. There is no time budget. Proceed now: write the two binary hashes side by side into inputs.txt (0501405e... base, 0c03ce36... candidate; they differ), check /tmp/lanes/jvm-gates/8745-r2/census/census.tsv and record in inputs.txt which census file you will use (the measured one if present, else /tmp/lanes/jvm-gates/8745/census/census.tsv), then run the captures per the brief (base A, candidate, base B; fresh BIFROST_CACHE_ROOT each; load below 100; 40-second wait; new directory per capture; stderr grep; request counts written before any comparison), the strict comparator and the SQL band with the per-record mount-INSERT counts recorded first, the census classification of every moved record, read-key pairing, replay130 by exact payloads, nine answers in both environments, work50 element by element, the two manual goldens per side from fresh extractions compared by decoded hashes, closing checksums and digests, then cleanup. Hand back only when REPORT.md ends with PASS or FAIL; do not hand back between steps."
-        },
-        {
-          "id": "user:2040",
-          "role": "user",
-          "text": "New focused gate work, reusing your JVM gate experience: BUILD ONLY #8679 r5 two measurement CLI binaries. Read /tmp/lanes/jvm-gates/8679-r5/REQUEST.md. Candidate 248b8d96f82a327b0dc86ccccbbe5a1b5c80d1f2, exact base 80ed8814dfb0651f3c148348ee405879bcf7b2a0; parent fetched and verified merge-base/API. Work solely under /tmp/lanes/jvm-gates/8679-r5, git archive from /home/jonathan/Projects/bifrost2; no worktree/branch changes, no repository edits, no cloud. Fresh separate extracts and usual measure build, copy each binary immediately after build, record archive/binary hashes, commands and exit status. Use normal mbx/Cargo behavior; DO NOT set/redirect/delete target directories or cargo clean. Retain extracts for later focused goldens. Read current testing guidance from git and current gate README from candidate git object. No tests or captures yet; single handback BUILD.md after both binaries exist, or exact failure. Do not interrupt or restart a running build. Parent owns later surface scheduling and acceptance; no gate PASS from build success."
-        },
-        {
-          "id": "user:2545",
-          "role": "user",
-          "text": "Build handback reviewed; continue PHASE2 lifecycle capture only for #8679 r5 (no tests/manual goldens/replay130 yet). Use copied exact binaries and current protocol logs/jvm-gate-README.md; extract current gate scripts via git show from the candidate into this lane. Follow /tmp/lanes/jvm-gates/brief-8679-r4.txt for operational commands and frozen input paths BUT current REQUEST.md wins on SHAs/classes/scope, no target cleanup, normal mbx, no cloud, waits <=60s per poll. All Python capture/measurement commands nice10. No worktree/branch changes.\nValidate frozen/old130 manifests from their own directories and corpus digests, record raw checks. BaseA/candidate/baseB sequential with fresh cache roots, fixed same corpus paths; wait for protocol load threshold only for captures, not builds. Always record-answer-differences so root drift doesn't abort. No pre-created capture directory. Verify151 request counts and no profile-write errors BEFORE pairing; retry152 with90s post-init per protocol (tool wait polls <=60s). Record selected_mounts per-record restaging; compare A/B then candidate and SQL family band, distinguish #8728/restaging and named noise only with actual evidence. Preserve raw differences, do not mask new answer movement or decide unexplained cost acceptable.\nRead r4 REPORT.md coordinator section for prior classes; r5 changes in REQUEST.md. Produce CAPTURE.md with capture dirs/counts/binary hashes/comparator exit statuses, each actual answer/SQL/work-key difference and decisive paths; parent classifies substantive movement. This phase ends after captures/comparisons; no gate PASS. No editing frozen inputs, product files or targets; keep extracts for later test phase."
-        },
-        {
-          "id": "user:3341",
-          "role": "user",
-          "text": "#8679 r5 Phase3: CAPTURE.md received; continue with replay130 four streams and nine answers in both empty/JDK21 environments ONLY. Use exact retained base/candidate binaries and current lane scripts/protocol, same canonical corpus/site paths as Phase2, fresh per-run caches, nice10 Python. Read logs/jvm-gate-README.md replay section and replay.py --help to form exact command; legacy comparator is /mnt/optane/tmp/lanes-primary/gate-inputs/scripts/legacy-comparator-shim.py. JDK21 /home/jonathan/.sdkman/candidates/java/21-tem. Frozen manifests/corpus digests before/after. Save exact commands/hashes/exit statuses to inputs.txt and concise REPLAY.md with leaf-level differences (ignore only established timing/header fields). Compare base vs candidate and each vs frozen, keeping inherited baseline drift distinct. Parent classifies, no PASS. No builds/tests/manual goldens/work50 in this phase; no source/branch/target changes, no cloud. Poll commands <=60seconds without restarting. Once complete hand back and park; retain all artifacts."
-        },
-        {
-          "id": "user:3713",
-          "role": "user",
-          "text": "Continue #8679-r5 as a bounded artifact review only, no new runs/builds/captures/edits/cloud. Parent still owns gate acceptance, index24 attribution pending owner05. Verify new C/D receipts against exact248b8d96f8: owner says /tmp/java-parity/7869/v2/merge-80ed/final-validation/{f-suites.log,f-libs.log,f-dev.log,d-post-fix.log,d-count-receipt.txt}, commands ../results.md. C PASS tests: golden_cross_language_callable_facts_rql::native_java_overload_trace_classifies_every_candidate; native_jvm_points::java_compiler_parent_identity_keeps_compact_constructor_exact (also devtrial); engine_tests ... java_compiler_parent_names_are_not_declarations_or_closed_hierarchy. Object controls golden_native_jvm_package_route_provenance and golden_java_native_ancestors, expected unchanged, ../intrinsic-merge.diff empty approved8a47a9327e. D shared_closer_go_registration_accounting(Disabled3594/Curated3315) and shared_rust_export_publication_and_generated_bases(460nodes15rounds). Summaries owner3522/3527 suites,4581/4582 libs,41/41dev. Check logs really selected/ran these tests under stated exacthead/env, identify failed tests and whether existing r5 records already have exact-base controls, read assertion source for C/D only if available to verify claimed control scope. If paths not locally accessible stop and name missing artifact; do not reproduce work. Save concise C-D-receipt-audit.md in your report_dir; no PASS claim. Keep existing captures/manual artifacts untouched."
-        },
-        {
-          "id": "user:4071",
-          "role": "user",
-          "text": "Read-only S1/#8745 saved-evidence follow-up, no gate runs. Newly fetched 11KB zip /tmp/mjolnir/94d7c3846306d798c13d5c32fe7b9c2c/workspace/94d7c3846306d798c13d5c32fe7b9c2c/.mj-agents/a142ef5c66ae52d7081144f90d54d5a2/s1-decision-evidence.zip. Extract in your reportdir. Compare with prior independent .mj/agents/9c285345f20a8a2e2fade02d60e0a506/8745-s1-evidence-review.md. Read 5 raw response JSON, response-index, dynamic-declarations and probe-receipts. Questions only: exactly what is proved for three resolved->budget losses (stage/numeric work/limits?), MetadataSpecs419/423 cluster, and Dynamic.kt28:52 ambiguous Dynamic.emit+TypeName.emit -> incomplete Dynamic.emit. Does actual frozen source/receiver/applicability evidence establish eligibility of retained Dynamic.emit? Do NOT equate incomplete subset with false answer or presume all old candidates must remain; known-excluded candidate still cannot be retained. Prior synthetic kotlinc proof was withdrawn (empty log and shell cat exit), don't revive absent new command/version/exit evidence. Return compact proved/unproved table and next minimal missing evidence if any; no source search broadening, tests/build/cloud or product edits. Parent decides S1 acceptance/direction; no bless/counterthresholdchange."
-        },
-        {
-          "id": "user:4381",
-          "role": "user",
-          "text": "Final bounded #8679r5 evidence check, read-only/no runs. You know C/D gate. Owner05 closed sole remaining index24-9 attribution. Report /home/jonathan/Projects/bifrost/.mj/clones/05d9cf1a40f2a74086d14d7010497284/.mj/agents/28c88930b2e6b5e4bdacf5cb024d933a/work24-attribution.md. Evidence /tmp/java-parity/7869/v2/work24/. Verify saved raw receipts: Doff restores4109 vs4100, Aoff/C1+Noff fullcaptures equalcandidate933eaf...; same-binary trace reproduces uninstrumented both counts, exactly9 SelectedGapReasonProvenance requested-key charges and otherfamilies unchanged; base/candidate record24 identical; all temporary changes diff0 and finalhead248b8d96f82a327b0dc86ccccbbe5a1b5c80d1f2. Read decisive logs/hashes only, no rerunmanual or build, no whole gate re-audit. Report any contradictory evidence or PASS of this attribution-only check. Parent owns final r5 acceptance; no product edits/cloud."
-        },
-        {
-          "id": "user:4606",
-          "role": "user",
-          "text": "New JVM gate #8946/#8811 BUILD ONLY, reuse your prior gate build context. Read /tmp/lanes/jvm-gates/8946-r1/REQUEST.md. Exact candidate1131920ca85529b42fd07f19ae7d8406398a6da6, basee3f63352b6f26ebdea3941037b8c09c5680dacae both now in /home/jonathan/Projects/bifrost2; parent fetched and verifiedmerge-base/APIhead. Own output root8946-r1 only. Fresh archived sources, ordinary mbx/Cargo target handling; no targetredirect/clean/remove, branch/checkout changes, tests/captures/cloud/productedits. Same BUILDONLY procedure as8679-r5: measure locked/offline envidentity, archive/bin hashes, immediatecopy viaCargoartifact with nice10Python, exactcommands/exit/logs. Both sides needed; no verifiede3 sharedbase known. Keep extracts/bins forlaterstages. Report genuinefailure withevidence, neverrestartongoingbuild or inferdeathfromsandboxps. Parent schedulescapturesafterBUILD.md handback and ownsPASS. Start now; short progress after each binary."
-        },
-        {
           "id": "agent:4931",
           "role": "assistant",
           "text": "The base build is still active and has reached `brokk-bifrost-analysis`; the CLI executable has not been emitted yet. Candidate work remains on hold."
@@ -88,11 +43,6 @@
           "id": "agent:5143",
           "role": "assistant",
           "text": "The exact-base build succeeded and its archive and binary hashes are recorded in [BUILD.md](/tmp/lanes/jvm-gates/8946-r1/BUILD.md). The candidate build is on hold per the coordinator because its head will change; no candidate archive was started. Awaiting a replacement SHA."
-        },
-        {
-          "id": "user:5232",
-          "role": "user",
-          "text": "New independent BUILD-ONLY gate assignment; #8946's HOLD remains and its retained base stays untouched. #8679 has landed and parent verified #8915 exact base/candidate against fetched master. Read /tmp/lanes/jvm-gates/8915-r1/REQUEST.md and execute its first assignment only: archive/build/copy/hash base2bed77bed4c90993b2ea7deba4474a0ea5c4e0a1 and candidate231e401983bf662c3ba18ec82225043c0a25c066 sequentially, source repo /home/jonathan/Projects/bifrost2. Preserve normal mbx targets, no redirects/clean/cloud/checkout changes; Python nice10. Use prior artifact-copy workflow and actual process completion evidence. New output root8915-r1, no reuse of a different binary identity, no tests or captures yet. Retain artifacts, write BUILD.md + input ledger, and hand back after both builds or an exact blocker. Parent owns classifications/acceptance. No source implementation or plan files."
         },
         {
           "id": "agent:5236",
@@ -145,11 +95,6 @@
           "text": "Both #8915 BUILD ONLY builds succeeded in sequence with different binary hashes. The retained artifacts and exact commands are recorded in [BUILD.md](/tmp/lanes/jvm-gates/8915-r1/BUILD.md) and [inputs.txt](/tmp/lanes/jvm-gates/8915-r1/inputs.txt). No tests or captures were run; this is not gate acceptance."
         },
         {
-          "id": "user:5863",
-          "role": "user",
-          "text": "Both CLI builds accepted as build evidence. Resume #8915 phase2 now under /tmp/lanes/jvm-gates/8915-r1/PHASE2.md (new brief; read it fully). Exact existing binaries, lifecycle captures/comparisons ONLY, base A / candidate / base B sequential, normal load<100 and 40s post-init protocol, complete 151-request/SQL staging audit before comparison. #8946 build has finished and its captures wait, so no other coordinator capture/build will compete. Reuse your prior8679r5 capture experience; no tests/rebuilds/cloud/corpus writes/cleanup. Report raw command/exit/hashes, every movement and integrity checks; parent owns classification. Hand back CAPTURE.md/inputs.txt after this phase, no PASS claim."
-        },
-        {
           "id": "agent:5869",
           "role": "assistant",
           "text": "I’ll read the full phase brief, then run only the three ordered lifecycle captures and required audits/comparisons using the retained binaries and fixed inputs."
@@ -195,11 +140,6 @@
           "text": "Phase 2 captures and comparisons are complete. The raw evidence and observed movements are documented in [CAPTURE.md](/tmp/lanes/jvm-gates/8915-r1/CAPTURE.md) and [inputs.txt](/tmp/lanes/jvm-gates/8915-r1/inputs.txt). No gate PASS or causal attribution is claimed; parent classification remains pending."
         },
         {
-          "id": "user:7355",
-          "role": "user",
-          "text": "Proceed #8915-r1 PHASE3 ONLY now; #8946 phase2 is finished, no coordinator capture competes. Reuse exact binaries in your /tmp/lanes/jvm-gates/8915-r1 inputs.txt/CAPTURE.md: base2bed77bed4 ce0cf827... and candidate231e401983 380bddcf.... Run replay130 four streams and nine answers empty-JDK/JDK21 sequentially, then stop and hand back REPLAY.md plus inputs/logs/actual exits and leaf-level base/candidate/frozen differences. Prior protocol/command: /tmp/lanes/jvm-gates/8679-r5/REPLAY.md and inputs.txt; adapt IDENTITIES/paths, never reuse old outcomes. Current lane gate-scripts/replay.py absent: extract original replay.py and required imports from exact candidate Git object or retained candidate-src (.agents/scripts/jvm-gate), preserve source hashes; do not use arbitrary current scripts. README current lane lines481+. Same canonical read-only corpus/control/sites roots, verify CURRENT and old130 manifests from inside root and corpus digests before+after. Fresh output and per-mode caches under8915-r1. nice10 every Python invocation, internal workers1, packs disabled/offline, no unsafe fsync/eatmydata; explicit JDK21 home /home/jonathan/.sdkman/candidates/java/21-tem only where replay asks. Record expected initialize build identity. Do not mask answer fields; timing/text wrapper normalization only as established. No builds, root tests, work50/manual, product/git edits, cloud or cleanup. Preserve running exec session IDs and wait for actual completion (do not restart a running process). Parent owns substantive classification/PASS; phase2 read-key attribution is independently with owner05."
-        },
-        {
           "id": "agent:7361",
           "role": "assistant",
           "text": "I’ll read the Phase 3 protocol and the prior replay handoff, then extract the replay script from the exact candidate object and run only the four streams plus nine answers in the two JDK environments."
@@ -213,11 +153,6 @@
           "id": "agent:7618",
           "role": "assistant",
           "text": "Phase 3 replay is complete. [REPLAY.md](/tmp/lanes/jvm-gates/8915-r1/REPLAY.md) and updated [inputs.txt](/tmp/lanes/jvm-gates/8915-r1/inputs.txt) contain the commands, hashes, exits, comparisons, and integrity checks. No gate PASS or substantive classification is claimed."
-        },
-        {
-          "id": "user:7722",
-          "role": "user",
-          "text": "#8915 Phase3 read and accepted as evidence: base/candidate equality, shared frozen differences retained, no overall gate PASS. Next job: #8946-r1 PHASE3 ONLY, same replay/nine procedure, then stop. Root /tmp/lanes/jvm-gates/8946-r1. Read CAPTURE.md/inputs.txt for identities: base e3f63352b6f26ebdea3941037b8c09c5680dacae at builds/base-bifrost SHA80dd6f05937567d558cfb6f220c3346f05168e72c6ac0470f0e215009b2f1cdd; candidate b0c7da715069bbc796fd68270c3a32e60a7d0af6 at builds/candidate-b0c7da7150-bifrost SHA8a9503688659f730b6103a1562bcab77fab6287b248c4dc8580afc34a0049273. Scripts from exact retained builds/candidate-b0c7da7150-src/.agents/scripts/jvm-gate (NOT obsolete candidate-src1131920). Copy/hash replay and dependencies into lane. Same canonical frozen corpora/sites/old130/CURRENT, manifest+digest before/after, fresh output/per-mode cache under8946 only, nice10 Python, internal1, disabled/offlinepacks, normalfsync. Explicit JDK21 /home/jonathan/.sdkman/candidates/java/21-tem only prescribed modes. Save all four streams per side and nine sites in both environments, leaf differences/commands/exits, REPLAY.md/inputs. No builds/tests/work50/manual/cloud/cleanup/Git edits. No other coordinator capture is running; owner94's two-site attribution is remote. Preserve exec session IDs, don't restart living processes. Parent owns final classification."
         },
         {
           "id": "agent:7732",
@@ -240,11 +175,6 @@
           "text": "#8946-r1 Phase3 is complete. Replay and comparison both exited 0; all replay130 streams and nine-answer checks completed with zero leaf differences. Integrity checks passed before and after. Evidence is in [REPLAY.md](/tmp/lanes/jvm-gates/8946-r1/REPLAY.md) and `inputs.txt`. No overall gate PASS is asserted."
         },
         {
-          "id": "user:8102",
-          "role": "user",
-          "text": "#8946 Phase3 receipt read; zero answer/frozen movement accepted as evidence, not whole gate PASS. Now explicitly dispatch #8915 PHASE4 per /tmp/lanes/jvm-gates/8915-r1/MANUAL_REQUEST.md. Execute its four focused serial source/work50 invocations, compare full actuals and every scope/ReceiverAnalysisWork counter, then hand back MANUAL.md/inputs with decisive logs and actual exits. No competing coordinator capture/build is running. Use exact retained8915 base2bed and candidate231 extracts and SAME private corpus path, fresh caches each run, normal Cargo/mbx targets. Read candidate testing guidance before validation. Preserve live exec session IDs and wait actual completion; don't rerun or stop a slow build. If any resource/host/path/tool issue prevents progress, report exact evidence without changing targets or deleting anything. No bless, source edit, Git action, cloud, broad suites or cleanup. Parent owns classification."
-        },
-        {
           "id": "agent:8108",
           "role": "assistant",
           "text": "I’ll read the #8915 Phase4 request and the retained candidate’s testing guidance, then run the four serial invocations with fresh caches and compare the full outputs and work counters."
@@ -260,11 +190,6 @@
           "text": "All four #8915 Phase4 invocations completed. Both source-golden tests passed; both work50 tests failed at the unblessed golden assertion (exit 100). The private corpus digest remained unchanged before and after every run.\n\nThe requested decoded golden comparison and full per-index `ReceiverAnalysisWork` audit are still incomplete, so this is not a complete Phase4 evidence report. Raw logs and exits are under `/tmp/lanes/jvm-gates/8915-r1/manual-logs/`; no `MANUAL.md` was completed."
         },
         {
-          "id": "user:8967",
-          "role": "user",
-          "text": "Finish the incomplete #8915 Phase4 handback now; no reruns/builds. Evidence: all4 exit files present (source0 both; work100 both), eachwork log fails solely golden_case.rs111 equality. Your MANUAL_REQUEST.md explicitly requires decoded actual comparison and all50 scope/per-field ReceiverAnalysisWork audit, and those are still missing. Parse retained logs with nice10 python3 -I outside source; confirm exactassertion expectedLEFT/actualRIGHT, retaindecodedstrings/hashes, compare fullactuals (no inherited old8679 masks), and enumerate ALL differinglines/fields and workcounters keyed byindex/site. Read before/after evidence at manual-logs/*-digest-{before,after}.txt (actual names). Sourcepassingexpectedfiles areactuals, compare themtoo. UpdateMANUAL.md+inputs withcommands/testcounts/exits/integrity/diffs/limits. Stop ONLY after completed audit or exact parsing blocker with saved offending lines; do not end at another 'next step'. Parent owns substantive classification. This is correction1 of incompletehandback."
-        },
-        {
           "id": "agent:8975",
           "role": "assistant",
           "text": "I’ll finish the retained-log audit without rerunning anything: decode both golden assertion sides, compare the full source/work actuals, and enumerate all 50 scope entries plus each `ReceiverAnalysisWork` field by record index and site."
@@ -273,11 +198,6 @@
           "id": "agent:9104",
           "role": "assistant",
           "text": "Completed the #8915 Phase4 audit and updated [MANUAL.md](/tmp/lanes/jvm-gates/8915-r1/MANUAL.md) and `inputs.txt`. Both source goldens passed; both work50 runs failed only at the unblessed golden equality assertion. The decoded strings, hashes, diffs, all 50 scope entries, and all emitted work counters are retained under `manual/` and `manual-logs/`. No overall gate PASS is asserted."
-        },
-        {
-          "id": "user:9231",
-          "role": "user",
-          "text": "New focused assignment: #8973 BUILD ONLY, per /tmp/lanes/jvm-gates/8973-r1/REQUEST.md. Exact candidate451c2d1e4a440770370c49cdb87f2bf7f94bebd0/basefde903d152bc45f5cc71e07bfb9ad10cfad5b16d, both objects in peer44 clone named in brief. Reuse successful compiler-artifact-copy build method; normal mbx/Cargo, no target changes, all Python nice10, two sequential builds, actual process-exit receipts. No tests/captures/cloud/cleanup or Git mutations. You own only8973-r1 artifacts. #8946 manual runs independently elsewhere. Parent already completed8915's missing lexical-scope/source-hash audit; no more8915 work. Hand back after both builds or concrete blocker."
         },
         {
           "id": "agent:9237",
@@ -300,11 +220,6 @@
           "text": "Both #8973 builds completed with exit 0 and distinct binary hashes. Build evidence and retained artifacts are in [BUILD.md](/tmp/lanes/jvm-gates/8973-r1/BUILD.md) and `inputs.txt`. No gate PASS is implied."
         },
         {
-          "id": "user:9581",
-          "role": "user",
-          "text": "#8973 BUILD evidence read; parent independently rehashed both copied binaries and read exit0 receipts. Proceed Phase2 only under /tmp/lanes/jvm-gates/8973-r1/PHASE2.md: exactfde/451 binaries, serialbaseA/candidate/baseB lifecycle+strict+SQLband, frozeninputintegrity,151alignment/SQLflush/stagingfirst, nice10Python,freshcaches, establishedcaptureloadprotocol. #8946manualfinished; no other coordinatorcapture. No builds/tests/replay/work50/cleanup/cloud, no masks/classification/PASS. Handback CAPTURE.md and completeledgers; unchangedanswerhypothesisnotassumed for sharedshapecompletion."
-        },
-        {
           "id": "agent:9587",
           "role": "assistant",
           "text": "I’ll read the #8973 Phase2 protocol and verify the retained binary hashes, then perform the three sequential captures and complete the required precomparison audit before running strict and SQL comparisons."
@@ -325,11 +240,6 @@
           "text": "#8973 Phase2 capture evidence is complete in [CAPTURE.md](/tmp/lanes/jvm-gates/8973-r1/CAPTURE.md) and `inputs.txt`. Strict comparisons exited 0 with no answer or read-key movement; the SQL band exited 2 with six session-reader family differences. No classification or gate PASS is asserted."
         },
         {
-          "id": "user:9999",
-          "role": "user",
-          "text": "#8973 Phase2 correction before next phase: I read precomparison-audit.py/json; they do NOT check the required whole-session SQL totals >= sum of per-request totals for every exact(role,SQL) family. Finish that from retained captures, save script/output/exit, and label it a LATE completeness audit (do not claim it ran before comparison). Also verify the nine frozen-answer difference payloads are identical across A/candidate/B, not only equal counts. Parent read six changed SQL texts: they are the known connection-opening PRAGMA/temp-table families, zero per-request deltas. No source-class trace needed if late completeness audit passes. During-capture load series was omitted; record limitation faithfully, do not reconstruct. Start samples36/43.5/78.4 meet<100 andA/Bagree; no wall-time/perf claim or recapture solely for missing load samples. Future phases retain required load samples. No builds/tests/replay/capture rerun unless retained audit demonstrates incomplete flush; in that case report first. Handback concise once checks complete; no PASS."
-        },
-        {
           "id": "agent:10005",
           "role": "assistant",
           "text": "I’ll run a late audit over the retained SQL records, comparing whole-session totals to summed per-request totals for every exact `(role, SQL)` family, and hash the three frozen-answer difference payloads. I’ll record it as post-comparison evidence."
@@ -338,11 +248,6 @@
           "id": "agent:10075",
           "role": "assistant",
           "text": "The late completeness audit passed: no SQL execution or row shortfalls across 2,708 families per capture, and all three frozen-answer difference payloads are identical. Details are in [CAPTURE.md](/tmp/lanes/jvm-gates/8973-r1/CAPTURE.md) and `logs/late-completeness-audit.json`. Missing during-capture load samples are recorded as a limitation; no recapture or PASS is claimed."
-        },
-        {
-          "id": "user:10193",
-          "role": "user",
-          "text": "Late completeness correction read/accepted: zero shortfalls2708families, identical nine frozen-difference payloads. Parent classifies six SQL families as documented connection-opening PRAGMA/temp-table noise, no per-request movement; source/method/readkeys all equal. Missingduringloadseries remains an explicit receipt limit, not reconstructed. Proceed #8973 PHASE3 per /tmp/lanes/jvm-gates/8973-r1/PHASE3.md now: exactretainedbinaries, candidateownreplay.py, replay130+empty/JDK21nine only, fullleafcomparisons/integrity/hash/actualexit evidence, nice10allPython; logloadbefore/during/after. No builds/tests/work50/manual/cloud/cleanup/PASS. Solecoordinatorcapture. Hand back REPLAY.md/inputs and concise result."
         },
         {
           "id": "agent:10199",
@@ -360,11 +265,6 @@
           "text": "#8973 Phase3 is complete. Replay and comparison exited 0; all requested streams completed, with no base/candidate answer differences. The inherited frozen differences are documented in [REPLAY.md](/tmp/lanes/jvm-gates/8973-r1/REPLAY.md). No overall gate PASS is asserted."
         },
         {
-          "id": "user:10518",
-          "role": "user",
-          "text": "New bounded job: #7728 r7 BUILD ONLY. Follow /tmp/lanes/jvm-gates/7728-r7/REQUEST.md. Exact final08db7ea846c7bcf16b39837b2295a0c4f89d5575 is fetched in parent /home/jonathan/Projects/bifrost2; basefde903 retained in8973. Verify/copy base binary, build only final candidate through normalmbx, save provenance/exits/hashes, then hand back. Parent has checked final comment-only delta and merge-base. No captures/tests/cleanup/cloud/target changes/product edits. Your prior8973 build command/copier applies; read exact candidate guidance. Do not rebuild base."
-        },
-        {
           "id": "agent:10524",
           "role": "assistant",
           "text": "I’ll read the #7728 request, verify the retained #8973 base binary against its recorded hash, then archive and build only the exact final candidate from the parent repository."
@@ -378,11 +278,6 @@
           "id": "agent:10668",
           "role": "assistant",
           "text": "#7728-r7 candidate build exited 0. The reused base and candidate binaries have different hashes. Evidence and retained artifacts are in [BUILD.md](/tmp/lanes/jvm-gates/7728-r7/BUILD.md) and `inputs.txt`. No gate PASS is implied."
-        },
-        {
-          "id": "user:10755",
-          "role": "user",
-          "text": "#7728-r7 proceed Phase2 captures/comparison only per /tmp/lanes/jvm-gates/7728-r7/PHASE2.md. Parent readBUILD and rehashed both retained binaries (basee86a5cc7 candidate3f996299). Sole coordinator lifecycle capture now; no parallel parent test/build. Exactcandidate08db; include followup-latency.py in extracted candidate scripts. Important previous8973 correction: aggregate SQL totals >= per-request sums must be audited BEFORE comparators, alongside151counts/flush and exact stagingINSERT. All three captures sequential freshcache/output, normalfsync, nice10Python, frozeninputintegrity, loadrecording and40sreadiness remedy as protocol. No builds/tests/replay/manual/cleanup/Git/cloud. Parent classifies everymovement; handbackCAPTURE+inputs, noPASS."
         },
         {
           "id": "agent:10761",
@@ -400,11 +295,6 @@
           "text": "#7728 Phase2 captures and comparisons are complete. All captures exited 0; precomparison alignment, staging, and SQL flush audits passed. Candidate comparisons show 115 JVM operation-read key differences and two SQL query-family increases, with no answer leaf changes. Details are in [CAPTURE.md](/tmp/lanes/jvm-gates/7728-r7/CAPTURE.md). No gate PASS is asserted."
         },
         {
-          "id": "user:11086",
-          "role": "user",
-          "text": "#7728-r7 bounded Phase2 handback completion, retained files only: (1) CAPTURE/inputs cite logs/answer-differences.json and sql-family-differences.json, but neither is in ls logs. Locate/correct pointers or produce those evidence summaries from existing captures; no recapture. (2) For all115 changed JVM operation-read records, give field-for-field leaf differences between base/candidate key payloads, grouped by method and exact field path. Test a narrowly named projection removing ONLY newly added external_argument_reasons/external_call_binding_reasons/external_constructor_hierarchy_reasons if present; report residuals and nonempty values separately, don't assume all new fields empty or normalize IDs generically. Preserve original request indices and all changed reads. (3) Sum each added SQL family perrequest executions/rows and pair with sites; confirm all9 frozen-difference payloads identical across A/C/B. Full raw logs retained; no product/source edits/builds/tests/cloud/replay/cleanup. Parent independently traces SQL cause and owns normalization/acceptance. Handback compact Phase2 addendum with exact existing/new artifact paths."
-        },
-        {
           "id": "agent:11092",
           "role": "assistant",
           "text": "I’ll audit only the retained #7728 captures. First I’ll locate the missing summary files, then pair operation-read keys by original request index and compare their structured payload fields before and after removing only the three named external-reason fields."
@@ -413,11 +303,6 @@
           "id": "agent:11252",
           "role": "assistant",
           "text": "The retained #7728 addendum is complete. All 115 operation-read differences are limited to the three named fields, absent in base and empty in candidate; projected residuals are zero. Each added SQL family totals 54 executions and 177 rows across 54 requests, with sites recorded. The three frozen-difference payloads match byte-for-byte. See the addendum in [CAPTURE.md](/tmp/lanes/jvm-gates/7728-r7/CAPTURE.md); no PASS is asserted."
-        },
-        {
-          "id": "user:11387",
-          "role": "user",
-          "text": "New #8834 lifecycle build assignment. Read /tmp/lanes/jvm-gates/8834-r1/REQUEST.md and execute BUILD ONLY. Exact candidate22ed7cad4e0b92214d0cca6f9f3c551d70ba7be8 vs exact merge-base7ff2f635245e811b2b2b80cbffbe2a47b4544b76, both fetched/verified in parentrepo. Earlier /8834 gate CANCELLED before candidate build, cannot carry. Fresh archives/normal mbx measure CLI artifacts, immediate compiler-artifact copy, hashes/commands/actual exits. Follow same successful build procedure as your7728-r7/8973-r1, but these exact identities. No product/Git/source/target/config changes, tests/captures/cloud/cleanup. Read request constraints. Return BUILD.md+inputs; don't start later phases. Owner saved manual logs are being audited independently to avoid unnecessary reruns."
         },
         {
           "id": "agent:11396",

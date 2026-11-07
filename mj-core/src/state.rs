@@ -2046,6 +2046,25 @@ impl SessionRecord {
         )
     }
 
+    /// How this session's harness realizes its target's execution policy:
+    /// the policy recorded when its target was selected, so a later change
+    /// to the target template does not move it, and the profile's Muse
+    /// auto-review choice. `None` when the policy cannot be resolved or the
+    /// harness keeps its own configuration.
+    pub fn execution_enforcement(
+        &self,
+        config: &Config,
+    ) -> Option<crate::config::ExecutionEnforcement> {
+        let policy = self.target_runtime_settings(config).ok()?.execution_policy;
+        let muse_auto_review = config
+            .profiles
+            .get(&self.last_profile)
+            .and_then(|profile| profile.muse_auto_review)
+            .unwrap_or(false);
+        self.harness_kind
+            .resolve_execution_enforcement(policy, muse_auto_review)
+    }
+
     /// The target access settings this session's commands use: the ones
     /// recorded when its target was selected, with the machine's current ssh
     /// options while they still reach the same host, user, and port, or the
@@ -2355,7 +2374,9 @@ fn repository_source_identity(repository: &ProjectRepository) -> Option<ProjectS
     repository
         .github
         .as_deref()
-        .and_then(ProjectSourceIdentity::git_remote)
+        .and_then(|source| {
+            ProjectSourceIdentity::git_remote(source, crate::remote_git::Shorthand::Allowed)
+        })
         .or_else(|| {
             repository
                 .local
@@ -2409,10 +2430,12 @@ impl ProjectSourceIdentity {
     }
 
     /// Canonicalizes a Git remote so raw checkouts group as the same project
-    /// even when their worktree paths differ.
-    pub fn git_remote(source: &str) -> Option<Self> {
-        let identity = crate::repository::RepositoryIdentity::from_remote(source)?;
-        let full = crate::repository::RepositoryIdentity::remote_label(source)?;
+    /// even when their worktree paths differ. `shorthand` says whether a bare
+    /// `owner/repository` is GitHub; text read from `git config` must not
+    /// allow it, because there it is a relative path.
+    pub fn git_remote(source: &str, shorthand: crate::remote_git::Shorthand) -> Option<Self> {
+        let identity = crate::repository::RepositoryIdentity::from_remote_with(source, shorthand)?;
+        let full = crate::repository::RepositoryIdentity::remote_label_with(source, shorthand)?;
         Some(Self {
             key: identity.key(),
             short: full.rsplit(['/', ':']).next()?.to_owned(),
@@ -2589,6 +2612,17 @@ impl<'a> Checkout<'a> {
         }
     }
 
+    /// The record that owns a borrowed checkout, following nested borrowing
+    /// to the session that holds the workspace. `None` for a checkout the
+    /// session owns itself.
+    #[must_use]
+    pub fn owner(&self) -> Option<&'a SessionRecord> {
+        match self {
+            Self::Borrowed { owner, checkout } => checkout.owner().or(Some(*owner)),
+            Self::Attached { .. } | Self::ManagedWorktree { .. } | Self::ManagedWorkspace => None,
+        }
+    }
+
     /// The concrete repository directory when the record stores one.
     /// Bundle workspace paths are target-specific and are not in the record.
     #[must_use]
@@ -2713,6 +2747,19 @@ impl State {
             });
         }
         Ok(session.checkout())
+    }
+
+    /// The record whose workspace `session_id` works in: the session itself,
+    /// or, for a sub-agent, the parent it borrows from. Facts about how the
+    /// workspace was created (its exact checkout, its history cutoff) belong
+    /// to that record, so a reader asks here instead of the child's own
+    /// fields, which a child leaves empty.
+    pub fn workspace_owner(&self, session_id: &str) -> Result<&SessionRecord> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        Ok(self.checkout(session_id)?.owner().unwrap_or(session))
     }
 
     /// How a notice names a session: the title the session list shows

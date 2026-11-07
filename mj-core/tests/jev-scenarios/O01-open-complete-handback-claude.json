@@ -88,18 +88,20 @@
   },
   "expected": {
     "failure": "none",
-    "input": "none",
+    "input": "required",
     "work": "finished",
     "reply": "closing",
     "quiet": null,
-    "action": "finished",
+    "action": "await_input",
     "wrong_actions": [
       "continue",
       "wait"
     ]
   },
   "known_failure": [],
-  "outcome": null,
+  "outcome": {
+    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent. Was input=none, action=finished."
+  },
   "context": {
     "after": [
       {

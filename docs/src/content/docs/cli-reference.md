@@ -205,7 +205,7 @@ the matching task choice for this session; each unspecified type uses its global
 choice. Either override implies Mjolnir. The matching
 `--subagent-*-effort` flag requires its model flag. Omitted policy retains
 the session's override. `--subagents none` removes delegation tools entirely;
-it needs a Claude, Codex, or DSH session. A retry of a sealed
+it needs a Claude, Codex, DSH, or OpenCode session. A retry of a sealed
 Move retains its recorded policy; an explicit different policy is refused.
 
 `--oracle enabled|disabled` turns the session's oracle on or off, and
@@ -379,7 +379,7 @@ mj new --workspace eval --bundle product --target builder \
 - `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to
   Native, or to None for a DSH profile. DSH has no sub-agents of its own, so it
   refuses `native` and accepts `mjolnir` or `none`. `none` gives the session no delegation tools, native or Mjolnir; it
-  needs a Claude, Codex, or DSH profile. Mjolnir requires a Claude, Codex, or DSH parent and a straightforward
+  needs a Claude, Codex, DSH, or OpenCode profile. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and a straightforward
   choice in `[subagents.straightforward]` or a session override. The subtle
   choice in `[subagents.subtle]` is optional. Configure global defaults in
   config.toml or TUI Settings → Sub-agents.
@@ -450,8 +450,9 @@ mj new --workspace eval --bundle product --target builder \
   include known per-million-token rates; subscription and unknown billing modes
   are labeled without per-token prices. JSON includes a `billing` field and a
   `price` object or `null` for each model.
-- `mj set-config` applies any selectable session setting the harness advertises,
-  such as the model, effort, approval mode, or collaboration mode.
+- `mj set-config` applies user-settable session settings the harness advertises,
+  such as the model or effort. The target permission policy owns permission
+  settings; use plan mode to enter or leave Plan.
   Without `--key` and `--value` it lists the settings the session's agent
   offers, with their choices.
 - `mj ui` changes what an open dashboard shows, as if you had pressed the keys,

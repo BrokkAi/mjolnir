@@ -1,0 +1,183 @@
+{
+  "id": "L2902",
+  "title": "Claude instruction file source",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "f5f9c658bb9dcccb93b55852596d1403",
+    "session_title": "mjolnir via claude3",
+    "reply_position": 984,
+    "captured_at": "2026-11-06T13:10:27.602Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "sort profiles whose 5h burn rate is projected to exhaust before reset to the end of the load-balancing priority list"
+        },
+        {
+          "id": "agent:31",
+          "role": "assistant",
+          "text": "So `projects_exhaustion` already exists. Let me read the scheduler and that function."
+        },
+        {
+          "id": "user:69",
+          "role": "user",
+          "text": "as a tiebreak, obviously"
+        },
+        {
+          "id": "agent:98",
+          "role": "assistant",
+          "text": "Now the edits. First a small public predicate on `QuotaWindow` so the controller can pick out the 5-hour window without duplicating the label list."
+        },
+        {
+          "id": "agent:120",
+          "role": "assistant",
+          "text": "Now a test covering both the ranked and the drawn order."
+        },
+        {
+          "id": "user:153",
+          "role": "user",
+          "text": ">  between the\n│ tier and the pace score\n\nwhat are those"
+        },
+        {
+          "id": "agent:164",
+          "role": "assistant",
+          "text": "**What the two terms mean.** Both come from `mj-controller/src/profile_scheduler.rs`.\n\n**Tier** is the coarse group a profile falls into, from `QuotaRank::tier()`. Lower numbers come first, and a profile never moves across tiers:\n\n| Tier | Meaning |\n|---|---|\n| 0 Available | Subscription with included quota left for the model |\n| 1 Unknown | No usable quota reading |\n| 2 Paid | Subscription out of included quota but with paid credits |\n| 3 UsagePriced | API-billed profile |\n| 4 Exhausted | Known to be out of quota, so it would only fail |\n\n**Pace score** orders profiles within the Available and Paid tiers. For Available it comes from `quota_score` in `mj-controller/src/quota/recovery.rs`. For each window that applies to the model, it divides the percent left by the percent of the window's time left, capped at 4. The profile's score is the lowest of these. For example, 60% left with 30% of the window's time left scores 2.0. Higher is better. Paid profiles are ordered by their credit balance instead. The score is used in two ways:\n- `rank_candidates` (session launch) sorts by it, highest first.\n- `order_by_draw` (sub-agents, reviewers, continuation) uses it as the weight in a random draw, so that spawns started at the same time spread across profiles.\n\n**What I changed.** The sort key is now: tier, then \"5-hour window projected to run out before reset\" (no before yes), then the pace score or random draw. A profile that is burning its 5-hour window still stays in its tier. Before the change, the draw could still pick it with a weight close to that of a healthy profile. Now it is picked only after every non-burning profile in the same tier. That is my reading of \"as a tiebreak\". If you meant a narrower tiebreak that applies only after the pace score, the flag would almost never change anything, because pace scores rarely tie exactly.\n\n**Changes (87 lines, not committed):**\n- `mj-client/src/quota.rs`: new `QuotaWindow::is_five_hour()`, which reuses the existing label check.\n- `mj-controller/src/profile_scheduler.rs`: new `projects_short_window_exhaustion()`, added to both sort functions. It reuses the existing `projects_exhaustion` test, the same one behind the dashboard's projected-exhaustion flag.\n- `mj-controller/src/server/api/subagents.rs`: new test `five_hour_burn_projected_to_run_out_sorts_last_within_its_tier`. It has a burning profile that would otherwise rank first on pace score, and it checks that the profile still sorts ahead of the Unknown tier.\n\n**Tests:** the new test passes. So do the 114 subagent, continuation and quota tests in `brokk-mj-controller`, and all 51 tests in `brokk-mj-client`. I did not run the full workspace suite.\n\n**One difference from the dashboard:** the projection uses the current time. The dashboard uses the time of the quota reading. With a reading a few minutes old, the scheduler sees slightly more elapsed time, so it is slightly less likely to flag a profile than the dashboard is. Matching the dashboard exactly would mean adding the reading time to `CandidateQuota::Subscription` and its five test constructors. I can do that if you want the two to agree exactly.\n\n`★ Insight ─────────────────────────────────────`\n- The burn flag goes in the sort key before the draw key, not into the score itself. That keeps the random weighted draw fair among the healthy profiles; folding the flag into the score would distort the weights.\n- The flag can only matter in the Available tier: Unknown profiles have no reading to project from, and Exhausted or Paid ones already have no included quota left.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:421",
+          "role": "user",
+          "text": "this isn't your fault bc it keeps happening\n\nwhy didn't you push? i know AGENTS.md says to push so something must be countermanding that"
+        },
+        {
+          "id": "agent:443",
+          "role": "assistant",
+          "text": "Nothing overrode AGENTS.md. It was never loaded into my context. I confirmed this from the repo history and from what this session was given.\n\n**Why:**\n- Claude Code reads `CLAUDE.md` files, not `AGENTS.md`. This repo used to have a `CLAUDE.md` symlink pointing to `AGENTS.md`. Commit `799c07d51` (\"death to claude.md\", Ryan Svihla, 2026-09-21) deleted it. Since then, Claude sessions in this repo don't see the repo's instructions. The only instruction files in my context were `~/.claude/CLAUDE.md` and the Mjolnir profile's `CLAUDE.md`, and neither says anything about committing or pushing.\n- With no repo rule loaded, Claude Code's built-in default applied: \"Commit or push only when the user asks. If on the default branch, branch first.\" That is the opposite of `AGENTS.md:65-72`, which says to commit to the current branch and push to `origin/master` without being asked.\n\nThis explains why it keeps happening: every Claude session in this repo since September 21 has had the same gap. Codex sessions read `AGENTS.md` directly, so they won't show the problem.\n\n**Fix options (my recommendation first):**\n1. **Add a `CLAUDE.md` that contains only `@AGENTS.md`.** Claude Code treats `@path` as an import, so this loads the same content without a symlink. It may also avoid whatever problem led to the symlink being removed, for example on Windows checkouts. Ask Ryan why it was deleted before you choose between this and option 2.\n2. **Restore the symlink.**\n3. **Have mj inject `AGENTS.md` into Claude sessions.** This also covers other repos, but it's more work and duplicates something Claude Code already supports.\n\nI haven't changed anything. The scheduler change from before is still uncommitted. If you want it pushed, I'll commit it, run `request_review`, and push once the review comes back clean."
+        },
+        {
+          "id": "user:588",
+          "role": "user",
+          "text": "are we using an old version of claude code? bc claude announced they read AGENTS.md now"
+        },
+        {
+          "id": "agent:622",
+          "role": "assistant",
+          "text": "No, the version is new enough. This session runs Claude Code **2.1.308**, bundled by mj in `~/.cache/mjolnir/harnesses/claude/claude-agent-acp-0.99.0_claude-2.1.308_pkg2`, matching the pin in `mj-core/assets/harnesses/claude/package.json:7`. That binary has the AGENTS.md support, and it is on by default.\n\n**What the binary does (confirmed from the code in `claude.exe`):**\n- A setting called `instructionFiles` controls this. Its default is `\"claude-md-or-agents-md\"`, and its description says: \"a project with no CLAUDE.md of its own gets its AGENTS.md files instead.\"\n- That \"no CLAUDE.md\" check looks at more than the repo. It treats the project as already having one if either of these is true:\n  - a loaded instruction file named `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md` sits in the session root or below it, or\n  - `fs.ancestors({names: [\"CLAUDE.md\", \".claude/CLAUDE.md\", \"CLAUDE.local.md\"]})` finds any such file.\n- If either is true, AGENTS.md is skipped.\n\n**Likely cause:** `/home/jonathan/.claude/CLAUDE.md`. mj sets this session's config directory to the worker profile, so Claude Code doesn't treat `~/.claude` as your user config. It finds `~/.claude/CLAUDE.md` as an ancestor of the repo instead. You can see this in my context: that file was labelled \"project instructions, checked into the codebase\", while the profile's copy was labelled \"user's private global instructions\". Because a `.claude/CLAUDE.md` turned up among the ancestors, the fallback decided this is a Claude project and didn't load `AGENTS.md`.\n\nThis is likely, not confirmed. I didn't trace how far up `fs.ancestors` searches, and I didn't run a test.\n\n**How to confirm:** temporarily rename `~/.claude/CLAUDE.md`, start a new Claude session in this repo, and check whether AGENTS.md loads. The debug log should show `no CLAUDE.md found; AGENTS.md loaded: …`.\n\n**If that's the cause, the fixes are:**\n1. **Delete or move `~/.claude/CLAUDE.md`** (my recommendation). It's the same text as the profile's `CLAUDE.md`, so mj sessions lose nothing. It only matters to Claude Code run outside mj, which would then need its own copy.\n2. **Set `instructionFiles: \"claude-md-and-agents-md\"`** in the Claude settings mj writes for profiles. Then AGENTS.md loads next to any CLAUDE.md. This also protects other repos that have the same layout.\n\nNothing is changed. The scheduler change is still uncommitted."
+        },
+        {
+          "id": "user:797",
+          "role": "user",
+          "text": "> It's the same text as the profile's CLAUDE.md\n\npretty sure this is bc mj syncs \"the profile\" from ~/.claude"
+        },
+        {
+          "id": "agent:824",
+          "role": "assistant",
+          "text": "You're right, and that rules out my first recommendation. `mj-controller/src/controller/worker_binary/harness.rs:198` adds the harness's instruction file (`CLAUDE.md` for Claude, from `agent_instructions_file()` in `mj-core/src/config/harness.rs:517`) to the files copied from the profile's home into the worker profile. `install.rs:107-112` then appends the delegation policy. That is why the profile copy is 6,684 bytes while `~/.claude/CLAUDE.md` is 2,133.\n\nSo `~/.claude/CLAUDE.md` is the source for every mj Claude session. Deleting it would remove your instructions from all of them.\n\nThis also explains the conflict. mj points Claude Code's config directory at the worker profile. Claude Code then no longer treats `~/.claude` as your user config, so it sees `~/.claude/CLAUDE.md` as an ordinary ancestor file. When the session's directory is under `/home/jonathan`, that file makes Claude Code decide \"this project has a CLAUDE.md\", and it skips `AGENTS.md`. The same file is loaded twice, once as user instructions and once as project instructions. I haven't confirmed this with a test yet.\n\nBetter options, now that deleting the file is out:\n\n1. **Have mj set `instructionFiles: \"claude-md-and-agents-md\"`** in the settings it writes for Claude worker profiles (my recommendation). Then `AGENTS.md` loads next to any `CLAUDE.md` it finds. It fixes every repo under your home directory, not just this one, and needs no changes to your files.\n2. **Add a `CLAUDE.md` containing `@AGENTS.md` to each repo.** It works, but each repo needs it, and it is the file Ryan deleted in `799c07d51`.\n\nThere may also be a Claude Code bug worth reporting: with a custom config directory, the default config directory's `CLAUDE.md` counts as a project file. Whether that is intended is unknown.\n\nBefore building option 1, I'd do the confirming test: start a session with `~/.claude/CLAUDE.md` renamed and check that `AGENTS.md` loads. That shows the ancestor file is the trigger before mj changes are built around it. Do you want me to run that test and then implement option 1?"
+        },
+        {
+          "id": "agent:984",
+          "role": "assistant",
+          "text": "That notice is from the slow binary search I started earlier and then replaced with a faster one. Its output adds nothing new.\n\nMy question from the last message is still open: do you want me to run the confirming test (a session started with `~/.claude/CLAUDE.md` renamed) and then have mj set `instructionFiles: \"claude-md-and-agents-md\"` for Claude worker profiles? The scheduler change is also still uncommitted."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "> It's the same text as the profile's CLAUDE.md\n\npretty sure this is bc mj syncs \"the profile\" from ~/.claude",
+    "assistant_text_tail": "That notice is from the slow binary search I started earlier and then replaced with a faster one. Its output adds nothing new.\n\nMy question from the last message is still open: do you want me to run the confirming test (a session started with `~/.claude/CLAUDE.md` renamed) and then have mj set `instructionFiles: \"claude-md-and-agents-md\"` for Claude worker profiles? The scheduler change is also still uncommitted.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      824,
+      984
+    ],
+    "user_position": 797,
+    "input_rationale": "The agent offers two options, recommends one, and asks permission to run a confirming test and implement it; the 984 reply restates that the question is still open. The user pushed back on where the setting goes, then approved.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:824",
+      "agent:984"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T13:10:42.169Z",
+        "kind": "user",
+        "text": "> Have mj set instructionFiles: \"claude-md-and-agents-md\" in the settings it writes for Claude worker profiles (my recommendation).  better to write this to my ~/.claude instead of hardcoding it in mj"
+      },
+      {
+        "at": "2026-11-06T13:11:01.301Z",
+        "kind": "agent",
+        "text": "Partly agree. Writing it to `~/.claude/settings.json` works, and it's the right fix for you right now. I'd still make mj set it as a default when you haven't set it.  **Why `~/.claude` works (confirme"
+      },
+      {
+        "at": "2026-11-06T13:13:05.745Z",
+        "kind": "user",
+        "text": "> mj adds instructionFiles only when the user's settings.json doesn't set it  ok, you're right, do that, and also report a CC bug. no ~/.claude edits, i'll just install the new mj  push both the mj fi"
+      },
+      {
+        "at": "2026-11-06T13:13:33.030Z",
+        "kind": "agent",
+        "text": "Repo rules (`AGENTS.md:65-72`, clippy at `AGENTS.md:350`) now apply. I'll start the Claude Code reproduction in a child while I commit the scheduler change and build the mj default."
+      },
+      {
+        "at": "2026-11-06T13:14:10.986Z",
+        "kind": "agent",
+        "text": "Now a test next to the mailbox-hook test: the default is added, and a user's own value is kept."
+      },
+      {
+        "at": "2026-11-06T13:18:29.006Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task cc-agents-md-repro finished: completed     State: completed     Report directory: /home/jonathan/Projects/mjolnir/.mj/clones/f5f9c658bb9dcccb93b55852596d1403/.mj/agents/"
+      }
+    ]
+  }
+}

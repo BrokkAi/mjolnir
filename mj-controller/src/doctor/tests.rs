@@ -1948,3 +1948,61 @@ fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
         check.remediation
     );
 }
+
+/// A host that does not answer has one problem, not two: its GitHub check
+/// waits for the SSH check to pass, and then runs on the host under the same
+/// strict host-key checking.
+#[test]
+fn ssh_bare_github_check_runs_only_on_a_reachable_host() {
+    let unreachable = FakeExecutor::new([Ok(failed(
+        b"ssh: connect to host example.test port 22: Connection timed out",
+    ))]);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &unreachable);
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<Vec<_>>(),
+        ["runtime.ssh-bare.builder"]
+    );
+
+    let reachable = FakeExecutor::new([
+        Ok(output(b"")),
+        // Git on the host rewrites neither SSH spelling, so SSH decides.
+        Ok(output(b"git@github.com:octocat/hello-world.git")),
+        Ok(output(b"ssh://git@github.com/octocat/hello-world.git")),
+        Ok(failed(
+            b"Hi octocat! You've successfully authenticated, but GitHub does not provide shell access.",
+        )),
+    ]);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &reachable);
+    assert_eq!(checks[1].id, "github.ssh-bare.builder");
+    assert_eq!(checks[1].status, CheckStatus::Ready);
+    let commands = reachable.commands.borrow();
+    assert_eq!(&commands[3].args[..2], ["-o", "StrictHostKeyChecking=yes"]);
+    assert!(
+        commands[3]
+            .args
+            .last()
+            .unwrap()
+            .contains("'StrictHostKeyChecking=yes' '-o' 'ConnectTimeout=5' 'git@github.com'"),
+        "{:?}",
+        commands[3].args
+    );
+}
+
+// Hard-won: e32a6aeef: the default localhost target, not saved in config.toml, got no GitHub check.
+#[test]
+fn the_default_local_target_gets_a_github_check() {
+    if !crate::targets::HOST_RUNS_WORKERS {
+        return;
+    }
+    let checks = local_bare_github_checks(Ok(&Config::default()), &AlwaysFailingExecutor);
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<Vec<_>>(),
+        ["github.local-bare.localhost"]
+    );
+}

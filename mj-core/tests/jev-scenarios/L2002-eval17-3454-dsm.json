@@ -1,0 +1,279 @@
+{
+  "id": "L2002",
+  "title": "eval17 3454 dsm",
+  "category": "still-open-none",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "c18e7c3c8c07dee0ea2ae209b899df43",
+    "session_title": "eval17 3454 dsm",
+    "reply_position": 339331,
+    "captured_at": "2026-09-20T00:10:43.018Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:19",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3454: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 0e6a57f4b8264c6541ff3358cd615048efc6a08e\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitati\n[... 2205 bytes omitted from the middle of this message ...]\n/`, `semantic-packs/web-network/{javascript,typescript}/`, `crates/bifrost-policy/policy-packs/bifrost.effects/policies/{javascript,typescript}/selected-boundary-no-network-io.rqlp`, `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs`). Copy their structure.\n\nDeliver, for this language:\n\n1. Fixture set under `tests/fixtures/network-effect-boundary/<language>/`: a finding tree (selected root -> helper chain across files -> concrete network API), a corrected tree (the caller owns the effect, the root is clean), a same-name near miss (a local or unrelated function with the API's name that must not become a proven effect by spelling), a recursion case (the helper reaches the effect exactly once and terminates), and an unresolved-helper case (coverage stays open, no clean verdict).\n2. Reviewed model under `semantic-packs/web-network/<language>/` (or the language's existing reviewed pack tree) declaring `bifrost.network_io` on the exact API identity at the arity the fixture writes.\n3. Policy specialization in `crates/bifrost-policy/policy-packs/bifrost.effects/` with the stable id `bifrost.effects.<language>.selected-boundary-no-network-io`, a documented declaration-selection block, and the manifest row.\n4. Acceptance: tests in `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs` covering all five fixtures, a CLI run through `--policy-file` (exit 1 finding, 0 corrected, 2 unresolved), and one MCP `run_policy` run.\n5. Update this language's row in the matrix doc with the evidence.\n\nIf the language cannot bind the exact API identity or cannot key its workspace callees (compare #3451 for Python), stop, file the focused capability-gap issue, link it on the row, and leave this ticket open. Do not fill the gap with text matching.\n\n---\nComment by jbellis:\nThe prerequisite for this row landed with merge commit 9b4769df1: the reviewed JDK model at `semantic-packs/web-network/jvm/bifrost.web-network-jvm.json` is shared across the JVM realm, so the Scala row binds it and must not ship a second JDK model.\n"
+        },
+        {
+          "id": "agent:190152",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:217593",
+          "role": "assistant",
+          "text": "Now the main implementation. Let me refactor the supertype resolution and add the Scala external member family walk:"
+        },
+        {
+          "id": "agent:217974",
+          "role": "assistant",
+          "text": "Now add the external-root walk. Let me place it after `resolve_enclosing_package_supertype`:"
+        },
+        {
+          "id": "agent:224524",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:224568",
+          "role": "assistant",
+          "text": "I'll pick up from the handoff. First, let me orient on the current state."
+        },
+        {
+          "id": "agent:251708",
+          "role": "assistant",
+          "text": "Now let me make the remaining implementation edits."
+        },
+        {
+          "id": "agent:251835",
+          "role": "assistant",
+          "text": "Now the shared prefix helper and the landing function:"
+        },
+        {
+          "id": "agent:251949",
+          "role": "assistant",
+          "text": "Now update the walk call site and add the needed import:"
+        },
+        {
+          "id": "agent:252140",
+          "role": "assistant",
+          "text": "Now the MultiAnalyzer routing:"
+        },
+        {
+          "id": "agent:252351",
+          "role": "assistant",
+          "text": "Now let me run the two previously failing Scala tests:"
+        },
+        {
+          "id": "agent:257249",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:270994",
+          "role": "assistant",
+          "text": "Now let me fix the recursion fixture so its call graph contains only resolvable calls (Scala spells `depth - 1` as an operator application, which is an unmodeled stdlib call). First let me confirm the current failure text is reproducible and check compile state:"
+        },
+        {
+          "id": "agent:272675",
+          "role": "assistant",
+          "text": "Now let me rewrite the Scala recursion fixture so the descent is expressed through workspace declarations rather than unmodeled stdlib operator calls:"
+        },
+        {
+          "id": "agent:273514",
+          "role": "assistant",
+          "text": "Both Scala tests pass and every reachable call site now resolves. Let me strip the debug instrumentation:"
+        },
+        {
+          "id": "agent:277424",
+          "role": "assistant",
+          "text": "Now let me run the full issue-3387 policy suite (all in-process dialect tests):"
+        },
+        {
+          "id": "agent:278083",
+          "role": "assistant",
+          "text": "The analysis suite needs longer than one bounded command; let me run it in the background and poll:"
+        },
+        {
+          "id": "agent:278111",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:278561",
+          "role": "assistant",
+          "text": "analysis2.log is empty — that background run never started. Relaunching it properly, and starting clippy in parallel."
+        },
+        {
+          "id": "agent:279288",
+          "role": "assistant",
+          "text": "Background nohup jobs are being reaped. Switching to a persistent PTY session for the long analysis suite."
+        },
+        {
+          "id": "agent:279521",
+          "role": "assistant",
+          "text": "Analysis lib suite passed (3059/3059). Now the Scala usage/issue suites."
+        },
+        {
+          "id": "agent:281538",
+          "role": "assistant",
+          "text": "Clippy found one needless borrow. Fixing it."
+        },
+        {
+          "id": "agent:283158",
+          "role": "assistant",
+          "text": "Clippy is clean. Now the before/after witness: save the staged fix, revert the four analysis files to base, and show the capability test failing."
+        },
+        {
+          "id": "agent:289949",
+          "role": "assistant",
+          "text": "The repo's `target` symlink points at a shared cache dir that another session's GC removed. I'll repoint it at this session's isolated target dir so nextest's store dir resolves."
+        },
+        {
+          "id": "agent:291402",
+          "role": "assistant",
+          "text": "Restored. Now the after-state run: all five Scala acceptance tests, the CLI and MCP routes, and the policy-crate catalog test."
+        },
+        {
+          "id": "agent:292900",
+          "role": "assistant",
+          "text": "Both green. Re-running the analysis lib suite (its test binary was rebuilt at base state during the witness) plus the Scala usage/issue suites against the current tree."
+        },
+        {
+          "id": "agent:293792",
+          "role": "assistant",
+          "text": "All suites green. Preparing the commit."
+        },
+        {
+          "id": "agent:296671",
+          "role": "assistant",
+          "text": "The commit is in. One integrity check before the report: whether resolver-side changes like this one require a language extraction-epoch bump."
+        },
+        {
+          "id": "agent:304599",
+          "role": "assistant",
+          "text": "Everything is validated and committed. Final integrity check of the committed state:"
+        },
+        {
+          "id": "agent:304616",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\n1. **Confirmed cause with structured evidence.** The Scala row could not bind the reviewed JVM identity because `resolve_scala_field` stopped at the plain unsupported-receiver miss whenever the local inference engine had typed a receiver (`java.net.URL`) but the workspace indexed no member of that type; MultiAnalyzer's `external_member_family` answered `unsupported()` for any non-Java identity, so Scala had no external declaration route at all. The activated JDK model's `declared_effects` row on `java.net.URL.openConnection/0` therefore never bound, the effect set stayed open, and no finding could be published. At the detached base `0e6a57f4b8264c6541ff3358cd615048efc6a08e` with the new fixtures and tests present, `a_scala_receiver_call_binds_the_shared_jvm_model_identity` failed with `left: 0, right: 1` — the finding tree produced zero findings because the boundary could not see the callee. The same resolution path publishes the reference site, which is exactly the \"Scala call-site reference publication\" the #3452 lane recorded as unproven.\n\n2. **Changes and reasons.** 31 files, +1367/-61, committed on the detached HEAD as `8cd6eeaa0e41a2060c1ccdf1c06a7e04817e4d72` (parent `0e6a57f4b8264c6541ff3358cd615048efc6a08e`).\n   - `scala/hierarchy.rs`: an external member family resolver over the Scala analyzer's own hierarchy — iterative descendant closure, arity-carrying member facts, refusal of overload-collapsed identities, and explicit refusal of wildcard supertype landings that cannot be proven unambiguous.\n   - `multi_analyzer.rs`: Scala external identities route to the Scala analyzer; Java is unchanged; a realm also holding Java or Kotlin reports `MixedJvmRealmUnsupported` instead of answering from an incomplete hierarchy.\n   - `usages/get_definition/scala.rs`: a logically typed receiver with no workspace member/term/extension publishes the canonical external identity the activated declaration surface answers, with a structured `ResolvedReferenceSite` built from the shared `node_range`; the visible-type annotation ladder consults the same surface for a missing explicit import (structured import evidence, not a spelling match).\n   - Policy `bifrost.effects.scala.selected-boundary-no-network-io` with the shared rule body, empty ship-time selection, documented selection block, manifest row, catalog counts. No second JDK model: `semantic-packs/web-network/jvm/` stays shared.\n   - Five fixtures (`finding`, `corrected`, `near-miss/unrelated-same-name`, `recursion`, `unresolved`), in-process acceptance, CLI exit 1/0/2, MCP `run_policy`, matrix row, public docs, open-core inventory rows. No extraction epoch moved: no persisted extraction fact changed, matching the JS/TS and Java rows' precedent (the persisted class-set surfaces are verified by recomputed content digests, so a resolution change re-derives rather than serving stale rows).\n\n3. **Exact validation commands and results** (all with `JAVA_HOME` cleared, `BIFROST_PARALLELISM=1`, `RAYON_NUM_THREADS=1`, `--max-fail 100`):\n   - `cargo nextest run -p brokk-bifrost-analysis --lib` → 3059 passed, 123 skipped (twice: pre-cleanup and post-restore).\n   - `cargo nextest run --test suite_bench_policy -E 'test(issue_3387_network_effect_boundary)'` → 25/25 passed (all five Scala fixtures, all five dialects).\n   - `cargo nextest run --run-ignored all --test suite_bench_policy -E 'test(the_cli_reports_finding_clean_and_open_outcomes_for_the_scala_fixture)'` → passed; asserts exit 1/complete with the finding on `PriceCalculator.scala`, exit 0/complete on the corrected tree, exit 2/inconclusive on the unresolved tree.\n   - `cargo nextest run --run-ignored all --test suite_bench_policy -E 'test(built_in_policy_catalog_lists_without_constructing_a_workspace)'` → passed.\n   - `cargo nextest run --run-ignored all --test suite_mcp_cli -E 'test(issue_3387_network_effect_boundary_mcp)'` → 8/8 passed, including `mcp_run_policy_reports_the_scala_cross_file_network_effect`.\n   - `cargo nextest run --test suite_usages -E 'test(scala)'` → 280 passed; `--test suite_issues\n[... 1006 bytes omitted from the middle of this message ...]\ner-owned tree concludes clean, and the unresolved helper leaves the absence claim open (exit 2, inconclusive).\n\n5. **`git status --short`** is empty. Limitations: a workspace mixing Scala with Java or Kotlin now reports an unmet obligation (`MixedJvmRealmUnsupported`) rather than answering from an incomplete hierarchy — a deliberate refusal of an unproven landing, previously `unsupported` anyway; Kotlin's concrete-receiver route remains #3453. Environment note: the repo's `target` symlink pointed at a shared cache directory another session's collector had removed, so I repointed it to this session's isolated target directory (`target` is gitignored; nothing in the commit depends on it). No other separately actionable findings.\n\n6. **Draft GitHub approach comment.** Landed the Scala row of the #3387 network-effect boundary family on top of the shared JVM model from #3452, with no second JDK model. The gap was that a Scala call site on a `java.net.URL`-typed receiver never published the external member identity, so the reviewed `java.net.URL.openConnection()` declaration could not bind and the boundary stayed open. The Scala analyzer now resolves external member families through its own hierarchy walk and publishes the canonical external identity the activated declaration surface answers, with a structured reference site; MultiAnalyzer routes Scala external identities there and refuses mixed JVM realms instead of guessing. Acceptance covers the five fixtures, the shipped specialization, CLI exit codes 1/0/2 and one MCP `run_policy` run, with 25 in-process tests plus the Scala usage/issue suites and the analysis lib suite green. The near miss binds its workspace declaration, the recursion reaches the effect once and terminates, and the unresolved helper keeps the absence claim open. No extraction epoch changed because no persisted extraction fact did, consistent with the JavaScript, TypeScript and Java rows. Known boundary: Scala in a mixed JVM realm reports an unmet obligation rather than a possibly wrong answer."
+        },
+        {
+          "id": "user:306399",
+          "role": "user",
+          "text": "Your solution for #3454 won the evaluation. Land it on master from this container. Do all of this yourself, no sub-agents, and never block on one command for longer than 5 minutes (background plus polling for the long gates).\n\n1. Record your solution head: `git rev-parse HEAD` (expected 8cd6eeaa0e41a2060c1ccdf1c06a7e04817e4d72). Confirm `git status --short` is empty.\n2. `git fetch origin master`. Check out current origin/master detached: `git checkout --detach origin/master`. Then merge your solution: `git merge --no-ff 8cd6eeaa0e41a2060c1ccdf1c06a7e04817e4d72` with a plain-language merge message stating what landed and why (the Scala row of the network-effect boundary family lands: a logically typed Scala receiver publishes the shared JDK identity, and a Scala external member family over the analyzer's own hierarchy closes coverage with typed refusals; no second JDK model). Resolve conflicts by keeping both sides where they are additive: master has landed the Kotlin row (#3453) since your base, so `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs`, `tests/suite_mcp_cli/issue_3387_network_effect_boundary_mcp.rs`, the `bifrost.effects` manifest, `crates/bifrost-policy/src/builtin.rs`, the open-core inventory shards, the matrix doc and any catalog-count test keep both the Kotlin and the Scala additions (recompute manifest hashes with the repository's tooling if the manifest conflicts; catalog counts reflect the merged catalog); `multi_analyzer.rs` and the JVM hierarchy code may conflict with the Kotlin member family, keep both languages' routes; the changelog entry belongs under `## Unreleased` (create the section if master has none). No rebase. Explain every conflict and its resolution in your report.\n3. Run `node scripts/check-open-core-classification.mjs`; if it reports unclassified paths, classify them the way the existing rows in `.open-core/public-paths.d/` do and commit that separately.\n4. Gates, all with `JAVA_HOME` cleared, `BIFROST_PARALLELISM=1`, `RAYON_NUM_THREADS=1`, nextest default concurrency, `--max-fail 100`:\n   - `cargo fmt --all -- --check`\n   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`\n   - `cargo nextest run --max-fail 100 -p brokk-bifrost-jvm --lib`\n   - `cargo nextest run --max-fail 100 -p brokk-bifrost-policy --lib`\n   - `cargo nextest run --max-fail 100 -p brokk-bifrost-semantic-packs`\n   - `cargo nextest run --max-fail 100 --test suite_usages -E 'test(/scala|kotlin|java/)'`\n   - `cargo nextest run --max-fail 100 --test suite_issues -E 'test(/scala|kotlin|java/)'`\n   - `cargo nextest run --max-fail 100 --test suite_bench_policy --run-ignored all -E 'test(issue_3387) | test(/effects/) | test(bifrost_policy_cli) | test(built_in_policy_catalog)'`\n   - `cargo nextest run --max-fail 100 --test suite_mcp_cli --run-ignored all -E 'test(issue_3387)'`\n   - `cargo nextest run --max-fail 100 --test suite_cross_language`\n   - `cargo nextest run --max-fail 100 --test suite_persistence`\n   - `cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib`\n   Known load-sensitive tests: `blast_radius::tests::a_held_build_lock_ends_a_budgeted_request_by_naming_the_lock` and `go_typestate_lifecycle::cli_reruns_and_one_file_edit_stay_in_the_interactive_latency_class`; the ignored `bifrost_policy_cli::production_summary_repeated_policy_measurement` fails on master independently (#3480). If one of these is the only failure, rerun it alone (or cite #3480) and report both results. If a shared `target/` symlink is dangling, recreate the directory with `mkdir -p` rather than changing any tracked file. If a gate fails because of the merge, fix the cause with a small follow-up commit and rerun that gate. If a gate fails for a reason you cannot fix without redesigning your solution, stop and report; do not push.\n5. Push: `git push origin HEAD:master`. If rejected as non-fast-forward, `git fetch origin master`, `git merge origin/master` (no rebase), rerun fmt and the open-core check, push again. If the push fails for an authentication or permission reason, do not retry; report the merge commit hash so the judge can publish it.\n6. Reply with LANDING REPORT on its own line first, then: the merge commit hash and any follow-up commit hashes; each conflict and its resolution; every gate with its pass count or failure output; the push result verbatim; and a draft approach comment for the issue, 5 to 12 plain sentences with the merge hash and no model or evaluation names.\n\nCommit messages: plain language, explain the reasons, end with these lines exactly:\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01GpYuiHRYVX6D6syLFmofg6\n"
+        },
+        {
+          "id": "agent:307093",
+          "role": "assistant",
+          "text": "Six conflicts, as anticipated. Resolving each by keeping both rows."
+        },
+        {
+          "id": "agent:307436",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:332194",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:332485",
+          "role": "assistant",
+          "text": "The gate runner is now running under `setsid` (PID 246617). While it works, let me verify the merge commit's content."
+        },
+        {
+          "id": "agent:334072",
+          "role": "assistant",
+          "text": "All 12 gates completed. Now let me rerun the single known-failing ignored test alone and collect per-gate pass counts."
+        },
+        {
+          "id": "agent:335388",
+          "role": "assistant",
+          "text": "The rerun confirms the same independent failure. Now let me check whether origin/master has moved and push."
+        },
+        {
+          "id": "agent:339331",
+          "role": "assistant",
+          "text": "LANDING REPORT\n\n**Commits**\n- Solutions head (verified): `8cd6eeaa0e41a2060c1ccdf1c06a7e04817e4d72` on base `0e6a57f4b8264c6541ff3358cd615048efc6a08e`; `git status --short` was empty before the merge and is empty now.\n- `origin/master` before merge: `271da18f937405172a57a243b2bc4844806e7a89` (already carries the Kotlin row #3453).\n- Merge commit: `ee0e1bb3292cc84638066cffe79e0ca9a8103dbf` (`Merge the Scala network-effect boundary row (#3454) into master`, parents `271da18f9` + `8cd6eeaa0e41`).\n- Follow-up commit: `a5b41405eaf160f333a4ba62ee33081b565f012b` (`Format the merged benchmark suite after the Scala row's insertion`).\n- `node scripts/check-open-core-classification.mjs` exits 0 (\".open-core/public-paths.d classifies every tracked path.\"), so no classification commit was needed.\n\n**Conflicts and resolutions** (`git merge-tree --name-only` between the two parents lists exactly these six; everything else auto-merged)\n1. `crates/bifrost-analysis/src/analyzer/multi_analyzer.rs` — kept both JVM languages' routes: the Kotlin arm and the Scala arm are separate `identity.language() == Language::...` blocks in `external_member_family`, each refusing a mixed realm (Kotlin refuses Java/Scala siblings, Scala refuses Java/Kotlin siblings), followed by the Java arm refusing both; one merged comment states why one analyzer's supertype facts alone cannot prove the boundary (#3452/#3453/#3454).\n2. `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs` — kept both dialects: both sets of shipped/policy path constants and root sets, both `Dialect` consts, both five-test groups, both CLI tests and both vacuous-shipped-specialization tests; `activation_request` maps `Java | Kotlin | Scala => \"java\"` and Python `=> \"jdk\"`.\n3. `tests/suite_mcp_cli/issue_3387_network_effect_boundary_mcp.rs` — kept both consts/dialects and both `run_policy` tests (Kotlin and Scala).\n4. `tests/suite_bench_policy/bifrost_policy_cli.rs` — the effects-pack policy count has to reflect the merged catalog, so `Some(5)` became `Some(6)` with python at index 3, scala at index 4 and typescript at index 5.\n5. `docs/src/content/docs/static-analysis-policies.md` — kept the Kotlin paragraph followed by the Scala paragraph.\n6. `.agents/docs/issue-3387-network-effect-boundary-matrix.md` — both rows appended evidence in the same paragraph, so the merged text describes the Kotlin (#3453) and Scala (#3454) concrete-receiver routes as landed, with no stale \"Scala still open\" wording.\n\nAdditive content that auto-merged: `bifrost.effects/manifest.json` (all six specializations incl. `bifrost.effects.kotlin...` and `bifrost.effects.scala...`), `crates/bifrost-policy/src/builtin.rs` (id list plus count 5 -> 6), the open-core shards, and every Scala analyzer/fixture/policy file. The changelog bullet landed under the existing `## Unreleased` / `### Added`, next to the Kotlin bullet. No manifest hash recomputation was needed because the manifest auto-merged and the catalog test verifies it. The single follow-up commit removed one doubled blank line the merge left in the benchmark suite so `cargo fmt --all -- --check` passes.\n\n**Gates** (all with `JAVA_HOME` cleared, `BIFROST_PARALLELISM=1`, `RAYON_NUM_THREADS=1`, nextest default concurrency, `--max-fail 100`; run in the background and polled)\n- `cargo fmt --all -- --check` — exit 0.\n- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — exit 0.\n- `-p brokk-bifrost-jvm --lib` — 95 passed, 0 failed.\n- `-p brokk-bifrost-policy --lib` — 724 passed, 4 skipped.\n- `-p brokk-bifrost-semantic-packs` — 16 passed.\n- `--test suite_usages -E 'test(/scala|kotlin|java/)'` — 441 run, 441 passed, 1659 skipped.\n- `--test suite_issues -E 'test(/scala|kotlin|java/)'` — 257 passed, 1166 skipped.\n- `--test suite_bench_policy --run-ignored all -E 'test(issue_3387) | test(/effects/) | test(bifrost_policy_cli) | test(built_in_policy_catalog)'` — 92 run, 91 passed, 1 failed. The only failure is the known ignored `bifrost_policy_cli::production_summary_repeated_policy_measurement` (#3480, fails on master\n[... 1341 bytes omitted from the middle of this message ...]\ndev's default branch (1 critical, 18 high, 12 moderate). To find out more, visit:\nremote:      https://github.com/BrokkAi/bifrost-dev/security/dependabot\nremote:\nTo https://github.com/BrokkAi/bifrost-dev.git\n   271da18f9..a5b41405e  HEAD -> master\n```\n`origin/master` now resolves to `a5b41405eaf160f333a4ba62ee33081b565f012b`; the working tree is clean.\n\n**Draft approach comment**\n\nThe Scala row of the network-effect boundary family has landed on master as merge commit ee0e1bb3292cc84638066cffe79e0ca9a8103dbf. It ships the five-fixture set, the reviewed-model wiring, the policy specialization `bifrost.effects.scala.selected-boundary-no-network-io`, and the acceptance tests the ticket asked for. A Scala call site whose receiver the analyzer typed as `java.net.URL` now publishes the shared JDK identity `java.net.URL.openConnection` at its written arity zero, so the already-reviewed `bifrost.web-network-jvm` model is read through the JVM realm and no second JDK model ships. Proving that call-site reference publication was the capability work this row called for, and the tests pin the exact identity against the Java and Kotlin rows so a same-name spelling can never stand in for a bound identity. A Scala external member family over the analyzer's own Scala hierarchy closes coverage with typed refusals, so an unresolved helper keeps the absence claim open instead of reporting a clean boundary. The fixtures cover the cross-file finding, the corrected caller-owned placement, a workspace near miss that stays clean, recursion that terminates with exactly one finding, and the unresolved helper. The specialization keeps the shared relational rule body with an empty ship-time selection, so enabling it unconfigured carries no obligation; a CLI run through `--policy-file` exits 1 on the finding, 0 on the corrected tree and 2 on the unresolved helper, and an MCP `run_policy` run reports the same cross-file effect. The matrix document row now records this evidence alongside the Java, Kotlin, JavaScript, TypeScript and Python rows."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "llow-up commit and rerun that gate. If a gate fails for a reason you cannot fix without redesigning your solution, stop and report; do not push.\n5. Push: `git push origin HEAD:master`. If rejected as non-fast-forward, `git fetch origin master`, `git merge origin/master` (no rebase), rerun fmt and the open-core check, push again. If the push fails for an authentication or permission reason, do not retry; report the merge commit hash so the judge can publish it.\n6. Reply with LANDING REPORT on its own line first, then: the merge commit hash and any follow-up commit hashes; each conflict and its resolution; every gate with its pass count or failure output; the push result verbatim; and a draft approach comment for the issue, 5 to 12 plain sentences with the merge hash and no model or evaluation names.\n\nCommit messages: plain language, explain the reasons, end with these lines exactly:\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01GpYuiHRYVX6D6syLFmofg6\n",
+    "assistant_text_tail": "dev's default branch (1 critical, 18 high, 12 moderate). To find out more, visit:\nremote:      https://github.com/BrokkAi/bifrost-dev/security/dependabot\nremote:\nTo https://github.com/BrokkAi/bifrost-dev.git\n   271da18f9..a5b41405e  HEAD -> master\n```\n`origin/master` now resolves to `a5b41405eaf160f333a4ba62ee33081b565f012b`; the working tree is clean.\n\n**Draft approach comment**\n\nThe Scala row of the network-effect boundary family has landed on master as merge commit ee0e1bb3292cc84638066cffe79e0ca9a8103dbf. It ships the five-fixture set, the reviewed-model wiring, the policy specialization `bifrost.effects.scala.selected-boundary-no-network-io`, and the acceptance tests the ticket asked for. A Scala call site whose receiver the analyzer typed as `java.net.URL` now publishes the shared JDK identity `java.net.URL.openConnection` at its written arity zero, so the already-reviewed `bifrost.web-network-jvm` model is read through the JVM realm and no second JDK model ships. Proving that call-site reference publication was the capability work this row called for, and the tests pin the exact identity against the Java and Kotlin rows so a same-name spelling can never stand in for a bound identity. A Scala external member family over the analyzer's own Scala hierarchy closes coverage with typed refusals, so an unresolved helper keeps the absence claim open instead of reporting a clean boundary. The fixtures cover the cross-file finding, the corrected caller-owned placement, a workspace near miss that stays clean, recursion that terminates with exactly one finding, and the unresolved helper. The specialization keeps the shared relational rule body with an empty ship-time selection, so enabling it unconfigured carries no obligation; a CLI run through `--policy-file` exits 1 on the finding, 0 on the corrected tree and 2 on the unresolved helper, and an MCP `run_policy` run reports the same cross-file effect. The matrix document row now records this evidence alongside the Java, Kotlin, JavaScript, TypeScript and Python rows.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 306399,
+    "input_rationale": "Landing report: merge and push done, gates run. 'Scala still open' is a quoted doc phrase the merge removed; the one failing ignored test is reported as independent. Nothing is asked of the user.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-20T00:10:56.024Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-20T00:30:03.614Z",
+        "kind": "user",
+        "text": "Your solution for #3454 won the evaluation. Land it on master from this container. Do all of this yourself, no sub-agents, and never block on one command for longer than 5 minutes (background plus pol"
+      },
+      {
+        "at": "2026-09-20T00:31:50.380Z",
+        "kind": "agent",
+        "text": "LANDING REPORT  **State on resume:** `.git/MERGE_HEAD` does not exist, `git status --short` is empty, `HEAD = a5b41405eaf160f333a4ba62ee33081b565f012b`, and `origin/master = a5b41405e`. The interrupte"
+      }
+    ]
+  }
+}

@@ -880,6 +880,7 @@ mod tests {
 
     fn session(id: &str) -> RuntimeSessionView {
         RuntimeSessionView {
+            policy_config_keys: Vec::new(),
             session_id: id.into(),
             projection_ordinal: 0,
             projection_digest: String::new(),

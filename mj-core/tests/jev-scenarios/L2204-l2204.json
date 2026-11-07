@@ -1,0 +1,138 @@
+{
+  "id": "L2204",
+  "title": "L2204",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "43c7bd59da2b8b35eb5f0fc1c057ca44",
+    "session_title": "eval36 3512 opushighlunaadapt",
+    "reply_position": 479,
+    "captured_at": "2026-10-09T01:29:37.720Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3512: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 18fa60ee98f92a8dca58ffbd3a5d949adb30ee19\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nRepository history after the base commit is out of bounds. This issue was\nsolved on master after the base commit; do not read, fetch, log, diff or\ncheck out anything newer than the base commit named above, do not look at\nclosed pull requests or issue comments, and do not search master for the\nlanded solution. Solve it from the base commit and the issue text below.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports.\nDelegation policy for this lane: this session has Mjolnir sub-agent\ntools (spawn, wait, send_input, list_agents, close); use them. Every child is\nGPT-6 Luna at effort max, fixed by the harness. Treat Luna as a strong senior\nengineer, not as you. Work this way:\n1. Start by spawning investigators, two to four in parallel, one question each,\n   with file excerpts and the acceptance criteria. Do not read the repository\n   yourself for a question you have assigned; read the handback, then only the\n   files it names.\n2. Implement through children by default: split your agreed design into slices\n   with a spec, files and tests each, and dispatch them in parallel. Keep a\n   slice yourself only when it needs your whole context, when the setup a\n   child would need exceeds doing it yourself, or when a child has already\n   failed it once; say which, in one sentence, when you keep it.\n3. When a handback is wrong or incomplete, re-task that child once with the\n   specific correction and the failing evidence. If the second handback is\n   still wrong, take the slice over yourself and note it in your report.\n4. Delegate suite, lint and format runs: \"run these suites; report only\n   failures, with test names, a one-line reason and the log path each\". Run a\n   suite yourself only to reproduce one failure a child reported. Rerun\n   nothing a child ran green.\n5. Put the design, file excerpts and acceptance criteria in the spawn\n   instruction. Use send_input to answer a child's question or give a\n   correction, not for progress checks.\n6. After you spawn, call wait once for every outstanding child with the default\n   timeout (return_when any when the next step depends on whichever finishes\n   first). The brief's five-minute limit on shell commands does not apply to\n   wait. Do not poll: every wait, and every poll of a shell cell that runs a\n   wait, re-sends your whole context.\n7. Keep for yourself: the design, the review of the integrated diff, the\n   commit, the final report, and any decision a child hands back.\n8. Children share your container and checkout: give concurrent children\n   disjoint files and say so; expect their cargo builds\n[... 3619 bytes omitted from the middle of this message ...]\nroven boundary. The witnesses are in the Waves repository; the corpus driver and pins from #3500 are in `.agents/docs/issue-3500-validation.md` on the base.\n\n# Issue\n\nIssue #3512: Scala: this.apply method references are proven usage hits but fail forward navigation\n\nScala method references can remain proven usage hits even when forward navigation cannot resolve them. This is distinct from the JDK/workspace import collision in #3500.\n\nThe archived before/after corpus replay uses Bifrost base `a6cb9de6cd8e432dd2f670eb8fd31f70828d56eb` and Waves `66faa85e5f6195c7ac3edf4cbe15723de865825c`. Both revisions return `no_applicable_scala_callable` for:\n\n- `node/src/main/scala/com/wavesplatform/account/PrivateKey.scala:22:52`, `byteStrFormat.map(this.apply)`.\n- `node/src/main/scala/com/wavesplatform/account/PublicKey.scala:50:52`, the equivalent `this.apply` reference.\n\nThe inverse scans include the sites among proven hits with zero unproven hits. The PrivateKey scan retains seven rows; PublicKey retains 31. The two navigation failures are unchanged on the exact base and after the import correction, and the audit counts them as unresolved rather than successful round trips.\n\nReproduce with the corpus driver and pins in `.agents/docs/issue-3500-validation.md` at candidate `96839c9818b1e9733ec030540af1e601e5dfab43`; the full before/after JSON is in `.agents/docs/issue-3500-results/`. The archived branch is `eval19-3500-astra` (bundle in the local evaluation evidence). The driver enumerates the full declaration census, scans both public surfaces, and round-trips every location hit. This filing records the candidate's measured exact-base evidence; it does not claim a fresh replay on current master.\n\nResolve the method reference through the structured callable applicability route, or retain an explicit unproven boundary consistently in both surfaces. Add the two reduced higher-order method-reference witnesses and preserve all existing companion-call recall controls. Neither #3500 candidate currently fixes this separate defect.\n\n"
+        },
+        {
+          "id": "agent:57",
+          "role": "assistant",
+          "text": "Two investigators are tracing forward navigation and the usage scan. Next I'm starting a third child to build the corpus driver from the base and record the before evidence."
+        },
+        {
+          "id": "agent:75",
+          "role": "assistant",
+          "text": "While they work, I'll read the routed testing guidance and the usage design chapter (not assigned to children)."
+        },
+        {
+          "id": "agent:155",
+          "role": "assistant",
+          "text": "Both investigators reported. The usage scan already has method-value logic; navigation lacks it. I'm reading the scan's method-value code to decide on a design."
+        },
+        {
+          "id": "agent:200",
+          "role": "assistant",
+          "text": "I've settled on the design (navigation mirrors the scan's method-value context). Checking whether the `hardwon` test macro exists at this base before briefing the implementer."
+        },
+        {
+          "id": "agent:223",
+          "role": "assistant",
+          "text": "Base has no `hardwon` macro or golden-test rule, so the regression goes in `tests/suite_issues` as plain tests. Spawning the implementer now."
+        },
+        {
+          "id": "agent:253",
+          "role": "assistant",
+          "text": "The base corpus run reproduces both witnesses (`no_applicable_scala_callable` at PrivateKey.scala:22:52 and PublicKey.scala:50:52, with zero unproven scan hits). Waiting for the implementer."
+        },
+        {
+          "id": "agent:290",
+          "role": "assistant",
+          "text": "Implementer reports green suites. Now reviewing the integrated diff myself."
+        },
+        {
+          "id": "agent:332",
+          "role": "assistant",
+          "text": "The fix works but duplicates scan-side logic. I'm sending the implementer a refactor request to share helpers with the scan instead of copying them."
+        },
+        {
+          "id": "agent:366",
+          "role": "assistant",
+          "text": "The jvm side is a clean move of existing code. I'll drop the three new unit tests, which only restate the moved helper's code, then re-read the final forward-side context function."
+        },
+        {
+          "id": "agent:421",
+          "role": "assistant",
+          "text": "Workspace clippy, jvm library tests (98/98) and the #3512 tests (5/5) pass. Committing now while the corpus AFTER run continues."
+        },
+        {
+          "id": "agent:450",
+          "role": "assistant",
+          "text": "The corpus AFTER run is complete. I'll spot-check the two witness rows in the raw JSON before reporting."
+        },
+        {
+          "id": "agent:479",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nIssue #3512 is fixed and committed on detached HEAD. Forward navigation now resolves Scala method values with the same rules the usage scan uses. Both Waves witnesses now navigate to the two workspace `apply` overloads (ambiguous) instead of returning `no_applicable_scala_callable`. Both scan surfaces return the same rows as before.\n\n## 1. Confirmed cause\n\n- **Usage scan:** the scan treats a member passed as an argument without an argument list as a method value (`crates/bifrost-jvm/src/scala/graph/inverted.rs`, `companion_method_value_context` and `call_parameter_method_value_context`). It works out the expected function type from a declared `val`/`def` type or from the callee's function-typed parameter.\n  - When the callee is not modelled, the context is `Unknown`. The scan then attributes the site to the receiver's whole overload family (`exact_method_value_declaration_for_owner`) as proven hits.\n  - In Waves, `byteStrFormat` is a play-json `Format`, which is not modelled, so this is the case that applies.\n- **Forward navigation:** `resolve_scala_field` (`get_definition/scala.rs`) got its shape from `scala_call_site_shape`, which returned `None` when no argument list was written. The older arity helper only ran when an argument list existed, and only for bare-identifier callees.\n- **Why navigation failed:** `scala_filter_callable_units` then applied `scala_callable_shape_mismatch` (`syntax.rs`) with no shape. That rule admits a method that needs arguments only if it is the only candidate. Both `apply` overloads take one argument, so both were rejected as `NoCallShape`, and the result became `no_applicable_scala_callable`.\n- **Confirmed on the base** by a reduced reproduction test and by the corpus run below.\n\n## 2. Changes\n\n- **Base:** `18fa60ee98f92a8dca58ffbd3a5d949adb30ee19`\n- **Final:** `5f260e28d2f009f39fc3480a3a2fbbcd888ae9ab`\n\nChanges:\n- **`get_definition/scala.rs`:** a new `scala_forward_method_value_context` handles a member selected without an argument list. It covers bare identifiers, `generic_function` and eta `_` wrappers, typed `val`/`def` positions, and call arguments whose callee is an identifier or a field expression. It replaces `scala_forward_method_value_arity` rather than adding a copy.\n  - A known function context becomes a call shape with no argument lists that carries the expected arity and, when authoritative, the parameter types. The shared filter then picks the overload that matches.\n  - An `Unknown` context in argument position on an exact owner returns the owner's method family, as the scan does.\n  - An incompatible context, or any other position, keeps the old behaviour.\n  - The context is computed once per reference.\n- **`bifrost-jvm` `syntax.rs`:** two pieces moved here so the scan and navigation share one implementation instead of copies: `scala_declared_method_value_context` and `scala_method_value_parameter_types_match`.\n- **`tests/suite_issues/issue_3512_scala_method_reference.rs`:** five regression tests.\n  - Reduced PrivateKey and PublicKey witnesses, each checking that navigation and the scan agree.\n  - A bare `apply` method value, which the base also failed with `no_indexed_definition`.\n  - A workspace `map[B](f: ByteStr => B)` parameter that selects only `apply(ByteStr)` in both surfaces.\n  - The explicit `this.apply(x)` call and the qualified `PrivateKey.apply` reference, which are unchanged.\n- **No extraction epoch bump:** the change only alters how queries are interpreted. No persisted or semantic-adapter artifact changed.\n\nI asked the implementer to refactor its first version, which copied the scan's parameter-type matcher, its declared-type logic and the postfix detection. I also removed three unit tests it added that only restated the moved helper's code.\n\n## 3. Validation\n\nEnvironment for all runs: `JAVA_HOME=`, `BIFROST_PARALLELISM=1`, `RAYON_NUM_THREADS=1`, plain cargo, `eatmydata`.\n\n| Command | Result |\n| --- | --- |\n| `cargo nextest run --max-fail 100 --test suite_issues -E 'test(issue_3512)'` | 4 tests fail on base production code, 5/5 pass after (the \n[... 2699 bytes omitted from the middle of this message ...]\n is in Waves, it attributes the site to the receiver's overload family. Navigation reached the callable filter with no call shape, and the rule that admits such a reference only for a single callable rejected both one-argument `apply` overloads. Navigation now computes the same method-value context for bare identifiers, field selections, generic and eta wrappers, and typed `val` or `def` positions. A known function type becomes an expected arity and, when available, expected parameter types, so the shared filter can select the matching overload. An unknown context on an exact owner returns the overload family as an ambiguous answer, which is what the scan proves. The declared-type rule and the parameter-type matcher now live in one shared helper used by both surfaces. This changes query interpretation only, so the extraction epoch is unchanged. On the pinned Waves commit, both witnesses now navigate to the two workspace `apply` overloads, and all 38 scan rows are unchanged with zero unproven hits. New regression tests cover both reduced witnesses, a bare `apply`, a workspace function parameter that selects `apply(ByteStr)`, and unchanged call and qualified-reference controls. The Scala integration suites, the companion-call recall tests and workspace clippy pass.\n\n`★ Insight ─────────────────────────────────────`\n- In this codebase \"the two surfaces agree\" does not mean both return one answer. The scan unions proven hits across an overload group, so the honest navigation answer for an unknown expected type is the ambiguous overload set, not a guessed single overload.\n- The fix reuses the existing `ScalaCallSiteShape` and treats a method value as a call with zero argument lists plus an expected function shape. The existing partial-application logic then handles it with no new filtering rules.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "assistant_text_tail": " is in Waves, it attributes the site to the receiver's overload family. Navigation reached the callable filter with no call shape, and the rule that admits such a reference only for a single callable rejected both one-argument `apply` overloads. Navigation now computes the same method-value context for bare identifiers, field selections, generic and eta wrappers, and typed `val` or `def` positions. A known function type becomes an expected arity and, when available, expected parameter types, so the shared filter can select the matching overload. An unknown context on an exact owner returns the overload family as an ambiguous answer, which is what the scan proves. The declared-type rule and the parameter-type matcher now live in one shared helper used by both surfaces. This changes query interpretation only, so the extraction epoch is unchanged. On the pinned Waves commit, both witnesses now navigate to the two workspace `apply` overloads, and all 38 scan rows are unchanged with zero unproven hits. New regression tests cover both reduced witnesses, a bare `apply`, a workspace function parameter that selects `apply(ByteStr)`, and unchanged call and qualified-reference controls. The Scala integration suites, the companion-call recall tests and workspace clippy pass.\n\n`★ Insight ─────────────────────────────────────`\n- In this codebase \"the two surfaces agree\" does not mean both return one answer. The scan unions proven hits across an overload group, so the honest navigation answer for an unknown expected type is the ambiguous overload set, not a guessed single overload.\n- The fix reuses the existing `ScalaCallSiteShape` and treats a method value as a call with zero argument lists plus an expected function shape. The existing partial-application logic then handles it with no new filtering rules.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "Final eval report; #3512 is fixed and committed. The only extra item is an optional follow-up observation by the agent, with no request to the user.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

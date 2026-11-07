@@ -25,16 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:15",
-          "role": "user",
-          "text": "Estimate how much tokens and wall time the merge marshall queue has saved over the previous free for all. Use my local sessions from the past week for the free for all data, and leave the DeepSeek merges out, we had infra issues. Ask questions if you're not sure what assumptions are reasonable to make."
-        },
-        {
-          "id": "user:146",
-          "role": "user",
-          "text": "Please answer the following questions.\n\nFFA scope: Landing work only (Recommended)\nWall time: Both, reported separately (Recommended)\nRejections: Charge only extra work (Recommended)\nDirect: Include at zero cost (Recommended)"
-        },
-        {
           "id": "user:1712",
           "role": "user",
           "text": "what's the easiest way to give a human a \"stabilize a branch for me\" command, can we do this via slack?\n\nimo it should\n\n1. create a branch from the most recently push-checked commit, or user-specified commit-ish\nfor each test suite push, hourly, nightly:\n2. run the suite\n3. triage agent creates issues for problems found (tag the issues with mergemarshall:stabilize)\n4. fix agent creates PRs with fixes\n5. repeat 2-4 until green\n\nso, we don't run hourly until push is green, etc\n\ngoal is composition/reusability; should share same queues as other triage + fix work\n\nmerging stabilize branch PRs should take priority over normal-priority PRs, but i think maybe we special case this to keep the queue moving quickly -- don't merge a stability batch until all the tickets from (3) have PRs\n\nhow should we port stability PRs to master? or should we just create one PR when complete to merge the completed branch?\n\nwhat are the other sticky pieces?"
@@ -58,16 +48,6 @@
           "id": "user:3295",
           "role": "user",
           "text": "After a fix batch lands on the stabilize branch during the hourly or nightly stage, which suites must pass again at the new branch tip before that stage counts as passed?\n\nRerun rule: All earlier stages, parallel (Recommended)"
-        },
-        {
-          "id": "user:3433",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:3446",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "user:3542",

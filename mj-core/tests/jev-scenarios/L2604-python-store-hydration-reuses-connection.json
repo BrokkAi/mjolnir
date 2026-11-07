@@ -1,0 +1,363 @@
+{
+  "id": "L2604",
+  "title": "Python store hydration reuses connection",
+  "category": "still-open-none",
+  "harness": "kimi",
+  "source": {
+    "kind": "transcript",
+    "session": "a0b929c1fd2fd05dca3234daec2a70a6",
+    "session_title": "eval47 7347 k31max",
+    "reply_position": 56276,
+    "captured_at": "2026-10-28T23:26:06.350Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:24",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #7347: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). Direct unresolved contract questions to the series lead.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 9c4d3f1af65b6f0b83b5b41ce00b477285650716\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nDo not bypass the mbx cargo shim, redirect target/, set CARGO_TARGET_DIR,\nor change shared cache settings.\n\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /worksp\n[... 2611 bytes omitted from the middle of this message ...]\nOOT`. Then run:\n\n    cargo nextest run -p brokk-bifrost-rql --lib -E 'test(=structural::search::tests::python_method_receiver::callable_signature_rows_preserve_python_receiver_kind_and_source_evidence)'\n\nResult: panic at `crates/bifrost-store/src/analyzer/store/writer.rs:172`, \"store writer acquired while this thread retains an exclusive reader\". With a writable cache, the store template is staged and the test passes, so CI never sees it.\n\n## Frames (master)\n\n- Fallback: a missing template must be published (`crates/bifrost-core/src/sqlite_template.rs`). When publication fails, `open_ephemeral_with_config` falls back to the single-connection memory store (`crates/bifrost-store/src/analyzer/store/mod.rs`, near line 3872). In that mode a read goes through the writer connection and holds a `RetainedExclusiveReader` (`ReaderConn::Writer`).\n- The outer read: `AnalyzerStore::hydrate_import_facts_by_key_with_metadata` (`store/mod.rs`, near line 5424) takes the connection, opens a transaction, and calls `adapter.hydrate_content_qualifier` while both are alive.\n- The inner read: `PythonAdapter::hydrate_content_qualifier` (`crates/bifrost-python-analysis/src/analyzer/python/adapter.rs`) computes the module name, which resolves the import root through `SelectedConfigurationProject::configuration_source` (`crates/bifrost-analysis/src/analyzer/workspace.rs`) and then `AnalyzerStore::selected_configuration_source` (`store/workspace_inputs.rs`). That calls `read_conn` again, which locks the writer (`store/mod.rs`, `read_conn_with_acquisition`; `writer.rs` `StoreWriter::lock`).\n\n## Fix direction\n\nThe store callback should not read the store while the outer read is open. Either resolve the configuration source the adapter needs before `hydrate_import_facts_by_key_with_metadata` takes its connection, and pass it in, or hand the callback the open connection instead of letting it check out a new one.\n\nFound while validating #2445 Milestone 2a/2b (#7294, #7285), which do not touch these frames. The full backtraces are kept locally.\n\n"
+        },
+        {
+          "id": "agent:11172",
+          "role": "assistant",
+          "text": "The fallback can be handled without changing Python’s packaging algorithm: its existing structured `PythonImportRootInputs` interface can be backed by the open SQLite connection. I’ll add a deterministic single-connection regression in the Python analyzer-store tests and prove it fails before editing the implementation."
+        },
+        {
+          "id": "agent:13951",
+          "role": "assistant",
+          "text": "The original shell reproduction passed because this container can still write through mode `0555`, so it did not force the fallback. The new deterministic test uses the actual single-connection constructor; I’ll run that unfixed code now to capture the real panic."
+        },
+        {
+          "id": "agent:14631",
+          "role": "assistant",
+          "text": "While the regression runs, I’m preparing the connection-aware path through all store hydration callers, preserving the existing public non-connection hooks for query code that does not hold a store read."
+        },
+        {
+          "id": "agent:14975",
+          "role": "assistant",
+          "text": "The first regression run exposed a test assertion compile error, not the product defect. I’ll correct the assertion to use the existing `CallableSignature` result shape, then rerun it against the unfixed implementation."
+        },
+        {
+          "id": "agent:16607",
+          "role": "assistant",
+          "text": "The implementation will keep the existing adapter APIs intact and add connection-aware variants used only where the store already holds a read. Python’s selected project will serve module and configuration reads from that connection; no extraction or persisted-fact epoch changes are involved."
+        },
+        {
+          "id": "agent:16894",
+          "role": "assistant",
+          "text": "The regression is still linking. I’ll wait briefly for the unfixed result before changing product code, so the before/after evidence is valid."
+        },
+        {
+          "id": "agent:17191",
+          "role": "assistant",
+          "text": "The first deterministic scenario passed, so it did not reach the defective import reader. I’ll tighten it to invoke import-fact hydration explicitly after a real workspace build, rather than assuming every callable query exercises that path."
+        },
+        {
+          "id": "agent:18660",
+          "role": "assistant",
+          "text": "I’ll make the regression call `hydrate_canonical_import_facts_by_key` with the analyzer’s selected Python adapter, then run the same callable query. That directly exercises the reported frame while retaining end-to-end result assertions."
+        },
+        {
+          "id": "agent:19948",
+          "role": "assistant",
+          "text": "`PythonAnalyzer` is a wrapper rather than the generic analyzer type. I’ll construct `TreeSitterAnalyzer<PythonAdapter>` directly, which exposes the selected adapter needed for the explicit hydration call."
+        },
+        {
+          "id": "agent:20533",
+          "role": "assistant",
+          "text": "The direct test is still compiling. The relevant store module already imports `rusqlite::Connection`, so the connection-aware adapter variants will not require new dependencies there."
+        },
+        {
+          "id": "agent:20708",
+          "role": "assistant",
+          "text": "The direct regression has finished against the unfixed code; I’ll capture its failure, then implement the connection-passing changes."
+        },
+        {
+          "id": "agent:20989",
+          "role": "assistant",
+          "text": "The test reached the store but used the pre-build bootstrap generation, so it failed for the wrong reason. I’ll derive the generation from the analyzer’s selected post-build snapshot and rerun it."
+        },
+        {
+          "id": "agent:21645",
+          "role": "assistant",
+          "text": "The corrected unfixed regression failed quickly; I’ll verify that it is the expected writer-reentry panic and then proceed with the fix."
+        },
+        {
+          "id": "agent:21731",
+          "role": "assistant",
+          "text": "That run was another test-only type mismatch: the store uses its faster hash-map alias. I’ll use the repository’s `HashMap` type and rerun; no product code has changed yet."
+        },
+        {
+          "id": "agent:22249",
+          "role": "assistant",
+          "text": "The test now has the correct selected generation and hash-map type. Once this run confirms the panic, implementation edits can begin without contaminating the before/after comparison."
+        },
+        {
+          "id": "agent:22333",
+          "role": "assistant",
+          "text": "The alias also lacks array-based `From`; existing store tests use `HashMap::from_iter`. I’ll match that idiom and rerun once more."
+        },
+        {
+          "id": "agent:22763",
+          "role": "assistant",
+          "text": "The regression is still linking, with no new diagnostics. The implementation plan is ready; I’m keeping product files untouched until this baseline run completes."
+        },
+        {
+          "id": "agent:23136",
+          "role": "assistant",
+          "text": "I expect the completed run to provide the actual panic rather than another test setup error. While it finishes, I’ll check the regression diff for whitespace problems."
+        },
+        {
+          "id": "agent:23242",
+          "role": "assistant",
+          "text": "The regression now fails at `writer.rs:172` with the exact “store writer acquired while this thread retains an exclusive reader” panic. I’ll implement the fix and leave that debug assertion unchanged."
+        },
+        {
+          "id": "agent:29102",
+          "role": "assistant",
+          "text": "The core connection hooks and Python’s connection-backed packaging inputs are in place. Next I’m wiring the selected project overrides and the Python adapter’s four connection-aware hydration methods."
+        },
+        {
+          "id": "agent:34259",
+          "role": "assistant",
+          "text": "The selected project now reuses the supplied connection for configuration membership and bytes. I’m switching every store-internal caller of the adapter hydration hooks to the new variants, including unit identity and relational path hydration."
+        },
+        {
+          "id": "agent:35820",
+          "role": "assistant",
+          "text": "Store hydration is converted for synthesized modules. I’m finishing the qualifier and relational candidate call-site conversions, then I’ll compile to catch any missed signatures."
+        },
+        {
+          "id": "agent:36661",
+          "role": "assistant",
+          "text": "All store-internal adapter hook calls are now connection-aware; the remaining old calls are in non-connection query paths and public compatibility helpers. I’ll remove the obsolete import and run a focused compile check."
+        },
+        {
+          "id": "agent:37907",
+          "role": "assistant",
+          "text": "Compilation found one internal caller of the original module-unit helper in Python parsing. I’ll restore that shared helper and have the new components API delegate to it, preserving the existing parse path."
+        },
+        {
+          "id": "agent:39119",
+          "role": "assistant",
+          "text": "The restored helper is compiling again. I’ll check formatting now, then apply rustfmt to the changed files once the test run finishes."
+        },
+        {
+          "id": "agent:39223",
+          "role": "assistant",
+          "text": "The next compile reached more code and found another error; I’ll inspect it before making the next correction. Rustfmt has identified only formatting differences in the changed files."
+        },
+        {
+          "id": "agent:39399",
+          "role": "assistant",
+          "text": "Two mechanical issues remain: one relational caller needs an explicit borrow, and the read guard needs to be bound and dereferenced before passing it as `&Connection`. I’ll correct those and rerun."
+        },
+        {
+          "id": "agent:40444",
+          "role": "assistant",
+          "text": "The changed files are formatted. I’ll verify the file set stayed limited to the intended nine files and rerun the single-connection regression."
+        },
+        {
+          "id": "agent:42030",
+          "role": "assistant",
+          "text": "The formatted store is still compiling. For the original witness, I’ll also verify the fallback itself rather than relying on mode `0555`, which this privileged container can bypass."
+        },
+        {
+          "id": "agent:42549",
+          "role": "assistant",
+          "text": "For the required follow-up validation, I’m identifying the existing usage and issue suite filters rather than creating any new test targets."
+        },
+        {
+          "id": "agent:43226",
+          "role": "assistant",
+          "text": "The fix has progressed to compiling `bifrost-analysis`. After the regression passes, I’ll make the test’s single-connection constructor explicit in its own body to match the requested witness exactly."
+        },
+        {
+          "id": "agent:44001",
+          "role": "assistant",
+          "text": "All affected language crates have compiled without further errors. I’m waiting for the final RQL link and test result before starting the broader suites."
+        },
+        {
+          "id": "agent:44677",
+          "role": "assistant",
+          "text": "I expect the next status to include the final RQL test result, rather than only another crate compilation line."
+        },
+        {
+          "id": "agent:44981",
+          "role": "assistant",
+          "text": "Formatting and the frozen pack-authoring inventory check pass. I’ll now read the completed regression result if it is available."
+        },
+        {
+          "id": "agent:45110",
+          "role": "assistant",
+          "text": "The final RQL compile/link is taking longer than the earlier incremental runs. I’ll check that the compiler or linker is still actively running rather than stalled."
+        },
+        {
+          "id": "agent:45504",
+          "role": "assistant",
+          "text": "The regression now passes, preserving the package name and callable result. I’ll make its single-connection setup explicit, then run it once more alongside the original issue witness."
+        },
+        {
+          "id": "agent:46231",
+          "role": "assistant",
+          "text": "The implementation is complete and has passed once; the explicit-constructor rerun is the last focused check before broader validation. No persisted facts or extraction behavior changed, so no language epoch bump is needed."
+        },
+        {
+          "id": "agent:47003",
+          "role": "assistant",
+          "text": "The explicit `AnalyzerStore::open_in_memory_single_connection()` regression passes. I’ll now run the issue’s original test with `XDG_CACHE_HOME` under `/proc`, where even this root container cannot stage a template, guaranteeing the memory fallback."
+        },
+        {
+          "id": "agent:47493",
+          "role": "assistant",
+          "text": "The original issue test passes with the fallback forced. Next I’m running the library suites for the store, analysis, core, Python, and Python-analysis crates in one nextest invocation."
+        },
+        {
+          "id": "agent:48492",
+          "role": "assistant",
+          "text": "`cargo fmt --all -- --check` passes. The affected crate suites are still compiling; I’ll keep their output under review while they run."
+        },
+        {
+          "id": "agent:48578",
+          "role": "assistant",
+          "text": "I expect the next suite snapshot to show whether compilation completed and tests have begun, including any failures that need investigation."
+        },
+        {
+          "id": "agent:48845",
+          "role": "assistant",
+          "text": "The crate suites are still compiling. I’ll start the required workspace-wide Clippy gate in parallel, matching the repository’s pre-push practice."
+        },
+        {
+          "id": "agent:49510",
+          "role": "assistant",
+          "text": "The combined suite is running tests now (over 1,100 of 2,596 completed in the latest snapshot), with no failures shown. Clippy is still compiling dependencies and has reported no lint errors."
+        },
+        {
+          "id": "agent:49855",
+          "role": "assistant",
+          "text": "The crate suite is at 2,595 of 2,596 tests with no failures; Clippy has also checked the modified core and Python crates without warnings. I’ll collect the final summaries before starting the integration suites."
+        },
+        {
+          "id": "agent:50087",
+          "role": "assistant",
+          "text": "All 2,596 affected crate tests passed (15 skipped). I’m now running the Python selections from the `suite_usages` and `suite_issues` integration harnesses."
+        },
+        {
+          "id": "agent:50904",
+          "role": "assistant",
+          "text": "The Python integration suites are compiling their root-feature dependencies. Clippy is now checking the modified store crate and still has no diagnostics."
+        },
+        {
+          "id": "agent:51196",
+          "role": "assistant",
+          "text": "Clippy has checked every modified production crate without warnings and is continuing through downstream crates. The integration run is now compiling RQL before linking the two suites."
+        },
+        {
+          "id": "agent:51862",
+          "role": "assistant",
+          "text": "Validation is still clean. The remaining work is to finish the two integration suites and the workspace Clippy gate, then review and commit the nine changed files."
+        },
+        {
+          "id": "agent:52277",
+          "role": "assistant",
+          "text": "I expect the next integration snapshot to show either the linked test count or a build failure; so far there are only normal compile lines and no diagnostics."
+        },
+        {
+          "id": "agent:52564",
+          "role": "assistant",
+          "text": "Both remaining gates are in their final root-crate build phase, with no failures or lint diagnostics so far."
+        },
+        {
+          "id": "agent:52641",
+          "role": "assistant",
+          "text": "The integration run has not started tests yet, so this is build latency rather than a product deadlock. I’ll verify that both root builds are still active."
+        },
+        {
+          "id": "agent:53379",
+          "role": "assistant",
+          "text": "Workspace-wide Clippy passed with `-D warnings`. The Python integration run has started and is passing its first 42 of 224 tests."
+        },
+        {
+          "id": "agent:53510",
+          "role": "assistant",
+          "text": "The integration run is at 158 of 224 tests with no failures, including Python packaging, path-module, and native usage-graph coverage."
+        },
+        {
+          "id": "agent:53560",
+          "role": "assistant",
+          "text": "Only two integration tests remain; I’m waiting for the final summary before committing."
+        },
+        {
+          "id": "agent:53866",
+          "role": "assistant",
+          "text": "All 224 Python integration tests passed, completing the required validation. I’ll do the final diff/status review, stage only the nine intended files, and commit the fix on the detached HEAD."
+        },
+        {
+          "id": "agent:55764",
+          "role": "assistant",
+          "text": "The fix is committed as `a38791c486f65cef63b39c591a7281e3374b1131`, and the working tree is clean. All requested validation is green."
+        },
+        {
+          "id": "agent:56276",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\n## 1. Confirmed cause with structured evidence\n\n`AnalyzerStore::hydrate_import_facts_by_key_with_metadata` held a read connection and transaction while calling `PythonAdapter::hydrate_content_qualifier`. The selected Python project then called `AnalyzerStore::selected_module_name`, checking out another reader on the same connection.\n\nIn single-connection fallback mode, that reentrancy triggers the retained-reader assertion at `crates/bifrost-store/src/analyzer/store/writer.rs:172`; release builds can block on the same mutex. The new regression reproduced the exact panic before the fix:\n\n```text\nstore writer acquired while this thread retains an exclusive reader\n```\n\n## 2. Changes and reasons\n\n- Base: `9c4d3f1af65b6f0b83b5b41ce00b477285650716`\n- Final commit: `a38791c486f65cef63b39c591a7281e3374b1131`\n\nThe fix passes the already-open SQLite connection through hydration instead of checking out another reader:\n\n- Added connection-aware adapter hooks for content qualifiers, package anchors, synthesized modules, and path-derived modules.\n- Changed these call sites:\n  - Import-fact hydration.\n  - Single and bulk file-state hydration and `read_blob_meta`.\n  - Unit-row, type-alias, enclosing-declaration, and structured-FQ hydration.\n  - Relational content candidates and point/batched path-module queries.\n- Added connection-aware selected-module and configuration reads to `SelectedConfigurationProject`.\n- Backed Python’s existing structured `PythonImportRootInputs` packaging probes with that same connection, covering fallback module derivation without text parsing.\n- Preserved the existing non-connection entry points for callers that hold no store read.\n- Added a production-shaped regression at `crates/bifrost-rql/src/structural/search/tests/python_method_receiver.rs:135` using `AnalyzerStore::open_in_memory_single_connection()` directly.\n- Kept the debug assertion and all extraction epochs unchanged; this is query-time connection handling, not persisted-fact behavior.\n\n## 3. Exact validation commands and results\n\nRegression, run before and after:\n\n```bash\nenv -u JAVA_HOME BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 BIFROST_OPEN_PACKS_DISABLE=1 cargo nextest run --max-fail 100 -p brokk-bifrost-rql --lib -E 'test(=structural::search::tests::python_method_receiver::python_import_hydration_completes_on_single_connection_store)'\n```\n\n- Before: failed at `writer.rs:172` with the expected reentrancy panic.\n- After: **1 passed, 627 skipped**.\n\nOriginal issue witness with template staging made impossible:\n\n```bash\ntest ! -e /proc/bifrost-7347-after && env -u JAVA_HOME -u BIFROST_CACHE_ROOT XDG_CACHE_HOME=/proc/bifrost-7347-after BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 BIFROST_OPEN_PACKS_DISABLE=1 cargo nextest run --max-fail 100 -p brokk-bifrost-rql --lib -E 'test(=structural::search::tests::python_method_receiver::callable_signature_rows_preserve_python_receiver_kind_and_source_evidence)' && test ! -e /proc/bifrost-7347-after\n```\n\nResult: **1 passed, 627 skipped**.\n\nAffected crate suites:\n\n```bash\nenv -u JAVA_HOME BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 BIFROST_OPEN_PACKS_DISABLE=1 eatmydata cargo nextest run --max-fail 100 -p brokk-bifrost-analysis -p brokk-bifrost-core -p brokk-bifrost-python -p brokk-bifrost-python-analysis -p brokk-bifrost-store --lib\n```\n\nResult: **2,596 passed, 15 skipped**.\n\nPython usage and issue suites:\n\n```bash\nenv -u JAVA_HOME BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 BIFROST_OPEN_PACKS_DISABLE=1 eatmydata cargo nextest run --max-fail 100 -p brokk-bifrost --test suite_usages --test suite_issues -E 'test(python)'\n```\n\nResult: **224 passed, 3,419 skipped**.\n\nWorkspace lint and formatting:\n\n```bash\nenv -u JAVA_HOME BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 cargo clippy --workspace --all-targets --all-features -- -D warnings\ncargo fmt --all -- --check\nnode scripts/check-pack-authoring-drift.mjs\n```\n\nAll passed. The pack inventory reported: `Legacy pack content matches the frozen authoring inventory.`\n\n## 4. Before/after evidence on the issue’s witnesses\n\nThe issue names no external evidence re\n[... 169 bytes omitted from the middle of this message ...]\nr: it hydrates one import-fact row with package `src.main` and returns the expected callable `src.main.Factory.build`.\n- The original witness also passes with its complete **11 callable-signature rows**, demonstrating no sampling or suppression-based reduction.\n\nThis container runs as root, so mode `0555` did not prevent cache creation during the initial reproduction. The after run used `/proc` to guarantee template-publication failure and force the memory fallback; the deterministic regression independently asserts single-connection mode directly.\n\n## 5. Status, limitations, and separately actionable findings\n\n`git status --short` is empty; the detached HEAD contains only the final commit.\n\nNo pre-existing test failures were encountered, no external corpus was required, and there are no separately actionable findings or known remaining product limitations.\n\n## 6. Draft GitHub approach comment\n\nPython import hydration was checking out the store again while an import-fact read was still open. That reentrancy panics in a debug single-connection fallback and can block a release build. This change passes the already-open SQLite connection through the store’s hydration adapter calls. The selected project now uses that connection for published module names and retained configuration bytes. Python’s package-root probes use the same connection through the existing structured input interface. I applied the connection-aware path to import facts, file-state and unit hydration, and relational content and path candidates. Existing non-connection hooks remain for callers that do not hold a store read. The debug assertion and all extraction epochs are unchanged. A new regression builds a real Python analyzer over `open_in_memory_single_connection` and checks import facts plus callable-signature results. It failed at `writer.rs:172` before the fix and passes after it; the original issue test also passes with template staging disabled. Affected crate suites, 224 Python integration tests, formatting, and workspace Clippy pass."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "kimi",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "ate_content_qualifier` while both are alive.\n- The inner read: `PythonAdapter::hydrate_content_qualifier` (`crates/bifrost-python-analysis/src/analyzer/python/adapter.rs`) computes the module name, which resolves the import root through `SelectedConfigurationProject::configuration_source` (`crates/bifrost-analysis/src/analyzer/workspace.rs`) and then `AnalyzerStore::selected_configuration_source` (`store/workspace_inputs.rs`). That calls `read_conn` again, which locks the writer (`store/mod.rs`, `read_conn_with_acquisition`; `writer.rs` `StoreWriter::lock`).\n\n## Fix direction\n\nThe store callback should not read the store while the outer read is open. Either resolve the configuration source the adapter needs before `hydrate_import_facts_by_key_with_metadata` takes its connection, and pass it in, or hand the callback the open connection instead of letting it check out a new one.\n\nFound while validating #2445 Milestone 2a/2b (#7294, #7285), which do not touch these frames. The full backtraces are kept locally.\n\n",
+    "assistant_text_tail": "r: it hydrates one import-fact row with package `src.main` and returns the expected callable `src.main.Factory.build`.\n- The original witness also passes with its complete **11 callable-signature rows**, demonstrating no sampling or suppression-based reduction.\n\nThis container runs as root, so mode `0555` did not prevent cache creation during the initial reproduction. The after run used `/proc` to guarantee template-publication failure and force the memory fallback; the deterministic regression independently asserts single-connection mode directly.\n\n## 5. Status, limitations, and separately actionable findings\n\n`git status --short` is empty; the detached HEAD contains only the final commit.\n\nNo pre-existing test failures were encountered, no external corpus was required, and there are no separately actionable findings or known remaining product limitations.\n\n## 6. Draft GitHub approach comment\n\nPython import hydration was checking out the store again while an import-fact read was still open. That reentrancy panics in a debug single-connection fallback and can block a release build. This change passes the already-open SQLite connection through the store’s hydration adapter calls. The selected project now uses that connection for published module names and retained configuration bytes. Python’s package-root probes use the same connection through the existing structured input interface. I applied the connection-aware path to import facts, file-state and unit hydration, and relational content and path candidates. Existing non-connection hooks remain for callers that do not hold a store read. The debug assertion and all extraction epochs are unchanged. A new regression builds a real Python analyzer over `open_in_memory_single_connection` and checks import facts plus callable-signature results. It failed at `writer.rs:172` before the fix and passes after it; the original issue test also passes with template staging disabled. Affected crate suites, 224 Python integration tests, formatting, and workspace Clippy pass.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 24,
+    "input_rationale": "Eval task: fix committed (a38791c486), all validation reported green, report delivered. Nothing is left for the judge; the matched text is only the limitations section saying none remain.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

@@ -42,10 +42,6 @@ MESSAGE_TAIL_BYTES = 2 * 1024
 MAX_MESSAGES = 256
 USER_TAIL = 1024
 ASSISTANT_TAIL = 2048
-CONTINUATION_PROMPT = (
-    "Continue the unfinished work already requested by the user, following their latest "
-    "instructions. This message supplies no new approval or missing information."
-)
 CREDENTIAL_PATTERNS = [
     re.compile(p)
     for p in (
@@ -124,19 +120,22 @@ def item_text(body):
 
 def transcript(connection, session):
     rows = connection.execute(
-        "select position, created_at_ms, body_json from materialized_transcript_items "
+        "select position, created_at_ms, stable_id, body_json from materialized_transcript_items "
         "where session_id = ? order by position",
         (session,),
     ).fetchall()
     items = []
-    for position, created_at_ms, body_json in rows:
+    for position, created_at_ms, stable_id, body_json in rows:
         body = json.loads(body_json)
         items.append(
             {
                 "position": position,
                 "at_ms": created_at_ms,
+                "stable_id": stable_id,
                 "kind": body.get("kind"),
                 "text": item_text(body),
+                "non_text": body.get("kind") == "user"
+                and any(block.get("type") != "text" for block in body.get("content", [])),
                 "title": body.get("call", {}).get("title") if body.get("kind") == "tool" else None,
             }
         )
@@ -249,69 +248,99 @@ def trim_middle(text):
     return f"{head}\n[... {omitted} bytes omitted from the middle of this message ...]\n{tail}"
 
 
+# Ports of mj_core::continuation::is_generated_prompt / is_generated_prompt_text
+# and mj_core::archive::CONTEXT_BOUNDARY_PREFIX. Keep them in step with the Rust.
+GENERATED_PROMPT_PREFIXES = ("auto-continue-", "quota-retry-", "review-forward-", "archive-", "subagent-", "mailbox-wake-")
+PARENT_WAIT_PROMPT_TEXT = "One or more sub-agents finished. Call wait to collect their reports."
+CONTEXT_BOUNDARY_PREFIX = "context-cleared:"
+
+
+def is_generated_prompt(command_id):
+    for prefix in ("capacity-retry-", "server-retry-"):
+        ordinal = command_id[len(prefix):] if command_id.startswith(prefix) else None
+        if ordinal and ordinal.isascii() and ordinal.isdigit():
+            return True
+    return command_id.startswith(GENERATED_PROMPT_PREFIXES)
+
+
+def is_generated_prompt_text(text):
+    return text.lstrip().startswith("[HARNESS NOTE:") or text.strip() == PARENT_WAIT_PROMPT_TEXT
+
+
 def build_authorization(items, end_index):
     """Whole user and assistant messages up to the reply, under production rules.
 
-    Mirrors `mj_core::assessment::ContextHistory` step by step: every message is
-    kept by head and tail past 6 KiB; a user message that would push the user
-    total past 32 KiB, or a 257th user message, marks the history incomplete;
-    assistant entries are evicted oldest first past 16 KiB of assistant text or
-    past 256 entries in all, never the final reply. History starts after the
-    last `/compact` or `/clear`, the closest available stand-in for a context
-    reset.
+    Mirrors `mj_core::assessment::ContextHistory` step by step. Prompts that
+    Mjolnir generated (`is_generated_prompt` by command id, as the daemon seed
+    in `mj-transcript/src/authorization.rs` reads it from the stable id, and
+    `is_generated_prompt_text`) are not user messages. Every message is kept by
+    head and tail past 6 KiB. When the 32 KiB user budget or the 256-message cap
+    is full, the oldest exchange gives way; non-text user content marks the
+    history incomplete. Assistant entries are evicted oldest first past 16 KiB
+    of assistant text or past 256 entries in all, never the entry being
+    written. `/clear` (a context-cleared boundary in the transcript) starts the
+    history over; `/compact` is an ordinary prompt and stays in it.
     """
     start = 0
     for index in range(end_index + 1):
         item = items[index]
-        if item["kind"] == "user" and item["text"].strip().split(" ")[0] in ("/compact", "/clear"):
+        if (item.get("stable_id") or "").startswith(CONTEXT_BOUNDARY_PREFIX) or (
+            item["kind"] == "user" and item["text"].strip().split(" ")[0] == "/clear"
+        ):
             start = index + 1
     messages = []
     state = {"complete": True, "omitted": False, "final_omitted": False}
 
-    def user_bytes():
-        return sum(len(m["text"].encode()) for m in messages if m["role"] == "user")
+    def total(role):
+        return sum(len(m["text"].encode()) for m in messages if m["role"] == role)
 
     def user_count():
         return sum(1 for m in messages if m["role"] == "user")
 
-    def assistant_bytes():
-        return sum(len(m["text"].encode()) for m in messages if m["role"] == "assistant")
-
-    def evict_oldest_assistant(protect_last):
-        candidates = [i for i, m in enumerate(messages) if m["role"] == "assistant"]
-        if protect_last and candidates and candidates[-1] == len(messages) - 1:
-            candidates = candidates[:-1]
-        if not candidates:
+    def evict_oldest_assistant(protected):
+        index = next((i for i, m in enumerate(messages) if m["role"] == "assistant" and m["id"] != protected), None)
+        if index is None:
             return False
-        index = candidates[0]
         if index + 1 == len(messages):
             state["final_omitted"] = True
         messages.pop(index)
         state["omitted"] = True
         return True
 
+    def evict_oldest_exchange():
+        first = next((i for i, m in enumerate(messages) if m["role"] == "user"), None)
+        if first is None:
+            return False
+        end = next((i for i in range(first + 1, len(messages)) if messages[i]["role"] == "user"), first + 1)
+        if any(m["role"] == "assistant" for m in messages[:end]):
+            state["omitted"] = True
+        del messages[:end]
+        return True
+
     for index in range(start, end_index + 1):
         item = items[index]
         text = item["text"]
-        if not text.strip():
-            continue
         if item["kind"] == "user":
-            if text.startswith(CONTINUATION_PROMPT) or text.startswith("[handback reminder]"):
+            command_id = (item.get("stable_id") or "").removeprefix("user:")
+            if is_generated_prompt(command_id):
+                continue
+            if item.get("non_text"):
+                state["complete"] = False
+            if is_generated_prompt_text(text) or not text.strip():
                 continue
             text = trim_middle(text)
-            if user_bytes() + len(text.encode()) > USER_BYTES or user_count() >= MAX_MESSAGES:
-                state["complete"] = False
-                continue
-            while len(messages) >= MAX_MESSAGES and evict_oldest_assistant(False):
+            while (total("user") + len(text.encode()) > USER_BYTES or user_count() >= MAX_MESSAGES) and evict_oldest_exchange():
                 pass
-            if len(messages) >= MAX_MESSAGES:
-                state["complete"] = False
-                continue
+            while len(messages) >= MAX_MESSAGES and evict_oldest_assistant(None):
+                pass
             messages.append({"id": f"user:{item['position']}", "role": "user", "text": text})
         elif item["kind"] == "agent":
+            if not text.strip():
+                continue
             state["final_omitted"] = False
-            messages.append({"id": f"agent:{item['position']}", "role": "assistant", "text": trim_middle(text)})
-            while (assistant_bytes() > ASSISTANT_BYTES or len(messages) > MAX_MESSAGES) and evict_oldest_assistant(True):
+            identity = f"agent:{item['position']}"
+            messages.append({"id": identity, "role": "assistant", "text": trim_middle(text)})
+            while (total("assistant") > ASSISTANT_BYTES or len(messages) > MAX_MESSAGES) and evict_oldest_assistant(identity):
                 pass
     return {
         "messages": messages,
@@ -373,11 +402,46 @@ def fixture_from_transcript(args, connection):
     }
 
 
+def refresh(ids, connection, directory):
+    """Rebuild `evidence.authorization` of transcript fixtures under the current rules.
+
+    A fixture that cannot be rebuilt is reported and left unchanged; the others
+    still refresh, and the exit status is nonzero.
+    """
+    problems = []
+    for identity in ids:
+        paths = list(directory.glob(f"{identity}-*.json"))
+        if len(paths) != 1:
+            problems.append(f"{identity}: expected one fixture file, found {len(paths)}")
+            continue
+        fixture = json.loads(paths[0].read_text())
+        source = fixture["source"]
+        if source.get("kind") != "transcript":
+            problems.append(f"{identity}: only transcript fixtures can be refreshed (kind {source.get('kind')!r})")
+            continue
+        items = transcript(connection, source["session"])
+        index = next((i for i, item in enumerate(items) if item["position"] == source["reply_position"] and item["kind"] == "agent"), None)
+        if index is None:
+            problems.append(f"{identity}: no agent reply at position {source['reply_position']} in the current transcript")
+            continue
+        authorization = build_authorization(items, index)
+        if authorization == fixture["evidence"].get("authorization"):
+            continue
+        fixture["evidence"]["authorization"] = authorization
+        scan_credentials(fixture)
+        paths[0].write_text(json.dumps(fixture, indent=2, ensure_ascii=False) + "\n")
+        print(paths[0])
+    if problems:
+        fail("could not refresh:\n  " + "\n  ".join(problems))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--id", required=True, help="fixture id such as S01 or P04")
-    parser.add_argument("--title", required=True)
-    parser.add_argument("--category", required=True)
+    parser.add_argument("--id", help="fixture id such as S01 or P04")
+    parser.add_argument("--title")
+    parser.add_argument("--category")
+    parser.add_argument("--refresh", nargs="+", metavar="ID",
+                        help="rebuild the authorization history of existing transcript fixtures, keeping their labels")
     parser.add_argument("--decision", help="worker decision id (assessment-<session>-<ordinal> or an activity id)")
     parser.add_argument("--session", help="session id or unique prefix")
     parser.add_argument("--at", help="local time of the agent reply, YYYY-MM-DD HH:MM:SS (America/Chicago)")
@@ -385,6 +449,11 @@ def main():
     parser.add_argument("--out", type=Path, default=FIXTURES)
     parser.add_argument("--force", action="store_true", help="overwrite an existing fixture for this id")
     args = parser.parse_args()
+    if args.refresh:
+        refresh(args.refresh, connect(), args.out)
+        return
+    if not (args.id and args.title and args.category):
+        fail("--id, --title and --category are required unless --refresh is given")
     if sum(1 for flag in (args.decision, args.at, args.position) if flag) != 1:
         fail("give exactly one of --decision, --at, or --position")
     if (args.at or args.position) and not args.session:

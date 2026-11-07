@@ -1,0 +1,458 @@
+{
+  "id": "L2609",
+  "title": "Measure parse-time IR redesign cost",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "07d292ca700ead3ba5c751211efb3228",
+    "session_title": "bifrost via claude",
+    "reply_position": 168685,
+    "captured_at": "2026-11-01T01:16:24.280Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:101",
+          "role": "user",
+          "text": "sorry for the interruption, i've enabled subagents now"
+        },
+        {
+          "id": "user:134",
+          "role": "user",
+          "text": "when you have a plan, ask 61f0abcccf634f1496fc07478093eb5d to review it"
+        },
+        {
+          "id": "user:2863",
+          "role": "user",
+          "text": "can we split these out to ec2 vms to get results faster? this is high priority and i'm in a hurry\n\n(fine to leave matrix here, also fine to move it if we expect the time remaining to be >> time spent so far)"
+        },
+        {
+          "id": "user:3054",
+          "role": "user",
+          "text": "you can run boto3 via uv if that's easier"
+        },
+        {
+          "id": "user:6670",
+          "role": "user",
+          "text": "is message ordering actually material to correctness here or just \"we wanted to change absolutely nothing\""
+        },
+        {
+          "id": "user:6794",
+          "role": "user",
+          "text": "yeah i think the gate is incorrect here and we should revise it. close 7118"
+        },
+        {
+          "id": "user:10459",
+          "role": "user",
+          "text": "it looks like you stopped. keep going, you can build on to-be-merged PRs"
+        },
+        {
+          "id": "user:59360",
+          "role": "user",
+          "text": "is 7761 the last piece?"
+        },
+        {
+          "id": "user:59972",
+          "role": "user",
+          "text": "can we accelerate 4b?"
+        },
+        {
+          "id": "user:60187",
+          "role": "user",
+          "text": "yes"
+        },
+        {
+          "id": "user:65736",
+          "role": "user",
+          "text": "answer on dist?"
+        },
+        {
+          "id": "user:66004",
+          "role": "user",
+          "text": "> Bifrost should skip generated or minified files by default\n\ni mean it should, yes\n\n> .bifrostignore in the benchmark setup\n\nlet's do that"
+        },
+        {
+          "id": "user:73775",
+          "role": "user",
+          "text": "> Reaching the flask target probably needs keys per declaration or procedure instead of per file. That is a new milestone-sized piece of design, so it is your call whether to start it next.\n\npls perform the measurement and create the ticket but idt i want to scope creep to this atm"
+        },
+        {
+          "id": "user:82275",
+          "role": "user",
+          "text": "The 4(a) durable root-product engine (#8048), measured against its master base on 11 flask commits on one VM, both orders: cold scan +2.4%, one-commit source edits +0.4% to +2.9% (+1.3% overall), docs-only commit -25%, net -0.7%. Even 100% root reuse saves only 25%, because master's one-commit check costs almost as much as its cold scan (about 510 vs 527 CPU s). The bigger cost is 36 policies that run in full mode on every check (20 unbounded units, 9 plans crossing seeds). What should happen with #8048?\n\n#8048: Hold; do full-mode next (Recommended)"
+        },
+        {
+          "id": "user:82711",
+          "role": "user",
+          "text": "why do we have a \"full mode policy,\" shouldn't our design mean that all policies get diff-base mode automatically once it lands?"
+        },
+        {
+          "id": "user:82902",
+          "role": "user",
+          "text": "ok but you can start on the other gaps while waiting for that"
+        },
+        {
+          "id": "user:92631",
+          "role": "user",
+          "text": "while you're waiting, ask 61f0abcccf634f1496fc07478093eb5d if we're missing anything\nthat's causing us to not realize the hoped-for improvements, besides the file-level keys"
+        },
+        {
+          "id": "user:95932",
+          "role": "user",
+          "text": "While you were away: on flask, 282 of 298 units recomputed after a one-line edit to src/flask/cli.py fail on one read, the module-path index key `flask.cli` (#8180). The verifier counts every index key an edited file contributes as changed, even when that file's entries for the key are identical before and after. Comparing the entries per key is a contained change to index verification and the store's row builders, not per-declaration keys (#7965). Should I take #8180 on next?\n\n#8180: Yes, do it next (Recommended)"
+        },
+        {
+          "id": "user:111713",
+          "role": "user",
+          "text": "did you try \"pr ready\" or just assume it doesn't work?"
+        },
+        {
+          "id": "user:111761",
+          "role": "user",
+          "text": "0a. I explicitly authorize this\n0b. How do I configure fucking claude code to always alow this\n1. why do we get 75% savings instead of 95%?\n2. what's the decision / how do we fix type flow cost?"
+        },
+        {
+          "id": "user:112197",
+          "role": "user",
+          "text": "1a. is absent-member slicing complementary with \"cache type flow in sqlite\" or does the latter obsolete the former?\n1b. i thought we had a bunch of work on caching type flow summaries already\n\n2. i think we should just remove full mode entirely and figure out how to make policies that require it, not require it, is that feasible? if not why not?"
+        },
+        {
+          "id": "user:112740",
+          "role": "user",
+          "text": "Under the new partial-answer rule, #8314's per-branch merged-limit walk is parity machinery: it only lets a sliced answer through when it would match the whole run's truncation. A simpler change: if every unit finished untruncated, return the merged answer (it is complete), and if a limit is hit, return the merged subset with incompleteness reported, instead of falling back to full mode. That also slices except-plans and selectors, and drops the per-leaf charges and their epoch token. The remaining question is cost: summed unit recomputes can exceed one whole run's budget, so the unit loop would stop once the request budget is spent and report the rest incomplete. How should #8314 proceed?\n\n#8314 path: Rework #8314 now (Recommended)"
+        },
+        {
+          "id": "user:113150",
+          "role": "user",
+          "text": "1a. good, kick off absent-member slicing\n1b. let's investigate this and hopefully fix it\n\n2.i.a. kick off recompute just the failed units\n2.i.b. redefinining truncated results is not an issue\n\n2.ii. I thought that was what we just built, what was the file-level reuse that you just finished, I guess it only applies to single-file rules? if so jfc why did that take multiple days I'm worried that you dramatically overcomplicated something"
+        },
+        {
+          "id": "user:113649",
+          "role": "user",
+          "text": "mark #8368 ready"
+        },
+        {
+          "id": "user:113917",
+          "role": "user",
+          "text": "> What per-file reuse can't do\n\nlet's make this concrete\n\n1. give an example of a cross-file policy that benefits substantially (no typestate, no taint)\n2. suppose i have a sql injection rule, this is taint right? what would file-level reuse plausibly save, vs what would it not?"
+        },
+        {
+          "id": "user:114282",
+          "role": "user",
+          "text": "> the next precision step\n\nyes we should obviously do this\n\n> the per-declaration keys\n\nif it's just a matter of finer-grained keys then sure let's try it\n\n> #8368\n\ni will work w/ coordinator directly on this, you can stand down\n\n> If it were sliced per source file\n\nhow much value does this add assuming we get typestate summaries working and the other improvements in motion?"
+        },
+        {
+          "id": "user:114297",
+          "role": "user",
+          "text": "also i thought there was a \"cache results by source\", if we know that the graph from root X hasn't changed we don't need to recompute X"
+        },
+        {
+          "id": "user:115097",
+          "role": "user",
+          "text": "ok so just to clarify\n\n1a. we only care about native engine (rust, mostly go, others in progress), if work benefits legacy as well then great but we should not do work that only benefits legacy \n1b. corollary: you really need to be testing in a native engine path, is the flash \"costs more than it saved\" result a function of legacy distortion? idk, best to not introduce this question\n2a. i want general solutions not a bunch of point fixes, so \"we built solution X for problem shape A but not for B\" is a huge massive smell, okay to increase the blast radius of the refactor to address these\n2b. in this specific case yes i agree that policy units should cover this"
+        },
+        {
+          "id": "user:115480",
+          "role": "user",
+          "text": "ok so is this a reasonable summary of where we're at for my boss? image included so you can see how it's nested \n\n\nNon-graph rules: completed\nEasy mode, just cache results by file and invalidate when changed, this is in the merge queue now\nThis doesn't mean it only applies to single-file analysis, for example, \"do python parameters passed anonymously match declared kwargs\" applies to declarations that are not in the same file, but we can still cache the analysis by file (if neither caller's nor callee's file changed, the result is the same)\nGraph-based rules are harder, two sub-pieces, both in progress\nCache entire paths -- meaning, if we know that none of the edges from source X have changed then the entire analysis for X is unchanged\nFor some reason Opus built this but only for typestate queries and did not generalize to taint\nCache intermediate nodes, primarily this means \"build a reusable summary of type flow within each function and cache that instead of recomputing it for every call,\" this is straightforward conceptually but quite messy in dynamic languages since you basically have to store partial results at every transformation"
+        },
+        {
+          "id": "user:115799",
+          "role": "user",
+          "text": "> Per-function summaries exist for type flow and for Rust taint. The gap is Go taint, which has no stored summaries.\n\nokay so the gap is\n\n1. we built something per-language that goes in the shared engine\n2. possibly also we built two specializations of node-based summaries that should be generalized"
+        },
+        {
+          "id": "user:115934",
+          "role": "user",
+          "text": "> some cached reads cover a whole file\n\nacceptable, for now\n\n> or include source positions\n\nnot acceptable, you're fixing this right?"
+        },
+        {
+          "id": "user:116387",
+          "role": "user",
+          "text": "approved. launch all zig!"
+        },
+        {
+          "id": "user:138771",
+          "role": "user",
+          "text": "did the merged policy node summaries make it to the generalized engine?"
+        },
+        {
+          "id": "user:138974",
+          "role": "user",
+          "text": "why is go blocked by a jvm gate?"
+        },
+        {
+          "id": "user:139079",
+          "role": "user",
+          "text": "> #8402's 16% cold-CPU cost and the unfinished #8453\n\nare these in motion?"
+        },
+        {
+          "id": "user:139180",
+          "role": "user",
+          "text": "yes to both"
+        },
+        {
+          "id": "user:148476",
+          "role": "user",
+          "text": "/mnt/optane is back"
+        },
+        {
+          "id": "user:148514",
+          "role": "user",
+          "text": "> landing #8402\n\nwhat call do you need"
+        },
+        {
+          "id": "user:148641",
+          "role": "user",
+          "text": "it sounds like this should be something that gets generalized for the entire native engine, not a Go one-off #collaborating"
+        },
+        {
+          "id": "user:149181",
+          "role": "user",
+          "text": "let's land 8402 now\n\nthen extend it to the native languages and make it obvious that is part of native-language implementation\n\nif at some point we find a native impl where it's not worth the cost we deal with it then, YAGNI applies"
+        },
+        {
+          "id": "user:155704",
+          "role": "user",
+          "text": "> #8575 lands on the reuse gains alone\n\nwfm"
+        },
+        {
+          "id": "agent:167255",
+          "role": "assistant",
+          "text": "I've opened #8586's fix as draft PR #8692 at `33f7785cf5`, and asked for the JVM lane and a review.\n\nIt passes on the merged tree:\n- `suite_bench_policy` 2,398 of 2,398;\n- `suite_mcp_cli` 254 of 254;\n- `suite_semantic` 2,407 of 2,407;\n- the five shared-path libs 5,251 of 5,252. The one failure is the known master failure #8665.\n\nTwo findings from this round:\n- **Policy goldens:** blessing on current master changed none of the nine conflicted goldens. Since #8617, Java and C# serve those files from parse-time rows, so master's counters already matched. Only `file-system-race` keeps a counter change.\n- **C++ test:** `cpp_enumeration_budget_counts_non_callable_syntax` failed after the merge. The child had replaced the test's own assertion (\"work exceeds the 64 declarations\") with \"reported work equals the census\". On the merged tree the C++ census reports 0 nested entries against 770 performed, so the replacement failed. I restored master's assertion. I flagged the 0-versus-770 gap for the reviewer, because I haven't investigated it.\n\nThe PR description says what now limits an extreme on-demand lowering: the producer budget itself, through the lowerers' own gates. The coordinator required that.\n\nWaiting on:\n- The JVM verdict and review for #8692.\n- #8682, now in the merge queue.\n- Your answer on #8580. I recommend measuring first."
+        },
+        {
+          "id": "agent:167353",
+          "role": "assistant",
+          "text": "The coordinator started the JVM lane for #8692 on `33f7785cf5`. It accepts these changes and nothing else:\n- the identity change (token, plus pair v322/v321);\n- completion changes where an on-demand Kotlin artifact now admits instead of exceeding its staged budget, each one named by site;\n- no SQL change;\n- `work50` equal except on the moved sites.\n\nAny answer that becomes less complete fails the lane. Master is now at pair v315/v314 after batch #8690, and v322 is still above it and above every ready head.\n\nWaiting on:\n- The #8692 lane verdict and review.\n- #8682 in the merge queue.\n- Your answer on #8580. I recommend measuring first."
+        },
+        {
+          "id": "agent:167401",
+          "role": "assistant",
+          "text": "The reviewer accepts the design. One test change is required: the witness must assert the expected outcome, not only that the two results are equal. The test must also gain a case that has to refuse, for every origin, stored rows included. Three follow-ups come with it:\n- check whether the C++ census undercounts nested entries;\n- confirm whether this PR also fixes #8624;\n- post on #8665 which Scala golden lines, if any, come from #8586.\n\nThe Scala question is cheap. I have the actual Scala output from two runs: #8617 plus master `a8316c4aa6` without #8586, and #8586 plus master `96a4dc7dbb`. If they're identical, #8586 contributes none of those lines."
+        },
+        {
+          "id": "agent:167517",
+          "role": "assistant",
+          "text": "The reviewer accepted the #8692 design. I've answered the Scala question and started the review follow-ups.\n\n- **Scala:** the `jvm-shared-closer/scala` output is byte-identical with and without #8586. So all six of #8665's changed lines are master's own state, and the earlier claim that #8586 caused them was wrong. I posted this on #8665 for whoever re-blesses it.\n- **Witness and refusal tests (child running):** the witness will assert that both disk and overlay are Complete under a 1-byte source budget, keeping its hardwon tag. A new test will require ExceededBudget when the request limit is below the census. Both tests cover stored-row hits, in-memory cache hits and on-demand lowering, and prove each origin with existing counters. The same child is making the small telemetry fix the reviewer suggested, so every exit records the same performed work. I told the coordinator that this edit touches product code and will move the head.\n- **C++ census and #8624 (read-only child running):** the census reports 0 nested entries for C++ against 770 performed. The child will check whether the C++ artifact retains data that the census doesn't count. If it does, census admission can't bound C++ memory, and an issue gets filed. It will also check whether #8692 fully fixes #8624.\n\n`★ Insight ─────────────────────────────────────`\n- A test that asserts only that two results are equal passes when both are wrong in the same way. Pinning the expected value (Complete) and adding the opposite case (ExceededBudget below the census) makes the witness fail on regressions in either direction.\n- Comparing actual outputs across two trees, one with the change and one without, settles attribution without a new run. Here it showed a \"this change removed a boundary\" explanation was wrong before anyone re-blessed it into a golden.\n`─────────────────────────────────────────────────`\n\nWaiting on:\n- The two #8586 children.\n- The #8692 JVM lane, which is still running.\n- #8682 in the merge queue.\n- Your answer on #8580. I recommend measuring first."
+        },
+        {
+          "id": "agent:167658",
+          "role": "assistant",
+          "text": "The coordinator says the test-only part carries, but the telemetry edit needs a second lane run (r2) on the new head. That edit is product code on the shared materialization path, and it changes the performed-work counters the lane measures. The r2 is cheap, because this lane's base build becomes the shared base. Splitting the edit into its own PR would mean another PR with its own lane and more overhead. So I'll keep the edit in #8692 and take the r2."
+        },
+        {
+          "id": "agent:167686",
+          "role": "assistant",
+          "text": "The telemetry fix stays in #8692. The coordinator will run a cheap r2 lane on the new head, using the base build from the current lane. I'll send it the SHA once the follow-up is pushed.\n\nWaiting on:\n- The two #8586 children: the witness and refusal tests, and the C++ census and #8624 check.\n- The current #8692 lane.\n- #8682 in the merge queue.\n- Your answer on #8580. I recommend measuring first."
+        },
+        {
+          "id": "agent:167718",
+          "role": "assistant",
+          "text": "The investigator found nothing to file for C++. The census of 0 is correct: those 64 field-only structs produce no procedures, and the artifact retains nothing that grows with them. Java behaves the same way. The 770 is traversal work done during lowering, which the census is not meant to count.\n\n#8624 is fixed only in part. The request no longer keeps the source admission on a stored-row hit. But the row branch after a miss still holds `prepared` alive through `publish_from_semantic_ir_rows`, while the cache-hit arm drops it first. I'll check whether that call needs the prepared source. If not, dropping it first fully fixes #8624 in this PR, and the change rides the same r2 lane."
+        },
+        {
+          "id": "agent:167794",
+          "role": "assistant",
+          "text": "I'll tell the reviewer the answers to its last two questions."
+        },
+        {
+          "id": "agent:167803",
+          "role": "assistant",
+          "text": "The two #8692 follow-up questions are answered.\n\n- **C++ census:** there's nothing to file. The census counts what an artifact keeps, and 64 field-only structs keep nothing: they produce no procedures, and the artifact holds no declaration inventory. Java behaves the same way. The 770 is traversal work done during lowering, which the census is not meant to count.\n- **#8624:** #8692 already removes the stored-row hit's retained source admission. The rest, the prepared source kept alive through the row publication, is now in the running child's assignment: a `drop(prepared)` before that call. Its witness will also materialize the same disk file several times against one small source budget. That is the test #8624 asks for, so #8692 will close #8624 as well.\n\nI told the reviewer both answers. The child's head will then get the cheap r2 lane run.\n\nWaiting on:\n- The #8586 child.\n- The current #8692 lane.\n- #8682 in the merge queue.\n- Your answer on #8580. I recommend measuring first."
+        },
+        {
+          "id": "agent:167871",
+          "role": "assistant",
+          "text": "The reviewer accepted all three: the C++ census explanation, the #8624 fix through `drop(prepared)` and the repeated-materialization witness, and the Scala attribution to #8665. It will review the new head once I send it. When the child finishes, I'll audit, commit and push. Then I'll send the SHA to both the reviewer and the coordinator for the r2 lane.\n\nWaiting on:\n- The #8586 child.\n- The current #8692 lane.\n- #8682 in the merge queue.\n- Your answer on #8580. I recommend measuring first."
+        },
+        {
+          "id": "agent:167920",
+          "role": "assistant",
+          "text": "The child finished all six items, and the tests now prove which origin each call took. The first disk call is a stored-row hit with no lowering. The second reuses the cache. The overlay lowers. The disk calls share one bounded budget, which covers #8624. The child ran `suite_semantic` against a temporary Python 3.14 link instead of the canonical 3.12 environment. I'll rerun it properly, together with `suite_bench_policy`, which the telemetry change may affect. First I'll review the diff."
+        },
+        {
+          "id": "agent:168009",
+          "role": "assistant",
+          "text": "I've committed the third round on the #8586 branch.\n\n- **Tests:** they now pin the expected outcome on every origin. With a 1-byte source budget, stored rows, the cache and the overlay all return Complete. With a limit one point below the census, all three return ExceededBudget. The serve counters prove each origin. The disk file is materialized twice against one bounded budget, which is #8624's requested test.\n- **`service.rs`:** two edits. The stored-row branch drops the prepared source before publishing, which finishes #8624. The leftover performed work is charged before `publish_cached`, so every exit records the same work.\n\nI closed the child. Now running in the canonical environment: `suite_bench_policy`, which the telemetry edit may affect, and `suite_semantic`. If both pass, I'll push. Then I'll send the SHA to the coordinator for the r2 lane and to the reviewer, and add \"Fixes #8624\" to the PR.\n\nWaiting on:\n- Those two suites.\n- The current #8692 lane.\n- #8682 in the merge queue.\n- Your answer on #8580. I recommend measuring first."
+        },
+        {
+          "id": "agent:168084",
+          "role": "assistant",
+          "text": "Both pass, with no golden changes: `suite_bench_policy` 2,398 of 2,398 and `suite_semantic` 2,407 of 2,407. So the telemetry edit moves no policy counter. I'll push the new head on its own."
+        },
+        {
+          "id": "agent:168135",
+          "role": "assistant",
+          "text": "Since #8692 now closes #8624, I'll claim that issue too."
+        },
+        {
+          "id": "agent:168146",
+          "role": "assistant",
+          "text": "#8692 is at `a136bde5f7` and now fixes both #8586 and #8624.\n\n- **Validation on this head:** `suite_bench_policy` 2,398 of 2,398 with no golden change, so the telemetry edit moves no policy counter. `suite_semantic` 2,407 of 2,407. The tools lib passes except the known #8665 failure.\n- **PR and issue:** the PR description says \"Fixes #8586\" and \"Fixes #8624\" and lists the new tests. I claimed #8624 and left a note on it.\n- **Next:** I sent the SHA to the coordinator for the r2 lane and to the reviewer. Once both report, I'll mark #8692 ready.\n\nWaiting on:\n- The #8692 r2 lane verdict and review.\n- #8682 in the merge queue.\n- Your answer on #8580. I recommend measuring first."
+        },
+        {
+          "id": "agent:168211",
+          "role": "assistant",
+          "text": "The reviewer approved #8692 at `a136bde5f7`. One suggestion is optional but worth taking. The `lowerings` checks compare against an absolute 0 on a counter shared by the whole process. That holds under nextest, which runs one process per test, but not when tests share a process. Taking a `before` value, as the test already does for `rows_hits`, removes that dependence. The change is test-only, so the r2 verdict carries. I'll read those assertions."
+        },
+        {
+          "id": "agent:168249",
+          "role": "assistant",
+          "text": "I'll make the three `lowerings` checks relative to a `before` value captured at the start, the same pattern the test uses for `rows_hits`."
+        },
+        {
+          "id": "agent:168283",
+          "role": "assistant",
+          "text": "The coordinator started the r2 lane on `a136bde5f7`. My edit is test-only, so its verdict should carry. I'll run the two tests and fmt, then commit."
+        },
+        {
+          "id": "agent:168299",
+          "role": "assistant",
+          "text": "Both tests pass and fmt is clean; the exit code 1 is just the final `grep` finding no FAIL lines. I'll commit, then push in a separate command."
+        },
+        {
+          "id": "agent:168332",
+          "role": "assistant",
+          "text": "The reviewer approved #8692 at `a136bde5f7`. I took its optional suggestion as one test-only commit, now pushed as `1da238e34a`. The origin tests compare the lowering count with its value at the start, as they already did for row hits. They no longer rely on nextest's one process per test. Both tests pass. I asked the coordinator to carry the r2 verdict to `1da238e34a` and told the reviewer.\n\nWaiting on:\n- The #8692 r2 verdict. I'll mark it ready after that.\n- #8682 in the merge queue.\n- Your answer on #8580. I recommend measuring first."
+        },
+        {
+          "id": "agent:168378",
+          "role": "assistant",
+          "text": "The reviewer confirmed `1da238e34a`: the only change from `a136bde5f7` is the `lowerings_before` baseline, so the approval carries. The r2 lane verdict is the last step before I mark #8692 ready.\n\nWaiting on:\n- That verdict.\n- #8682 in the merge queue.\n- Your answer on #8580. I recommend measuring first."
+        },
+        {
+          "id": "agent:168404",
+          "role": "assistant",
+          "text": "The coordinator has recorded the carry: the r2 verdict on `a136bde5f7` will apply to `1da238e34a`, because the change is test-only. It will send the verdict when the lane reports, and then I'll mark #8692 ready.\n\nWaiting on:\n- That verdict.\n- #8682 in the merge queue.\n- Your answer on #8580. I recommend measuring first."
+        },
+        {
+          "id": "agent:168441",
+          "role": "assistant",
+          "text": "The r2 lane passed with no movement on any surface. SQL counts are exact, and replay, answers, `work50` and the goldens are all equal. The carry to `1da238e34a` applies, and the reviewer has approved that head. Before marking it ready, the coordinator asked me to check v322/v321 against master and every ready head, and to confirm the API head equals ls-remote."
+        },
+        {
+          "id": "agent:168492",
+          "role": "assistant",
+          "text": "#8692 is ready at `1da238e34a` and in the merge queue. It fixes #8586 and #8624.\n\n- **The fix:** every semantic artifact is now lowered under one producer budget. Each request admits the finished artifact by its census, whether it came from stored rows, the cache or on-demand lowering. So the same file can no longer be Complete on one path and ExceededBudget on another.\n- **JVM lane:** the r2 run passed with no movement on any surface, and the carry to this head applies. The reviewer approved this head.\n- **Identity:** the pair v322/v321 is above master's v315/v314 and above the one other ready PR that sets the pair, #8517 at v312/v311.\n\nBoth of today's fix PRs are now in the queue: #8682 (#8634, Java default-only switches) and #8692.\n\nThe one thing still waiting on you is the #8580 scope question. Python and Scala need a redesign before they can publish IR at parse time: query-time handling of Python's `with` suppression and of non-returning calls, and query-time collection-flow contracts for Scala. I recommend measuring first. A single profiled flask policy check would show how much CPU on-demand Python lowering costs today. Then we'd know whether the Python work is worth doing now."
+        },
+        {
+          "id": "agent:168584",
+          "role": "assistant",
+          "text": "#8682 has landed. I'll check whether #8634 closed automatically. My PR text said \"Fixes the defect in #8634\", which may not count as a closing keyword. Then I'll clear its label and remove the lane."
+        },
+        {
+          "id": "agent:168611",
+          "role": "assistant",
+          "text": "#8682 has landed, so the Java default-only switch fix is on master. It didn't close #8634 automatically, so I closed it with a note, removed its in-progress label, and removed its lane worktree.\n\n#8692 (#8586 and #8624) is ready in the merge queue.\n\nThe #8580 scope question is still waiting on you: Python and Scala need a redesign before they can publish IR at parse time. I recommend measuring first. One profiled flask policy check would show what on-demand Python lowering costs today, before we commit to the Python redesign."
+        },
+        {
+          "id": "agent:168666",
+          "role": "assistant",
+          "text": "#8692 has landed. Its description used \"Fixes #8586\" and \"Fixes #8624\", so both should have closed. I'll confirm, clear their labels, and remove the lane."
+        },
+        {
+          "id": "agent:168685",
+          "role": "assistant",
+          "text": "#8692 has landed: #8586 and #8624 are closed, their labels cleared, and the lane removed. The `getcwd` error came from the shell's working directory being inside the worktree I deleted, and it's harmless.\n\nToday's landed work:\n- **#8617 (#8579):** parse-time semantic IR is now a required part of every native language adapter.\n- **#8628 (#8618) and #8641 (#8633):** a nested query no longer takes on its sub-queries' stable content gaps as its own, and a cache hit replays the reads its fill made.\n- **#8682 (#8634):** Java switches whose only arm is `default` now produce valid semantic IR.\n- **#8692 (#8586, #8624):** one producer budget for every artifact, so an answer's completeness no longer depends on cache state.\n\nSeparately, someone opened #8712 to restore the Scala open-boundary reasons behind #8665, the master failure I showed this work didn't cause.\n\nThe one open item needs your decision: **#8580, Python and Scala parse-time IR.** Both need a redesign first:\n- **Python:** non-returning calls and `with` suppression must move to query time.\n- **Scala:** collection-flow contracts must be applied in the flow engine.\n\nI recommend measuring first. One profiled flask policy check would show what on-demand Python lowering costs today, and whether the Python work is worth doing now. The audit is on the issue: https://github.com/BrokkAi/bifrost-dev/issues/8580#issuecomment-6548479698"
+        }
+      ],
+      "authorization_complete": false,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "> #8575 lands on the reuse gains alone\n\nwfm",
+    "assistant_text_tail": "#8692 has landed: #8586 and #8624 are closed, their labels cleared, and the lane removed. The `getcwd` error came from the shell's working directory being inside the worktree I deleted, and it's harmless.\n\nToday's landed work:\n- **#8617 (#8579):** parse-time semantic IR is now a required part of every native language adapter.\n- **#8628 (#8618) and #8641 (#8633):** a nested query no longer takes on its sub-queries' stable content gaps as its own, and a cache hit replays the reads its fill made.\n- **#8682 (#8634):** Java switches whose only arm is `default` now produce valid semantic IR.\n- **#8692 (#8586, #8624):** one producer budget for every artifact, so an answer's completeness no longer depends on cache state.\n\nSeparately, someone opened #8712 to restore the Scala open-boundary reasons behind #8665, the master failure I showed this work didn't cause.\n\nThe one open item needs your decision: **#8580, Python and Scala parse-time IR.** Both need a redesign first:\n- **Python:** non-returning calls and `with` suppression must move to query time.\n- **Scala:** collection-flow contracts must be applied in the flow engine.\n\nI recommend measuring first. One profiled flask policy check would show what on-demand Python lowering costs today, and whether the Python work is worth doing now. The audit is on the issue: https://github.com/BrokkAi/bifrost-dev/issues/8580#issuecomment-6548479698",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      162785,
+      162995,
+      168685
+    ],
+    "user_position": 155704,
+    "input_rationale": "The #8580 scope question (redesign now, or measure Python lowering cost first) has been waiting since 162785 for the user. The agent works on other lanes meanwhile. The user's next message answers it.",
+    "label": "required_final",
+    "triggers": [
+      "needs you"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:168685"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-01T01:17:20.743Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Told the agent you are back"
+      },
+      {
+        "at": "2026-11-01T01:17:20.750Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-01T01:19:31.150Z",
+        "kind": "user",
+        "text": "#8580: Python and Scala can only publish IR at parse time after a redesign. Python needs a model gate for non-returning calls (small) and a new query-time step for `with` suppression (medium). Scala n"
+      },
+      {
+        "at": "2026-11-01T01:20:58.719Z",
+        "kind": "agent",
+        "text": "Your decision belongs on the issue, so I'll record it on #8580."
+      },
+      {
+        "at": "2026-11-01T01:21:13.457Z",
+        "kind": "agent",
+        "text": "**The alternative to parse-time IR is on-demand lowering, which is what Python and Scala do today.** A request lowers each file the first time it needs it, then caches the result in memory for that pr"
+      },
+      {
+        "at": "2026-11-01T02:09:53.520Z",
+        "kind": "system",
+        "text": "Mailbox events:   - New PR brokkai/bifrost-dev#8721 Merge batch: #8712   - Child task 8580-flask-lowering-share finished: completed     State: completed     Report directory: /home/jonathan/Projects/b"
+      }
+    ]
+  }
+}

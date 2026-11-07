@@ -1,0 +1,348 @@
+{
+  "id": "L2805",
+  "title": "qs27-build-retry1-canonical-receipt-update",
+  "category": "still-open-none",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "db06d433b9a8c5644ed7e60633b17a05",
+    "session_title": "qs27-build-retry1-canonical-receipt-update",
+    "reply_position": 5186,
+    "captured_at": "2026-11-05T23:32:36.410Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:33",
+          "role": "assistant",
+          "text": "I’ll update only the listed campaign continuation/status files and the specified plan. I’ll first inspect their current structure and verify the cited acceptance receipts before editing."
+        },
+        {
+          "id": "agent:107",
+          "role": "assistant",
+          "text": "Handback delivered with the updated campaign indexes, status, and plan. No commit was made."
+        },
+        {
+          "id": "agent:160",
+          "role": "assistant",
+          "text": "I’ll reconcile only the Rust knowledge TEST entry in the package ledger and its matching evidence-matrix row, using the accepted receipt and current row conventions. I’ll preserve before-images in my report directory and leave the Rust analysis row and campaign status files untouched."
+        },
+        {
+          "id": "agent:253",
+          "role": "assistant",
+          "text": "Updated the Rust knowledge TEST rows in both campaign indexes and added the accepted receipt reference copy. The Rust analysis row and unrelated entries are unchanged. Handback includes hashes, before-image paths, and validation details."
+        },
+        {
+          "id": "agent:332",
+          "role": "assistant",
+          "text": "I’ll refresh only the canonical status and its existing durable mirror. I’ll check the current status, continuation’s H2 job, and the cited accepted Rust terminal/active Rust-analysis map facts before replacing stale wording."
+        },
+        {
+          "id": "agent:394",
+          "role": "assistant",
+          "text": "Updated the canonical status and durable mirror to reflect the accepted Rust TEST and the active Rust-analysis MAP. Both files match (SHA-256 `b27030ab…`). No other files were changed."
+        },
+        {
+          "id": "agent:472",
+          "role": "assistant",
+          "text": "I’ll inspect the reviewed receipt and existing C# ledger/matrix entries, then make only the two requested row updates in the temporary and durable ledgers. I’ll check for an established Markdown matrix format before deciding whether that file needs a matching update."
+        },
+        {
+          "id": "agent:567",
+          "role": "assistant",
+          "text": "Updated the two C# rows across the package ledger and evidence matrix, including the existing Markdown matrix and durable mirrors. The syntax entry remains historical and partial; the analysis entry remains incomplete with no terminal packet. Handback includes hashes and validation details."
+        },
+        {
+          "id": "agent:654",
+          "role": "assistant",
+          "text": "I’ll update only the C# syntax source-carriage note and its matching matrix entry, leaving the analysis row and all campaign status files unchanged. I’ll verify the follow-up receipt and retain the historical-only boundary in the wording."
+        },
+        {
+          "id": "agent:728",
+          "role": "assistant",
+          "text": "Updated the C# syntax source-carriage note and matching matrix entry with the reviewed two-file comparison. The row remains historical and incomplete; the analysis row is unchanged. Handback includes hashes and validation details."
+        },
+        {
+          "id": "agent:801",
+          "role": "assistant",
+          "text": "I’ll refresh only the status file and its existing durable mirror, using the current continuation and QS28 failure audit to align the H2 state and local proof boundaries. I’ll leave all ledgers and control files untouched."
+        },
+        {
+          "id": "agent:886",
+          "role": "assistant",
+          "text": "Updated the status file and durable mirror to reflect the stopped QS28 failure and completed local proof boundaries. Both match (SHA-256 `9b2bec57…`). No other files were changed."
+        },
+        {
+          "id": "agent:965",
+          "role": "assistant",
+          "text": "I’ll update only the canonical continuation and status, keeping the 33-package campaign incomplete. I’ll first inspect their current fields and the cited local receipts so the new capacity and tool facts are recorded without implying a map or accepted local binary."
+        },
+        {
+          "id": "agent:1041",
+          "role": "assistant",
+          "text": "Updated only the canonical continuation and status files. They record the capacity-refused probe and stopped H2, qualified local proofs, and pending local build/map preparation without claiming new map results. Hashes and validation details were sent in the handback."
+        },
+        {
+          "id": "agent:1128",
+          "role": "assistant",
+          "text": "I’ll reconcile the canonical continuation/status and durable root manifest from the accepted local map, tool, packet, and catalog receipts. I’ll inspect the manifest’s mixed hash/object formats and current bundle indexes first, then add only bounded evidence files and preserve existing bundle contents."
+        },
+        {
+          "id": "agent:1574",
+          "role": "assistant",
+          "text": "Updated the canonical continuation/status, their durable mirrors, and the durable root manifest at checkpoint `1206186f8e`. The 33-package goal remains open and incomplete; local maps are recorded as map-only, with the separate MCP map still running. Hashes and validation details were sent in the handback."
+        },
+        {
+          "id": "agent:1669",
+          "role": "assistant",
+          "text": "I’ll update the canonical continuation/status and their durable mirrors/root manifest at checkpoint `7655f69eba`, preserving prior records while adding only the new accepted terminal and intake/build facts. I’ll verify the named receipts and bundle index, and avoid broad searches or runtime actions."
+        },
+        {
+          "id": "agent:1845",
+          "role": "assistant",
+          "text": "The latest parent review changes the JS/TS terminals from audit-pending to accepted bounded terminals. I’m recording those accepted counts, the QS36 build-exit uncertainty, and C# intake/build progress separately so no map-only or source-only evidence is mistaken for whole-package completion."
+        },
+        {
+          "id": "agent:1999",
+          "role": "assistant",
+          "text": "Updated the continuation/status, durable mirrors, and root manifest at checkpoint `7655f69eba`. The 33-package campaign remains open and incomplete. C# test commands are recorded as dispatched with results pending.\n\nThe root manifest now indexes the QS36, QS35, and JS/TS terminal bundles. Hashes and validation details were sent in the handback."
+        },
+        {
+          "id": "agent:2113",
+          "role": "assistant",
+          "text": "I’ll reconcile only the canonical continuation/status, their durable mirrors, and the durable root manifest. I’ll verify the named receipts and running snapshots directly, preserve historical entries, and leave all four running maps without terminal counts."
+        },
+        {
+          "id": "agent:2199",
+          "role": "assistant",
+          "text": "The two C# acceptances and their independent audit agree on all 33 joins. The durable C# bundle and the corrected JVM control receipt are present; I’m adding their indexed files while retaining the superseded receipt and original historical records. The four Go/Python snapshots have `RUNNING` state and no terminal JSON yet, so I’m recording their launch identity only."
+        },
+        {
+          "id": "agent:2302",
+          "role": "assistant",
+          "text": "Updated the canonical continuation and status, durable mirrors, and root manifest. The four Go/Python maps are recorded as running with no terminal outcomes; the 33-package campaign remains open and incomplete. Hashes and verification details are in the handback report."
+        },
+        {
+          "id": "agent:2385",
+          "role": "assistant",
+          "text": "I’ll inspect the ledger and matrix row shapes and verify the six accepted terminal receipts against their durable bundle indexes before updating anything. I’ll keep map-only Go/Python records out of terminal rows and preserve all existing history and manifest entries."
+        },
+        {
+          "id": "agent:2501",
+          "role": "assistant",
+          "text": "Reconciled the six bounded JVM, JS/TS, and C# terminal packets into the canonical ledger and evidence matrix, with durable mirrors and root manifest updated. All remain explicitly bounded; the campaign is still incomplete, and no current-head replay is claimed. Hashes and verification details were sent in the handback report."
+        },
+        {
+          "id": "agent:2598",
+          "role": "assistant",
+          "text": "I’ll verify the accepted Go/Python and PHP/Ruby receipts and inspect the durable bundle indexes before updating the canonical records. I’ll record Ruby knowledge separately as pending acceptance, preserve existing history, and count package rows by terminal status after reconciliation."
+        },
+        {
+          "id": "agent:2690",
+          "role": "assistant",
+          "text": "The accepted terminal receipts match their stated counts and successful build/test exits. The Go/Python terminal and intake bundles are now indexed; the final PHP/Ruby archive is not present, so I’ve kept it as a pending pointer rather than claiming archival completion. Ruby knowledge remains outside the accepted terminal set."
+        },
+        {
+          "id": "agent:2757",
+          "role": "assistant",
+          "text": "A parent update confirms the separate Ruby MCP map now has independent acceptance. I’ll record its accepted map coverage separately from mutation terminals; its 12 selected mutants were not built or tested, so it does not change terminal counts."
+        },
+        {
+          "id": "agent:2831",
+          "role": "assistant",
+          "text": "Updated the canonical and durable indexes at checkpoint `d3fb97a25f`. Seven Go, Python, PHP, and Ruby analysis rows now record bounded accepted terminals. Ruby knowledge’s accepted MCP map is recorded separately; its 12 mutants were not built or tested.\n\nThe inventory remains 33 packages: 13 rows have bounded terminals with remaining scope, and 15 have no `terminal_packets` entry. Five other rows retain historical or other evidence. No whole-package completion or current-head replay is claimed."
+        },
+        {
+          "id": "agent:2975",
+          "role": "assistant",
+          "text": "Acknowledged. No indexes were changed; I’ll record the Rust-analysis map preparation after wrapper review and a launch receipt."
+        },
+        {
+          "id": "agent:3038",
+          "role": "assistant",
+          "text": "I’ll verify the finalized bundle receipt and all indexed member hashes, then update only its durable pointers in the root manifest, continuation, and relevant ledger rows. I’ll retain the r1 provenance and keep the Ruby MCP map separate from mutation terminals."
+        },
+        {
+          "id": "agent:3109",
+          "role": "assistant",
+          "text": "Verified all 1,826 bundle members and added the finalized PHP/Ruby bundle to the root manifest, continuation, and three relevant ledger rows. Ruby MCP evidence remains separate; H2 is unchanged. Hashes and snapshot paths are in the handback report."
+        },
+        {
+          "id": "agent:3200",
+          "role": "assistant",
+          "text": "I’ll reconcile the ledger and matrix summaries against the latest accepted continuation and primary receipts, keeping superseded milestones as dated history. I’ll also correct the root row’s stale “no mutant captured” wording to describe its historical map milestone and current remaining scope."
+        },
+        {
+          "id": "agent:3285",
+          "role": "assistant",
+          "text": "Updated the matrix and ledger summaries to reflect accepted terminals and current preparation status. Superseded 09:39Z summaries are retained as dated history, and the root row’s “no library mutant captured” statement is labeled as a historical QS22 milestone.\n\nThe 33-package inventory remains incomplete. The fresh Rust-analysis map is still preparation-only, pending wrapper review and a launch receipt. Hashes and verification are in the handback report."
+        },
+        {
+          "id": "agent:3414",
+          "role": "assistant",
+          "text": "I’ll update only the continuation and STATUS to record the launched Rust own-library map as running, with no map ID or results. I’ll preserve the separate failed H2 identity gate and refresh their durable mirror entries in the root manifest."
+        },
+        {
+          "id": "agent:3479",
+          "role": "assistant",
+          "text": "Recorded the fresh Rust-analysis map as running, with no map ID or outcomes, in continuation and STATUS and updated their durable mirrors and the root manifest. The prior H2 identity gate remains unresolved; H2 remains stopped. Hashes and verification are in the handback report."
+        },
+        {
+          "id": "agent:3574",
+          "role": "assistant",
+          "text": "I’ll record both live jobs and the new checkpoint pointer, pinning the Ruby build’s running receipt and accepted intake. I’ll leave outcome fields unset and retain the prior H2 stop and unresolved identity gate."
+        },
+        {
+          "id": "agent:3641",
+          "role": "assistant",
+          "text": "Recorded the d034f92648 checkpoint and both running jobs. Ruby’s accepted intake is recorded separately from its still-running build; no compiler or mutation result is claimed. H2 remains stopped, and its prior identity gate remains unresolved.\n\nHashes and verification details are in the handback report."
+        },
+        {
+          "id": "agent:3731",
+          "role": "assistant",
+          "text": "I’ll update the checkpoint and execution status from the Ruby build receipt, test-plan receipt, and current test running snapshot. I’ll record the successful build as build evidence only, keep mutation outcomes unset, and leave the Rust map and H2 states unchanged."
+        },
+        {
+          "id": "agent:3809",
+          "role": "assistant",
+          "text": "Recorded checkpoint `61c2bb4c87`: Ruby’s build completed successfully, while its mutation test remains running with no verdict. The Rust map is still running without results; H2 remains stopped and its prior identity gate unresolved. Hashes and verification are in the handback report."
+        },
+        {
+          "id": "agent:3907",
+          "role": "assistant",
+          "text": "I’ll verify the accepted Ruby terminal and durable bundle, then update its ledger/matrix row while preserving the historical 343-row packet separately. I’ll also record the accepted Rust map and running build without treating map coverage as mutation results."
+        },
+        {
+          "id": "agent:3989",
+          "role": "assistant",
+          "text": "Recorded the accepted Ruby MCP terminal and finalized bundle, preserving its historical syntax packet separately. The Rust-analysis map is recorded as accepted map evidence; its build remains running with no compiler or test terminal. Hashes and verification are in the handback report."
+        },
+        {
+          "id": "agent:4072",
+          "role": "assistant",
+          "text": "I’ll replace the Rust build-running state with its completed build receipt and record the exact 16-mutant test as running, with no mutation results. I’ll retain the accepted Ruby terminal and unresolved H2 identity failure."
+        },
+        {
+          "id": "agent:4134",
+          "role": "assistant",
+          "text": "Recorded checkpoint `2166d284ee`: the Rust-analysis build completed successfully, while artifact acceptance is pending and its mutation test remains running with no outcomes. The accepted map remains map-only; Ruby’s terminal and the stopped H2 state are preserved. Hashes and verification are in the handback report."
+        },
+        {
+          "id": "agent:4233",
+          "role": "assistant",
+          "text": "I’ll inspect the accepted r2 reconciliation and verify its cited primary files, then copy the r2 records into the durable campaign folder and index them. I’ll keep primary-evidence existence distinct from remaining-scope status and preserve the current runtime checkpoint at `2166d284ee`."
+        },
+        {
+          "id": "agent:4306",
+          "role": "assistant",
+          "text": "The accepted r2 report’s primary-evidence axis is 31 source-qualified terminal rows, one structural row, and one package with no verified primary terminal receipt; it separately reports zero whole-package/current-head-complete rows. I’ll preserve those counts as a dated, cited reconciliation, without deriving them from `terminal_packets` fields or summing cohorts."
+        },
+        {
+          "id": "agent:4392",
+          "role": "assistant",
+          "text": "Copied and indexed the parent-accepted r2 reconciliation, and added its primary-evidence counts to the continuation, ledger, matrix, and status. The summary now distinguishes primary-evidence existence from remaining scope; the runtime checkpoint remains `2166d284ee`. Hashes and verification are in the handback report."
+        },
+        {
+          "id": "agent:4493",
+          "role": "assistant",
+          "text": "I’ll update the checkpoint pointer to `e500f0648f` and carry forward the existing primary-evidence summary and scope qualifications. I’ll leave the Rust test at its last-known running state, with no new outcomes."
+        },
+        {
+          "id": "agent:4547",
+          "role": "assistant",
+          "text": "Updated the continuation and STATUS checkpoint to `e500f0648f`, preserving the corrected primary-evidence counts and scope qualifiers. The Rust test remains last-known running with no new outcome. Hashes and verification are in the handback report."
+        },
+        {
+          "id": "agent:4636",
+          "role": "assistant",
+          "text": "I’ll add the accepted Rust-analysis terminal to its ledger and matrix rows, keeping its remaining roles incomplete and the prior H2 failure separate. I’ll update the current primary-evidence count to 32 terminal, one structural, zero missing, while retaining the parent-accepted r2 report as historical evidence until r3 is finalized."
+        },
+        {
+          "id": "agent:4724",
+          "role": "assistant",
+          "text": "The Rust terminal bundle is now finalized. I’ll verify all indexed members, then update its durable pointer, the accepted Rust row, and the current primary-evidence count to 32 terminal, one structural, zero missing. I’ll preserve r2 as historical and note the omitted optional uncaught-source report and the unresolved audit-script provenance clarification."
+        },
+        {
+          "id": "agent:4812",
+          "role": "assistant",
+          "text": "Recorded the accepted Rust-analysis terminal, verified and indexed its 205-member bundle, and updated the ledger, matrix, continuation, and STATUS. The current primary-evidence count is 32 terminal, one structural, zero missing; whole-package/current-head completion remains zero. Hashes and qualifications are in the handback report."
+        },
+        {
+          "id": "agent:4914",
+          "role": "assistant",
+          "text": "I’ll preserve r3 as a separate immutable folder with the accepted JSON, Markdown, and source inventory check, then create the requested stable canonical copies and durable mirrors. I’ll keep r2 unchanged and record the current 32/1/0 primary-evidence count separately from remaining scope."
+        },
+        {
+          "id": "agent:5011",
+          "role": "assistant",
+          "text": "Created the canonical primary-results files as exact r3 copies and preserved the immutable r3 folder with its inventory check. The primary-evidence count is 32 terminal, one structural, zero missing across 33 packages; whole-package/current-head completion remains zero. Hashes and verification are in the handback report."
+        },
+        {
+          "id": "agent:5111",
+          "role": "assistant",
+          "text": "I’ll verify all five addendum members against its index and receipt, then update the current provenance, checkpoint, publication pointer, durable manifest, and mirrored status. I’ll keep r2/r3 records and the primary-evidence counts unchanged."
+        },
+        {
+          "id": "agent:5186",
+          "role": "assistant",
+          "text": "Recorded final checkpoint `7621acae64` and indexed the five-member Rust addendum. The 12 source-plausible routes remain unexecuted, with no defect inference; the frozen 205-member terminal bundle and r2/r3 records remain unchanged. The primary count remains 32 terminal, one structural, zero missing; broader scope is still open. Hashes and consistency checks are in the handback report."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "427comment6672242059 published source-qualifiedprimaryaxiscomplete; broadergoalstillopen, nojobsrunning,H2stoppedoldidentityunresolved. DurablecanonicalPRIMARY-RESULTS.md3697eef1... + primary-evidence-ledger.json0ee5e856... parentverifiedexactcopies. FinalRustADDENDUM nowexists .agents/scratch/9427-first-pass/qs28-rust-analysis-local-terminal-addendum-v1,5files435073B,index877d3cb96e7aecaacf84c6500c00a584ce97e28209a8e83f4d50ebf482d0d4ae,receipt5b08b86a064b8fb2d99938c82e5695283b27ba6c6d53d9abfb5a60bbd93e2bc7. Includescompleted12uncaughtSOURCE_PLAUSIBLEunexecuted JSON/MD(parentreadaccepted) +three ORIGINAL409underscore-namedcheckers; resolvesoldomissionwithoutrewriting205bundle(df91...). Verify/indexaddendum/updatecurrentprovenance frompendingtofinal, updatecheckpoint/publicationURL/canonical/durablemirrors/rootmanifest. Preserve r2/r3 historicalversionsandwhole-scopeaxis; no newresultcounts orcurrentHEADclaim. Pleasefinalhandbackshort withconsistency/count/sourcechecksum; no furtherworkrequestedafterfinalsync.",
+    "assistant_text_tail": "Recorded final checkpoint `7621acae64` and indexed the five-member Rust addendum. The 12 source-plausible routes remain unexecuted, with no defect inference; the frozen 205-member terminal bundle and r2/r3 records remain unchanged. The primary count remains 32 terminal, one structural, zero missing; broader scope is still open. Hashes and consistency checks are in the handback report.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 5104,
+    "input_rationale": "The still-open item is whole-package/current-head coverage, stated as a scope limit in a bookkeeping report. The parent said no further work was requested after the final sync; nothing is left for the user.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": true,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}
