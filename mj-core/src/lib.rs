@@ -34,6 +34,7 @@ pub mod history;
 pub mod jev;
 pub mod local_git;
 pub mod local_sockets;
+pub mod lock_wait;
 pub mod logging;
 pub mod login_environment;
 pub mod mailbox;

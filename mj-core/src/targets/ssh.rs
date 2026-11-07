@@ -1591,7 +1591,7 @@ struct Shard {
     verified_at: Option<Instant>,
     /// Serializes checking and opening this shard's master, so concurrent
     /// leases never start two openers for one socket.
-    opening: Arc<Mutex<()>>,
+    opening: Arc<OpeningLock>,
 }
 
 #[cfg(unix)]
@@ -1599,9 +1599,76 @@ impl Shard {
     fn new() -> Self {
         Self {
             verified_at: None,
-            opening: Arc::new(Mutex::new(())),
+            opening: Arc::new(OpeningLock::default()),
         }
     }
+}
+
+/// Ownership of one shard's check-and-open step within this process. The
+/// record of who holds it is the lock itself: taking it sets the holder and
+/// dropping the guard on any path clears it.
+#[cfg(unix)]
+#[derive(Default)]
+struct OpeningLock {
+    holder: Mutex<Option<OpeningHolder>>,
+}
+
+#[cfg(unix)]
+struct OpeningHolder {
+    thread: String,
+    since: Instant,
+}
+
+#[cfg(unix)]
+struct OpeningGuard<'a>(&'a OpeningLock);
+
+#[cfg(unix)]
+impl OpeningLock {
+    fn holder(&self) -> std::sync::MutexGuard<'_, Option<OpeningHolder>> {
+        self.holder
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn try_lock(&self) -> Option<OpeningGuard<'_>> {
+        let mut holder = self.holder();
+        if holder.is_some() {
+            return None;
+        }
+        *holder = Some(OpeningHolder {
+            thread: current_thread_name(),
+            since: Instant::now(),
+        });
+        Some(OpeningGuard(self))
+    }
+
+    fn describe_holder(&self) -> String {
+        self.holder().as_ref().map_or_else(
+            || "released just now".to_owned(),
+            |holder| {
+                format!(
+                    "thread {} held for {}s",
+                    holder.thread,
+                    holder.since.elapsed().as_secs()
+                )
+            },
+        )
+    }
+}
+
+#[cfg(unix)]
+impl Drop for OpeningGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.holder() = None;
+    }
+}
+
+#[cfg(unix)]
+fn current_thread_name() -> String {
+    let thread = std::thread::current();
+    thread
+        .name()
+        .map_or_else(|| format!("{:?}", thread.id()), str::to_owned)
 }
 
 /// The shards of one connection and where walks start.
@@ -1617,7 +1684,7 @@ struct Connection {
 #[cfg(unix)]
 struct Reservation {
     shard: usize,
-    opening: Arc<Mutex<()>>,
+    opening: Arc<OpeningLock>,
 }
 
 /// This process's view of the shards of each connection, keyed by
@@ -1706,17 +1773,26 @@ impl SessionLedger {
             dir.join(control_socket_name(ssh, reservation.shard)),
         );
         if slot.needs_check() {
-            let _opening = loop {
-                ensure!(
-                    !executor.cancellation_requested(),
-                    "operation cancelled while waiting for SSH master"
-                );
-                match reservation.opening.try_lock() {
-                    Ok(guard) => break guard,
-                    Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
-                    Err(std::sync::TryLockError::WouldBlock) => {
-                        std::thread::sleep(Duration::from_millis(25));
+            let _opening = {
+                let mut wait = None::<crate::lock_wait::LockWait>;
+                loop {
+                    ensure!(
+                        !executor.cancellation_requested(),
+                        "operation cancelled while waiting for SSH master"
+                    );
+                    if let Some(guard) = reservation.opening.try_lock() {
+                        if let Some(wait) = wait {
+                            wait.acquired();
+                        }
+                        break guard;
                     }
+                    wait.get_or_insert_with(|| crate::lock_wait::LockWait::new("an SSH master"))
+                        .blocked(
+                            &format!("{} shard {}", ssh.destination, reservation.shard),
+                            &format!("thread {}", current_thread_name()),
+                            || reservation.opening.describe_holder(),
+                        );
+                    std::thread::sleep(Duration::from_millis(25));
                 }
             };
             // Another lease may have checked or opened the master while this
@@ -1826,6 +1902,7 @@ fn lock_master_opening_unless(
     let mut path = socket.as_os_str().to_owned();
     path.push(".lock");
     let path = PathBuf::from(path);
+    let mut wait = None::<crate::lock_wait::LockWait>;
     loop {
         ensure!(
             !cancelled(),
@@ -1840,6 +1917,16 @@ fn lock_master_opening_unless(
         match file.try_lock() {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
+                // The lock file is empty, so it cannot name its holder: that
+                // is another process, or another open of the file here.
+                wait.get_or_insert_with(|| {
+                    crate::lock_wait::LockWait::new("an SSH master file lock")
+                })
+                .blocked(
+                    &path.display().to_string(),
+                    &format!("thread {}", current_thread_name()),
+                    || "held by another process (the lock file records no pid)".to_owned(),
+                );
                 std::thread::sleep(Duration::from_millis(25));
                 continue;
             }
@@ -1853,6 +1940,9 @@ fn lock_master_opening_unless(
         // file removed meanwhile serializes nothing, so take the one at the
         // path now.
         if is_file_at(file.file(), &path) {
+            if let Some(wait) = wait {
+                wait.acquired();
+            }
             return Ok(file);
         }
     }
@@ -3141,7 +3231,7 @@ mod tests {
         let ledger = SessionLedger::new();
         let orphan_reservation = Reservation {
             shard: 99,
-            opening: Arc::new(Mutex::new(())),
+            opening: Arc::new(OpeningLock::default()),
         };
         let orphan_lease = SshSessionLease::new(
             Some(ledger.slot(
@@ -3270,7 +3360,7 @@ mod tests {
                 let ledger = SessionLedger::new();
                 let reservation = Reservation {
                     shard: 0,
-                    opening: Arc::new(Mutex::new(())),
+                    opening: Arc::new(OpeningLock::default()),
                 };
                 let lease = SshSessionLease::new(
                     Some(ledger.slot(
@@ -4160,7 +4250,7 @@ mod tests {
         let ledger = SessionLedger::new();
         let ssh = plain_target("cancelled-master-host");
         let reservation = ledger.reserve(&connection_key(&ssh), &mut SshWalk::default());
-        let _opening = reservation.opening.lock().unwrap();
+        let _opening = reservation.opening.try_lock().unwrap();
         let executor = CancellableProcessExecutor::with_timeout(Duration::from_millis(50));
         assert!(
             ledger

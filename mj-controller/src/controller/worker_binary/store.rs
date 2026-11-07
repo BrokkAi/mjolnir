@@ -1,7 +1,7 @@
 //! Immutable target binaries. Session installation only creates new directory
 //! entries; it never writes executable bytes through an existing inode.
 use super::*;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 /// Beside the session roots, in their target filesystem (inside containers).
 pub(super) fn store_root(locator: &targets::TargetLocator, session_id: &str) -> Result<PathBuf> {
@@ -32,8 +32,8 @@ fn store_key(locator: &targets::TargetLocator, root: &str) -> String {
 /// of these. Other
 /// daemons targeting the same host are protected by the upload's unique name
 /// and its atomic publication. Waiting observes the executor cancellation.
-pub(super) fn store_gate(locator: &targets::TargetLocator, root: &str) -> Arc<Mutex<()>> {
-    type Gates = Mutex<HashMap<String, Weak<Mutex<()>>>>;
+pub(super) fn store_gate(locator: &targets::TargetLocator, root: &str) -> Arc<StoreGate> {
+    type Gates = Mutex<HashMap<String, Weak<StoreGate>>>;
     static GATES: OnceLock<Gates> = OnceLock::new();
     let key = store_key(locator, root);
     let mut gates = GATES
@@ -44,30 +44,125 @@ pub(super) fn store_gate(locator: &targets::TargetLocator, root: &str) -> Arc<Mu
     if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
         return gate;
     }
-    let gate = Arc::new(Mutex::new(()));
+    let gate = Arc::new(StoreGate {
+        label: format!("{} {root}", gate_target(locator)),
+        holder: Mutex::new(None),
+    });
     gates.insert(key, Arc::downgrade(&gate));
     gate
 }
 
+/// Where a gate's store lives, for the log line of a long wait.
+fn gate_target(locator: &targets::TargetLocator) -> String {
+    use targets::TargetLocator::*;
+    match locator {
+        SshPodman {
+            ssh, container_id, ..
+        }
+        | SshDocker {
+            ssh, container_id, ..
+        }
+        | SshAppleContainer {
+            ssh, container_id, ..
+        } => format!("container {container_id} on {}", ssh.destination),
+        LocalPodman { container_id, .. }
+        | LocalDocker { container_id, .. }
+        | AppleContainer { container_id, .. } => format!("local container {container_id}"),
+        SshBare { ssh, .. } | AwsEc2 { ssh, .. } => format!("host {}", ssh.destination),
+        LocalBare { .. } => "this host".to_owned(),
+    }
+}
+
+/// One owner for a store root in this daemon. The record of who holds it is
+/// the lock itself: taking the gate sets it and releasing the guard on any
+/// path clears it, so a waiter reads the owner from the same place that
+/// decides ownership.
+pub(super) struct StoreGate {
+    label: String,
+    holder: Mutex<Option<GateHolder>>,
+}
+
+struct GateHolder {
+    session_id: String,
+    purpose: &'static str,
+    since: Instant,
+}
+
+/// Ownership of a [`StoreGate`]; dropping it releases the gate.
+pub(super) struct GateGuard<'a>(&'a StoreGate);
+
+impl StoreGate {
+    fn holder(&self) -> MutexGuard<'_, Option<GateHolder>> {
+        self.holder.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Take the gate if it is free, recording `session_id` and `purpose`.
+    pub(super) fn try_lock(
+        &self,
+        session_id: &str,
+        purpose: &'static str,
+    ) -> Option<GateGuard<'_>> {
+        let mut holder = self.holder();
+        if holder.is_some() {
+            return None;
+        }
+        *holder = Some(GateHolder {
+            session_id: session_id.to_owned(),
+            purpose,
+            since: Instant::now(),
+        });
+        Some(GateGuard(self))
+    }
+
+    fn describe_holder(&self) -> String {
+        self.holder().as_ref().map_or_else(
+            || "released just now".to_owned(),
+            |holder| {
+                format!(
+                    "{} ({}) held for {}s",
+                    holder.session_id,
+                    holder.purpose,
+                    holder.since.elapsed().as_secs()
+                )
+            },
+        )
+    }
+}
+
+impl Drop for GateGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.holder() = None;
+    }
+}
+
+/// Wait for the gate, logging the holder once the wait passes five seconds.
+/// Waiting observes the executor's cancellation.
 pub(super) fn lock_gate<'a>(
     executor: &impl CommandExecutor,
-    gate: &'a Mutex<()>,
-) -> Result<std::sync::MutexGuard<'a, ()>> {
+    gate: &'a StoreGate,
+    session_id: &str,
+    purpose: &'static str,
+) -> Result<GateGuard<'a>> {
+    let mut wait = None::<mj_core::lock_wait::LockWait>;
     loop {
-        match gate.try_lock() {
-            Ok(guard) => return Ok(guard),
-            Err(std::sync::TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => {
-                if executor.cancellation_requested() {
-                    executor.execute(
-                        &CommandSpec::new("true", Vec::<String>::new())
-                            .purpose("wait for the shared Mjolnir worker binary"),
-                    )?;
-                    bail!("worker binary store wait cancelled");
-                }
-                std::thread::sleep(Duration::from_millis(25));
+        if let Some(guard) = gate.try_lock(session_id, purpose) {
+            if let Some(wait) = wait {
+                wait.acquired();
             }
+            return Ok(guard);
         }
+        if executor.cancellation_requested() {
+            executor.execute(
+                &CommandSpec::new("true", Vec::<String>::new())
+                    .purpose("wait for the shared Mjolnir worker binary"),
+            )?;
+            bail!("worker binary store wait cancelled");
+        }
+        wait.get_or_insert_with(|| mj_core::lock_wait::LockWait::new("the worker binary store"))
+            .blocked(&gate.label, &format!("{session_id} ({purpose})"), || {
+                gate.describe_holder()
+            });
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -195,6 +290,7 @@ pub(super) fn forget_collections() {
 fn collect_if_due(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
+    session_id: &str,
     store: &str,
     keep: Option<&str>,
 ) {
@@ -202,10 +298,8 @@ fn collect_if_due(
         return;
     }
     let gate = store_gate(locator, store);
-    let _guard = match gate.try_lock() {
-        Ok(guard) => guard,
-        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => return,
+    let Some(_guard) = gate.try_lock(session_id, "collect unused worker binaries") else {
+        return;
     };
     if claim_collection(locator, store) {
         collect_reporting(executor, locator, store, keep);
@@ -292,7 +386,7 @@ fn install_worker_binary_at(
             .execute(executor)?;
         // Switching to an image link can release the last session reference
         // to a host-copied build. Image installs must collect that store too.
-        collect_if_due(executor, locator, &store, None);
+        collect_if_due(executor, locator, session_id, &store, None);
         return Ok(());
     };
     let directory = format!("{store}/{digest}");
@@ -350,7 +444,7 @@ promote_worker_binary "$temporary" "$destination"
         match linked.status {
             0 => {
                 // After the pin exists, so this install's own entry is linked.
-                collect_if_due(executor, locator, &store, Some(&digest));
+                collect_if_due(executor, locator, session_id, &store, Some(&digest));
                 return Ok(());
             }
             LINK_MISSING | LINK_DIGEST_MISMATCH => publish = true,
@@ -381,7 +475,7 @@ fn ensure_published(
 ) -> Result<()> {
     let directory = format!("{store}/{digest}");
     let gate = store_gate(locator, &directory);
-    let _guard = lock_gate(executor, &gate)?;
+    let _guard = lock_gate(executor, &gate, session_id, "publish a worker build")?;
     if crate::session_manager::installed_digest_matches(
         executor,
         &super::upgrade::installed_file_digest_command(
@@ -394,7 +488,12 @@ fn ensure_published(
         return Ok(());
     }
     let store_owner = store_gate(locator, store);
-    let _store = lock_gate(executor, &store_owner)?;
+    let _store = lock_gate(
+        executor,
+        &store_owner,
+        session_id,
+        "upload and collect worker builds",
+    )?;
     // Reclaim old builds before the capacity check below can refuse the
     // upload, even when this interval's collection already ran.
     claim_collection(locator, store);
