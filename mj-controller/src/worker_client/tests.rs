@@ -2545,6 +2545,36 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
         sync.actions
             .contains(&CredentialSyncAction::AwsCredentialsRemoved)
     );
+
+    // The controller cannot read its signing key, so it cannot tell whether
+    // the record is its own: that is no evidence of a forgery. The session
+    // keeps what it has, and the step says why it could not check.
+    install(issued(
+        "2099-01-01T00:00:00+00:00",
+        &session_name,
+        &policy_fingerprint,
+        None,
+        true,
+    ));
+    crate::aws_assume_role::SIGNING_KEY_UNAVAILABLE.with(|unavailable| unavailable.set(true));
+    let sync = reconcile().await.unwrap().unwrap();
+    crate::aws_assume_role::SIGNING_KEY_UNAVAILABLE.with(|unavailable| unavailable.set(false));
+    assert!(
+        root.path().join("aws").exists(),
+        "valid credentials were withdrawn on a key error"
+    );
+    assert!(
+        !sync
+            .actions
+            .contains(&CredentialSyncAction::AwsCredentialsRemoved)
+    );
+    let failure = &sync.failures[0].detail;
+    assert_eq!(sync.failures.len(), 1, "{:?}", sync.failures);
+    assert!(
+        failure.contains("could not verify the session's AWS scope record")
+            && failure.contains("the signing key is unreadable"),
+        "{failure}"
+    );
 }
 
 #[cfg(unix)]
@@ -3096,6 +3126,46 @@ async fn an_auth_trigger_reinstalls_deleted_scoped_credentials_at_once() {
     assert!(!triggered.partial);
 }
 
+// The lock map has an entry per session only while the session's lock is held
+// or awaited, and removing a finished entry never lets a waiter and a newcomer
+// hold the session at once.
+#[tokio::test]
+async fn session_turns_are_exclusive_and_leave_no_entry_behind() {
+    let steps = credential_sync::SessionSteps::default();
+    let mut turns = Vec::new();
+    for session in 0..2000 {
+        turns.push(steps.enter(&format!("session-{session}")).await);
+    }
+    assert_eq!(steps.tracked(), 2000);
+    drop(turns);
+    assert_eq!(steps.tracked(), 0);
+
+    // A holds; B waits; A releases. The entry must survive for B, so that C
+    // still finds the lock B holds.
+    let first = steps.enter("shared").await;
+    let waiting = tokio::spawn({
+        let steps = steps.clone();
+        async move { steps.enter("shared").await }
+    });
+    tokio::task::yield_now().await;
+    drop(first);
+    let second = waiting.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), steps.enter("shared"))
+            .await
+            .is_err(),
+        "a newcomer entered while the waiter held the session"
+    );
+    drop(second);
+    assert_eq!(steps.tracked(), 0);
+
+    // A waiter that gives up leaves nothing behind either.
+    let held = steps.enter("abandoned").await;
+    let _ = tokio::time::timeout(Duration::from_millis(50), steps.enter("abandoned")).await;
+    drop(held);
+    assert_eq!(steps.tracked(), 0);
+}
+
 #[test]
 fn a_failed_login_step_keeps_the_aws_steps_actions_in_the_outcome() {
     let mut outcomes = BTreeMap::from([(
@@ -3151,6 +3221,14 @@ async fn a_worker_before_protocol_55_is_left_to_the_automatic_upgrade_and_then_w
         "{failure}"
     );
     assert!(!failure.contains("restart"), "no manual step: {failure}");
+    // The refused mint and the withdrawal that could not happen are both
+    // said, in one failure for the step, the withdrawal first.
+    assert_eq!(outcomes[0].step_failures.len(), 1, "{failure}");
+    let (withdrawal, mint) = (
+        failure.find("predates withdrawing").expect(&failure),
+        failure.find("AccessDenied").expect(&failure),
+    );
+    assert!(withdrawal < mint, "{failure}");
     assert!(
         root.path().join("aws").exists(),
         "an old worker cannot withdraw"

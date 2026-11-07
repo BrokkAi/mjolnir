@@ -46,15 +46,15 @@ pub(super) struct JobHold(Arc<HeldSlots>);
 struct HeldSlots {
     admission: Option<crate::recovery_gate::RecoveryAttempt>,
     runtime: Option<Arc<crate::daemon::RuntimeState>>,
-    _turn: Option<tokio::sync::OwnedMutexGuard<()>>,
-    _installing: Option<tokio::sync::OwnedMutexGuard<()>>,
+    _turn: Option<SessionTurn>,
+    _installing: Option<SessionTurn>,
 }
 
 impl JobHold {
     pub(super) fn new(
         admission: Option<crate::recovery_gate::RecoveryAttempt>,
-        turn: Option<tokio::sync::OwnedMutexGuard<()>>,
-        installing: Option<tokio::sync::OwnedMutexGuard<()>>,
+        turn: Option<SessionTurn>,
+        installing: Option<SessionTurn>,
         runtime: Option<Arc<crate::daemon::RuntimeState>>,
     ) -> Self {
         Self(Arc::new(HeldSlots {
@@ -87,20 +87,58 @@ impl JobHold {
 /// because the other held it. A step waits only for the same session's other
 /// step, never another session's. The lock is released on every exit path.
 /// A second instance orders a session's role-scoped renewals themselves.
+///
+/// The map is keyed by session id and only that session's entry is touched by
+/// `enter` and by a release, so a batch of sessions costs one lookup each.
 #[derive(Clone, Default)]
-pub(super) struct SessionSteps(
-    Arc<std::sync::Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
-);
+pub(super) struct SessionSteps(Arc<std::sync::Mutex<SessionLocks>>);
+
+type SessionLocks = BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>;
+
+/// A session's turn. Dropping it releases the session's lock and, when nobody
+/// else holds or waits for that lock, forgets the session's entry.
+pub(super) struct SessionTurn {
+    // Both dropped first, which is what lets the entry's count reach zero.
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    lock: Option<Arc<tokio::sync::Mutex<()>>>,
+    locks: Arc<std::sync::Mutex<SessionLocks>>,
+    session_id: String,
+}
+
+impl Drop for SessionTurn {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        drop(self.lock.take());
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A waiter holds a strong reference, taken under this mutex.
+        if locks
+            .get(&self.session_id)
+            .is_some_and(|lock| lock.strong_count() == 0)
+        {
+            locks.remove(&self.session_id);
+        }
+    }
+}
 
 impl SessionSteps {
-    pub(super) async fn enter(&self, session_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    /// How many sessions the lock map has an entry for.
+    #[cfg(test)]
+    pub(super) fn tracked(&self) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    pub(super) async fn enter(&self, session_id: &str) -> SessionTurn {
         let lock = {
             let mut locks = self
                 .0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // Finished sessions leave no entry behind.
-            locks.retain(|_, lock| lock.strong_count() > 0);
             match locks.get(session_id).and_then(std::sync::Weak::upgrade) {
                 Some(lock) => lock,
                 None => {
@@ -110,7 +148,18 @@ impl SessionSteps {
                 }
             }
         };
-        lock.lock_owned().await
+        // Built before waiting, so a future dropped while waiting also
+        // forgets an entry nobody is left to use.
+        let mut turn = SessionTurn {
+            guard: None,
+            lock: Some(lock),
+            locks: Arc::clone(&self.0),
+            session_id: session_id.to_owned(),
+        };
+        if let Some(lock) = turn.lock.clone() {
+            turn.guard = Some(lock.lock_owned().await);
+        }
+        turn
     }
 }
 
@@ -637,6 +686,13 @@ fn merge_aws_cycle(
 ) {
     match result {
         Ok(Some(SessionSync { actions, failures })) => {
+            if let Some(failure) = joined_failures(&failures) {
+                tracing::warn!(
+                    session_id,
+                    error = %failure,
+                    "AWS credential synchronization step failed for relay session"
+                );
+            }
             merge_step_outcome(outcomes, session_id, actions, failures);
         }
         Ok(None) => {}
@@ -843,8 +899,8 @@ async fn admitted<T, F: std::future::Future<Output = Result<Option<T>>>>(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
     target: &CredentialSyncTarget,
-    turn: tokio::sync::OwnedMutexGuard<()>,
-    installing: Option<tokio::sync::OwnedMutexGuard<()>>,
+    turn: SessionTurn,
+    installing: Option<SessionTurn>,
     work: impl FnOnce(JobHold) -> F,
 ) -> Result<Option<T>> {
     match gate {
@@ -984,7 +1040,7 @@ pub(super) async fn aws_cycle(
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
     target: &CredentialSyncTarget,
     steps: &SessionSteps,
-    installing: Option<tokio::sync::OwnedMutexGuard<()>>,
+    installing: Option<SessionTurn>,
     force_new: bool,
 ) -> (String, Result<Option<SessionSync>>) {
     let session_id = target.session_id.clone();
@@ -1555,17 +1611,22 @@ async fn reconcile_aws_step(client: &mut RelayClient, aws: &AwsSync, sync: &mut 
         AwsSync::Install(_) => "AWS credentials install",
         _ => "AWS credentials withdrawal",
     };
-    let failed = |detail: String| StepFailure {
-        step: aws.step(),
-        detail,
-    };
+    // One failure for the step, saying everything that went wrong: a refused
+    // mint and a withdrawal that failed are both the reader's to know, and the
+    // withdrawal first, because it says unscoped credentials may remain.
+    let mut messages = Vec::new();
     match reconcile_aws(client, aws).await {
         Ok(action) => sync.actions.extend(action),
-        Err(error) => sync.failures.push(failed(format!("{step}: {error:#}"))),
+        Err(error) => messages.push(format!("{step}: {error:#}")),
     }
     if let AwsSync::Unavailable { error, .. } = aws {
-        sync.failures
-            .push(failed(format!("AWS credentials: {error}")));
+        messages.push(format!("AWS credentials: {error}"));
+    }
+    if !messages.is_empty() {
+        sync.failures.push(StepFailure {
+            step: aws.step(),
+            detail: messages.join("; "),
+        });
     }
 }
 
@@ -1629,11 +1690,17 @@ async fn reconcile_aws(
                 && let Some(expected) = expected_scope
                 && let Some(recorded) = client.aws_credentials_scope().await?
                 && expected.matches(&recorded)
-                // The record is the session's to write; only one the
-                // controller made, for this very secret, counts.
-                && crate::aws_assume_role::scope_is_authentic(&recorded, &held.fingerprint)
             {
-                return Ok(None);
+                // The record is the session's to write; only one the
+                // controller made, for this very secret, counts. If the
+                // controller cannot tell (its signing key is unreadable), the
+                // session keeps what it has and the step reports why: an error
+                // is not evidence that the record was forged.
+                if crate::aws_assume_role::scope_is_authentic(&recorded, &held.fingerprint)
+                    .context("could not verify the session's AWS scope record; its credentials were left as they are")?
+                {
+                    return Ok(None);
+                }
             }
             // Always asked, whatever the reported state: the state is "absent"
             // when a provider file is missing or differs, though the secret

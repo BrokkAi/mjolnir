@@ -276,14 +276,27 @@ fn selected_profile(source: &AwsCredentialSource) -> &str {
 /// safe direction.
 fn scope_key() -> Result<Vec<u8>> {
     #[cfg(test)]
-    let root = b"test signing key, not a secret".to_vec();
+    let root = {
+        anyhow::ensure!(
+            !SIGNING_KEY_UNAVAILABLE.with(std::cell::Cell::get),
+            "the signing key is unreadable (test)"
+        );
+        b"test signing key, not a secret".to_vec()
+    };
     #[cfg(not(test))]
-    let root = crate::server::load_or_create_cookie_key(&crate::server::cookie_key_path())?;
+    let root = crate::server::load_or_create_cookie_key(&crate::server::cookie_key_path())
+        .context("read the controller's signing key")?;
     use hmac::{Hmac, KeyInit, Mac};
     let mut derive =
         Hmac::<sha2::Sha256>::new_from_slice(&root).expect("HMAC accepts any key length");
     derive.update(b"mjolnir aws credential scope key v1");
     Ok(derive.finalize().into_bytes().to_vec())
+}
+
+// Lets a test make the signing key unreadable on the thread that sets this.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SIGNING_KEY_UNAVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn scope_mac(
@@ -306,21 +319,24 @@ pub(crate) fn sign_scope(scope: &AwsCredentialScope, secret_fingerprint: &str) -
 
 /// Whether a record the worker reports was made by this controller for the
 /// secret with this fingerprint. A record the session could have written
-/// itself does not verify.
-pub(crate) fn scope_is_authentic(scope: &AwsCredentialScope, secret_fingerprint: &str) -> bool {
+/// itself does not verify. An error means the answer is unknown (the signing
+/// key could not be read), which is not the same as "not authentic": callers
+/// must not act on it as if the record were forged.
+pub(crate) fn scope_is_authentic(
+    scope: &AwsCredentialScope,
+    secret_fingerprint: &str,
+) -> Result<bool> {
     use hmac::Mac;
-    let Ok(key) = scope_key() else {
-        return false;
-    };
+    let key = scope_key()?;
     let Some(tag) = (0..scope.tag.len() / 2)
         .map(|index| u8::from_str_radix(scope.tag.get(index * 2..index * 2 + 2)?, 16).ok())
         .collect::<Option<Vec<u8>>>()
     else {
-        return false;
+        return Ok(false);
     };
-    scope_mac(&key, scope, secret_fingerprint)
+    Ok(scope_mac(&key, scope, secret_fingerprint)
         .verify_slice(&tag)
-        .is_ok()
+        .is_ok())
 }
 
 /// The role session name: it appears in the assumed-role ARN of every

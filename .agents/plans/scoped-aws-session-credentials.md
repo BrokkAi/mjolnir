@@ -222,6 +222,18 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - Decision (tenth review): renewal tasks are indexed by session id when reconciled against the published targets (one map lookup per task, not a scan of all targets per task). The renewal delay and the reuse test share one half-life function (`ScopedEntry::refresh_at`); a delay of zero (credentials due already) is reported as "no schedule" and the task retries after the sync interval instead of renewing in a tight loop.
   Date/Author: 2026-11-07 / Claude, from review.
 
+- Decision (eleventh review): a session's AWS step reports one failure that carries every message, the withdrawal's first (it says unscoped credentials may remain), then the refused mint's. The notice map is keyed by (profile, session, step), so two failures under one key would have hidden the first; the step now emits one, `merge_aws_cycle` logs it, and the notice joins any further failures under a key instead of replacing them.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (eleventh review): the signing key that authenticates scope records has one creator. `load_or_create_cookie_key` re-reads and creates the key under a file lock beside it, which serializes every caller in every process (the phone server starting, launches, renewals); an existing valid key is returned without the lock because the file is replaced atomically. Concurrent first uses therefore end with one key, and records signed with it keep verifying.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (eleventh review): `scope_is_authentic` returns a `Result`. A signing key that cannot be read means the answer is unknown, not that the record was forged, so the session keeps its credentials and the step reports why it could not verify (and the log records it). Withdrawal stays the answer to a record that verifiably does not belong to the controller.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (eleventh review): the per-session lock maps are indexed by session id with no scan. A `SessionTurn` removes its own entry on release when nobody else holds or awaits the lock (a waiter holds a strong reference taken under the map's mutex, so the entry survives for it), including when a waiting future is dropped. Taking a lock for a batch of sessions costs one lookup each instead of a pass over every entry.
+  Date/Author: 2026-11-07 / Claude, from review.
+
 ## Outcomes & Retrospective
 
 Implemented through Milestone 6 on 2026-11-07. A Bedrock profile with `[profiles.<id>.aws] role_arn = ...` now gives each container or SSH session credentials assumed for it alone (role session name `mj-<session id>`), narrowed by a session policy, renewed after half their lifetime through the existing credential sync, with no relay or database change. A refused role fails the launch with AWS's error line and a remedy, or fails the running session's sync outcome while the worker keeps what it has; nothing falls back to the unscoped export. Profiles without a role behave as before, and `mj doctor` warns about them and probes a configured role with a real throwaway AssumeRole. Every EC2 launch (ordinary and Move) requires IMDSv2, verified in the launch response, and doctor warns about a launch template that allows IMDSv1.
@@ -439,3 +451,5 @@ Revision note (2026-11-07, eighth review): per-session turn-taking before the ad
 Revision note (2026-11-07, ninth review): per-session AWS renewal tasks, SourceIdentity and an authenticated scope record, merge keeps AWS actions, test markers removed. Reason: ninth review.
 
 Revision note (2026-11-07, tenth review): jobs own their admission, turn and install lock; auth triggers wake the session's renewal task; failures are keyed by step; renewal tasks indexed by session; one half-life function. Reason: tenth review.
+
+Revision note (2026-11-07, eleventh review): one combined AWS failure per step, one creator for the signing key, key errors do not withdraw, lock maps without scans. Reason: eleventh review.

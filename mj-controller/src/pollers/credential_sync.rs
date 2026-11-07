@@ -229,13 +229,23 @@ impl CredentialSyncNotices {
                 ),
             );
         }
+        // Every failure of a step is said: a second one under the same key is
+        // added to the first, never put in its place.
+        let mut details = std::collections::BTreeMap::<_, Vec<&str>>::new();
         for (session_id, step, detail) in result.failures() {
+            details
+                .entry((result.profile_id.clone(), Some(session_id.to_owned()), step))
+                .or_default()
+                .push(detail);
+        }
+        for (key, details) in details {
+            let session = state.session_notice_name(key.1.as_deref().unwrap_or_default());
             failures.insert(
-                (result.profile_id.clone(), Some(session_id.to_owned()), step),
+                key,
                 format!(
-                    "Credential sync for profile {} (session {}) failed: {detail}",
+                    "Credential sync for profile {} (session {session}) failed: {}",
                     result.profile_id,
-                    state.session_notice_name(session_id)
+                    details.join("; ")
                 ),
             );
         }

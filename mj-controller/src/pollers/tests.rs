@@ -1608,6 +1608,20 @@ fn a_result_clears_only_the_failures_of_the_steps_it_checked() {
     assert_eq!(notices.notice(&login_fine(), None, &state), None);
     assert_eq!(notices.notice(&aws_failed(), None, &state), None);
     assert!(notices.notice(&login_failed(), None, &state).is_some());
+
+    // Two failures of one step are both said.
+    let mut both = aws_failed();
+    both.outcomes[0].step_failures.push(StepFailure {
+        step: SyncStep::Aws,
+        detail: "AWS credentials withdrawal: worker too old".into(),
+    });
+    let said = CredentialSyncNotices::default()
+        .notice(&both, None, &state)
+        .unwrap();
+    assert!(
+        said.contains("AWS credentials: refused") && said.contains("worker too old"),
+        "{said}"
+    );
 }
 
 // Hard-won: 9805bf67: a dead worker repeated the same credential-sync failure notice every poll
