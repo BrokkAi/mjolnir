@@ -628,23 +628,33 @@ def run_workflow(
     )
     # The Help key opens the command palette, and a dialog holds every prefix
     # command except detach and refresh: opening the palette would move the
-    # keyboard out from under the dialog. The key is swallowed, the dialog stays.
+    # keyboard out from under the dialog. The key is swallowed. Escape follows
+    # at once: keys are handled in order, so if the palette had opened, that
+    # Escape would close the palette and leave the dialog open, and the wait
+    # for the dialog to go would fail. No sleep decides the outcome.
     tmux.send_prefix("?")
-    time.sleep(1.0 * TIMEOUT_SCALE)
-    held_screen = tmux.capture()
-    if " Commands " in held_screen or "Target actions" not in held_screen:
+    tmux.send_key("Escape")
+    palette_seen: list[str] = []
+
+    def dialog_closed() -> bool:
+        screen = tmux.capture()
+        if " Commands " in screen:
+            palette_seen.append(screen)
+        return "Target actions" not in screen
+
+    tmux.wait_until(dialog_closed, "Target actions closed by a single Escape")
+    if palette_seen:
         raise ScenarioFailure(
-            "the palette key was not held by the Target actions dialog:\n" + held_screen
+            "the palette opened over the Target actions dialog:\n" + palette_seen[0]
         )
+    closed_screen = tmux.capture()
     evidence.event(
         "prefix-command-held-by-dialog",
-        "Ctrl+B ?",
-        "the palette stays closed and the dialog stays open",
-        "the palette stayed closed and the dialog stayed open",
-        evidence.capture("prefix-command-held-by-dialog", held_screen),
+        "Ctrl+B ?, Escape",
+        "the palette never opens and one Escape closes the dialog",
+        "the palette never opened and one Escape closed the dialog",
+        evidence.capture("prefix-command-held-by-dialog", closed_screen),
     )
-    tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Target actions" not in tmux.capture(), "target actions dismissed")
 
     # Ctrl+B : is the user-facing route to the migrated representative form.
     tmux.send_prefix(":")
