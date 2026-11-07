@@ -14,7 +14,7 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
 
 - [x] (2026-11-06) Research the six issues, the pinned harnesses' background-process behaviour (Codex and Claude Code excerpts), and the code paths for reports, parking and the worker's relay protocol; write this plan.
 - [x] (2026-11-06) Milestone 0: measure on real harnesses (prototype, no production code). Done for Claude on a bare-local target; Codex was blocked by an exhausted subscription and the container target by a host without Podman or Docker (see `Surprises & Discoveries`). Steps: (a) does a `setsid` orphan survive a park today, per harness and per target; (b) which processes an idle child holds per pinned harness, and whether `MJ_SESSION_ID` reaches tool-launched processes in Codex; (c) how long `git status` takes on the largest repository a child works in.
-- [ ] Milestone 1: shared fact types in `mj-core`, worker-side collector, new connection-only relay request `WorkFacts` at relay protocol 55 (origin/master was at 54 when this was implemented).
+- [x] (2026-11-06, commit "Observe a session's running work...") Milestone 1: shared fact types in `mj-core`, worker-side collector, new connection-only relay request `WorkFacts` at relay protocol 55 (origin/master was at 54 when this was implemented).
 - [ ] Milestone 2: daemon collects facts when it builds a finish report, stores them in a new table, renders them in the report with the plain-text downgrade for older workers, and shows them in `list_agents`.
 - [ ] Milestone 3: park facts: snapshot before the stop, liveness check after, durable finish after a crash, follow-up message when something was stopped.
 - [ ] Milestone 4: goldens, the real-process tests, tool-description and documentation updates, upgrade regression, full validation, commit.
@@ -103,6 +103,11 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
 - Decision: `ParkFacts` also keeps `stopped_shown`, and the stopped and survived lists are drawn from the snapshot's shown entries only; counts are exact.
   Rationale: The park message must name what was stopped, but the snapshot keeps only start identities for processes beyond the shown five, so only those five have a command to print.
   Date/Author: 2026-11-06 / implementing agent.
+
+- Decision: The helper baseline is a time, not a set of identities. The worker records the instant its harness session was last configured (`harness_ready_ms`, set by `DurableRelay` when `acp_ready` turns true, cleared when it turns false, kept across a second configuration of an open session). A descendant of the worker that started at or before that instant is a helper; so is any process running Mjolnir's own executable or a program under a managed harness or Node cache directory. A descendant that started after it is the agent's. Detached processes (outside the worker's tree, carrying the marker) are never helpers by time, so an orphan left by an earlier worker life is still reported.
+  Rationale: This replaces the plan's "set of identities taken when the harness first reported ready". A scan at the ready instant would race the first prompt, and a baseline taken after a worker restart would hide orphans left by the previous life. A recorded instant is a single fact written by the one owner of `acp_ready`, needs no scan inside the relay's lock, and cannot race. Milestone 0 measured the idle helper set (supervisor, bridge, harness, Mjolnir's MCP server), all covered by these rules.
+  Date/Author: 2026-11-06 / implementing agent.
+
 
 ## Outcomes & Retrospective
 
