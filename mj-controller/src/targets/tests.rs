@@ -1049,7 +1049,7 @@ fn podman_plan_uses_owned_name_label_and_argv_clones() {
         .iter()
         .find(|command| command.purpose == "clone app")
         .unwrap();
-    assert_eq!(&clone.args[..4], ["exec", "-i", name.as_str(), "git"]);
+    assert_eq!(&clone.args[4..8], ["exec", "-i", name.as_str(), "git"]);
     assert!(clone.args.contains(&"--".to_owned()));
     assert!(clone.args.contains(&"/workspace/app".to_owned()));
     let bootstrap = plan
@@ -1714,9 +1714,17 @@ fn podman_containers_use_root_in_the_default_namespace() {
 #[test]
 fn podman_exec_uses_the_container_recorded_user() {
     let podman = container_exec("podman", "container-name", ["id"]);
-    assert_eq!(podman.args, ["exec", "-i", "container-name", "id"]);
+    assert_eq!(podman.program, "sh");
+    assert_eq!(
+        podman.args[3..],
+        ["podman", "exec", "-i", "container-name", "id"]
+    );
     let docker = container_exec("docker", "container-name", ["id"]);
-    assert_eq!(docker.args, ["exec", "-i", "container-name", "id"]);
+    assert_eq!(docker.program, "sh");
+    assert_eq!(
+        docker.args[3..],
+        ["docker", "exec", "-i", "container-name", "id"]
+    );
 }
 
 #[test]
@@ -1913,8 +1921,8 @@ fn docker_additional_mounts_use_managed_overlay_and_read_only_bind_volumes() {
         .iter()
         .find(|command| command.purpose == "clone app")
         .unwrap();
-    assert_eq!(clone.program, "docker");
-    assert_eq!(&clone.args[..4], ["exec", "-i", name.as_str(), "git"]);
+    assert_eq!(clone.program, "sh");
+    assert_eq!(&clone.args[4..8], ["exec", "-i", name.as_str(), "git"]);
 }
 
 #[test]
@@ -3209,9 +3217,9 @@ fn in_place_worker_reset_plan_stops_daemon_clears_relay_state_and_old_profile_ho
         &format!("/var/lib/hel/profiles/{SESSION}"),
     )
     .unwrap();
-    assert_eq!(container.program, "podman");
+    assert_eq!(container.program, "sh");
     assert_eq!(
-        container.args[..4],
+        container.args[4..8],
         [
             "exec".to_owned(),
             "-i".to_owned(),
@@ -5176,7 +5184,7 @@ fn per_worker_plans_accept_a_borrowed_container_and_leave_it_alone() {
     let script = cleanup.commands[0]
         .args
         .iter()
-        .find(|argument| argument.contains("rm -rf"))
+        .rfind(|argument| argument.contains("rm -rf"))
         .expect("the cleanup runs a removal script");
     assert!(script.contains(&format!("/var/lib/hel/workers/{BORROWED_CHILD}")));
     assert!(script.contains(&format!("/var/lib/hel/profiles/{BORROWED_CHILD}")));
