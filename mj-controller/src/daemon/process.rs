@@ -51,6 +51,7 @@ pub async fn run_daemon_process() -> Result<()> {
     }
     let opening = Instant::now();
     let guard = ControllerStoreGuard::acquire()?;
+    super::previous_daemon::report_unclean_previous_daemon();
     let database_writer = guard.start_database_writer()?;
     log_startup_phase("open the store", opening);
     let epilogue_started = AtomicBool::new(false);

@@ -782,6 +782,7 @@ use support::*;
 mod activity_cleanup;
 pub(crate) mod delegation;
 mod diagnostics;
+mod previous_daemon;
 mod process;
 pub use process::*;
 mod serve;
