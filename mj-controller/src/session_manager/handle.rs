@@ -297,6 +297,20 @@ impl ManagedSessionHandle {
             .map_err(anyhow::Error::msg)
     }
 
+    /// What this session's agent left running and the state of its working
+    /// tree, asked of the worker on the actor's own connection. The worker
+    /// answers from its own process table and repository; nothing is cached
+    /// here.
+    pub async fn work_facts(&self) -> Result<mj_core::work_facts::WorkFacts> {
+        let (reply, response) = oneshot::channel();
+        self.run_on_connection(Box::new(WorkFactsJob { reply }))
+            .await;
+        response
+            .await
+            .context("work facts request did not receive a relay result")?
+            .map_err(anyhow::Error::msg)
+    }
+
     pub async fn lease_connection(&self) -> Result<ManagedSessionLease> {
         self.lease_connection_for(None).await
     }
@@ -357,6 +371,28 @@ impl RelayConnectionJob for InstallGithubTokenJob {
                 .map_err(|error| format!("{error:#}"));
             if self.reply.send(result).is_err() {
                 tracing::debug!("GitHub token refresh result receiver was dropped");
+            }
+        })
+    }
+
+    fn refuse(self: Box<Self>, error: anyhow::Error) {
+        let _ = self.reply.send(Err(format!("{error:#}")));
+    }
+}
+
+struct WorkFactsJob {
+    reply: oneshot::Sender<std::result::Result<mj_core::work_facts::WorkFacts, String>>,
+}
+
+impl RelayConnectionJob for WorkFactsJob {
+    fn run<'a>(self: Box<Self>, client: &'a mut RelayClient) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let result = client
+                .work_facts()
+                .await
+                .map_err(|error| format!("{error:#}"));
+            if self.reply.send(result).is_err() {
+                tracing::debug!("work facts receiver was dropped");
             }
         })
     }

@@ -2110,6 +2110,9 @@ struct ParkingExports {
     unpark_failure: Option<String>,
     defer_unpark: std::sync::atomic::AtomicBool,
     protocol: u32,
+    /// What the child's worker answers when asked for work facts; `None` is a
+    /// worker that cannot be reached.
+    work_facts: std::sync::Mutex<Option<mj_core::work_facts::WorkFacts>>,
 }
 
 impl ParkingExports {
@@ -2134,12 +2137,17 @@ impl ParkingExports {
             unparks: Default::default(),
             unpark_failure: unpark_failure.map(str::to_owned),
             defer_unpark: Default::default(),
+            work_facts: Default::default(),
             protocol: if modern_worker {
                 mj_core::relay::RELAY_PROTOCOL_VERSION
             } else {
                 mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL
             },
         })
+    }
+
+    fn set_work_facts(&self, facts: mj_core::work_facts::WorkFacts) {
+        *self.work_facts.lock().unwrap() = Some(facts);
     }
 
     fn set_child_state(&self, state: SessionState) {
@@ -2165,6 +2173,19 @@ impl ParkingExports {
 }
 
 impl ExportRuntime for ParkingExports {
+    fn work_facts(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, Result<mj_core::work_facts::WorkFacts>> {
+        Box::pin(async move {
+            self.work_facts
+                .lock()
+                .unwrap()
+                .clone()
+                .context("connection refused")
+        })
+    }
+
     fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
         Box::pin(load_startup_status(session_id))
     }
@@ -4756,6 +4777,139 @@ async fn a_failed_turn_says_the_child_is_still_usable_but_an_errored_child_does_
     assert!(child.get("promptable").is_none(), "{child}");
 }
 
+fn observed_work() -> mj_core::work_facts::WorkFacts {
+    use mj_core::work_facts::*;
+    WorkFacts {
+        observed_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap() - 5_000,
+        processes: Observed::Known(ProcessFacts {
+            running: 1,
+            shown: vec![RunningProcess {
+                pid: 41301,
+                elapsed_secs: 250,
+                command: "sleep 600".into(),
+                detached: true,
+            }],
+            omitted: 0,
+            identities: vec![ProcessIdentity {
+                pid: 41301,
+                start: "boot:1".into(),
+            }],
+        }),
+        worktree: Observed::Known(WorktreeFacts {
+            directory: "/work/task".into(),
+            head: Some(HeadCommit {
+                sha: "1a2b3c4d5e6f".into(),
+                subject: "Fix parser".into(),
+            }),
+            branch: Some("task".into()),
+            changed: 1,
+            modified: 0,
+            untracked: 1,
+            shown: vec![ChangedPath {
+                status: "?".into(),
+                path: "notes.txt".into(),
+            }],
+            omitted: 0,
+        }),
+    }
+}
+
+/// A finished child, reported once, and what `list_agents` then says of it.
+async fn finish_report_and_listing(
+    facts: Option<mj_core::work_facts::WorkFacts>,
+) -> (mj_core::mailbox::SubagentFinishedReport, serde_json::Value) {
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 9;
+    conversation.applied_event_digest = format!("{:064x}", 9);
+    let mut turn = finished_turn("task");
+    turn.outcome = mj_core::state::TurnOutcomeKind::Rejected {
+        message: "ACP prompt returned no session updates".into(),
+        reason: None,
+    };
+    conversation.last_turn_outcome = Some(turn);
+    crate::database::save_materialized_session(&conversation).unwrap();
+    let (backend, exports) = report_backend(active_parent_view("working"));
+    if let Some(facts) = facts {
+        exports.set_work_facts(facts);
+    }
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 1);
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&events[0].event_json).unwrap();
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = event.body else {
+        panic!("wrong event");
+    };
+    let listing = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "observe".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            },
+        )
+        .await;
+    assert!(!listing.is_error, "{}", listing.message);
+    let listing: serde_json::Value = serde_json::from_str(&listing.message).unwrap();
+    (*report, listing["agents"][0].clone())
+}
+
+/// The finish report carries what the child's worker saw, the same lines
+/// appear under `list_agents`, and both come from the one recorded value.
+#[tokio::test]
+async fn a_finish_report_carries_what_the_worker_observed_and_list_agents_repeats_it() {
+    if !isolated_parked_test(
+        "a_finish_report_carries_what_the_worker_observed_and_list_agents_repeats_it",
+    ) {
+        return;
+    }
+    let observed = observed_work();
+    let (report, child) = finish_report_and_listing(Some(observed.clone())).await;
+    assert_eq!(report.facts.as_ref(), Some(&observed));
+    let lines = observed.render_lines();
+    let listed: Vec<String> =
+        serde_json::from_value(child["facts"]["finish"]["lines"].clone()).unwrap();
+    assert_eq!(listed, lines);
+    assert!(
+        child["facts"]["finish"]["observed_secs_ago"]
+            .as_u64()
+            .unwrap()
+            >= 5,
+        "{child}"
+    );
+    assert!(child["facts"].get("park").is_none(), "{child}");
+}
+
+/// A worker that cannot be asked yields a report that says so. It is never
+/// the "0 processes" of a worker that was asked.
+#[tokio::test]
+async fn a_finish_report_says_the_worker_could_not_be_reached_instead_of_reporting_zero() {
+    if !isolated_parked_test(
+        "a_finish_report_says_the_worker_could_not_be_reached_instead_of_reporting_zero",
+    ) {
+        return;
+    }
+    let (report, child) = finish_report_and_listing(None).await;
+    let facts = report.facts.expect("a finish report always carries facts");
+    assert!(matches!(
+        &facts.processes,
+        mj_core::work_facts::Observed::Unavailable { reason }
+            if reason.contains("the worker could not be reached") && reason.contains("connection refused")
+    ));
+    assert!(facts.worktree.known().is_none());
+    assert!(
+        child["facts"]["finish"]["lines"][0]
+            .as_str()
+            .unwrap()
+            .contains("unavailable"),
+        "{child}"
+    );
+}
+
 /// A restart that fails leaves the child parked, so the parent can try
 /// again, and the parent reads what failed.
 #[tokio::test]
@@ -5142,7 +5296,9 @@ async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_ou
         let RelayCommand::DeliverMailboxEvent { event } = command else {
             panic!("expected mailbox event")
         };
-        if protocol < mj_core::relay::RELAY_SUBAGENT_FINISHED_PROTOCOL {
+        // A recovered finish carries the facts its worker observed, which
+        // only a worker at the work-facts protocol can read.
+        if protocol < mj_core::relay::RELAY_WORK_FACTS_PROTOCOL {
             let mj_core::mailbox::MailboxEventBody::PlainText { text } = event.body else {
                 panic!("older worker needs plain text")
             };

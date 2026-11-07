@@ -130,6 +130,15 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("workspace file injection is unavailable") })
     }
 
+    /// Ask the session's worker what its agent left running and what its
+    /// working tree holds. A backend without a daemon has no worker to ask.
+    fn work_facts(
+        &self,
+        _session_id: String,
+    ) -> BoxFuture<'_, Result<mj_core::work_facts::WorkFacts>> {
+        Box::pin(async { anyhow::bail!("work facts are unavailable without a daemon") })
+    }
+
     /// Checkpoint a session now, returning the archive it wrote.
     fn checkpoint_now(
         &self,
@@ -336,6 +345,13 @@ impl ExportRuntime for RuntimeState {
         session_id: String,
     ) -> BoxFuture<'_, Result<crate::session_manager::ManagedSessionHandle>> {
         Box::pin(async move { self.workspace_session_handle(&session_id).await })
+    }
+
+    fn work_facts(
+        &self,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<mj_core::work_facts::WorkFacts>> {
+        Box::pin(async move { self.session_work_facts(&session_id).await })
     }
 
     fn checkpoint_now(
@@ -1098,11 +1114,19 @@ impl ApiBackend {
                     .iter()
                     .map(|relation| relation.child_session_id.clone())
                     .collect::<Vec<_>>();
+                // One read of what was recorded; this listing never asks a
+                // worker, so it stays a read of recorded state.
+                let recorded_facts = blocking("load sub-agent work facts", {
+                    let child_ids = child_ids.clone();
+                    move || crate::database::load_work_facts(&child_ids)
+                })
+                .await?;
                 let (observed, starts) = self.child_snapshots(child_ids).await?;
                 let summaries = observed
                     .into_iter()
                     .map(|(id, summary, progress)| (id, (summary, progress)))
                     .collect::<BTreeMap<_, _>>();
+                let now_ms = u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0);
                 let agents = relations
                     .into_iter()
                     .map(|relation| {
@@ -1149,6 +1173,9 @@ impl ApiBackend {
                         inputs.annotate(&relation.child_session_id, &mut entry);
                         mark_parked(&mut entry, record.as_ref());
                         mark_promptable(&mut entry, &state, progress, record.as_ref());
+                        if let Some(recorded) = recorded_facts.get(&relation.child_session_id) {
+                            entry["facts"] = work_facts_entry(recorded, now_ms);
+                        }
                         entry
                     })
                     .collect::<Vec<_>>();
@@ -1694,6 +1721,24 @@ impl ApiBackend {
             crate::database::load_child_answer_messages(&spans)
         })
         .await?;
+        // One question per finish, asked of the worker that owns the answer,
+        // and all of them at once: a slow Git read in one child must not hold
+        // up another's report. A restart before the report row exists asks
+        // again, so no fact is stored twice for one finish.
+        let mut work_facts = futures::future::join_all(
+            ready
+                .iter()
+                .filter(|child| {
+                    child.finished && child.relation.kind != mj_core::subagent::SubagentKind::Oracle
+                })
+                .map(|child| async {
+                    let id = child.relation.child_session_id.clone();
+                    (id.clone(), self.observe_work(&id).await)
+                }),
+        )
+        .await
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
         let mut notifications = Vec::with_capacity(ready.len());
         for child in ready {
             let id = &child.relation.child_session_id;
@@ -1725,7 +1770,9 @@ impl ApiBackend {
                 &child.progress,
                 child.record.as_ref(),
             );
-            let report = serde_json::from_value::<mj_core::mailbox::SubagentFinishedReport>(entry)?;
+            let mut report =
+                serde_json::from_value::<mj_core::mailbox::SubagentFinishedReport>(entry)?;
+            report.facts = work_facts.remove(id);
             notifications.push((
                 child.identity.expect("ready report has a finish identity"),
                 report,
@@ -1737,6 +1784,20 @@ impl ApiBackend {
         })
         .await?;
         Ok(())
+    }
+
+    /// Ask the child's worker what its agent left running and what its working
+    /// tree holds. A worker that cannot be reached yields facts that say so:
+    /// the report is still sent, and an unknown is never rendered as zero.
+    async fn observe_work(&self, child_id: &str) -> mj_core::work_facts::WorkFacts {
+        self.exports
+            .work_facts(child_id.to_owned())
+            .await
+            .unwrap_or_else(|error| {
+                mj_core::work_facts::WorkFacts::unavailable(format!(
+                    "the worker could not be reached: {error:#}"
+                ))
+            })
     }
 
     async fn require_owned_child(&self, parent_id: &str, child_id: &str) -> Result<()> {
@@ -2330,6 +2391,29 @@ fn wait_agent_entry(
         agent["failure"] = serde_json::json!({"kind": "provider_failure", "summary": summary});
     }
     agent
+}
+
+/// The `facts` object of a `list_agents` entry: the lines of the observation
+/// recorded with the child's latest finish report, and of what the park after
+/// it did, each rendered by the same code as the mailbox report.
+fn work_facts_entry(recorded: &crate::database::StoredWorkFacts, now_ms: u64) -> serde_json::Value {
+    let mut facts = serde_json::Map::new();
+    if let Some(finish) = &recorded.finish {
+        facts.insert(
+            "finish".into(),
+            serde_json::json!({
+                "observed_secs_ago": now_ms.saturating_sub(finish.observed_at_ms) / 1000,
+                "lines": finish.render_lines(),
+            }),
+        );
+    }
+    if let Some(park) = &recorded.park {
+        facts.insert(
+            "park".into(),
+            serde_json::json!({"lines": park.render_lines()}),
+        );
+    }
+    serde_json::Value::Object(facts)
 }
 
 /// What the session list calls a child now, bounded to one line, or the task

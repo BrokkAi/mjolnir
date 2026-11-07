@@ -2196,6 +2196,26 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Compatible: an additive table that older daemons never read or write.
+    // No existing column, stored JSON shape, enum value or constraint changes,
+    // so `minimum_compatible_version` stays where it is. Destroying a session
+    // removes its row through the foreign key, as for revision 86's table; an
+    // older writer that destroys a session fires the same cascade.
+    if version < 117 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS subagent_work_facts (
+                 child_session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 finish_json TEXT CHECK(finish_json IS NULL OR json_valid(finish_json)),
+                 park_json TEXT CHECK(park_json IS NULL OR json_valid(park_json))
+             ) STRICT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (117, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 117;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3634,6 +3654,11 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 117 {
+            connection
+                .execute_batch("DROP TABLE IF EXISTS subagent_work_facts;")
+                .unwrap();
+        }
         if version < 111 {
             connection
                 .execute_batch(
@@ -4196,6 +4221,39 @@ mod reader_tests {
         let state = read_schema_state(&writer).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION + 1);
         assert_eq!(state.minimum_compatible, Some(SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn work_facts_migration_adds_a_compatible_table_that_follows_its_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let record = super::super::tests::session("facts-upgrade", "project");
+        save_session_to(&path, &record).unwrap();
+        stamp_schema_version(&path, 116);
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        // Compatible: a build that predates the table still reads and writes
+        // the store, because the floor did not move.
+        state
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO subagent_work_facts(child_session_id, finish_json, park_json)
+                 VALUES (?1, '{}', NULL)",
+                [&record.id],
+            )
+            .unwrap();
+        connection
+            .execute("DELETE FROM sessions WHERE session_id=?1", [&record.id])
+            .unwrap();
+        let rows: i64 = connection
+            .query_row("SELECT count(*) FROM subagent_work_facts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "destroying a session removes its facts");
     }
 
     #[test]

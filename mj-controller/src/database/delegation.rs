@@ -194,6 +194,17 @@ pub(crate) fn enqueue_subagent_reports(
             if already_enqueued {
                 continue;
             }
+            if let Some(facts) = &report.facts {
+                // The row records the facts this report states, and clears the
+                // park result of any earlier finish: it described that finish.
+                transaction.execute(
+                    "INSERT INTO subagent_work_facts(child_session_id, finish_json, park_json)
+                     VALUES (?1, ?2, NULL)
+                     ON CONFLICT(child_session_id)
+                     DO UPDATE SET finish_json=excluded.finish_json, park_json=NULL",
+                    params![child_id, serde_json::to_string(facts)?],
+                )?;
+            }
             let event = mj_core::mailbox::MailboxEvent {
                 key: key.clone(),
                 source: "mjolnir".into(),
@@ -225,6 +236,63 @@ pub(crate) fn enqueue_subagent_reports(
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
     }
     Ok(())
+}
+
+/// The facts recorded for one child: those its latest finish report stated,
+/// and what the park after it did.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct StoredWorkFacts {
+    pub finish: Option<mj_core::work_facts::WorkFacts>,
+    pub park: Option<mj_core::work_facts::ParkFacts>,
+}
+
+fn decode_work_facts(finish: Option<String>, park: Option<String>) -> Result<StoredWorkFacts> {
+    Ok(StoredWorkFacts {
+        finish: finish.map(|text| serde_json::from_str(&text)).transpose()?,
+        park: park.map(|text| serde_json::from_str(&text)).transpose()?,
+    })
+}
+
+/// The recorded facts of each listed child that has any, in one read.
+pub(crate) fn load_work_facts(children: &[String]) -> Result<BTreeMap<String, StoredWorkFacts>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT finish_json, park_json FROM subagent_work_facts WHERE child_session_id=?1",
+    )?;
+    let mut facts = BTreeMap::new();
+    for child in children {
+        let row = statement
+            .query_row([child], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .optional()?;
+        if let Some((finish, park)) = row {
+            facts.insert(child.clone(), decode_work_facts(finish, park)?);
+        }
+    }
+    Ok(facts)
+}
+
+/// Record what a park did to the child's processes, creating the row when the
+/// child was never reported (a failed start, for example). `None` removes a
+/// record of a park that did not happen.
+pub(crate) fn record_park_facts(
+    child: String,
+    park: Option<mj_core::work_facts::ParkFacts>,
+) -> Result<()> {
+    submit_database_write("record park facts", move |connection| {
+        let park = park.map(|park| serde_json::to_string(&park)).transpose()?;
+        connection.execute(
+            "INSERT INTO subagent_work_facts(child_session_id, finish_json, park_json)
+             VALUES (?1, NULL, ?2)
+             ON CONFLICT(child_session_id) DO UPDATE SET park_json=excluded.park_json",
+            params![child, park],
+        )?;
+        Ok(())
+    })
 }
 
 fn subagent_report_key(

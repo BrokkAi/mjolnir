@@ -315,6 +315,26 @@ impl RuntimeState {
         self.session_manager.session(session_id.to_owned()).await
     }
 
+    /// What the session's agent left running and what its working tree holds,
+    /// as its worker observes them. Only a running session has a worker to
+    /// ask; a stopped one says what state it is in.
+    pub async fn session_work_facts(
+        &self,
+        session_id: &str,
+    ) -> Result<mj_core::work_facts::WorkFacts> {
+        let record = self.session_record(session_id).context("unknown session")?;
+        ensure!(
+            record.state == SessionState::Running && record.target.is_some(),
+            "the session is {}, so its worker is stopped",
+            record.state.as_str()
+        );
+        self.session_manager
+            .session(session_id.to_owned())
+            .await?
+            .work_facts()
+            .await
+    }
+
     /// Checkpoint a session now and publish the result, the way the daemon's
     /// own checkpoint action does.
     ///
