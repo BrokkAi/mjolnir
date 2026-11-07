@@ -64,7 +64,7 @@ pub(super) enum HostEvent {
     /// produced one.
     HasOpenReview {
         session_id: String,
-        reply: oneshot::Sender<Result<bool, String>>,
+        reply: oneshot::Sender<Result<bool, crate::review_host::OpenReviewUnknown>>,
     },
     /// A finished reviewer child whose review no longer tracks it. The host
     /// owns every reviewer child close, so the delegation loop hands it here

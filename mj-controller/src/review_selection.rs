@@ -38,7 +38,11 @@ pub(crate) async fn resolve(
     let choice = controller
         .state
         .effective_review(handle.session_id())
-        .map_err(|missing| anyhow::anyhow!("review parent session {missing} is missing"))?;
+        .map_err(|session| {
+            anyhow::anyhow!(
+                "the review settings of session {session} cannot be resolved: its parent is missing or the parent chain repeats"
+            )
+        })?;
     let (mut choices, autoconfigured) =
         configured_choices(settings.clone(), &controller.config, &cancelled, &backend).await?;
     if autoconfigured

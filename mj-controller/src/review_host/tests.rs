@@ -1834,7 +1834,20 @@ async fn the_host_reports_a_session_with_a_running_review_as_open_until_it_close
         armed(Some("reviewer")),
         environment.clone(),
     );
-    assert!(!host.has_open_review(session).await.unwrap());
+    // Before startup recovery finishes the host cannot know, and says so.
+    let first = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match host.has_open_review(session).await {
+                Err(crate::review_host::OpenReviewUnknown::NotReady) => {
+                    tokio::task::yield_now().await
+                }
+                answer => break answer,
+            }
+        }
+    })
+    .await
+    .expect("the host finishes startup");
+    assert!(!first.unwrap());
     open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
     assert!(host.has_open_review(session).await.unwrap());
     assert!(!host.has_open_review("another-session").await.unwrap());

@@ -213,10 +213,7 @@ impl TurnReviewHost {
                 reply,
             })
             .map_err(|_| OpenReviewUnknown::HostStopped)?;
-        answer
-            .await
-            .map_err(|_| OpenReviewUnknown::HostStopped)?
-            .map_err(OpenReviewUnknown::RecoveryFailed)
+        answer.await.map_err(|_| OpenReviewUnknown::HostStopped)?
     }
 
     /// Puts the host in the state a failed startup recovery leaves it in.
@@ -350,6 +347,8 @@ impl TurnReviewHost {
 pub(crate) enum OpenReviewUnknown {
     /// Its startup recovery failed and it did not restore this session.
     RecoveryFailed(String),
+    /// Its startup sweep has not finished restoring reviews yet.
+    NotReady,
     /// The host task is gone.
     HostStopped,
 }

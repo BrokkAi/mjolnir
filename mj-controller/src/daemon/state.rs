@@ -203,14 +203,22 @@ impl RuntimeState {
                 }
                 false
             }
-            // A stopped host says nothing about the review; keep the child
-            // waiting, so its completion retries on the busy backoff.
-            Err(crate::review_host::OpenReviewUnknown::HostStopped) => {
-                tracing::warn!(
-                    child_session_id = child_id,
-                    "the review host stopped; holding the child's completion"
-                );
-                true
+            // A host that is still restoring, or has stopped, says nothing
+            // about the review. A child that can request review waits, so its
+            // completion and its report retry later; any other child cannot
+            // have a review and is not held.
+            Err(
+                unknown @ (crate::review_host::OpenReviewUnknown::NotReady
+                | crate::review_host::OpenReviewUnknown::HostStopped),
+            ) => {
+                let held = self.child_can_request_review(child_id);
+                if held && unknown == crate::review_host::OpenReviewUnknown::HostStopped {
+                    tracing::warn!(
+                        child_session_id = child_id,
+                        "the review host stopped; holding the child's completion"
+                    );
+                }
+                held
             }
         }
     }

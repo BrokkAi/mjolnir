@@ -35,7 +35,9 @@ impl HostState {
                 // so "no review" cannot be answered truthfully. (Restored ones
                 // were answered above as active owners.)
                 HostEvent::HasOpenReview { reply, .. } => {
-                    let _ = reply.send(Err(reason.clone()));
+                    let _ = reply.send(Err(super::OpenReviewUnknown::RecoveryFailed(
+                        reason.clone(),
+                    )));
                     return false;
                 }
                 event => return Box::pin(self.handle_without_startup_failure(event)).await,
@@ -52,7 +54,6 @@ impl HostState {
                     | HostEvent::OverridePush { .. }
                     | HostEvent::SetPushBase { .. }
                     | HostEvent::Resolve { .. }
-                    | HostEvent::HasOpenReview { .. }
                     | HostEvent::QuestionTarget { .. }
             )
         {
@@ -186,10 +187,18 @@ impl HostState {
                         .map(|_| (child_session_id, question_id));
                 let _ = reply.send(target);
             }
+            // Never deferred: callers hold admissions or deliver other
+            // events while they ask, so before the startup sweep finishes a
+            // session it has not restored yet answers "not ready".
             HostEvent::HasOpenReview { session_id, reply } => {
-                let _ = reply.send(Ok(self.reviews.contains_key(&session_id)
+                let open = self.reviews.contains_key(&session_id)
                     || self.preparing.contains_key(&session_id)
-                    || self.pending_open.contains_key(&session_id)));
+                    || self.pending_open.contains_key(&session_id);
+                let _ = reply.send(if open || self.startup_ready {
+                    Ok(open)
+                } else {
+                    Err(super::OpenReviewUnknown::NotReady)
+                });
             }
             HostEvent::CloseChild { child_session_id } => self.close_child(child_session_id),
             HostEvent::ChildEnded {
@@ -288,7 +297,9 @@ impl HostState {
                             let _ = reply.send(if self.reviews.contains_key(&session_id) {
                                 Ok(true)
                             } else {
-                                Err(format!("review startup recovery failed: {error}"))
+                                Err(super::OpenReviewUnknown::RecoveryFailed(format!(
+                                    "review startup recovery failed: {error}"
+                                )))
                             });
                         }
                         HostEvent::QuestionTarget { reply, .. } => {

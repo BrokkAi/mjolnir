@@ -403,7 +403,7 @@ async fn settle_child(
     state
         .reconcile_parent_reports(&relation.parent_session_id)
         .await?;
-    let Ok(_work) = crate::upgrade::activity_unless_draining("delegation child completion") else {
+    let Ok(_work) = crate::upgrade::activity_unless_draining("delegation child park") else {
         return Ok(ChildCompletion::Draining);
     };
     match backend.park_subagent(&child_id).await? {
