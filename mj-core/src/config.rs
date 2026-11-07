@@ -16,6 +16,7 @@
 //! * `loading` -- instance names, directories, and atomic file writes.
 //! * `secrets` -- environment entries that name a secret held elsewhere.
 
+mod aws;
 mod daemon;
 mod document;
 mod dsh_credentials;
@@ -28,6 +29,7 @@ mod secrets;
 mod targets;
 mod ui;
 
+pub use aws::*;
 pub use daemon::*;
 pub use github::*;
 pub use harness::*;

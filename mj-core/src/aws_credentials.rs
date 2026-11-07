@@ -14,6 +14,10 @@ pub const EMPTY_CREDENTIALS_FILE: &str = "aws-empty-credentials";
 #[derive(Clone, PartialEq, Eq)]
 pub struct AwsCredentialSource {
     pub environment: BTreeMap<String, String>,
+    /// The role each session assumes instead of receiving the host's own
+    /// credentials. Part of the source, and so of the sync target's identity:
+    /// a configuration change makes obsolete queued work compare unequal.
+    pub role: Option<crate::config::AwsRoleConfig>,
 }
 
 impl std::fmt::Debug for AwsCredentialSource {
@@ -24,6 +28,7 @@ impl std::fmt::Debug for AwsCredentialSource {
                 "environment_names",
                 &self.environment.keys().collect::<Vec<_>>(),
             )
+            .field("role", &self.role.as_ref().map(|role| &role.role_arn))
             .finish()
     }
 }

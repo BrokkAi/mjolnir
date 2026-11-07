@@ -25,27 +25,55 @@ fn has_credential_source(environment: &BTreeMap<String, String>) -> bool {
             .is_some_and(|value| value == "false")
 }
 
+/// Whether a session on this profile and target receives AWS credentials
+/// from the controller. One definition, used by launch, the sync, and
+/// `mj doctor`.
+///
+/// `target_keeps_own_credentials` is true for a raw local session, which
+/// reads the host's AWS files itself, and for an EC2 instance, which uses its
+/// instance role. Explicit credentials in the target's or the profile's
+/// environment also stay with their owner.
+pub(crate) fn receives_synced_credentials(
+    profile: &HarnessProfile,
+    target_keeps_own_credentials: bool,
+    target_environment: &BTreeMap<String, String>,
+) -> bool {
+    profile.auth_scheme() == AuthScheme::AwsCredentialChain
+        && !target_keeps_own_credentials
+        && !has_credential_source(target_environment)
+        && !target_environment.contains_key("AWS_PROFILE")
+        && !target_environment.contains_key("AWS_DEFAULT_PROFILE")
+        && !has_credential_source(profile.environment.resolved())
+}
+
+pub(crate) fn locator_keeps_own_credentials(backend: &TargetLocator) -> bool {
+    matches!(
+        backend,
+        TargetLocator::LocalBare { .. } | TargetLocator::AwsEc2 { .. }
+    )
+}
+
+pub(crate) fn template_keeps_own_credentials(template: &mj_core::config::TargetTemplate) -> bool {
+    matches!(
+        template,
+        mj_core::config::TargetTemplate::LocalBare | mj_core::config::TargetTemplate::AwsEc2 { .. }
+    )
+}
+
 /// Explicit target credentials and EC2 instance roles stay target-owned.
 pub(crate) fn source(
     profile: &HarnessProfile,
     backend: &TargetLocator,
     target_environment: &BTreeMap<String, String>,
 ) -> Result<Option<AwsCredentialSource>> {
-    if profile.auth_scheme() != AuthScheme::AwsCredentialChain
-        || matches!(
-            backend,
-            TargetLocator::LocalBare { .. } | TargetLocator::AwsEc2 { .. }
-        )
-        || has_credential_source(target_environment)
-        || target_environment.contains_key("AWS_PROFILE")
-        || target_environment.contains_key("AWS_DEFAULT_PROFILE")
-    {
+    if !receives_synced_credentials(
+        profile,
+        locator_keeps_own_credentials(backend),
+        target_environment,
+    ) {
         return Ok(None);
     }
     let environment = profile.environment.resolved();
-    if has_credential_source(environment) {
-        return Ok(None);
-    }
     let mut environment = environment.clone();
     let selected = environment
         .get("AWS_PROFILE")
@@ -76,7 +104,10 @@ pub(crate) fn source(
             environment.insert("AWS_PROFILE".into(), selected.into());
         }
     }
-    Ok(Some(AwsCredentialSource { environment }))
+    Ok(Some(AwsCredentialSource {
+        environment,
+        role: profile.aws.clone(),
+    }))
 }
 
 pub(crate) fn export(
@@ -167,6 +198,7 @@ mod tests {
                 ),
                 ("AWS_EC2_METADATA_DISABLED".into(), "true".into()),
             ]),
+            role: None,
         };
         for generation in ["original", "renewed"] {
             std::fs::write(
@@ -229,6 +261,7 @@ mod tests {
         }
         let source = AwsCredentialSource {
             environment: BTreeMap::new(),
+            role: None,
         };
         let error = export(&source, &FailedExport).err().unwrap();
         assert!(!format!("{error:#}").contains("private-"));

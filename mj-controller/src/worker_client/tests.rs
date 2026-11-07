@@ -1564,6 +1564,7 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
                 source_file.to_string_lossy().into_owned(),
             ),
         ]),
+        role: None,
     });
     let targets = [local, remote];
     for generation in ["initial", "renewed"] {

@@ -1600,6 +1600,7 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
+                aws: None,
                 codex_profile: None,
                 environment: Default::default(),
                 ..mj_core::config::HarnessProfile::new(kind, PathBuf::from("/profiles/harness"))
