@@ -1071,6 +1071,10 @@ impl ProfileCatalog {
             if let Some(digest) = outcome.home_digest {
                 inner.home_settled.insert(key.0.clone(), digest);
             }
+            // A success converged the identity: discharge the failed-reprobe
+            // throttle so a genuinely new edit re-probes on the next pass
+            // instead of waiting out the retry window. A failure keeps it.
+            inner.home_edit_retry_after.remove(&key.0);
             let choices = outcome.choices;
             inner
                 .entries
@@ -1201,6 +1205,9 @@ impl ProfileCatalog {
                             if let Some(digest) = outcome.home_digest {
                                 inner.home_settled.insert(key.0.clone(), digest);
                             }
+                            // See drive_refresh: a success discharges the
+                            // failed-reprobe throttle; a failure keeps it.
+                            inner.home_edit_retry_after.remove(&key.0);
                             inner
                                 .entries
                                 .insert(key.clone(), Entry::Ready(outcome.choices.clone()));
@@ -2646,6 +2653,47 @@ mod tests {
         .await
         .expect("the failed re-probe is retried until the edit converges");
         assert_eq!(calls.load(Ordering::SeqCst), 5);
+    }
+
+    // Hard-won: #1337 review: a follow-up edit right after a successful
+    // re-probe stalled behind the failed-reprobe retry window.
+    #[tokio::test]
+    async fn a_follow_up_edit_reprimes_without_waiting_for_the_retry_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_home_model(root, "solo", "solo-first");
+        let calls = calls();
+        let (config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
+        let mut catalog = ProfileCatalog::with_probe(home_model_probe(homes, calls.clone()));
+        Arc::get_mut(&mut catalog).unwrap().home_edit_retry_wait = Duration::from_secs(60);
+        catalog.sync_now(&config).await;
+        catalog.watch_homes();
+
+        // The first edit re-probes and succeeds, all before the retry window
+        // that arming recorded could matter.
+        write_home_model(root, "solo", "solo-second");
+        catalog.watch_homes();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        while !catalog.lock().refreshing.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            current_model(&catalog, "solo").await.as_deref(),
+            Some("solo-second")
+        );
+
+        // A follow-up edit is a new change: it must re-probe on the next
+        // pass, not wait out the previous launch's retry window. Every served
+        // entry re-probes: the default, the previous model's, and the
+        // current model's.
+        write_home_model(root, "solo", "solo-third");
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            6,
+            "a new edit re-probes on the next pass even inside the retry window"
+        );
+        converge_on(&catalog, "solo", "solo-third").await;
     }
 
     // Hard-won: #1337: an edit made while the daemon was stopped stayed stale after start.
