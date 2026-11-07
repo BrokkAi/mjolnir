@@ -796,49 +796,6 @@ fn golden_mailbox_delivery_transcript() {
                 ),
             },
         ),
-        // What the park found: its check could not run, so no counts are
-        // shown as if it had.
-        mailbox_event(
-            "subagent-parked:child-1",
-            "mjolnir",
-            true,
-            513,
-            MailboxEventBody::SubagentParked {
-                child_session_id: "child-1".into(),
-                task_name: "Check parser".into(),
-                child_name: None,
-                park: Box::new(mj_core::work_facts::ParkFacts::unverified(
-                    mj_core::work_facts::Observed::Known(mj_core::work_facts::ProcessFacts {
-                        unattributed: 0,
-                        running: 1,
-                        shown: vec![mj_core::work_facts::RunningProcess {
-                            pid: 41301,
-                            elapsed_secs: 250,
-                            command: "sleep 600".into(),
-                            detached: true,
-                        }],
-                        omitted: 0,
-                        identities: Vec::new(),
-                    }),
-                    "the target did not answer",
-                )),
-            },
-        ),
-        // The working tree the report promised, with why it is missing.
-        mailbox_event(
-            "subagent-working-tree:child-1",
-            "mjolnir",
-            true,
-            514,
-            MailboxEventBody::SubagentWorkingTree {
-                child_session_id: "child-1".into(),
-                task_name: "Check parser".into(),
-                child_name: None,
-                worktree: Box::new(mj_core::work_facts::Observed::unavailable(
-                    "the daemon restarted before the working tree was read",
-                )),
-            },
-        ),
     ];
     for (index, mailbox_event) in events.iter().enumerate() {
         apply_observation(

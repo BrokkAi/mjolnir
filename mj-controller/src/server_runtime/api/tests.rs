@@ -4931,321 +4931,8 @@ async fn a_finish_report_carries_what_the_worker_observed_and_list_agents_repeat
             >= 5,
         "{child}"
     );
-    assert!(child["facts"].get("park").is_none(), "{child}");
 }
 
-/// The finish report is built from the process facts alone, with the working
-/// tree pending; `list_agents` shows the tree once its read arrives, and the
-/// report already sent is not rewritten. A tree for another finish, or a part
-/// already known, is not replaced.
-#[tokio::test]
-async fn a_pending_working_tree_does_not_withhold_the_report_and_arrives_in_list_agents() {
-    if !isolated_parked_test(
-        "a_pending_working_tree_does_not_withhold_the_report_and_arrives_in_list_agents",
-    ) {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let mut observed = observed_work();
-    let tree = observed.worktree.clone();
-    observed.worktree = mj_core::work_facts::Observed::Pending;
-    let (report, child, backend) = finish_report_and_listing(Some(observed.clone())).await;
-    let report = report.expect("a finish with process facts and a pending tree is reported");
-    let text = report.facts.as_ref().unwrap().render_lines().join("\n");
-    assert!(text.contains("pid 41301"), "{text}");
-    assert!(text.contains("Working tree: still being read"), "{text}");
-    let listed = child["facts"]["finish"]["lines"].to_string();
-    assert!(listed.contains("still being read"), "{listed}");
-
-    // Another finish's tree changes nothing; this one's arrives.
-    crate::database::record_finish_worktree("child-1".into(), 8, tree.clone()).unwrap();
-    let still = crate::database::load_work_facts(&["child-1".to_owned()]).unwrap();
-    assert!(matches!(
-        still["child-1"].finish.as_ref().unwrap().worktree,
-        mj_core::work_facts::Observed::Pending
-    ));
-    crate::database::record_finish_worktree("child-1".into(), 9, tree.clone()).unwrap();
-    // A known part is never replaced.
-    crate::database::record_finish_worktree(
-        "child-1".into(),
-        9,
-        mj_core::work_facts::Observed::unavailable("late"),
-    )
-    .unwrap();
-    let listing = backend
-        .execute_subagent_tool(
-            "parent-1".into(),
-            mj_core::subagent::SubagentToolRequest {
-                originating_command_id: None,
-                request_id: "observe-again".into(),
-                created_at_ms: 0,
-                action: mj_core::subagent::SubagentToolAction::ListAgents,
-            },
-        )
-        .await;
-    let listing: serde_json::Value = serde_json::from_str(&listing.message).unwrap();
-    let listed = listing["agents"][0]["facts"]["finish"]["lines"].to_string();
-    assert!(listed.contains("notes.txt"), "{listed}");
-    assert!(!listed.contains("still being read"), "{listed}");
-    // The report that was sent said the tree was pending, and still does.
-    let events = crate::database::pending_mailbox_events(10).unwrap();
-    let reports: Vec<_> = events
-        .iter()
-        .filter(|event| event.event_json.contains("subagent_finished"))
-        .collect();
-    assert_eq!(reports.len(), 1);
-    assert!(reports[0].event_json.contains("\"pending\""));
-    // The tree itself follows in its own message.
-    assert_eq!(working_tree_followups().len(), 1);
-}
-
-fn working_tree_followups() -> Vec<(bool, String)> {
-    crate::database::pending_mailbox_events(20)
-        .unwrap()
-        .into_iter()
-        .filter(|event| event.event_json.contains("subagent_working_tree"))
-        .map(|event| {
-            let parsed: mj_core::mailbox::MailboxEvent =
-                serde_json::from_str(&event.event_json).unwrap();
-            (parsed.wake, mj_core::mailbox::render_mailbox_event(&parsed))
-        })
-        .collect()
-}
-
-/// A report that went out with the tree pending is followed by the tree, once,
-/// in the transaction that stores it; a later park outcome neither repeats nor
-/// merges it, and a second arrival changes nothing.
-#[tokio::test]
-async fn a_report_sent_with_the_tree_pending_is_followed_by_the_tree_exactly_once() {
-    if !isolated_parked_test(
-        "a_report_sent_with_the_tree_pending_is_followed_by_the_tree_exactly_once",
-    ) {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let mut pending = observed_work();
-    let tree = pending.worktree.clone();
-    pending.worktree = mj_core::work_facts::Observed::Pending;
-    let (report, _child, _backend) = finish_report_and_listing(Some(pending)).await;
-    assert!(report.is_some());
-    assert!(
-        working_tree_followups().is_empty(),
-        "nothing to send before the tree arrives"
-    );
-
-    crate::database::record_finish_worktree("child-1".into(), 9, tree.clone()).unwrap();
-    crate::database::record_finish_worktree("child-1".into(), 9, tree).unwrap();
-    let followups = working_tree_followups();
-    assert_eq!(followups.len(), 1, "{followups:?}");
-    assert!(
-        followups[0].0,
-        "the tree wakes an idle parent, as the park follow-up does"
-    );
-    assert!(followups[0].1.contains("notes.txt"), "{}", followups[0].1);
-
-    // A park that follows, with or without news, sends its own message and does
-    // not send the tree again.
-    crate::database::record_park_outcome(
-        "child-1".into(),
-        "audit deps".into(),
-        mj_core::work_facts::ParkFacts::settled(
-            mj_core::work_facts::Observed::unavailable("n/a"),
-            &[],
-        ),
-    )
-    .unwrap();
-    assert_eq!(working_tree_followups().len(), 1);
-}
-
-/// A tree stored between the report's building and its enqueue is owed at once,
-/// and a finish superseded before its tree arrived is followed by an
-/// unavailable one, so a parent is never left waiting.
-#[tokio::test]
-async fn an_owed_tree_is_sent_when_it_raced_the_report_or_the_finish_was_superseded() {
-    if !isolated_parked_test(
-        "an_owed_tree_is_sent_when_it_raced_the_report_or_the_finish_was_superseded",
-    ) {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    let known = observed_work();
-    let mut pending = known.clone();
-    pending.worktree = mj_core::work_facts::Observed::Pending;
-    let report =
-        |facts: &mj_core::work_facts::WorkFacts| -> mj_core::mailbox::SubagentFinishedReport {
-            let mut report: mj_core::mailbox::SubagentFinishedReport =
-                serde_json::from_value(serde_json::json!({
-                    "child_session_id": "child-1", "task_name": "audit deps", "state": "completed",
-                    "finished": true, "output": "done", "report_dir": null
-                }))
-                .unwrap();
-            report.facts = Some(facts.clone());
-            report
-        };
-    let identity = |ordinal: u64| mj_core::subagent::SubagentFinishIdentity::Turn {
-        start_position: 1,
-        completed_ordinal: ordinal,
-        state: "completed".into(),
-    };
-    // The tree was stored (known) before a report built with it pending went out.
-    crate::database::record_finish_facts("child-1".into(), 9, known).unwrap();
-    crate::database::enqueue_subagent_reports(
-        "parent-1".into(),
-        vec![(identity(9), report(&pending))],
-    )
-    .unwrap();
-    assert_eq!(working_tree_followups().len(), 1);
-
-    // A later finish whose report went out pending, superseded before its tree.
-    crate::database::record_finish_facts("child-1".into(), 12, pending.clone()).unwrap();
-    crate::database::enqueue_subagent_reports(
-        "parent-1".into(),
-        vec![(identity(12), report(&pending))],
-    )
-    .unwrap();
-    assert_eq!(
-        working_tree_followups().len(),
-        1,
-        "still being read: nothing yet"
-    );
-    crate::database::record_finish_facts("child-1".into(), 15, observed_work()).unwrap();
-    let followups = working_tree_followups();
-    assert_eq!(followups.len(), 2, "{followups:?}");
-    assert!(
-        followups[1]
-            .1
-            .contains("the child began new work before the tree was read"),
-        "{}",
-        followups[1].1
-    );
-    // The late tree of the superseded finish changes nothing.
-    crate::database::record_finish_worktree("child-1".into(), 12, observed_work().worktree)
-        .unwrap();
-    assert_eq!(working_tree_followups().len(), 2);
-}
-
-/// A daemon that exits owes two follow-ups it will never send itself: the park
-/// whose survivor check was running, and the working tree a report promised.
-/// The next daemon sends both from the store alone: it holds no admission,
-/// takes no lifecycle and asks no target, so the child's recorded state is
-/// untouched, and a repeat of the startup sends nothing more.
-#[tokio::test]
-async fn startup_settles_the_park_and_tree_follow_ups_the_previous_daemon_owed() {
-    if !isolated_parked_test(
-        "startup_settles_the_park_and_tree_follow_ups_the_previous_daemon_owed",
-    ) {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    let mut parked = parent_record("child-1", "helper");
-    parked.state = SessionState::Parked;
-    crate::database::save_lifecycle_session(&parked).unwrap();
-    let known = observed_work();
-    let mut pending = known.clone();
-    pending.worktree = mj_core::work_facts::Observed::Pending;
-    let report: mj_core::mailbox::SubagentFinishedReport =
-        serde_json::from_value(serde_json::json!({
-            "child_session_id": "child-1", "task_name": "audit deps", "state": "completed",
-            "finished": true, "output": "done", "report_dir": null
-        }))
-        .map(|mut report: mj_core::mailbox::SubagentFinishedReport| {
-            report.facts = Some(pending.clone());
-            report
-        })
-        .unwrap();
-    crate::database::record_finish_facts("child-1".into(), 9, pending).unwrap();
-    crate::database::enqueue_subagent_reports(
-        "parent-1".into(),
-        vec![(
-            mj_core::subagent::SubagentFinishIdentity::Turn {
-                start_position: 1,
-                completed_ordinal: 9,
-                state: "completed".into(),
-            },
-            report,
-        )],
-    )
-    .unwrap();
-    // The park's stop ran and the daemon went before the check finished.
-    crate::database::record_park_started("child-1".into()).unwrap();
-    // A second child's park began, and the daemon went before the stop was
-    // known to have run: the child is still recorded as running.
-    store_parent_and_child("child-2");
-    crate::database::record_finish_facts("child-2".into(), 4, known.clone()).unwrap();
-    crate::database::record_park_started("child-2".into()).unwrap();
-    assert_eq!(crate::database::load_unfinished_parks().unwrap().len(), 2);
-    assert!(working_tree_followups().is_empty());
-
-    assert!(
-        crate::database::settle_followups_after_restart()
-            .unwrap()
-            .is_empty()
-    );
-
-    assert!(crate::database::load_unfinished_parks().unwrap().is_empty());
-    let trees = working_tree_followups();
-    assert_eq!(trees.len(), 1, "{trees:?}");
-    assert!(trees[0].0, "the follow-up wakes the parent");
-    assert!(
-        trees[0]
-            .1
-            .contains("the daemon restarted before the working tree was read"),
-        "{}",
-        trees[0].1
-    );
-    let parks: Vec<String> = crate::database::pending_mailbox_events(20)
-        .unwrap()
-        .into_iter()
-        .filter(|event| event.event_json.contains("subagent_parked"))
-        .map(|event| {
-            let parsed: mj_core::mailbox::MailboxEvent =
-                serde_json::from_str(&event.event_json).unwrap();
-            assert!(parsed.wake);
-            mj_core::mailbox::render_mailbox_event(&parsed)
-        })
-        .collect();
-    assert_eq!(parks.len(), 2, "{parks:?}");
-    let checked = parks
-        .iter()
-        .find(|text| text.contains("the daemon restarted during the check"))
-        .unwrap_or_else(|| panic!("{parks:?}"));
-    assert!(checked.contains("pid 41301"), "{checked}");
-    // The child not recorded as parked is not silently dropped: the report
-    // promised a message about the listed processes, and it says plainly that
-    // the park could not be confirmed and the processes were not checked.
-    let unconfirmed = parks
-        .iter()
-        .find(|text| text.contains("could not confirm the park of this child"))
-        .unwrap_or_else(|| panic!("{parks:?}"));
-    assert!(
-        unconfirmed.contains("the stop failed or the daemon stopped during it"),
-        "{unconfirmed}"
-    );
-    assert!(unconfirmed.contains("were not checked"), "{unconfirmed}");
-    assert!(unconfirmed.contains("pid 41301"), "{unconfirmed}");
-    assert_eq!(
-        crate::database::load_session_state("child-2").unwrap(),
-        Some(SessionState::Running)
-    );
-    assert_eq!(
-        crate::database::load_session_state("child-1").unwrap(),
-        Some(SessionState::Parked),
-        "the child's lifecycle is not the follow-ups' to change"
-    );
-
-    let before = crate::database::pending_mailbox_events(20).unwrap().len();
-    assert!(
-        crate::database::settle_followups_after_restart()
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        crate::database::pending_mailbox_events(20).unwrap().len(),
-        before
-    );
-}
 /// Reconciling reports never asks a worker. A finish whose connected worker's
 /// completion task has not stored its facts yet is left for the pass after it
 /// does, and nothing else waits for it: this test has no worker to ask at all.
@@ -5296,8 +4983,7 @@ async fn a_report_asks_for_its_facts_to_be_collected_whatever_the_actors_view_sa
 }
 
 /// Facts only move forward. A late collection for an older finish never
-/// replaces a newer finish's facts, and the follow-up the newer finish's report
-/// owes is kept for when its tree is read.
+/// replaces a newer finish's facts.
 #[tokio::test]
 async fn an_older_collection_never_replaces_a_newer_finishs_facts() {
     if !isolated_parked_test("an_older_collection_never_replaces_a_newer_finishs_facts") {
@@ -5305,163 +4991,24 @@ async fn an_older_collection_never_replaces_a_newer_finishs_facts() {
     }
     let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
-    let known = observed_work();
-    let mut pending = known.clone();
-    pending.worktree = mj_core::work_facts::Observed::Pending;
+    let newer = observed_work();
     assert!(
-        crate::database::record_finish_facts("child-1".into(), 10, pending.clone())
+        crate::database::record_finish_facts("child-1".into(), 10, newer.clone())
             .unwrap()
             .is_some()
     );
-    let mut report: mj_core::mailbox::SubagentFinishedReport =
-        serde_json::from_value(serde_json::json!({
-            "child_session_id": "child-1", "task_name": "audit deps", "state": "completed",
-            "finished": true, "output": "done", "report_dir": null
-        }))
-        .unwrap();
-    report.facts = Some(pending.clone());
-    crate::database::enqueue_subagent_reports(
-        "parent-1".into(),
-        vec![(
-            mj_core::subagent::SubagentFinishIdentity::Turn {
-                start_position: 1,
-                completed_ordinal: 10,
-                state: "completed".into(),
-            },
-            report,
-        )],
-    )
-    .unwrap();
 
     // The collection of the finish before it comes back late.
-    let late = crate::database::record_finish_facts("child-1".into(), 9, known.clone()).unwrap();
+    let late = crate::database::record_finish_facts(
+        "child-1".into(),
+        9,
+        mj_core::work_facts::WorkFacts::unavailable("a late collection"),
+    )
+    .unwrap();
     assert!(late.is_none(), "{late:?}");
     let recorded = crate::database::load_work_facts(&["child-1".to_owned()]).unwrap();
     assert_eq!(recorded["child-1"].finish_ordinal, Some(10));
-    assert_eq!(recorded["child-1"].finish.as_ref(), Some(&pending));
-    assert!(working_tree_followups().is_empty());
-
-    // The newer finish's tree is still owed, once, as itself.
-    crate::database::record_finish_worktree("child-1".into(), 10, known.worktree.clone()).unwrap();
-    let followups = working_tree_followups();
-    assert_eq!(followups.len(), 1, "{followups:?}");
-    assert!(
-        !followups[0].1.contains("began new work"),
-        "{}",
-        followups[0].1
-    );
-}
-
-/// A report built while its working tree was pending, and enqueued after the
-/// child finished again, promises no follow-up: nobody will read that tree, and
-/// the promise would never be kept. The wording and the mark that owes the
-/// follow-up are one decision, taken from the facts as stored when the report is
-/// enqueued.
-#[tokio::test]
-async fn a_report_enqueued_after_a_newer_finish_does_not_promise_its_tree() {
-    if !isolated_parked_test("a_report_enqueued_after_a_newer_finish_does_not_promise_its_tree") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    let known = observed_work();
-    let mut pending = known.clone();
-    pending.worktree = mj_core::work_facts::Observed::Pending;
-    // The report was built from finish 9, whose tree was still being read.
-    crate::database::record_finish_facts("child-1".into(), 9, pending.clone()).unwrap();
-    let mut report: mj_core::mailbox::SubagentFinishedReport =
-        serde_json::from_value(serde_json::json!({
-            "child_session_id": "child-1", "task_name": "audit deps", "state": "completed",
-            "finished": true, "output": "done", "report_dir": null
-        }))
-        .unwrap();
-    report.facts = Some(pending);
-    // The child finished again before the report was enqueued.
-    crate::database::record_finish_facts("child-1".into(), 10, known.clone()).unwrap();
-    crate::database::enqueue_subagent_reports(
-        "parent-1".into(),
-        vec![(
-            mj_core::subagent::SubagentFinishIdentity::Turn {
-                start_position: 1,
-                completed_ordinal: 9,
-                state: "completed".into(),
-            },
-            report,
-        )],
-    )
-    .unwrap();
-
-    let events = crate::database::pending_mailbox_events(10).unwrap();
-    assert_eq!(events.len(), 1, "{events:?}");
-    let event: mj_core::mailbox::MailboxEvent =
-        serde_json::from_str(&events[0].event_json).unwrap();
-    let text = mj_core::mailbox::render_mailbox_event(&event);
-    assert!(
-        !text.contains("a later message from Mjolnir gives it"),
-        "{text}"
-    );
-    assert!(text.contains("the child finished again"), "{text}");
-    // Nothing is owed for the finish that was replaced.
-    crate::database::record_finish_worktree("child-1".into(), 9, known.worktree.clone()).unwrap();
-    crate::database::record_finish_worktree("child-1".into(), 10, known.worktree).unwrap();
-    assert!(working_tree_followups().is_empty());
-}
-
-/// A park that could not be confirmed and the real outcome of a later attempt
-/// are different messages for one finish: the parent receives "could not
-/// confirm" once however often it repeats, and then the outcome.
-#[tokio::test]
-async fn an_unconfirmed_park_and_its_later_outcome_are_both_told_to_the_parent() {
-    if !isolated_parked_test(
-        "an_unconfirmed_park_and_its_later_outcome_are_both_told_to_the_parent",
-    ) {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    let known = observed_work();
-    crate::database::record_finish_facts("child-1".into(), 9, known.clone()).unwrap();
-    let attempt = |settled: bool| {
-        let started = crate::database::record_park_started("child-1".into()).unwrap();
-        let outcome = if settled {
-            mj_core::work_facts::ParkFacts::settled(started.marker.snapshot, &[41301])
-        } else {
-            mj_core::work_facts::ParkFacts::unconfirmed(started.marker.snapshot, "the stop failed")
-        };
-        crate::database::record_park_outcome("child-1".into(), "audit deps".into(), outcome)
-            .unwrap();
-    };
-    let parked_events = || -> Vec<String> {
-        crate::database::pending_mailbox_events(20)
-            .unwrap()
-            .into_iter()
-            .filter(|event| event.event_json.contains("subagent_parked"))
-            .map(|event| {
-                let parsed: mj_core::mailbox::MailboxEvent =
-                    serde_json::from_str(&event.event_json).unwrap();
-                mj_core::mailbox::render_mailbox_event(&parsed)
-            })
-            .collect()
-    };
-    attempt(false);
-    attempt(false);
-    assert_eq!(parked_events().len(), 1, "a repeat is not told twice");
-    attempt(true);
-    let told = parked_events();
-    assert_eq!(told.len(), 2, "{told:?}");
-    assert!(
-        told[0].contains("could not confirm the park of child task"),
-        "{}",
-        told[0]
-    );
-    assert!(!told[0].contains("Mjolnir: parked"), "{}", told[0]);
-    assert!(
-        told[1].contains("Mjolnir: parked child task"),
-        "the real outcome comes last: {}",
-        told[1]
-    );
-    attempt(false);
-    assert_eq!(parked_events().len(), 2, "{:?}", parked_events());
+    assert_eq!(recorded["child-1"].finish.as_ref(), Some(&newer));
 }
 
 /// Whether to use a finish's recorded facts follows from its completed turn,
@@ -5488,13 +5035,7 @@ async fn a_finished_child_whose_last_delivery_failed_is_reported_with_its_record
     };
     conversation.last_turn_outcome = Some(turn);
     crate::database::save_materialized_session(&conversation).unwrap();
-    // The working tree was still being read when the report went out.
-    let mut pending = observed_work();
-    let tree = std::mem::replace(
-        &mut pending.worktree,
-        mj_core::work_facts::Observed::Pending,
-    );
-    crate::database::record_finish_facts("child-1".into(), 9, pending).unwrap();
+    crate::database::record_finish_facts("child-1".into(), 9, observed_work()).unwrap();
     // The parent's newest message to the child failed to deliver.
     let mut parent = active_parent_view("working");
     let snapshot = parent.snapshot.as_mut().unwrap();
@@ -5532,10 +5073,6 @@ async fn a_finished_child_whose_last_delivery_failed_is_reported_with_its_record
     let text = mj_core::mailbox::render_mailbox_event(&event);
     assert!(text.contains("pid 41301"), "{text}");
     assert!(!text.contains("without a completed turn"), "{text}");
-    // The tree is owed to this finish too, and arrives once it is read.
-    assert!(working_tree_followups().is_empty());
-    crate::database::record_finish_worktree("child-1".into(), 9, tree).unwrap();
-    assert_eq!(working_tree_followups().len(), 1);
 }
 
 /// A restart that fails leaves the child parked, so the parent can try

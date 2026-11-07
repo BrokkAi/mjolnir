@@ -5,16 +5,16 @@ Session: session-mailbox
 
 Please check this detail.
 The whole second line must survive delivery.
-21: Message from your parent agent
+19: Message from your parent agent
 
 Please verify the edge case.
-21: Message from Fix cache race
+19: Message from Fix cache race
 
 The lock is fixed; please verify it.
-21: Message from the user
+19: Message from the user
 
 Please check the final result.
-21: Mailbox events:
+19: Mailbox events:
   - New PR #4623 Model Rust built-in macro values for CQ07
   - Comment on your PR #4623 by alice: Please check the ‹macro› case.
   - New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)
@@ -32,24 +32,18 @@ Please check the final result.
     Report truncated; see the report directory for details.
     Fixed ‹parser›.
     Tests passed: "parser".
-  - Child task Check parser parked; whether its processes survived could not be checked
-    The park ran, but what happened to the 1 processes the child's agent had left running could not be checked: the target did not answer.
-      pid 41301, up 4m10s, detached from the harness: sleep 600
-    send_message resumes the child but does not restart stopped processes.
-  - Child task Check parser: working tree read
-    Working tree: unavailable (the daemon restarted before the working tree was read)
-22: Agent continued on its own
-23: Working on the delivered messages.
-24: Message from Review agent
+20: Agent continued on its own
+21: Working on the delivered messages.
+22: Message from Review agent
 
 The first review item.
 支持 Unicode and **markdown**.
-24: Message from untitled-session
+22: Message from untitled-session
 
 The second item arrives in the same acknowledgment.
-24: Mailbox events:
+22: Mailbox events:
   - Review comment on your PR #4623 by gina: A late review note arrives mid-turn.
-26: Responding after delivery.
-28: Not shown because you were away: Claude Code requests permission: touch afk-created.txt
-29: Mailbox events:
+24: Responding after delivery.
+26: Not shown because you were away: Claude Code requests permission: touch afk-created.txt
+27: Mailbox events:
   - Told the agent you are back

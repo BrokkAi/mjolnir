@@ -67,38 +67,6 @@ fn completion_steps(
     steps
 }
 
-/// What becomes of a child's working-tree read when its task ends. One that
-/// failed or stopped (a panic included) must not leave the tree pending for
-/// ever: it is stored as unavailable, with why, and the parent is told by the
-/// follow-up that stores owe.
-async fn settle_tree_read(child: &str, ordinal: u64, result: Result<()>) {
-    let Err(error) = result else {
-        return;
-    };
-    let reason = format!("the working-tree read stopped: {error:#}");
-    tracing::warn!(child_session_id = %child, error = %reason, "could not record a finished child's working tree");
-    let stored = tokio::task::spawn_blocking({
-        let child = child.to_owned();
-        move || {
-            crate::database::record_finish_worktree(
-                child,
-                ordinal,
-                mj_core::work_facts::Observed::unavailable(reason),
-            )
-        }
-    })
-    .await;
-    match stored {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(child_session_id = %child, error = format!("{error:#}"), "could not store the unavailable working tree of a finished child");
-        }
-        Err(error) => {
-            tracing::warn!(child_session_id = %child, %error, "storing the unavailable working tree of a finished child stopped");
-        }
-    }
-}
-
 /// When one child outcome's completion may run again, and how it has been
 /// going. Settling the child forgets it; a later outcome starts afresh.
 struct CompletionRetry {
@@ -195,10 +163,6 @@ async fn run(
     let mut fact_tasks = tokio::task::JoinSet::new();
     let mut fact_ids = BTreeMap::<tokio::task::Id, (String, u64)>::new();
     let mut facts_done = BTreeMap::<String, u64>::new();
-    // The working tree, which has no fixed duration, is read after the report
-    // can be built, by another task of the same child, and nothing waits for it.
-    let mut tree_tasks = tokio::task::JoinSet::new();
-    let mut tree_ids = BTreeMap::<tokio::task::Id, (String, u64)>::new();
     let mut noticed = BTreeMap::<String, u64>::new();
     let mut retry = BTreeMap::<String, CompletionRetry>::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -367,12 +331,6 @@ async fn run(
                 if let Some((id, ordinal)) = fact_ids.remove(&task_id) {
                     match result {
                         Ok(()) => {
-                            let state = state.clone();
-                            let child_id = id.clone();
-                            let task = tree_tasks.spawn(async move {
-                                state.collect_finish_worktree(&child_id, ordinal).await
-                            });
-                            tree_ids.insert(task.id(), (id.clone(), ordinal));
                             facts_done.insert(id, ordinal);
                         }
                         Err(error) => {
@@ -384,16 +342,6 @@ async fn run(
                             retry.insert(id, next);
                         }
                     }
-                }
-            }
-            completed = tree_tasks.join_next_with_id(), if !tree_tasks.is_empty() => {
-                let Some(completed) = completed else { continue };
-                let (task_id, result) = match completed {
-                    Ok((id, result)) => (id, result),
-                    Err(error) => (error.id(), Err(anyhow::Error::from(error))),
-                };
-                if let Some((id, ordinal)) = tree_ids.remove(&task_id) {
-                    settle_tree_read(&id, ordinal, result).await;
                 }
             }
             completed = completions.join_next_with_id(), if !completions.is_empty() => {
@@ -436,7 +384,6 @@ async fn run(
     jobs.abort_all();
     completions.abort_all();
     fact_tasks.abort_all();
-    tree_tasks.abort_all();
     while let Some(result) = jobs.join_next().await {
         if let Err(error) = result
             && !error.is_cancelled()
@@ -554,28 +501,11 @@ async fn complete_child(
             return Ok(ChildCompletion::RetryPark);
         }
     }
-    // The park proceeds once the report is out, and does not wait for the working
-    // tree: that read has no fixed duration and can still be running. The park
-    // stops the worker that runs it, and the tree is then stored as unavailable,
-    // with why, and delivered so.
     match backend.park_subagent(&child_id).await? {
         crate::controller::ParkOutcome::Busy => Ok(ChildCompletion::RetryPark),
-        crate::controller::ParkOutcome::Parked => {
-            let id = child_id.clone();
-            let ordinal = outcome.completed_ordinal;
-            tokio::task::spawn_blocking(move || {
-                crate::database::record_finish_worktree(
-                    id,
-                    ordinal,
-                    mj_core::work_facts::Observed::unavailable(
-                        "the child was parked before its working tree could be read",
-                    ),
-                )
-            })
-            .await??;
+        crate::controller::ParkOutcome::Parked | crate::controller::ParkOutcome::NotRunning => {
             Ok(ChildCompletion::Settled)
         }
-        crate::controller::ParkOutcome::NotRunning => Ok(ChildCompletion::Settled),
     }
 }
 
@@ -706,87 +636,6 @@ mod tests {
         turn
     }
 
-    /// The park proceeds with a working-tree read still in flight (a hung
-    /// `git status` must never keep a worker, harness and slot alive), and the
-    /// tree is stored as unavailable, with why, and delivered so.
-    #[tokio::test]
-    async fn a_park_does_not_wait_for_a_stalled_tree_read_and_stores_it_unavailable() {
-        const CHILD: &str = "MJ_TEST_DELEGATION_PARK_NO_HOLD";
-        if std::env::var_os(CHILD).is_none() {
-            let root = tempfile::tempdir().unwrap();
-            IsolatedTest::new(test_name(
-                module_path!(),
-                "a_park_does_not_wait_for_a_stalled_tree_read_and_stores_it_unavailable",
-            ))
-            .env(CHILD, "1")
-            .env("MJ_INSTANCE", "delegation-park-no-hold")
-            .isolated_store(root.path())
-            .run();
-            return;
-        }
-        let _writer = crate::database::install_isolated_test_writer();
-        let workspace = crate::database::create_workspace("park no hold").unwrap();
-        let parent = crate::daemon::tests::runtime_test_session(
-            "parent",
-            &workspace.id,
-            mj_core::state::SessionState::Running,
-        );
-        let child = crate::daemon::tests::runtime_test_session(
-            "child",
-            &workspace.id,
-            mj_core::state::SessionState::Running,
-        );
-        crate::database::save_session(&parent).unwrap();
-        crate::database::save_subagent_session(
-            &child,
-            &crate::daemon::tests::runtime_test_subagent("child", "parent"),
-        )
-        .unwrap();
-        // The finish's facts are stored with the tree still being read, and the
-        // report went out that way (the follow-up is owed).
-        let mut facts = mj_core::work_facts::WorkFacts::unavailable("not needed");
-        facts.worktree = mj_core::work_facts::Observed::Pending;
-        crate::database::record_finish_facts("child".into(), 10, facts.clone()).unwrap();
-        let manager = crate::daemon::tests::TestRemoteManager::for_session("child").await;
-        let state = crate::daemon::tests::test_runtime_state_with_manager(&manager);
-        let parks = Arc::new(BusyThenParked(AtomicUsize::new(1)));
-        let backend = Arc::new(ApiBackend::new(
-            state.session_manager.client(),
-            Arc::new(|_| None),
-            parks.clone(),
-        ));
-        state.install_report_backend(&backend);
-        // The readers' snapshot holds the turn the observation reports.
-        let turn = store_finished_turn("child", "turn", 10);
-        publish_idle_child(&manager, &turn).await;
-        let observation = DelegationObservation {
-            requests: Vec::new(),
-            completed: Vec::new(),
-            in_flight: Vec::new(),
-            credential_signal: None,
-            outcome: Some(turn),
-        };
-        assert!(matches!(
-            complete_child(
-                state.clone(),
-                backend,
-                "child".into(),
-                observation,
-                crate::upgrade::activity_unless_draining("test completion").unwrap(),
-            )
-            .await
-            .unwrap(),
-            ChildCompletion::Settled
-        ));
-        assert_eq!(parks.0.load(Ordering::SeqCst), 2, "the park waited");
-        let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
-        assert!(matches!(
-            &recorded["child"].finish.as_ref().unwrap().worktree,
-            mj_core::work_facts::Observed::Unavailable { reason }
-                if reason.contains("the child was parked before its working tree could be read")
-        ));
-    }
-
     /// The worker owns acceptance: a scan whose answer says the worker had
     /// accepted newer work makes the scan unfit for that finish (it may show the
     /// new work's processes), whatever the store and the actor's view say yet.
@@ -794,13 +643,13 @@ mod tests {
     /// is an unknown, which is unavailable too; and with no newer work the scan
     /// stands.
     #[tokio::test]
-    async fn processes_the_worker_says_newer_work_may_have_changed_are_not_the_finishs() {
+    async fn observations_the_worker_says_newer_work_may_have_changed_are_not_the_finishs() {
         const CHILD: &str = "MJ_TEST_DELEGATION_PROCESS_SCAN_RACE";
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
             IsolatedTest::new(test_name(
                 module_path!(),
-                "processes_the_worker_says_newer_work_may_have_changed_are_not_the_finishs",
+                "observations_the_worker_says_newer_work_may_have_changed_are_not_the_finishs",
             ))
             .env(CHILD, "1")
             .env("MJ_INSTANCE", "delegation-process-scan-race")
@@ -808,7 +657,9 @@ mod tests {
             .run();
             return;
         }
-        use mj_core::work_facts::{Observed, ProcessFacts, ProcessIdentity, RunningProcess};
+        use mj_core::work_facts::{
+            ChangedPath, Observed, ProcessFacts, ProcessIdentity, RunningProcess, WorktreeFacts,
+        };
         let _writer = crate::database::install_isolated_test_writer();
         let workspace = crate::database::create_workspace("process scan race").unwrap();
         let parent = crate::daemon::tests::runtime_test_session(
@@ -827,11 +678,12 @@ mod tests {
             &crate::daemon::tests::runtime_test_subagent("child", "parent"),
         )
         .unwrap();
-        let scan = |accepted_ordinal: Option<u64>| async move {
+        // The processes and the working tree are answered by two requests, each
+        // with the newest work the worker had accepted when it answered.
+        let scan = |processes_accepted: Option<u64>, tree_accepted: Option<u64>| async move {
             crate::daemon::views::FinishScan {
-                facts: mj_core::work_facts::WorkFacts {
-                    observed_at_ms: 1,
-                    processes: Observed::Known(ProcessFacts {
+                processes: crate::daemon::views::Observation {
+                    value: Observed::Known(ProcessFacts {
                         unattributed: 0,
                         running: 1,
                         shown: vec![RunningProcess {
@@ -846,57 +698,88 @@ mod tests {
                             start: "boot:1".into(),
                         }],
                     }),
-                    worktree: Observed::Pending,
+                    accepted_ordinal: processes_accepted,
                 },
-                accepted_ordinal,
+                tree: crate::daemon::views::Observation {
+                    value: Observed::Known(WorktreeFacts {
+                        directory: "/work/task".into(),
+                        head: None,
+                        branch: None,
+                        changed: 1,
+                        modified: 0,
+                        untracked: 1,
+                        shown: vec![ChangedPath {
+                            status: "?".into(),
+                            path: "notes.txt".into(),
+                        }],
+                        omitted: 0,
+                    }),
+                    accepted_ordinal: tree_accepted,
+                },
             }
         };
         let state = crate::daemon::tests::test_runtime_state();
         let stored = || {
-            crate::database::load_work_facts(&["child".to_owned()]).unwrap()["child"]
+            let facts = crate::database::load_work_facts(&["child".to_owned()]).unwrap()["child"]
                 .finish
                 .clone()
-                .unwrap()
-                .processes
+                .unwrap();
+            (facts.processes, facts.worktree)
         };
         // Nothing newer was accepted (the newest work is the finish's own turn):
-        // the scan stands.
+        // both parts stand, and are stored together.
         state
-            .collect_finish_facts_from("child", 9, scan(Some(8)))
+            .collect_finish_facts_from("child", 9, scan(Some(8), Some(8)))
             .await
             .unwrap();
-        assert!(matches!(stored(), Observed::Known(_)));
+        let (processes, tree) = stored();
+        assert!(matches!(processes, Observed::Known(_)));
+        assert!(matches!(tree, Observed::Known(_)));
 
         // The worker accepted a prompt after the finish, while the store and the
-        // actor's view know nothing of it yet.
+        // actor's view know nothing of it yet: what each part saw is not the
+        // finish's, whichever of the two answers says so.
         state
-            .collect_finish_facts_from("child", 10, scan(Some(12)))
+            .collect_finish_facts_from("child", 10, scan(Some(12), Some(8)))
             .await
             .unwrap();
+        let (processes, tree) = stored();
         assert!(
             matches!(
-                &stored(),
+                &processes,
                 Observed::Unavailable { reason }
                     if reason.contains("started new work before its processes were read")
             ),
-            "{:?}",
-            stored()
+            "{processes:?}"
+        );
+        assert!(matches!(tree, Observed::Known(_)));
+        state
+            .collect_finish_facts_from("child", 11, scan(Some(8), Some(15)))
+            .await
+            .unwrap();
+        let (processes, tree) = stored();
+        assert!(matches!(processes, Observed::Known(_)));
+        assert!(
+            matches!(
+                &tree,
+                Observed::Unavailable { reason }
+                    if reason.contains("started new work before its working tree was read")
+            ),
+            "{tree:?}"
         );
 
         // A worker that does not say is an unknown.
         state
-            .collect_finish_facts_from("child", 11, scan(None))
+            .collect_finish_facts_from("child", 12, scan(None, None))
             .await
             .unwrap();
-        assert!(
-            matches!(
-                &stored(),
-                Observed::Unavailable { reason }
-                    if reason.contains("did not say whether the child had accepted new work")
-            ),
-            "{:?}",
-            stored()
-        );
+        let (processes, tree) = stored();
+        for part in [format!("{processes:?}"), format!("{tree:?}")] {
+            assert!(
+                part.contains("did not say whether the child had accepted new work"),
+                "{part}"
+            );
+        }
     }
 
     // A completion is decided from the readers' snapshot, which refreshes after
@@ -1013,58 +896,6 @@ mod tests {
             .reported_finish
             .expect("the report's marker is written with it");
         assert!(marker.covers(10));
-    }
-
-    #[tokio::test]
-    async fn a_tree_task_that_panics_stores_the_tree_as_unavailable() {
-        const CHILD: &str = "MJ_TEST_DELEGATION_TREE_PANIC";
-        if std::env::var_os(CHILD).is_none() {
-            let root = tempfile::tempdir().unwrap();
-            IsolatedTest::new(test_name(
-                module_path!(),
-                "a_tree_task_that_panics_stores_the_tree_as_unavailable",
-            ))
-            .env(CHILD, "1")
-            .env("MJ_INSTANCE", "delegation-tree-panic")
-            .isolated_store(root.path())
-            .run();
-            return;
-        }
-        let _writer = crate::database::install_isolated_test_writer();
-        let workspace = crate::database::create_workspace("tree panic").unwrap();
-        let parent = crate::daemon::tests::runtime_test_session(
-            "parent",
-            &workspace.id,
-            mj_core::state::SessionState::Running,
-        );
-        let child = crate::daemon::tests::runtime_test_session(
-            "child",
-            &workspace.id,
-            mj_core::state::SessionState::Running,
-        );
-        crate::database::save_session(&parent).unwrap();
-        crate::database::save_subagent_session(
-            &child,
-            &crate::daemon::tests::runtime_test_subagent("child", "parent"),
-        )
-        .unwrap();
-        let mut facts = mj_core::work_facts::WorkFacts::unavailable("not needed");
-        facts.worktree = mj_core::work_facts::Observed::Pending;
-        crate::database::record_finish_facts("child".into(), 10, facts).unwrap();
-        // The task panics, as the loop's JoinSet reports it.
-        let mut tasks = tokio::task::JoinSet::new();
-        tasks.spawn(async { panic!("the read blew up") });
-        let (_, result) = match tasks.join_next_with_id().await.unwrap() {
-            Ok((id, ())) => (id, Ok(())),
-            Err(error) => (error.id(), Err(anyhow::Error::from(error))),
-        };
-        settle_tree_read("child", 10, result).await;
-        let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
-        assert!(matches!(
-            &recorded["child"].finish.as_ref().unwrap().worktree,
-            mj_core::work_facts::Observed::Unavailable { reason }
-                if reason.contains("the working-tree read stopped")
-        ));
     }
 
     #[test]

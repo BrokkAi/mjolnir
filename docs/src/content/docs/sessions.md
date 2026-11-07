@@ -202,17 +202,19 @@ sub-agent holds hundreds of processes and threads against the container's
 process limit, even when it is only waiting. So when a sub-agent's turn ends
 and its parent has been told, Mjolnir parks it:
 
-- Its worker and harness stop, so it holds no harness processes. The park
-  stops what is still running under the harness. A process the agent started
+- Its worker and harness stop, so it holds no harness processes. Parking
+  stops the harness and the processes under it; a process the agent started
   detached, for example with `setsid`, is not part of that tree and may keep
-  running, so before it parks the child Mjolnir asks its worker which
-  processes the agent left running and what its working tree holds, and
-  records both. The report the parent receives lists them as Mjolnir's
-  observation, ahead of the child's own text; after the park, `list_agents`
-  shows which of those processes were no longer running after the park and
-  which survived (it cannot tell a process the park stopped from one that
-  exited on its own), and the parent gets one more message when the finish
-  report listed running processes or the park found any gone or surviving.
+  running. So when a sub-agent finishes, Mjolnir asks its worker which
+  processes it can find in the worker's process tree or carrying this
+  session's marker, and what the working tree holds, and puts both in the
+  report the parent receives, as Mjolnir's observation ahead of the child's
+  own text. A process outside that scope, such as a job started with
+  `env -i setsid` whose launching shell has exited, is not seen. The report
+  waits for both observations; the worker has the relay's 15-second request
+  deadline for each, and a part it cannot give in that time is reported as
+  unavailable, with the reason. `list_agents` shows the same lines under
+  `facts`.
 - Its conversation, its report, and the files on its target stay. Its row
   shows the idle symbol and reads "Parked". The report message the parent
   receives and `list_agents` show it as finished, with `"parked": true`.

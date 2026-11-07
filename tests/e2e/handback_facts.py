@@ -4,10 +4,11 @@
 A real parent spawns a real child that starts a detached `setsid sleep`, leaves
 an uncommitted file and hands back claiming everything is committed. The test
 checks, against the machine's own process table, that the parent's report lists
-the sleep as running and detached and the file as uncommitted, that the park
-that follows says truthfully whether it stopped or spared the sleep, and that
-`list_agents` data (the recorded facts row) agrees. It runs on whichever
-harness `--harness` names; Claude and Codex differ in what a park leaves.
+the sleep as running and detached and the file as uncommitted, in the one
+message (the report waits for both observations), and that the recorded facts
+row agrees with it. With `--kill-daemon-at-handback` the daemon is killed
+between the child's handback and its report, and the next daemon's report must
+still carry the real facts. It runs on whichever harness `--harness` names.
 
 The store is read through Node's `node:sqlite` (Node 22.5 or newer): the
 system SQLite behind some hosts' Python cannot open the daemon's strict tables.
@@ -194,47 +195,27 @@ After spawning, end your turn with a one-line status. Each time a message from M
         sleeping = [p for p in processes["shown"] if "sleep 600" in p["command"]]
         assert sleeping and sleeping[0]["detached"], processes
         sleep_pid = sleeping[0]["pid"]
-        # The report is built from the process facts without waiting for the
-        # working tree: it carries the tree if Git was quick, or says it is
-        # still being read. Either way the stored facts get the tree.
-        assert facts["worktree"]["status"] in ("known", "pending"), facts
-
-        def stored_finish():
-            rows = query("SELECT finish_json FROM subagent_work_facts WHERE child_session_id=?", [child])
-            finish = json.loads(rows[0][0]) if rows and rows[0][0] else None
-            return finish if finish and finish["worktree"]["status"] == "known" else None
-
-        stored = eventually("working tree stored", stored_finish, timeout=120)
-        tree = stored["worktree"]["value"]
+        # The report waits for both observations: the processes and the working
+        # tree arrive in the one message, as observed (or unavailable with why,
+        # which this run must not see).
+        assert facts["worktree"]["status"] == "known", facts
+        tree = facts["worktree"]["value"]
         assert tree["untracked"] >= 1 and any(p["path"] == "notes.txt" for p in tree["shown"]), tree
+        # The recorded facts row is the same observation.
+        recorded = query("SELECT finish_json FROM subagent_work_facts WHERE child_session_id=?", [child])
+        assert recorded and json.loads(recorded[0][0])["processes"] == facts["processes"], recorded
+        assert json.loads(recorded[0][0])["worktree"] == facts["worktree"], recorded
         # The child's claim and Mjolnir's observation disagree, and both are in the text.
         text = subprocess.run(
             mj + ["transcript", "--session", parent, "--limit", "1000"],
             env=env, text=True, capture_output=True, timeout=120).stdout
         assert "Mjolnir observed this when it recorded this finish" in text, text[-3000:]
         assert "detached from the harness: " in text and "sleep 600" in text, text[-3000:]
+        assert "notes.txt" in text and "still being read" not in text, text[-3000:]
         lines = text.splitlines()
         first = next(i for i, line in enumerate(lines) if "Mjolnir observed this when it recorded" in line)
-        print("REPORT TEXT THE PARENT RECEIVED:\n" + "\n".join(lines[max(0, first - 3):first + 16]), flush=True)
-
-        parked = eventually("park message", lambda: events("subagent-parked-"), timeout=300)[0]
-        assert parked["wake"] is True, parked
-        park = parked["body"]["park"]
-        survived = [p["pid"] for p in park.get("survived_shown", [])]
-        stopped = [p["pid"] for p in park.get("gone_shown", [])]
-        # The park message must say what the process table says.
-        if alive(sleep_pid):
-            assert sleep_pid in survived and sleep_pid not in stopped, park
-            outcome = "survived"
-        else:
-            assert sleep_pid in stopped and sleep_pid not in survived, park
-            outcome = "stopped"
-        recorded = query("SELECT finish_json FROM subagent_work_facts WHERE child_session_id=?", [child])
-        assert recorded and json.loads(recorded[0][0])["processes"] == facts["processes"], recorded
-        # The park's record is its own row, keyed by the finish it followed.
-        parks = query("SELECT park_json FROM subagent_park_facts WHERE child_session_id=?", [child])
-        assert len(parks) == 1 and json.loads(parks[0][0]) == park, parks
-        print(f"PASS ({args.harness}): the park {outcome} the detached sleep; report and park message match the process table", flush=True)
+        print("REPORT TEXT THE PARENT RECEIVED:\n" + "\n".join(lines[max(0, first - 3):first + 18]), flush=True)
+        print(f"PASS ({args.harness}): the report listed the detached sleep and the untracked file together", flush=True)
     finally:
         if sleep_pid and alive(sleep_pid):
             os.kill(sleep_pid, 9)

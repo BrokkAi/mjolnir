@@ -705,11 +705,7 @@ enum DaemonLifecycleResult {
     Done,
     DeferredCleanup,
     Move(MoveOutcome),
-    /// How the park ended, and the park it recorded when it stopped a worker.
-    Park(
-        crate::controller::ParkOutcome,
-        Option<crate::database::StartedPark>,
-    ),
+    Park(crate::controller::ParkOutcome),
 }
 
 /// How one lifecycle operation ended when it failed.
@@ -792,7 +788,6 @@ mod snapshot;
 pub(crate) mod startup_followup;
 mod state;
 mod subagent_park;
-pub(crate) use subagent_park::settle_owed_followups_at_startup;
 mod support;
 pub(crate) mod ui_requests;
 mod views;

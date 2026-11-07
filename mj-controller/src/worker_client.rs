@@ -131,6 +131,7 @@ mod connect;
 mod exchange;
 use crate::streamed_child as proxy;
 mod relay;
+pub(crate) use relay::WorkObservation;
 mod reviewer;
 mod transport;
 use transport::*;

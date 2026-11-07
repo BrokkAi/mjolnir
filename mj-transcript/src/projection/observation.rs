@@ -1036,17 +1036,9 @@ fn delivered_external_events(
         .map(|event| {
             let description = mj_core::mailbox::describe_mailbox_event(event);
             // A child report is the parent's only record of the child's
-            // result, so show the report the agent received, not a summary. So
-            // are the follow-ups to it: what a park found of the processes,
-            // and the working tree a report promised, with any reason either
-            // could not be had.
+            // result, so show the report the agent received, not a summary.
             match (&event.body, description.body) {
-                (
-                    mj_core::mailbox::MailboxEventBody::SubagentFinished { .. }
-                    | mj_core::mailbox::MailboxEventBody::SubagentParked { .. }
-                    | mj_core::mailbox::MailboxEventBody::SubagentWorkingTree { .. },
-                    Some(report),
-                ) => {
+                (mj_core::mailbox::MailboxEventBody::SubagentFinished { .. }, Some(report)) => {
                     let report = report.lines().collect::<Vec<_>>().join("\n    ");
                     format!("{}\n    {report}", description.transcript_line)
                 }

@@ -431,14 +431,15 @@ impl RuntimeState {
         });
     }
 
-    /// Collect and store, once, what the child's worker observed for the
-    /// finish that completed turn `ordinal`, as far as it is observed at once:
-    /// the processes. The working tree is stored as pending; a Git read has no
-    /// fixed duration, and the report must not wait for it ([`Self::collect_finish_worktree`]
-    /// fills it in). The child's own task runs this, apart from the bounded
-    /// completion pool, so no other child's or parent's report waits on this
-    /// child's worker. A worker that does not answer within the ordinary
-    /// request deadline is stored as unknown, with the reason.
+    /// Collect and store, once, what the child's worker observed for the finish
+    /// that completed turn `ordinal`: its processes and its working tree, read
+    /// together, and the report waits for both. The child's own task runs this,
+    /// apart from the bounded completion pool, so no other child's or parent's
+    /// report waits on this child's worker. Each question has the relay's
+    /// ordinary request deadline (`RELAY_RPC_TIMEOUT`, 15 seconds); a worker that
+    /// does not answer within it, a large tree's Git read included, is stored as
+    /// that part unavailable with the error, which names the deadline, and the
+    /// connection is dropped, which ends the worker's read. No other timeout.
     pub(super) async fn collect_finish_facts(&self, child_id: &str, ordinal: u64) -> Result<()> {
         let relation = blocking({
             let child_id = child_id.to_owned();
@@ -462,127 +463,59 @@ impl RuntimeState {
         {
             return Ok(());
         }
-        self.collect_finish_facts_from(child_id, ordinal, self.scan_finish_processes(child_id))
+        self.collect_finish_facts_from(child_id, ordinal, self.scan_finish(child_id))
             .await
     }
 
-    /// Ask the child's worker for its processes, for a finish's facts. The
-    /// working tree is left pending.
-    async fn scan_finish_processes(&self, child_id: &str) -> FinishScan {
-        match self.connect_to_worker(child_id).await {
-            Ok(mut client) => match client.work_facts(true, false).await {
-                Ok(observation) => FinishScan {
-                    facts: mj_core::work_facts::WorkFacts {
-                        observed_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0),
-                        processes: observation.facts.processes,
-                        worktree: mj_core::work_facts::Observed::Pending,
-                    },
-                    accepted_ordinal: observation.accepted_ordinal,
-                },
-                Err(error) => FinishScan {
-                    facts: mj_core::work_facts::WorkFacts {
-                        observed_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0),
-                        processes: mj_core::work_facts::Observed::unavailable(format!(
-                            "the worker could not be asked for its processes: {error:#}"
-                        )),
-                        worktree: mj_core::work_facts::Observed::Pending,
-                    },
-                    accepted_ordinal: None,
-                },
-            },
-            Err(reason) => FinishScan {
-                facts: mj_core::work_facts::WorkFacts::unavailable(reason),
-                accepted_ordinal: None,
-            },
+    /// Ask the child's worker for its processes and its working tree at once,
+    /// each on a connection of its own: a worker answers one connection's
+    /// requests in order, and a slow Git read must not hold the processes.
+    async fn scan_finish(&self, child_id: &str) -> FinishScan {
+        let (processes, tree) = tokio::join!(
+            self.ask_worker(child_id, true, false),
+            self.ask_worker(child_id, false, true)
+        );
+        FinishScan {
+            processes: processes.map_parts(|facts| facts.processes, "processes"),
+            tree: tree.map_parts(|facts| facts.worktree, "working tree"),
         }
     }
 
+    async fn ask_worker(
+        &self,
+        child_id: &str,
+        processes: bool,
+        worktree: bool,
+    ) -> std::result::Result<crate::worker_client::WorkObservation, String> {
+        let mut client = self.connect_to_worker(child_id).await?;
+        client
+            .work_facts(processes, worktree)
+            .await
+            .map_err(|error| format!("{error:#}"))
+    }
+
     /// [`Self::collect_finish_facts`] with the question to the worker given.
-    /// The answer is stored only as what it is: if the worker had accepted newer
-    /// work by the time it answered, the processes may be that work's and not
-    /// the finish's, so they are stored as unavailable, with that reason.
+    /// Each answer is stored only as what it is: if the worker had accepted
+    /// newer work by the time it answered, the observation may be that work's
+    /// and not the finish's, so it is stored as unavailable, with that reason.
     pub(super) async fn collect_finish_facts_from(
         &self,
         child_id: &str,
         ordinal: u64,
         scan: impl std::future::Future<Output = FinishScan>,
     ) -> Result<()> {
-        let FinishScan {
-            mut facts,
-            accepted_ordinal,
-        } = scan.await;
-        if matches!(facts.processes, mj_core::work_facts::Observed::Known(_))
-            && let Err(reason) =
-                observation_is_about_finish(accepted_ordinal, ordinal, "processes were")
-        {
-            facts.processes = mj_core::work_facts::Observed::unavailable(reason);
-        }
+        let FinishScan { processes, tree } = scan.await;
+        let facts = mj_core::work_facts::WorkFacts {
+            observed_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0),
+            processes: processes.about_the_finish(ordinal, "processes were"),
+            worktree: tree.about_the_finish(ordinal, "working tree was"),
+        };
         let child_id = child_id.to_owned();
-        // Stored once, and only forward: facts a report's reconciliation
-        // recorded first stand.
+        // Stored once, and only forward: a collection that was under way cannot
+        // replace the facts of a newer finish.
         blocking(move || crate::database::record_finish_facts(child_id, ordinal, facts))
             .await
             .map(|_| ())
-    }
-
-    /// Read the working tree of the finish that completed turn `ordinal`, which
-    /// its facts record as pending, and store it. There is no deadline: the
-    /// wait belongs to this child's task alone, and it ends when the read does
-    /// or when the daemon goes (the replacement reads again). A worker that
-    /// cannot be asked is stored as that part unavailable, with the reason.
-    pub(super) async fn collect_finish_worktree(&self, child_id: &str, ordinal: u64) -> Result<()> {
-        let recorded = blocking({
-            let child_id = child_id.to_owned();
-            move || crate::database::load_work_facts(&[child_id])
-        })
-        .await?;
-        let pending = recorded.get(child_id).is_some_and(|recorded| {
-            recorded.finish_ordinal == Some(ordinal)
-                && recorded.finish.as_ref().is_some_and(|facts| {
-                    matches!(facts.worktree, mj_core::work_facts::Observed::Pending)
-                })
-        });
-        if !pending {
-            return Ok(());
-        }
-        let (read, accepted_ordinal) = match self.connect_to_worker(child_id).await {
-            Ok(mut client) => match client.work_facts_unbounded(false, true).await {
-                Ok(observation) => (observation.facts.worktree, observation.accepted_ordinal),
-                Err(error) => (
-                    // The park stops the worker that runs this read; say so
-                    // rather than that the worker could not be asked.
-                    if self
-                        .session_record(child_id)
-                        .is_some_and(|record| record.state == SessionState::Parked)
-                    {
-                        mj_core::work_facts::Observed::unavailable(
-                            "the child was parked before its working tree could be read",
-                        )
-                    } else {
-                        mj_core::work_facts::Observed::unavailable(format!(
-                            "the worker could not be asked for its working tree: {error:#}"
-                        ))
-                    },
-                    None,
-                ),
-            },
-            Err(reason) => (mj_core::work_facts::Observed::unavailable(reason), None),
-        };
-        // A parent may give the child new work right after the report, and a
-        // read that was still running then can have seen that work's changes.
-        // What a tree describes is the finish it was asked for: if the worker
-        // had accepted newer work when it answered, it is not that.
-        let worktree = match read {
-            mj_core::work_facts::Observed::Known(tree) => {
-                match observation_is_about_finish(accepted_ordinal, ordinal, "working tree was") {
-                    Ok(()) => mj_core::work_facts::Observed::Known(tree),
-                    Err(reason) => mj_core::work_facts::Observed::unavailable(reason),
-                }
-            }
-            other => other,
-        };
-        let child_id = child_id.to_owned();
-        blocking(move || crate::database::record_finish_worktree(child_id, ordinal, worktree)).await
     }
 
     /// Open a relay connection for a question to the child's worker: the
@@ -1018,11 +951,63 @@ impl RuntimeState {
     }
 }
 
-/// What the child's worker answered to a question about a finish: the facts, and
-/// the newest work it had accepted when it answered.
-pub(super) struct FinishScan {
-    pub facts: mj_core::work_facts::WorkFacts,
+/// One part of the facts as the worker answered, with the newest work it had
+/// accepted when it answered.
+pub(super) struct Observation<T> {
+    pub value: mj_core::work_facts::Observed<T>,
     pub accepted_ordinal: Option<u64>,
+}
+
+impl<T> Observation<T> {
+    /// The part as it is stored for the finish that completed `finish_ordinal`:
+    /// as observed unless the worker says newer work had been accepted.
+    fn about_the_finish(self, finish_ordinal: u64, what: &str) -> mj_core::work_facts::Observed<T> {
+        match self.value {
+            mj_core::work_facts::Observed::Known(value) => {
+                match observation_is_about_finish(self.accepted_ordinal, finish_ordinal, what) {
+                    Ok(()) => mj_core::work_facts::Observed::Known(value),
+                    Err(reason) => mj_core::work_facts::Observed::unavailable(reason),
+                }
+            }
+            unavailable => unavailable,
+        }
+    }
+}
+
+/// What the child's worker answered about a finish.
+pub(super) struct FinishScan {
+    pub processes: Observation<mj_core::work_facts::ProcessFacts>,
+    pub tree: Observation<mj_core::work_facts::WorktreeFacts>,
+}
+
+/// A worker's answer, or why it could not be had, as one part of the facts.
+trait IntoObservation {
+    fn map_parts<T>(
+        self,
+        part: impl FnOnce(mj_core::work_facts::WorkFacts) -> mj_core::work_facts::Observed<T>,
+        what: &str,
+    ) -> Observation<T>;
+}
+
+impl IntoObservation for std::result::Result<crate::worker_client::WorkObservation, String> {
+    fn map_parts<T>(
+        self,
+        part: impl FnOnce(mj_core::work_facts::WorkFacts) -> mj_core::work_facts::Observed<T>,
+        what: &str,
+    ) -> Observation<T> {
+        match self {
+            Ok(observation) => Observation {
+                value: part(observation.facts),
+                accepted_ordinal: observation.accepted_ordinal,
+            },
+            Err(reason) => Observation {
+                value: mj_core::work_facts::Observed::unavailable(format!(
+                    "the worker could not be asked for its {what}: {reason}"
+                )),
+                accepted_ordinal: None,
+            },
+        }
+    }
 }
 
 /// Whether an observation of the child taken after the finish that completed

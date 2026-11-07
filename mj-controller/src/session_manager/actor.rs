@@ -913,7 +913,12 @@ pub(super) async fn run_session_actor(
                         // The actor alone decides when its connection is
                         // free; a job never opens or reopens one.
                         if lifecycle.is_leased() {
-                            job.refuse(RelayJobDeferred(RelayJobDeferred::LIFECYCLE_HOLD).into());
+                            job.refuse(
+                                RelayJobDeferred(
+                                    "a lifecycle operation holds the relay connection",
+                                )
+                                .into(),
+                            );
                             continue;
                         }
                         let Some(connection) = connection.as_mut() else {

@@ -157,10 +157,9 @@ pub enum RelayRequest {
     CpuUsage,
     /// Connection-only observation of the processes this session's agent left
     /// running (unless `processes` is false) and of its working tree (unless
-    /// `worktree` is false); never journaled. The parts are separate requests
-    /// for callers that need only one: a park, which holds the worker's idle
-    /// reservation, asks for processes alone, and the Git read, which has no
-    /// fixed duration, is asked for on a connection of its own.
+    /// `worktree` is false); never journaled. A worker answers one connection's
+    /// requests in order, so the two parts are asked on connections of their
+    /// own: a slow Git read must not hold the processes.
     WorkFacts {
         #[serde(default = "work_facts_part_default")]
         processes: bool,
