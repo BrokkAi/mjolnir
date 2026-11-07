@@ -1,0 +1,270 @@
+# Scoped, short-lived AWS credentials for sessions, and IMDSv2 on Mjolnir-launched EC2
+
+This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds.
+
+This plan must be maintained in accordance with `.agents/PLANS.md` at the repository root. It addresses GitHub issue #1424, "Security: full AWS profile credentials are synced to every worker and EC2 IMDS is never constrained". It is a design only: no implementation has started.
+
+## Purpose / Big Picture
+
+Today, a session that runs a Bedrock-backed harness (a Claude Code or Codex profile that talks to Amazon Bedrock through the AWS credential chain) on a container or SSH target receives a full copy of the controller host's AWS credentials: access key id, secret access key, and session token for whatever AWS identity the host's selected profile resolves to. Malicious code that runs inside the session can read those credentials and act with every permission that identity has. Mjolnir does not bound that authority. Separately, when Mjolnir launches an EC2 instance for an `aws-ec2` machine, it passes nothing about the instance metadata service (IMDS), so whether code on the instance can read the instance profile's credentials with a plain HTTP GET (IMDSv1) depends on whatever the operator's launch template happens to say.
+
+After this change, a person can configure, per harness profile, an IAM role and an optional narrowing policy. Mjolnir then asks the AWS Security Token Service (STS) for credentials that belong to that role, narrowed by the policy, valid for a bounded time, and tagged with the Mjolnir session id so that AWS CloudTrail (AWS's audit log) shows which session made each call. Those scoped credentials, not the host's own, travel to the session worker and are refreshed before they expire. The host's own credentials never leave the controller host for that profile. Where no role is configured, behavior is exactly what it is today, and `mj doctor` warns that sessions receive unscoped credentials. Separately, every `aws ec2 run-instances` call that Mjolnir makes will require IMDSv2 (the token-based metadata protocol that plain GETs, such as those from a server-side request forgery bug, cannot use), Mjolnir will verify the launched instance reports that setting, and `mj doctor` will flag a launch template that allows IMDSv1.
+
+How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a container session on that profile, and run `aws sts get-caller-identity` inside the session. The output names `assumed-role/<role>/mj-<session id>` rather than the host's identity. Run `mj doctor` and see the profile's scope check pass (it performs a real, throwaway AssumeRole). Remove the `[profiles.<id>.aws]` table, run `mj doctor`, and see a warning that the profile's sessions receive unscoped credentials. For EC2, launch a session on an `aws-ec2` machine and run `aws ec2 describe-instances --instance-ids <id> --query 'Reservations[0].Instances[0].MetadataOptions.HttpTokens'`; the answer is `required`.
+
+## Progress
+
+- [x] (2026-11-06 00:00Z) Read issue #1424 and researched the code paths named in this plan.
+- [x] (2026-11-06 00:00Z) Wrote this ExecPlan (design only).
+- [ ] Parent review of this plan; resolve the open decisions listed under "Decision Log" marked "open".
+- [ ] Milestone 0: live AWS prototype. Record real `aws sts assume-role` output and an `aws ec2 run-instances --metadata-options` response; confirm the Bedrock default policy against both harnesses.
+- [ ] Milestone 1: IMDSv2 on Mjolnir-launched EC2 (launch flag, launch-response verification, Move compatibility, doctor template check).
+- [ ] Milestone 2: configuration type `[profiles.<id>.aws]`, validation, settings surface, shared "does this session receive synced credentials" predicate.
+- [ ] Milestone 3: STS minting and the per-session cache in the controller; launch-time use.
+- [ ] Milestone 4: credential sync integration and visible failure reporting.
+- [ ] Milestone 5: `mj doctor` checks (unscoped warning, role probe).
+- [ ] Milestone 6: documentation, focused tests, final validation, live isolated-instance check.
+
+## Surprises & Discoveries
+
+- Observation: Only Bedrock-style profiles on isolated targets receive synced AWS credentials at all, and the decision is made in exactly one function.
+  Evidence: `mj-controller/src/aws_credentials.rs`, function `source`, returns `None` unless `profile.auth_scheme() == AuthScheme::AwsCredentialChain`, and also returns `None` for `TargetLocator::LocalBare` and `TargetLocator::AwsEc2` backends and for any target whose own environment already carries AWS credential variables or `AWS_PROFILE`. So a per-target "scope" setting has nothing to attach to: a target that owns its credentials already opts out of the sync, and the only profiles that reach the sync are Bedrock profiles. The scope therefore belongs on the profile.
+
+- Observation: The credential sync already carries expiring credentials and renews them; nothing in the wire format needs to change.
+  Evidence: `mj-core/src/aws_credentials.rs`, struct `AwsCredentials`, has `session_token` and `expiration` fields in the AWS CLI "process" credential format (`{"Version":1,"AccessKeyId":...,"SecretAccessKey":...,"SessionToken":...,"Expiration":...}`); `validate` rejects an expired export; `state` reports a stored but expired file as absent, which makes the next reconciliation replace it; `RelayRequest::InstallAwsCredentials { data }` (relay protocol 46, `RELAY_AWS_CREDENTIALS_PROTOCOL`) carries the bytes. The temporary credentials STS returns have exactly these fields.
+
+- Observation: The current export is computed once per profile per sync pass and shared by every session of that profile; scoped credentials must be per session.
+  Evidence: `mj-controller/src/worker_client/credential_sync.rs`, `reconcile_profile_guarded`, picks the first target's `aws_credentials` source, runs `crate::aws_credentials::export` once, and passes the same result to every `reconcile_session`. The session id and CloudTrail attribution require a per-session mint, which moves the AWS step inside the per-target loop for role-configured profiles.
+
+- Observation: Local bare sessions and EC2 sessions never use this sync, so scoping cannot cover them, and the plan must say so rather than imply otherwise.
+  Evidence: the `LocalBare`/`AwsEc2` exclusion in `source` above. A local bare worker runs as the controller's user and can read `~/.aws` directly; an EC2 session uses its instance profile through IMDS.
+
+- Observation: The EC2 `run-instances` response already carries the instance's effective metadata options, so Mjolnir can verify the setting it asked for instead of trusting it.
+  Evidence: `mj-controller/src/controller/backend.rs` (~L1294) parses the `run-instances` JSON for `/Instances/0/InstanceId`; the same document has `/Instances/0/MetadataOptions/HttpTokens` (to be confirmed with a recorded real response in Milestone 0).
+
+- Observation: A Move to a new EC2 destination persists its `run-instances` argument vector in the database before running it, so a Move prepared by an older daemon will not carry the new flag.
+  Evidence: `mj-controller/src/controller/move_session/destination.rs` (~L103-L118) stores `launch_args: command.args` in `PreparedDestinationState::LaunchPending`, and executes those stored arguments later.
+
+## Decision Log
+
+- Decision: Put the scope on the harness profile, as an optional table `[profiles.<id>.aws]`, and nowhere else. No per-target or per-machine scope.
+  Rationale: The sync is selected by profile and backend kind (see the first discovery), and a target that carries its own AWS credentials opts out of the sync entirely, so a per-target setting would have no behavior to control. The profile already owns the AWS identity selection (`AWS_PROFILE` in `[profiles.<id>.environment]`, or the Codex provider's `aws.profile`), so the role that narrows that identity sits next to it. This extends the existing profile configuration instead of adding a parallel mechanism (AGENTS.md "one mechanism"). The `aws_profile` key on `[machines.<name>]` is a different thing (the identity that launches EC2 instances) and is unchanged.
+  Date/Author: 2026-11-06 / Claude (plan author), pending parent review.
+
+- Decision: Table fields are `role_arn` (required), `session_policy` (optional inline policy, a JSON string), `session_policy_arns` (optional list of managed policy ARNs), `duration_seconds` (optional), and `source_identity` (optional boolean, default false).
+  Rationale: These map one-to-one to the `aws sts assume-role` options `--role-arn`, `--policy`, `--policy-arns`, `--duration-seconds`, and `--source-identity`, so a reader who knows STS can predict the behavior. The names avoid the bare word `policy` because the role itself has policies and the table narrows them.
+  Date/Author: 2026-11-06 / Claude.
+
+- Decision: When `role_arn` is set and neither `session_policy` nor `session_policy_arns` is given, Mjolnir passes a built-in Bedrock invocation policy as the session policy. If either is given, Mjolnir passes exactly what the person configured and nothing built in.
+  Rationale: Every profile that reaches the sync is a Bedrock profile, so "a sensible scope for a Bedrock profile" has one answer: permission to invoke and list Bedrock models and nothing else. A session policy can only remove permissions from the role, never add them, so a too-narrow default cannot widen anything; at worst a harness gets `AccessDenied`, visibly. The list is provisional until Milestone 0 confirms it against both harnesses (see Interfaces for the text). Fallback if Milestone 0 finds more actions in use: widen to `bedrock:*`, still limited to the Bedrock service.
+  Date/Author: 2026-11-06 / Claude. Open for parent: confirm the default-policy approach (alternative: pass no policy and rely on the role alone).
+
+- Decision: Always set the STS role session name to `mj-<session id>`; set `SourceIdentity` to the same value only when the profile says `source_identity = true`.
+  Rationale: The role session name appears in the assumed-role ARN in every CloudTrail event (`arn:aws:sts::<account>:assumed-role/<role>/mj-<session id>`) and needs no trust-policy change, so attribution works for everyone. `SourceIdentity` is a stronger, immutable attribute that survives role chaining, but STS refuses the call unless the role's trust policy allows `sts:SetSourceIdentity`, so making it the default would break first-time setups. Making it opt-in keeps the default working and gives the person who needs it a one-line switch. A session id is 32 lowercase hex characters (`mj-core/src/state.rs`, `new_session_id`), so `mj-<id>` is 35 characters and fits STS's 64-character limit and character set for both fields.
+  Date/Author: 2026-11-06 / Claude. Open for parent: user's wording was "SourceIdentity or a session tag"; this plan chooses role session name always plus opt-in SourceIdentity, and does not use session tags (they need `sts:TagSession` in the trust policy for the same reason).
+
+- Decision: Do not choose a duration. When `duration_seconds` is unset, omit `--duration-seconds` and let STS apply its own documented default of 3600 seconds. When it is set, pass it unchanged and let STS reject out-of-range values.
+  Rationale: STS accepts 900 seconds up to the role's `MaxSessionDuration` (1 to 12 hours), but when the calling identity is itself an assumed role (role chaining) the cap is 1 hour. A 3600-second request is valid in every case, including chaining, and it is STS's default, so Mjolnir invents no constant. Reading the role's maximum would need `iam:GetRole` on the controller's identity, which the person may not grant, and a longer lifetime widens the window in which stolen credentials work. Refreshing costs one STS call per session per half hour. The refresh rule below derives from the granted lifetime and so scales with whatever duration applies. STS's own error text names an out-of-range duration, which Mjolnir surfaces.
+  Date/Author: 2026-11-06 / Claude. Open for parent: the request said "take the maximum from the role". This plan departs from that deliberately, for the reasons above; say so if the maximum is wanted (it would add an `iam get-role` call and its permission).
+
+- Decision: Refresh a cached scoped credential when half of its granted lifetime has elapsed.
+  Rationale: The GitHub App token cache refreshes below a fixed ten-minute threshold (`TOKEN_REFRESH_THRESHOLD` in `mj-controller/src/controller/github_app.rs`) because its tokens always last an hour. A fixed threshold would be wrong for a configurable lifetime (a 15-minute lifetime would refresh on every pass). Half the granted lifetime is derived, not guessed: it leaves at least 7.5 minutes (the shortest STS lifetime is 15 minutes) between refresh and expiry, against a credential sync cadence of about one minute (`docs/src/content/docs/security.md`, "Credential synchronization and exclusion"), so a transient STS failure gets several retries before the session's credentials lapse.
+  Date/Author: 2026-11-06 / Claude.
+
+- Decision: The controller mints, using the host's own chain through the AWS CLI, run through the shared subprocess helpers.
+  Rationale: `crate::aws_credentials::export` already shells out to `aws configure export-credentials` through `CommandExecutor` and `BoundedProcessExecutor` with the selected `AWS_PROFILE` and environment (`AwsCredentialSource`). Minting uses the same executor, environment and `--profile`, so whichever login the person has (SSO, static keys, a credential process) works the same way and no AWS SDK dependency is added. The existing 30-second bound on that command is reused; it is not a new cap.
+  Date/Author: 2026-11-06 / Claude.
+
+- Decision: Failure behavior. If AssumeRole fails at session launch or resume, the launch is refused with the AWS error code and a stated remedy; the session does not start with unscoped credentials. If a refresh fails during a running session, the worker keeps the credentials it already has (they are scoped and still valid until their expiry), the sync reports a failed outcome that the existing credential-sync notices show to the person, and the next pass retries. There is no fallback to the unscoped export at any point.
+  Rationale: AGENTS.md says a narrow fallback hides a broken design and that failure must be visible. A Bedrock harness cannot call its model without AWS credentials, so a session that started with none would be a dead end that looks alive; refusing the launch with the reason is the same behavior as today's failed export ("Could not resolve AWS credentials for the isolated worker") and tells the person how to proceed. The remedy text includes the one-step exit "remove `role_arn` to return to unscoped credentials", so the person is never stuck. Keeping the previous scoped credentials during a transient outage is not a weaker scope, so it is not the forbidden kind of fallback.
+  Date/Author: 2026-11-06 / Claude. Open for parent: confirm refusal at launch (versus starting the session without AWS credentials).
+
+- Decision: Local bare and EC2 targets are out of scope for scoped credentials and the documentation says so. Doctor's unscoped warning is raised only when the profile would actually receive synced credentials on some configured target.
+  Rationale: Scoping files copied to a local bare worker would be a mirage because it can read the host's own AWS files; EC2 sessions use the instance profile. A warning that fires for a profile used only on local bare would be noise the person cannot act on. The "does this profile and backend receive synced credentials" question is answered by one shared predicate used by `source`, by the launch environment code, and by doctor, so the three cannot disagree (AGENTS.md: two predicates for one question are a bug).
+  Date/Author: 2026-11-06 / Claude.
+
+- Decision: Use `--metadata-options HttpTokens=required` only (as decided by the requester), verify it in the launch response, and have doctor warn on a launch template that allows IMDSv1.
+  Rationale: Command-line parameters to `run-instances` take precedence over the launch template's values, but this is the one point the plan could not verify without an AWS account, so Milestone 0 confirms it, and also confirms whether passing only `HttpTokens` leaves the template's `HttpPutResponseHopLimit` alone. Verification in the response means that if the override ever does not apply, the launch fails visibly instead of leaving an IMDSv1 instance. Doctor's warning is a warning, not a failure, because Mjolnir's own launches are protected regardless; the template matters to other users of it.
+  Date/Author: 2026-11-06 / Claude.
+
+- Decision: No relay protocol change, no database migration, no new wire message.
+  Rationale: See the second discovery. Older workers that already understand protocol 46 accept scoped credentials as they accept today's. Older workers (below protocol 46) are already skipped for AWS sync. Configuration is additive and optional, so an existing `config.toml` loads unchanged.
+  Date/Author: 2026-11-06 / Claude.
+
+## Outcomes & Retrospective
+
+Not started. At completion, record what was achieved against the Purpose section, what remains (in particular any Bedrock actions the default policy needed beyond the provisional list), and lessons learned.
+
+## Context and Orientation
+
+Mjolnir has a controller (the long-running `mj daemon-run` process, crate `mj-controller`) that owns configuration, the database and session lifecycle, and workers (crate `mj-worker`, one per session, running inside a container or on an SSH host or locally) that run the harness. A harness is the coding agent program, such as Claude Code or Codex. The controller talks to each worker over the relay, a private control connection; `RelayRequest` in `mj-core/src/relay/protocol.rs` lists its messages. Credentials travel only on that connection and are kept out of the durable event journal.
+
+Amazon Bedrock is AWS's hosted model service. A Bedrock profile is a harness profile whose `auth_scheme()` (in `mj-core/src/config/harness.rs`, around L1320-L1350) is `AuthScheme::AwsCredentialChain`: Claude with `CLAUDE_CODE_USE_BEDROCK=1` in its environment, or Codex with a Bedrock model provider. Such a profile signs requests with AWS credentials found by the AWS "credential chain" (environment variables, a named profile in `~/.aws/config`, single sign-on, and so on). docs/src/content/docs/profiles.md, section "Codex on Amazon Bedrock", documents the profile side.
+
+How credentials reach a session today. `crate::aws_credentials::source` in `mj-controller/src/aws_credentials.rs` decides whether a session gets synced AWS credentials and builds an `AwsCredentialSource` (defined in `mj-core/src/aws_credentials.rs`: a map of environment variables the AWS CLI should run with, including `AWS_PROFILE`). `Controller::aws_credential_source(session_id)` in `mj-controller/src/controller/worker_binary/launch.rs` (~L56) calls it for a session. At launch (same file, ~L208-L212) the controller runs `crate::aws_credentials::export`, which executes `aws configure export-credentials --format process --profile <profile>` through the `CommandExecutor` trait (`mj-core/src/targets`), turns the output into an `AwsCredentials` value, and installs it into the staged profile home with `AwsCredentials::install`. That writes three files into the session's home: `aws-credentials` (the JSON), `aws-config` (a profile whose `credential_process = cat <path>/aws-credentials`, so the AWS SDK inside the session re-reads the file when its credentials expire), and `aws-empty-credentials`. The same file's launch-environment code (~L1048-L1065) points `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE` and `AWS_PROFILE` at them. While the session runs, the credential sync reconciles the worker's copy: `CredentialSyncCoordinator` and `reconcile_profile_guarded` in `mj-controller/src/worker_client/credential_sync.rs` run about once a minute per profile, call `export` once per profile, and `reconcile_on` compares the fingerprint of the controller's `AwsCredentials` bytes with the worker's (`RelayRequest::AwsCredentialsState`) and pushes with `RelayRequest::InstallAwsCredentials` when they differ. The worker side is `mj-worker/src/worker_runtime/unix/requests.rs` (~L428 and ~L455), which decodes, validates (rejecting expired JSON), and installs. Targets are built for the sync by `credential_sync_targets_from_sources` in `mj-controller/src/pollers/worker_targets.rs`; `CredentialSyncTarget` (in `mj-core/src/credentials.rs`, ~L660) carries the `AwsCredentialSource`, and the code that decides whether a queued sync is still valid compares whole targets for equality, so a configuration change that alters the source invalidates obsolete work.
+
+The GitHub App token cache is the model for this design. `GithubAppTokenProvider` in `mj-controller/src/controller/github_app.rs` is shared process-wide (`shared()`), keeps a map from a cache key to a tokio mutex around an optional entry (`token`, `expires_at`), takes an injectable clock (`now: Clock`) for tests, serves a cached token while enough lifetime remains, and mints a new one under the per-key mutex so concurrent callers share one mint.
+
+Failures during a sync are reported by `CredentialSyncOutcome { outcome: Err(String) }` and shown by `CredentialSyncNotices` in `mj-controller/src/pollers/credential_sync.rs`, which posts a notice when the failure message for a profile and session changes.
+
+EC2 provisioning. `ec2_launch_command` in `mj-controller/src/targets/provision.rs` (~L575-L608) builds `aws --profile <p> --region <r> ec2 run-instances --launch-template ... --tag-specifications ... --output json`. It is used both by ordinary provisioning (`provision.rs` ~L164) and by Move to a new EC2 destination (`mj-controller/src/controller/move_session/destination.rs` ~L103, which appends a client token and stores the arguments in the database). The response is parsed in `mj-controller/src/controller/backend.rs` (~L1294) and in `destination.rs` (~L141-L152). Doctor's EC2 check is `aws_target_check` in `mj-controller/src/doctor.rs` (~L2890-L3000); it calls `describe-launch-templates` only. Cleanup of a managed instance is `mj-controller/src/targets/cleanup.rs` (`terminate-instances`). docs/AWS.md documents the machine configuration and IAM permissions; docs/src/content/docs/security.md has the section "Credential synchronization and exclusion".
+
+Terms. STS (Security Token Service) issues temporary credentials. `AssumeRole` is the STS operation that returns temporary credentials for an IAM role. A session policy is a policy passed to AssumeRole; the resulting credentials get the intersection of the role's own permissions and the session policy. A role's trust policy says who may assume it. CloudTrail records API calls with the caller's identity. IMDS is the instance metadata service at 169.254.169.254 from which code on an EC2 instance can fetch the instance profile's credentials; IMDSv2 requires a session token obtained with an HTTP PUT first, which blocks simple request-forgery reads.
+
+Repository rules that shape this plan (AGENTS.md): tests only in the four categories (golden, end-to-end, integration against a third-party, tricky condition), no unit tests of ordinary happy paths; no protective caps on speculation; one mechanism; no silent fallback; run child processes through the shared helpers; test in a named `--instance`; the daemon's handoff admission rules (any new daemon-owned operation must be short and bounded or resumable). Minting runs inside the existing supervised credential-sync task and the launch path, both already admission-aware, and spawns no new background operation.
+
+## Plan of Work
+
+The work has seven parts, ordered so each leaves the repository working. EC2 IMDSv2 is independent of the credential work and goes first because it is small and shippable alone.
+
+Milestone 0, a live prototype, removes the three facts that code reading cannot settle: the exact `aws sts assume-role` output and argument syntax, how `--metadata-options` composes with a launch template, and which Bedrock actions the harnesses need.
+
+Milestone 1 adds the IMDSv2 flag to `ec2_launch_command` in `mj-controller/src/targets/provision.rs`: arguments `--metadata-options HttpTokens=required`. It adds one shared function, in the same module, that takes the parsed `run-instances` response and returns an error unless `/Instances/0/MetadataOptions/HttpTokens` is `required`; the error names the instance and says Mjolnir required IMDSv2 and the response disagrees. Both response parsers (`backend.rs` and `destination.rs`) call it, after the instance id has been persisted so the existing cleanup paths own the instance (read `targets/cleanup.rs` and the provisioning failure handling to confirm that a failure after launch leads to termination, and add a test if it does not). For Move, the stored argument vector of a pending launch may predate this change, so the code that executes a `LaunchPending` destination must apply the same flag idempotently (a small function `with_required_imds(args)` that appends `--metadata-options HttpTokens=required` unless the vector already contains `--metadata-options`), used by `ec2_launch_command` and by the Move execution path, so one definition owns the flag. In `aws_target_check` in `mj-controller/src/doctor.rs`, after the template is found, call `ec2 describe-launch-template-versions` for the configured version (the target's `launch_template_version`, or `$Default`), query `LaunchTemplateVersions[0].LaunchTemplateData.MetadataOptions.HttpTokens`, and return `DoctorCheck::warning` when it is `optional` (or absent, which EC2 treats as the account's default; report absent as "does not set it" without a warning if the response cannot show the account default), with remediation text: set HttpTokens to `required` in the template; Mjolnir requires it for its own launches either way. If the describe call fails (it needs `ec2:DescribeLaunchTemplateVersions`, which docs/AWS.md already lists), keep the existing Ready result and say the setting could not be read. Update docs/AWS.md: the exact `run-instances` command now includes `--metadata-options`, the new doctor check, and a statement that sessions on EC2 read instance-profile credentials through IMDSv2 only.
+
+Milestone 2 adds configuration. Create `mj-core/src/config/aws.rs` with `AwsRoleConfig` (see Interfaces), re-exported like the GitHub types in `mj-core/src/config`. Add `pub aws: Option<AwsRoleConfig>` to `HarnessProfile` in `mj-core/src/config/harness.rs` with `#[serde(default, skip_serializing_if = "Option::is_none")]`. Extend the profile's validation (the same place that rejects `muse_auto_review` on a non-Muse profile) to reject `aws` on a profile whose `auth_scheme()` is not `AwsCredentialChain`, with the message "`[profiles.<id>.aws]` applies only to profiles that authenticate with the AWS credential chain (Bedrock)", and to call `AwsRoleConfig::validate`. Extend `AwsCredentialSource` in `mj-core/src/aws_credentials.rs` with `pub role: Option<AwsRoleConfig>` so that a configuration change makes the sync target compare unequal (the existing equality-based staleness check then does the right thing); `Debug` already prints only variable names and must keep doing so (the role ARN is not secret, but the inline policy can be long; print only whether a role is set). Factor the predicate out of `crate::aws_credentials::source` in `mj-controller/src/aws_credentials.rs` into one function (for example `pub(crate) fn backend_receives_synced_credentials(profile, backend_kind_or_locator, target_environment) -> bool`) that `source` calls, that the launch-environment code at launch.rs ~L1048 reaches through `source`, and that doctor calls with a target template instead of a locator; have `source` fill `role` from `profile.aws`. The settings surface (`mj-client/src/settings/schema.rs`, profile defaults ~L47, field labels ~L290-L330, and `hidden_key` in `mj-client/src/settings/page.rs` ~L196) gets a nullable `aws` object so a person can edit it; hide it for harness kinds other than Claude and Codex, as `guardian_review_model` is hidden for non-Codex kinds. Inspect `mj-controller/tests/golden/viewer-settings-exchange.txt` and extend it if it renders profile fields.
+
+Milestone 3 adds minting. Create `mj-controller/src/aws_assume_role.rs` (declared in `mj-controller/src/lib.rs`) containing a process-wide `ScopedAwsCredentials` provider shaped like `GithubAppTokenProvider`: `shared()`, a `now` clock field for tests, and a map from `ScopedKey` (session id plus the `AwsRoleConfig` plus the selected `AWS_PROFILE` value) to a tokio mutex around `Option<ScopedEntry>`, where `ScopedEntry` holds the `AwsCredentials`, `minted_at`, and `expires_at`. The method `credentials_for(&self, session_id, source, executor) -> Result<AwsCredentials>` takes the key's mutex, returns the cached entry if `now < minted_at + (expires_at - minted_at) / 2`, and otherwise mints. On every call it first drops entries whose `expires_at` has passed, so the daemon does not hold expired secrets and no entry outlives its usefulness. Minting runs `aws sts assume-role` with `sensitive_output = true`, the source's environment, `AWS_CLI_AUTO_PROMPT=off`, `--profile <AWS_PROFILE>`, `--role-arn`, `--role-session-name mj-<session id>`, `--output json`, plus `--policy <json>`, `--policy-arns arn=<arn>...`, `--duration-seconds <n>`, and `--source-identity mj-<session id>` as configured (the built-in default policy supplies `--policy` when neither policy option is set). It parses the `Credentials` object (`AccessKeyId`, `SecretAccessKey`, `SessionToken`, `Expiration`) into the existing `AwsCredentials` through the same JSON shape `from_export` accepts (add `AwsCredentials::from_assume_role(profile, bytes)` next to `from_export`, with the same no-secret-in-errors discipline). The blocking CLI call runs in `tokio::task::spawn_blocking` with `BoundedProcessExecutor::new(Duration::from_secs(30))`, exactly as `reconcile_profile_guarded` does for export today. Error text never includes CLI output, except one line: when stderr matches the AWS CLI's `An error occurred (<Code>) when calling the AssumeRole operation: <message>` shape, the code and message are included, because they name the problem (`AccessDenied`, `ValidationError`, `ExpiredToken`) and contain no credentials; any other failure reports only the exit status and the standard advice. Add one method on the controller side, `obtain(source, session_id, executor)`, that returns `export(...)` when `source.role` is `None` and `credentials_for(...)` otherwise, and call it from launch.rs ~L208-L212 in place of the direct `export` call. Launch errors gain the context text: "Could not assume AWS role <role_arn> for this session: <code and message>. Check that the controller's AWS login can assume the role and that the role's trust policy allows it; or remove `[profiles.<id>.aws]` to give sessions your AWS credentials unscoped."
+
+Milestone 4 integrates the sync. In `reconcile_profile_guarded` (`credential_sync.rs` ~L303-L320), keep the single per-profile `export` for targets whose `AwsCredentialSource.role` is `None`, and for targets with a role call the provider per target inside the existing per-target loop, within the `gate.run_background` block next to the per-target GitHub token fetch, so the work stays admission-gated and supervised like the GitHub token. A failure becomes that target's `CredentialSyncOutcome { outcome: Err(..) }`, and nothing is pushed for that session, so the worker keeps its current files until they expire. `reconcile_session` and `reconcile_on` need no change: they take an `AwsCredentials` value and compare fingerprints, and the cache returns the identical entry until refresh, so a minute-by-minute pass does not push every time. After a daemon restart the cache is empty, so each live role-configured session receives one fresh mint and one push; that costs one STS call per session and is accepted rather than adding a relay request to read the worker's copy. Verify that the notice text produced for a failed outcome reaches the person (via `CredentialSyncNotices`) and reads clearly for the AWS error line.
+
+Milestone 5 adds doctor checks. In `mj-controller/src/doctor.rs`, next to `aws_harness_authentication_check` (~L1063), add a scope check for each Bedrock profile. With `profile.aws` unset and the shared predicate true for at least one configured target template, return `DoctorCheck::warning` saying that sessions of this profile on isolated targets receive the controller's AWS credentials unscoped, with remediation pointing to `[profiles.<id>.aws]` and docs. With `profile.aws` set, run one real `aws sts assume-role` through the same command builder as Milestone 3 with role session name `mj-doctor` and report Ready ("assumed <role> with the configured policy; credentials last until <Expiration>") or a fixable failure carrying the AWS error line and the remedy. When `AWS_BEARER_TOKEN_BEDROCK` is set in the profile (an API key rather than the credential chain), report that the key is not covered by this feature. Doctor probes run through the existing `executor`, so tests pass a hand-written fake.
+
+Milestone 6 writes documentation, finishes tests, runs validation, and performs the live check described under "Validation and Acceptance".
+
+## Concrete Steps
+
+All commands run from the repository root, `/home/jonathan/Projects/mjolnir-wt/1424-aws-scoped` (or a fresh worktree of it). Run `cargo test` and `cargo clippy` outside the restricted sandbox (AGENTS.md). Do not redirect Cargo's output directory. Test any build of the daemon with `--instance aws-scoped-test`; a binary run from a Cargo target directory refuses the default instance.
+
+Before Milestone 0, claim the issue: `gh issue edit 1424 --add-assignee @me --add-label agent-in-progress` (AGENTS.md "Coordination").
+
+Milestone 0 (needs an AWS account the person controls; if the implementer has none, ask the person to run these and paste the output). Create an IAM role `mj-scoped-test` that trusts the identity of the controller host's AWS profile and has Bedrock invoke permissions. Then:
+
+    aws --profile <host-profile> sts assume-role \
+      --role-arn arn:aws:iam::<account>:role/mj-scoped-test \
+      --role-session-name mj-0123456789abcdef0123456789abcdef \
+      --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["bedrock:InvokeModel"],"Resource":"*"}]}' \
+      --policy-arns arn=arn:aws:iam::aws:policy/AmazonBedrockReadOnly \
+      --duration-seconds 900 \
+      --source-identity mj-0123456789abcdef0123456789abcdef \
+      --output json
+
+Expected: a JSON document with `Credentials` (`AccessKeyId`, `SecretAccessKey`, `SessionToken`, `Expiration`), `AssumedRoleUser`, and `SourceIdentity`. Save it with the secrets replaced by obvious placeholders (keep the `Expiration` format and the field set exactly) as `mj-controller/tests/fixtures/aws-sts-assume-role.json`. Record the stderr line of a deliberate failure (an unknown role ARN) in `mj-controller/tests/fixtures/aws-sts-assume-role-access-denied.txt`. Confirm the `--policy-arns arn=...` syntax, and that omitting `--duration-seconds` yields a one-hour `Expiration`. For IMDS: launch with a template that sets `HttpTokens=optional` and `HttpPutResponseHopLimit=2`, adding `--metadata-options HttpTokens=required`, and record `/Instances/0/MetadataOptions` from the response and from a later `describe-instances`; save the response excerpt as `mj-controller/tests/fixtures/aws-run-instances-imdsv2.json`. If the hop limit reverts to 1, decide whether to pass `HttpPutResponseHopLimit` from the template (add a Decision Log entry). For Bedrock: run one Claude (`CLAUDE_CODE_USE_BEDROCK=1`) turn and one Codex Bedrock turn with the role's session policy set to the provisional default in Interfaces, then check CloudTrail (or the harness error output) for `AccessDenied` events; add any action found, or widen to `bedrock:*` as recorded above. Write the results in `Surprises & Discoveries`.
+
+Milestone 1:
+
+    cargo test -p mj-controller ec2_launch
+    cargo test -p mj-controller doctor_ec2
+
+Expected after the change: the launch-argument test shows `--metadata-options HttpTokens=required`; the new verification test fails on a recorded response that says `optional` and passes on `required`; the doctor test shows the warning for a template that allows IMDSv1.
+
+Milestones 2 to 5, after each: `cargo test -p mj-core aws`, `cargo test -p mj-controller aws_assume_role`, `cargo test -p mj-controller credential_sync`, `cargo test -p mj-controller doctor`, using the filters that match the tests added (libtest accepts several filters; AGENTS.md says run only what changed per round).
+
+Milestone 6, once: `cargo clippy --all-targets -- -D warnings` for the workspace and the full test suites of `mj-core`, `mj-controller`, `mj-client` and `mj-worker` (the touched crates), on the dev profile.
+
+## Validation and Acceptance
+
+Automated, in the four allowed categories.
+
+Integration with the AWS CLI (a third-party tool): the recorded `aws-sts-assume-role.json` fixture is parsed by `AwsCredentials::from_assume_role`; the test asserts the resulting process-format JSON, that `Expiration` (the CLI emits an offset like `+00:00`) is accepted by `validate`, and that the secrets are absent from every error the function can return. A second test feeds the recorded failure line and asserts the surfaced error contains the AWS error code and message and nothing else from the output. The command-line vector built for a configured role (role, inline policy, two managed policy ARNs, duration, source identity) is compared with a checked-in golden file `mj-controller/tests/golden/aws-assume-role-command.txt`; the same arguments are the ones Milestone 0 ran against real AWS, which is what ties the golden to the real CLI. The tests never call AWS; they use a hand-written fake `CommandExecutor`, like `FailedExport` in `mj-controller/src/aws_credentials.rs` tests.
+
+Tricky conditions, in `mj-controller/src/aws_assume_role.rs` with the injected clock: a cached credential is served before half its granted lifetime and replaced after (shortest 900 s and default 3600 s cases); two sessions with the same role get separate entries and separate session names; expired entries are dropped; two concurrent callers for one key cause exactly one mint; a failed mint returns an error and does not corrupt or evict a still-valid entry. In `mj-controller/src/worker_client/tests.rs`, extending the existing AWS sync test near L1558 (which builds `remote.aws_credentials = Some(AwsCredentialSource {..})`): a role-configured session whose mint fails produces an `Err` outcome and sends no `InstallAwsCredentials` request, and the worker's installed files are unchanged; a role-configured session whose mint succeeds installs once and a second pass pushes nothing. A test with a source that has `role: Some(..)` asserts the unscoped `export` is never invoked for it (a fake executor that fails the test if it sees `configure export-credentials`).
+
+EC2: update the existing `ec2_launch_command` expectations in `mj-controller/src/targets/tests.rs` (~L2587 and ~L2647) to include the flag; a test of the verification function with the recorded response excerpt (`required` passes, `optional` fails, a missing field fails); a Move test that a stored `LaunchPending` argument vector lacking the flag gets it before execution and one that has it is unchanged (this pins the upgrade case); a doctor test with a fake executor returning a template version with `HttpTokens: optional`. If `mj-controller/tests/golden/doctor-external-runtime-checks.txt` renders the EC2 or harness AWS checks, extend that golden for the new check text instead of adding new tests.
+
+Config: extend the existing settings golden if the profile fields appear in it; no separate parse test for defaults or field validation.
+
+Manual, in an isolated instance (never the default instance), after Milestones 1 to 5:
+
+    cargo build
+    target/debug/mj --instance aws-scoped-test daemon status
+
+Create a throwaway `MJ_CONFIG_DIR` and `MJ_DATA_DIR` with a Bedrock Claude profile (`CLAUDE_CODE_USE_BEDROCK=1`, `AWS_PROFILE=<host-profile>`), add `[profiles.<id>.aws]` with `role_arn` for the role from Milestone 0, add a Podman or Docker target, and start a session in the TUI driven through tmux (live-test isolation, as recorded in the user's notes). Inside the session run `aws sts get-caller-identity`; expect an ARN ending in `assumed-role/mj-scoped-test/mj-<session id>`. Wait past half the lifetime (use `duration_seconds = 900` and wait about 8 minutes) and rerun it; expect the same role with a new `AccessKeyId` prefix or a later expiry visible in the file `aws-credentials` in the session home, with no restart. Break the trust policy and wait for the next refresh; expect a credential-sync notice naming `AccessDenied`, and the session still working until the old credentials expire. Remove the `[profiles.<id>.aws]` table and run `mj --instance aws-scoped-test doctor`; expect the unscoped warning. Launch an EC2 session on an `aws-ec2` machine and run the `describe-instances` command from the Purpose section; expect `required`.
+
+Acceptance is the behavior above plus: the new tests fail before their change and pass after, workspace `cargo clippy --all-targets -- -D warnings` is clean, and the touched crates' test suites pass.
+
+## Idempotence and Recovery
+
+Every step is additive and repeatable. Configuration is optional; removing `[profiles.<id>.aws]` returns a profile to today's behavior on the next sync pass and the next launch. The cache is rebuildable: a daemon restart empties it and costs one STS call per live role-configured session. Credential files in a session are replaced atomically by the existing `AwsCredentials::install`. Doctor's AssumeRole probe is read-only apart from a CloudTrail event. In Milestone 1, if the IMDS verification rejects a launch, the instance has an owned, persisted id and follows the existing termination path; if Milestone 0 shows the launch-template override does not apply, stop and revisit the decision rather than weakening the verification. If a milestone has to be reverted, each stands alone: the EC2 change does not depend on the credential changes, and Milestones 2 to 5 are guarded by the optional `aws` table.
+
+## Artifacts and Notes
+
+Provisional default session policy, used only when `role_arn` is set and no policy option is configured (confirm in Milestone 0):
+
+    {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":[
+      "bedrock:InvokeModel","bedrock:InvokeModelWithResponseStream",
+      "bedrock:ListInferenceProfiles","bedrock:GetInferenceProfile",
+      "bedrock:ListFoundationModels","bedrock:GetFoundationModel"],
+      "Resource":"*"}]}
+
+The Bedrock Converse APIs are authorized by `bedrock:InvokeModel`, so no separate action is listed. The resulting permissions are this list intersected with the role's own, so the person's role still bounds the resources (specific model ARNs, regions).
+
+Example configuration after the change:
+
+    [profiles.bedrock-luna]
+    kind = "codex"
+    home = "/home/ubuntu/.codex-bedrock"
+
+    [profiles.bedrock-luna.environment]
+    AWS_REGION = "us-east-1"
+    AWS_PROFILE = "work"
+
+    [profiles.bedrock-luna.aws]
+    role_arn = "arn:aws:iam::123456789012:role/mj-bedrock-session"
+    # session_policy = '{"Version":"2012-10-17","Statement":[...]}'
+    # session_policy_arns = ["arn:aws:iam::aws:policy/AmazonBedrockReadOnly"]
+    # duration_seconds = 3600
+    # source_identity = true
+
+What the role needs. The controller's AWS identity (the `AWS_PROFILE` above) needs `sts:AssumeRole` on that role. The role's trust policy must name that identity. If `source_identity = true`, the trust policy must also allow `sts:SetSourceIdentity`. The role's own permissions should already be limited to what sessions need; the session policy then narrows them further per session.
+
+Honest limits to state in the documentation: this scopes credentials delivered to container and SSH sessions through the credential sync; local bare sessions still read the host's AWS files directly, EC2 sessions use their instance profile (now IMDSv2 only), and a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`) is not covered. Scoped credentials limit what stolen credentials can do and for how long; they do not stop code in the session from using them during their lifetime.
+
+## Interfaces and Dependencies
+
+No new crate dependency. The AWS CLI v2 (`aws`), already required, is the only AWS interface.
+
+In `mj-core/src/config/aws.rs`:
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct AwsRoleConfig {
+        pub role_arn: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub session_policy: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub session_policy_arns: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub duration_seconds: Option<u32>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub source_identity: bool,
+    }
+
+    impl AwsRoleConfig {
+        /// role_arn has the form arn:<partition>:iam::<12 digits>:role/<path and name>;
+        /// session_policy, when set, parses as a JSON object; each policy ARN starts with
+        /// "arn:". Sizes and counts are left to STS to refuse; Mjolnir does not restate its limits.
+        pub fn validate(&self) -> Result<()>;
+    }
+
+In `mj-core/src/aws_credentials.rs`: `AwsCredentialSource` gains `pub role: Option<AwsRoleConfig>`; `AwsCredentials` gains `pub fn from_assume_role(profile: &str, bytes: &[u8]) -> Result<Self>` (reads the STS `Credentials` object, reuses `validate`, no secret in any error).
+
+In `mj-controller/src/aws_credentials.rs`: one predicate shared by `source`, launch and doctor, `pub(crate) fn receives_synced_credentials(profile: &HarnessProfile, backend: BackendKind, target_environment: &BTreeMap<String, String>) -> bool` (where `BackendKind` is whatever lets both a `TargetLocator` and a `TargetTemplate` be classified as local-bare, EC2 or other; the implementer chooses the smallest shape that both callers can build), and `pub(crate) fn obtain(source: &AwsCredentialSource, session_id: &str, executor: &impl CommandExecutor) -> Result<AwsCredentials>`.
+
+In `mj-controller/src/aws_assume_role.rs`:
+
+    pub(crate) struct ScopedAwsCredentials { /* clock, map of ScopedKey to tokio Mutex<Option<ScopedEntry>> */ }
+    impl ScopedAwsCredentials {
+        pub(crate) fn shared() -> Arc<Self>;
+        pub(crate) async fn credentials_for(&self, session_id: &str, source: &AwsCredentialSource)
+            -> Result<AwsCredentials>;
+        pub(crate) fn assume_role_command(role: &AwsRoleConfig, selected_profile: &str,
+            session_name: &str) -> CommandSpec;   // also used by doctor with "mj-doctor"
+    }
+
+In `mj-controller/src/targets/provision.rs`: `pub fn with_required_imds(args: Vec<String>) -> Vec<String>` and `pub fn require_imdsv2(run_instances_response: &serde_json::Value) -> Result<()>`.
+
+Time source: the cache takes `Arc<dyn Fn() -> SystemTime + Send + Sync>`, the same `Clock` type as `github_app.rs`, so tests control it without sleeping.
+
+Documentation to update in the same commits as the behavior: docs/AWS.md (the exact `run-instances` command with `--metadata-options`, the doctor template check, IMDSv2-only instance-profile credentials, and the sentence about hop limit 2 in docs/src/content/docs/profiles.md that must stay accurate for containers on hosts the person manages); docs/src/content/docs/security.md, section "Credential synchronization and exclusion" (what AWS credentials a session gets, scoped versus unscoped, the limits listed under Artifacts and Notes); docs/src/content/docs/profiles.md, section "Codex on Amazon Bedrock" (the `[profiles.<id>.aws]` table, the role's trust and permission requirements, and the same table for Claude on Bedrock).
+
+Revision note (2026-11-06): initial version of the plan, written for parent review before any implementation. Reason: requested design-first deliverable for #1424.
