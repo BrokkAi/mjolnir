@@ -627,6 +627,10 @@ impl HostState {
             }
             if result.is_ok() {
                 self.run(&session_id, requests);
+            } else {
+                // A destroyed requester can never save this outcome, and no
+                // retry would change that.
+                self.drop_review_if_owner_gone(&session_id, epoch, None);
             }
             let queued = self
                 .reviews

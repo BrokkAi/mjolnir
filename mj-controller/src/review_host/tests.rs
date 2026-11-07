@@ -607,10 +607,8 @@ impl ReviewEnvironment for FakeEnvironment {
         {
             return Err(error);
         }
-        if state.active_group.is_none()
-            && state.active.is_none()
-            && self.owner_deleted.load(std::sync::atomic::Ordering::SeqCst)
-        {
+        // The real store's foreign key refuses every save for a deleted session.
+        if self.owner_deleted.load(std::sync::atomic::Ordering::SeqCst) {
             self.deleted_owner_saves
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             return Err("FOREIGN KEY constraint failed".into());
@@ -2440,14 +2438,53 @@ async fn a_review_whose_requester_was_destroyed_is_dropped_without_retrying() {
 
     // The first retry would come after one second.
     tokio::time::sleep(Duration::from_millis(1500)).await;
+    let attempts = environment
+        .deleted_owner_saves
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(attempts >= 1);
+    assert!(host.view(&session).is_none());
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(
         environment
             .deleted_owner_saves
             .load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "the undeliverable verdict is attempted once"
+        attempts,
+        "the undeliverable verdict is not attempted again"
     );
-    assert!(host.view(&session).is_none());
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: pre-push review: a reviewer ending under a destroyed requester failed its outcome save and was re-reported forever
+#[tokio::test]
+async fn a_reviewer_ending_under_a_destroyed_requester_drops_the_review() {
+    let session = session_id("restored-destroyed-reviewer");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+    environment
+        .owner_deleted
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // One reviewer ends; the other is still running, so the group has not
+    // resolved and only the owner check can end the review.
+    host.child_ended(
+        children[0].clone(),
+        "the reviewer's session ended (removed)".into(),
+    );
+    wait_until_review_resolves(&host, &session).await;
+
+    let attempts = environment
+        .deleted_owner_saves
+        .load(std::sync::atomic::Ordering::SeqCst);
+    // The end-report retry would come after one second.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        environment
+            .deleted_owner_saves
+            .load(std::sync::atomic::Ordering::SeqCst),
+        attempts,
+        "an ended reviewer's report is not retried for a destroyed requester"
+    );
     host.shutdown().await.unwrap();
 }
 

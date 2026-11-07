@@ -302,48 +302,15 @@ impl HostState {
                 }
                 Err(error) => {
                     self.close_reviewer_child(&session_id);
-                    // The one decision: a record that is definitely gone ends
-                    // the review; anything else, including a failed lookup,
-                    // retries.
-                    let environment = self.environment.clone();
-                    let events = self.events.clone();
-                    let owner = session_id.clone();
-                    tokio::spawn(async move {
-                        let lookup = owner.clone();
-                        let exists = tokio::task::spawn_blocking(move || {
-                            environment.session_exists(&lookup)
-                        })
-                        .await;
-                        let step = match exists {
-                            Ok(Ok(false)) => ReviewStep::PushOwnerGone,
-                            Ok(Ok(true)) => ReviewStep::PushRetry(error),
-                            Ok(Err(lookup)) => {
-                                tracing::warn!(
-                                    session_id = %owner,
-                                    error = %lookup,
-                                    "could not check whether the review's session still exists; retrying delivery"
-                                );
-                                ReviewStep::PushRetry(error)
-                            }
-                            Err(join) => {
-                                tracing::warn!(
-                                    session_id = %owner,
-                                    error = %join,
-                                    "the session lookup task failed; retrying delivery"
-                                );
-                                ReviewStep::PushRetry(error)
-                            }
-                        };
-                        let _ = events.send(HostEvent::Step {
-                            session_id: owner,
-                            epoch,
-                            step,
-                        });
-                    });
+                    self.drop_review_if_owner_gone(
+                        &session_id,
+                        epoch,
+                        Some(ReviewStep::PushRetry(error)),
+                    );
                 }
             },
             ReviewStep::PushRetry(error) => self.retry_push_delivery(&session_id, error),
-            ReviewStep::PushOwnerGone => {
+            ReviewStep::OwnerGone => {
                 let review_id = self
                     .reviews
                     .get(&session_id)
@@ -399,6 +366,55 @@ impl HostState {
                 }
             }
         }
+    }
+
+    /// The one decision for "the requester is gone", asked after any save of
+    /// this review's state fails: the real store refuses every such save once
+    /// the session's record is deleted. A record that is definitely gone ends
+    /// the review through [`ReviewStep::OwnerGone`]; otherwise, including when
+    /// the lookup fails, `otherwise` is applied and the caller's own retry
+    /// stands. The lookup runs off the host loop.
+    pub(super) fn drop_review_if_owner_gone(
+        &self,
+        session_id: &str,
+        epoch: u64,
+        otherwise: Option<ReviewStep>,
+    ) {
+        let environment = self.environment.clone();
+        let events = self.events.clone();
+        let owner = session_id.to_owned();
+        tokio::spawn(async move {
+            let lookup = owner.clone();
+            let exists =
+                tokio::task::spawn_blocking(move || environment.session_exists(&lookup)).await;
+            let step = match exists {
+                Ok(Ok(false)) => Some(ReviewStep::OwnerGone),
+                Ok(Ok(true)) => otherwise,
+                Ok(Err(lookup)) => {
+                    tracing::warn!(
+                        session_id = %owner,
+                        error = %lookup,
+                        "could not check whether the review's session still exists; keeping the review"
+                    );
+                    otherwise
+                }
+                Err(join) => {
+                    tracing::warn!(
+                        session_id = %owner,
+                        error = %join,
+                        "the session lookup task failed; keeping the review"
+                    );
+                    otherwise
+                }
+            };
+            if let Some(step) = step {
+                let _ = events.send(HostEvent::Step {
+                    session_id: owner,
+                    epoch,
+                    step,
+                });
+            }
+        });
     }
 
     /// Release the retained last-view for every session no longer in the live

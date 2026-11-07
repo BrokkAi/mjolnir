@@ -206,9 +206,9 @@ pub(super) enum ReviewStep {
     /// Delivery failed and the requesting session still exists, or could not
     /// be looked up: the delivery is tried again.
     PushRetry(String),
-    /// Delivery failed because the requesting session's record is gone, so
-    /// no verdict or review state can be saved for it.
-    PushOwnerGone,
+    /// A save failed because the requesting session's record is gone, so no
+    /// verdict or review state can be saved for it.
+    OwnerGone,
 }
 
 /// Everything one blocking preparation gathered before a review can start.
