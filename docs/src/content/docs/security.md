@@ -120,8 +120,8 @@ in `jev-decisions/`, first has every unbroken run of 24 or more letters,
 digits, `-`, `_`, `.`, or `+` replaced. That catches many API keys and tokens
 but not every credential: an AWS secret key containing `/`, or a short access
 key ID, passes through. A secret an agent prints can therefore still reach the
-hosted classifier; turn Jev off, as described above, to keep turn text on this
-machine.
+hosted classifier; turn Jev off, as described above, to stop sending turn text
+to it.
 
 ## Sessions are not isolated from each other's agents
 
