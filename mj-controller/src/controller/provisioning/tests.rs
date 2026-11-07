@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::controller::test_support::{IsolatedTest, test_name};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use mj_core::config::{
     Config, ContainerTemplate as ConfigContainer, HarnessKind, HarnessProfile, ProjectBundle,
@@ -1886,6 +1887,12 @@ struct Imds {
     optional: std::sync::atomic::AtomicBool,
     modify_fails: bool,
     modify_has_no_effect: bool,
+    /// How many checks still report the change as `pending` (the state EC2
+    /// reports right after a launch or a change, before it is applied).
+    pending_checks: std::sync::atomic::AtomicUsize,
+    /// Report this state instead of `applied` or `pending`.
+    state: Option<&'static str>,
+    cancelled: bool,
     commands: Mutex<Vec<Vec<String>>>,
 }
 
@@ -1895,8 +1902,17 @@ impl Imds {
             optional: std::sync::atomic::AtomicBool::new(optional),
             modify_fails: false,
             modify_has_no_effect: false,
+            pending_checks: std::sync::atomic::AtomicUsize::new(0),
+            state: None,
+            cancelled: false,
             commands: Mutex::new(Vec::new()),
         }
+    }
+
+    fn pending_for(self, checks: usize) -> Self {
+        self.pending_checks
+            .store(checks, std::sync::atomic::Ordering::SeqCst);
+        self
     }
 
     fn purposes_run(&self) -> Vec<String> {
@@ -1919,6 +1935,10 @@ impl Imds {
 }
 
 impl CommandExecutor for Imds {
+    fn cancellation_requested(&self) -> bool {
+        self.cancelled
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         use std::sync::atomic::Ordering::SeqCst;
         let mut argv = vec![command.program.clone()];
@@ -1940,6 +1960,17 @@ impl CommandExecutor for Imds {
                 if self.optional.load(SeqCst) {
                     options["HttpTokens"] = "optional".into();
                 }
+                // The recording was taken right after launch, while pending.
+                let pending = self
+                    .pending_checks
+                    .try_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+                    .is_ok();
+                options["State"] = match (pending, self.state) {
+                    (_, Some(state)) => state,
+                    (true, None) => "pending",
+                    (false, None) => "applied",
+                }
+                .into();
                 ok(serde_json::to_vec(&options).unwrap())
             }
             "require IMDSv2 on EC2 instance" if self.modify_fails => CommandOutput {
@@ -2037,7 +2068,7 @@ fn an_instance_that_cannot_be_made_to_require_imdsv2_is_an_error() {
     )
     .unwrap_err();
     assert!(
-        format!("{error:#}").contains("still reports HttpTokens optional"),
+        format!("{error:#}").contains("reports HttpTokens optional after Mjolnir required IMDSv2"),
         "{error:#}"
     );
 }
@@ -2110,4 +2141,111 @@ fn a_launch_whose_instance_cannot_require_imdsv2_is_terminated() {
             .purposes_run()
             .contains(&"terminate-instances".to_owned())
     );
+}
+
+/// A clock the test drives: `sleep` advances it, and nothing waits.
+struct VirtualClock {
+    start: std::time::Instant,
+    elapsed: std::cell::Cell<Duration>,
+    sleeps: std::cell::RefCell<Vec<Duration>>,
+}
+
+impl VirtualClock {
+    fn new() -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            elapsed: Default::default(),
+            sleeps: Default::default(),
+        }
+    }
+
+    fn ensure(&self, executor: &Imds, timeout: Duration) -> Result<()> {
+        crate::controller::backend::ensure_imdsv2_until(
+            "default",
+            "us-east-1",
+            "i-0123456789abcdef0",
+            executor,
+            timeout,
+            || self.start + self.elapsed.get(),
+            |pause| {
+                self.sleeps.borrow_mut().push(pause);
+                self.elapsed.set(self.elapsed.get() + pause);
+            },
+        )
+    }
+}
+
+// Hard-won: cf6c771c4: the change was trusted while EC2 still reported its state as pending, leaving IMDSv1 reachable.
+#[test]
+fn a_pending_imdsv2_change_is_adopted_only_once_it_is_applied() {
+    // Required by the request but not yet applied, as right after a launch.
+    let launched = Imds::new(false).pending_for(1);
+    let clock = VirtualClock::new();
+    clock.ensure(&launched, Duration::from_secs(300)).unwrap();
+    assert_eq!(
+        launched.purposes_run(),
+        ["describe-instances", "describe-instances"]
+    );
+    assert_eq!(*clock.sleeps.borrow(), [Duration::from_secs(3)]);
+
+    // Changed in place: pending twice after the change, with growing pauses,
+    // and returned only after the check that reports applied.
+    let executor = Imds::new(true);
+    // The first check (before the change) is consumed as pending too.
+    executor
+        .pending_checks
+        .store(3, std::sync::atomic::Ordering::SeqCst);
+    let clock = VirtualClock::new();
+    clock.ensure(&executor, Duration::from_secs(300)).unwrap();
+    assert_eq!(
+        executor.purposes_run(),
+        [
+            "describe-instances",
+            "modify-instance-metadata-options",
+            "describe-instances",
+            "describe-instances",
+            "describe-instances",
+        ]
+    );
+    assert_eq!(
+        *clock.sleeps.borrow(),
+        [Duration::from_secs(3), Duration::from_secs(6)]
+    );
+}
+
+// Hard-won: cf6c771c4: a change that never applies must fail visibly within the launch's own deadline, not wait forever or be trusted.
+#[test]
+fn an_imdsv2_change_that_never_applies_fails_at_the_deadline() {
+    let executor = Imds::new(false).pending_for(usize::MAX);
+    let clock = VirtualClock::new();
+    let error = clock
+        .ensure(&executor, Duration::from_secs(20))
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("still pending"), "{error:#}");
+    // 3 + 6 + 11: the last pause is cut to what the deadline leaves.
+    assert_eq!(
+        *clock.sleeps.borrow(),
+        [
+            Duration::from_secs(3),
+            Duration::from_secs(6),
+            Duration::from_secs(11)
+        ]
+    );
+
+    // Any other state is a visible failure at once, with no waiting.
+    let mut failed = Imds::new(false);
+    failed.state = Some("failed");
+    let clock = VirtualClock::new();
+    let error = clock.ensure(&failed, Duration::from_secs(300)).unwrap_err();
+    assert!(format!("{error:#}").contains("state failed"), "{error:#}");
+    assert!(clock.sleeps.borrow().is_empty());
+
+    // So does cancelling the operation.
+    let mut cancelled = Imds::new(false).pending_for(usize::MAX);
+    cancelled.cancelled = true;
+    let clock = VirtualClock::new();
+    let error = clock
+        .ensure(&cancelled, Duration::from_secs(300))
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
 }

@@ -182,6 +182,8 @@ impl CommandExecutor for Ec2 {
                 ))
                 .unwrap();
                 let mut options = options["Instances"][0]["MetadataOptions"].take();
+                // The recording was taken right after launch, while pending.
+                options["State"] = "applied".into();
                 if self.imds_optional.load(Ordering::SeqCst) {
                     options["HttpTokens"] = "optional".into();
                 }

@@ -26,8 +26,12 @@ any instance it adopts (just launched, a Move destination recorded by an older
 Mjolnir version, or one found again after a restart) it reads the instance's
 `MetadataOptions.HttpTokens`. An instance that allows IMDSv1 is changed in place
 with `aws ec2 modify-instance-metadata-options --http-tokens required` and read
-back; only if that fails does the launch fail, with the reason, and the instance
-is removed. Code in a session on an EC2 machine can therefore read the instance
+back. EC2 reports a new setting as `pending` before it is in effect, so Mjolnir
+adopts the instance only once `MetadataOptions.State` is `applied`, waiting with
+growing pauses within the same five-minute limit it allows a new instance to
+become reachable over SSH. If the change fails, does not apply in that time, or
+the operation is cancelled, the launch fails with the reason and the instance is
+removed. Code in a session on an EC2 machine can therefore read the instance
 profile's credentials only with IMDSv2 tokens. Scope the instance profile's
 role to what sessions need; Mjolnir does not create or limit it.
 
