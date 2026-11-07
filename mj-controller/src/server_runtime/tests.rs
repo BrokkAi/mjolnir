@@ -254,6 +254,10 @@ fn move_recovery_projection_exposes_safe_retry_settings_only() {
     };
     let recovery = ViewerMoveRecovery::from_operation(&operation).unwrap();
     assert_eq!(recovery.phase, "cancelled");
+    assert_eq!(
+        recovery.failure_notice.as_deref(),
+        Some("Move cancelled. The daemon log records the reason under reference move-1.")
+    );
     assert_eq!(recovery.source_profile_id, "source-profile");
     assert!(recovery.clear_resource_allocation);
     assert_eq!(recovery.source_additional_mounts.len(), 1);

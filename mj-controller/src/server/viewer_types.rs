@@ -758,6 +758,9 @@ fn oracle_default_enabled() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerMoveRecovery {
+    /// Public diagnostic owned by this Move, without the raw error chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_notice: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -803,6 +806,18 @@ impl ViewerMoveRecovery {
             return None;
         }
         Some(Self {
+            failure_notice: matches!(operation.phase, MovePhase::Failed | MovePhase::Cancelled)
+                .then(|| {
+                    format!(
+                        "Move {}. The daemon log records the reason under reference {}.",
+                        if operation.phase == MovePhase::Cancelled {
+                            "cancelled"
+                        } else {
+                            "failed"
+                        },
+                        operation.operation_id
+                    )
+                }),
             oracle: operation.selection.oracle,
             oracle_choice: operation.selection.oracle_choice.clone(),
             operation_id: operation.operation_id.clone(),

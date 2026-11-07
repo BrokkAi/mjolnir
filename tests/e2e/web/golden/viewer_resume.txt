@@ -125,7 +125,7 @@ controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":
 request: GET /api/v1/wiki/search [""]
 action: POST /api/v1/wiki/archive/restore [{"id":"archived-one","body":{"workspace_id":"test","profile_id":"beta","target_id":"remote"}}]
 === failed Move remains visible in the conversation without a worker ===
-Move failed: The move did not finish while resuming the destination. The daemon log records the reason under reference failed-move.
+Move failed. The daemon log records the reason under reference failed-move.
 
 The environment and a verified checkpoint are retained. Retry the move; the checkout is kept.
 

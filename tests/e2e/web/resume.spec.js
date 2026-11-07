@@ -364,13 +364,24 @@ test('golden_viewer_resume', async ({ context }) => {
   const restored = restoreState.snapshot.sessions.find(row => row.id === 'restored');
   restored.state = 'suspended';
   restored.lifecycle = 'suspended';
-  restored.launch_error = 'The move did not finish while resuming the destination. The daemon log records the reason under reference failed-move.';
+  restored.capabilities = { open: false, prompt: false, resume: false };
+  restored.launch_error = 'A later, unrelated lifecycle error.';
   restored.move_recovery = {
     operation_id: 'failed-move', phase: 'failed', checkpoint_retained: true,
+    failure_notice: 'Move failed. The daemon log records the reason under reference failed-move.',
     environment_retained: true,
   };
   // Hard-won: #1470: Move failures were missing from the conversation after the worker stopped.
   await refresh(restorePage, restoreState);
+  await expect(restorePage.locator('#conversation-move-failure')).toBeVisible();
+  await expect(restorePage.locator('#conversation-move-failure')).not.toContainText('unrelated');
+  await expect(restorePage.locator('#prompt-form')).toBeHidden();
+  await expect(restorePage.locator('#conversation-scroll')).toBeHidden();
+  await restorePage.reload();
+  await expect(restorePage).toHaveURL(/restored$/);
+  await expect(restorePage.locator('#conversation-move-failure')).toBeVisible();
+  await restorePage.goto('https://viewer.test/#workspace/test/resume/restored');
+  await restorePage.getByRole('button', { name: 'View Move failure', exact: true }).click();
   await expect(restorePage.locator('#conversation-move-failure')).toBeVisible();
   output.push('=== failed Move remains visible in the conversation without a worker ===');
   output.push(await restorePage.locator('#conversation-move-failure').innerText());
