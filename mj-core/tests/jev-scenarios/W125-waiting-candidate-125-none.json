@@ -47,7 +47,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nRead /tmp/lanes/jvm-gates/brief-8531-r4.txt in full and carry it out exactly. It is the complete assignment: a two-sided JVM lifecycle gate for PR #8531 head 1b9b64c1bb649a0fffb34b384c81da88108a45cd (merge of master 1f508bce79) against base 1f508bce79837c38e42decd681c9929004e4b555 (shared base binary; build only the candidate). Write everything under /tmp/lanes/jvm-gates/8531-r4/. A report without a candidate verdict is a checkpoint, not a handback: hand back only when /tmp/lanes/jvm-gates/8531-r4/REPORT.md carries PASS or FAIL on the candidate after every surface in the brief, in under 35 lines, with log paths.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The pinned base and merge-base checks passed, and the base binary checksum matches the required value. The candidate archive build is running; once it finishes I’ll capture base A, candidate, and base B in sequence, then proceed through the replay and golden comparisons.",
     "completion": {
       "stop_reason": "EndTurn",

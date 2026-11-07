@@ -72,7 +72,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "if neither fits, wrap it as PendingMemo and say why. Pin it: a tsconfig or package.json edit that changes the index rejects a warm unit while no JS/TS blob changed.\nItem 12 (JS/TS parts): member_surface_request_for_analyzer (crates/bifrost-rql/src/structural/search/type_flow.rs about :2360, invoked at :2456 before the authority capture opens at :2480, plus the replay path at :1625-1636) and the workspace-package Fact (crates/bifrost-analysis/src/analyzer/workspace_authority.rs about :96-108, caller tsconfig.rs:317) must compute the whole Fact under the authority capture, so the Fact subsumes its construction reads and raw File/PathAbsent probes. The test at providers.rs:475-506 currently asserts those probes; the reviewer names it as locking in the leak, so update it and say exactly what changed. Keep the ModulePaths SourceAndFiles authority naming its own inputs. Other lanes edit other regions of workspace_authority.rs at the same time; stay inside the region your item names.\nHandback as the rules file says.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "All 1,042 library tests across the three touched crates passed, and clippy is clean after one existing test-expression lint was fixed. The required cross-language `workspace_authority` gate is still compiling the root test binary and its broad dependency set; I’m waiting for that result before wrapping up.",
     "completion": {
       "stop_reason": "EndTurn",

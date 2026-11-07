@@ -112,7 +112,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Continue",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Final Clippy and the three-crate check passed. I’ve written the lane report with file locations, test assertions, and mutation evidence; I’m waiting for the last formatter check before handing it back.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -332,7 +332,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "There were no new reports. The `wait` call returned 37 old handbacks, which I read in full with `jq`. They came from the triage children, the engine lanes, and the pack lanes of earlier waves, and I had already collected all of them. I've now closed all 37, so the repeated \"sub-agents finished\" notifications should stop.\n\nNothing is running now:\n- **PRs #4527 and #4545:** still open and blocked, waiting on the MergeMarshall queue and the master baseline failures.\n- **Your decision on the Python rule authoring:** whether to start group 1, the quality pack in bifrost-packs, and whether you agree that groups 2 and 3 are placed public and premium.",
     "completion": {
       "stop_reason": "EndTurn",

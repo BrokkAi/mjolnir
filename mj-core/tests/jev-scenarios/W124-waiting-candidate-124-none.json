@@ -357,7 +357,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Parent: wave 3 for #4323, same worktree. Merge master (c646450b87) first; it now contains py04-09's local-flow rows and py14-21's assignment facts. Remaining in-reach items: (1) add the missing policy fixtures proving the global/shadowing rules your slice 3 made expressible (redundant-global / unused-global / shadow-global / shadow-builtin-style rules named in the ticket), with near misses; (2) py/undefined-placeholder-variable (moved here from #4337): a name used where no binding in scope is initialized on all paths before the use; build it from your BindingOf/binding-uses facts plus py04-09's CFG/local-flow facts on master; class-template attributes, module globals assigned elsewhere, and monkey-patched builtins stay typed-incomplete. Default-value mutation stays blocked on #3745 (do not touch type_flow.rs). Build via cargo-slot, land per LANES2.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The latest tree is exactly at master `c646450b87`; no additional merge is needed yet. Formatting and whitespace checks are clean. The focused policy run is still waiting or compiling through `cargo-slot`, so I’m letting that owned command finish before starting any other Cargo work.",
     "completion": {
       "stop_reason": "EndTurn",

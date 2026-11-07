@@ -87,7 +87,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "rive before analysis finishes, in an order driven by completion (use a hand-written fake transport with a gate holding one group); a split group is reported only once final; a failed group unlocks as keep-all; recovery after an interrupted run does not report complete. Add app/core tests: locked groups are skipped by navigation and reject actions; placeholder replacement on split; progress fraction; Finish disabled until complete. Run `cargo test -p autocull-engine -p autocull-core -p autocull-app` and `cargo clippy --workspace --all-targets`. The app suite needs X11 and serial execution in this environment; see /mnt/c/SSD2/Projects/autocull/.mj/agents/99f923bbe87a55613c80b7a58deeaf01 logs for the working invocation. Failures in boundary/flash tests may come from other agents' in-progress work; report them, but do not fix them.\n\nHand back under 500 words: the plan path, design as implemented with any deviations and reasons, changed files, test names and results, and open risks. Put details in your report dir.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The X11 invocation also needs Iced’s `x11` feature enabled; without it, Winit intentionally refuses to build on Linux. The feature-enabled test command is waiting on Cargo’s shared target lock, likely due another workspace build, so I’m using that time to finish checking the staged refresh/event synchronization and preserving the other agents’ changes.",
     "completion": {
       "stop_reason": "EndTurn",

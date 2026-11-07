@@ -167,7 +167,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": ". Control-shape gaps (NormalControlFlow, NonLocalControl, ExceptionalControlFlow, CleanupControlFlow) still veto the whole procedure. Gaps with no point veto the whole procedure.\nR4b: R4a, but ExceptionalControlFlow/CleanupControlFlow gaps whose exits are non-rejoining (cannot return into the procedure body) are scoped by reachability like data gaps. State the evidence you used for non-rejoining.\nFor R4a/R4b also report, if cheap with your helper, how many un-vetoed guards then get decided by derive_scalar_states versus open for another reason (UnsupportedPredicate, UnprovenGuard, PartialGuard, PartialProducer), and whether any decided verdict would produce a contradictory-condition finding (list those sites: they need checking against the frozen expectations). Also list, for R4b, each still-blocked file with its blocking gaps (family + site), so I can see what full-run completeness would still require.\nPut results in your report dir as counterfactual-veto.md and report the table plus key caveats. Stop there.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Saved [counterfactual-veto.md](/workspace/d8443f17cb24506c5ee26277fcf319f4/.mj-agents/784eb27dbe0a51ea474eb39bb134e95f/counterfactual-veto.md) and handed back the results.\n\nR1–R3 free 0 conditions; R4a frees 3; R4b frees 17. R4b yields 8 `BothFeasible` verdicts and 9 still open for other reasons. No findings. No tracked changes.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -352,7 +352,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "sed then made those calls incomplete. Use the predicate to DECIDE the rule, not only to fail closed:\n- Shares: APPLY the NormalReturn member rule (the writeback), as the base did for identity-preserving mappings.\n- Isolated: skip it; this is a proven copy.\n- Unknown: skip it and mark the call rule incomplete.\nDrop the passing-mode guard; the predicate already treats an explicit reference mode as Shares. Keep preserves_reference_identity as the extra condition the base used for the writeback. Then reference-out-param and forwarded-local-reference may become Complete with a finding (Shares, and the rule applies). Report whatever results. Wait for the #8931 predicate fix (the local-root ContainerCollapse chain and a Go scalar-allocation hook) before you judge the by-value cases. Rerun after that merge: the golden, the Python issue_3386 test, golden_go_aggregate_copy_policy_flow, the full suite, flow lib, the root check and clippy. Implement the rule change now, and I will tell you when the predicate merge lands.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The writeback rule now uses the shared storage predicate: `Shares` applies identity-preserving writeback, `Isolated` skips it, and `Unknown` marks the call incomplete. The passing-mode guard is removed.\n\nThe change is uncommitted in `plan.rs`. Formatting, diff checks, and flow library compilation pass. I’m waiting for the #8931 predicate merge before rerunning the requested tests.",
     "completion": {
       "stop_reason": "EndTurn",

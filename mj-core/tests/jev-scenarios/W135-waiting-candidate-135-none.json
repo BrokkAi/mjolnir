@@ -177,7 +177,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Integration compile error module_bindings.rs:913 fixed by parent to &candidate == target. Resume your lint gate if it encountered that error. Workspace lint still waits on test fixture owner being ready.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Resumed library Clippy, but it is still waiting on Cargo’s build lock; it has not compiled or reached the fixed line. I handed back the process chain and log. Workspace Clippy remains unstarted pending the fixture owner’s signal.",
     "completion": {
       "stop_reason": "EndTurn",

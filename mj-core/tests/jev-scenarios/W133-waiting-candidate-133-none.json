@@ -407,7 +407,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Parent: committed and pushed as 185624ef7b. Decision on the public outcome: yes, carry the stable Output rows in PolicyBatchOutcome for composed anchors, fresh and reused alike (the same rows), and have MCP register composed taint results from those rows; live ProductionTaintAnalysisResult stays only for ICFG runs. That keeps one path: a fresh composed anchor is encoded to rows before it is registered, so fresh and warm registrations cannot differ. Audit every MCP consumer of a registered taint result (searchtools_service.rs ~2750 and whatever reads the registry later: witness or path retrieval, explanations, related locations) and make each answer from the rows; if one needs data the rows lack, add it to the rows rather than keeping a live-only side path. Then the UnitSlice, receipts, merge and seal, the golden (cold, warm reuse, one edited remote source adding a second origin, a store-channel writer edit, two temp roots) and the gates, including suite_mcp_cli since MCP registration changes. Same stop rule.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The row transport is compiling through the policy and RQL crates. The root test build is still running; once it finishes I’ll fix any type errors, then exercise the MCP registration path before moving to the unit loop.",
     "completion": {
       "stop_reason": "EndTurn",

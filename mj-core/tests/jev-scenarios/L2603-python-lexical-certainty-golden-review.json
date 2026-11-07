@@ -177,7 +177,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "ed answer expectations. Their downstream legacy-cache assertions were left pending: remove them now, under the same rule as B (production does not drive the legacy batch context), and keep the answer assertions and the #3164 hardwon tag.\n5. Report what native answers now for the four diagnostic cases: annotated direct, facade, constructed local, and self.run(). If self.run() is still Incomplete, give its remaining reasons with the interner mapping.\n6. Run the three crates' lib tests, golden_resolution_facts, and the native Python goldens: suite_usages golden_native_python_usage_graph, the suite_semantic native route, member and reverse goldens, and suite_mcp_cli golden_code_quality_smell_reports. Do not bless. List every golden that changes, with its cause (expected: completeness flips from Incomplete to Complete on bindings through parameters and locals). Flag any change that is not that.\nThen test-support Clippy and fmt. Hand back the decisions, the file list, the golden list with causes, and the log paths.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Implemented without committing. Both original tests and all 1,243 library tests pass; Clippy and fmt pass.\n\nGoldens remain unblessed. One subclass-certainty assertion needs your decision.\n\nDetails: [REPORT-FIX.md](/tmp/py-switch-logs/switch-libtests/REPORT-FIX.md).",
     "completion": {
       "stop_reason": "EndTurn",

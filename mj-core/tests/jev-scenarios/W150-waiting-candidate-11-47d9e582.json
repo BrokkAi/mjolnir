@@ -367,7 +367,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Parent: approved. Add an explicit stable public plan fingerprint in bifrost-flow, built from durable artifact and procedure keys and every immutable semantic plan input (no handle, pointer or dense solver ID), and use it for reached IDs; the pointer-bearing registration digest stays for allocation validation only, with a comment saying it must not reach a public or persisted identity. Add a debug assertion or test that two separately built registrations of the same plan in one process (different allocations) give the same fingerprint. Also check: does master's current reached ID (or any other public or persisted ID) already include ValueFlowPlanRegistration::plan_digest? If so, master's IDs vary across processes, which is a defect of its own: tell me the sites so I can record it, and this change fixes them. Then finish ordering and idempotence, the product golden with explicit ID checks, the composition mapping and admission, and the gates. Checkpoint note when a turn is ending.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The fingerprint test is rebuilding the flow test binary after formatting. The earlier RQL library check passed; I’m waiting for the actual test result before treating this checkpoint as verified.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -332,7 +332,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Parent: yes. For py/percent-format/not-mapping, an RHS that is structurally a list, tuple, set, string or numeric literal (or a binding whose single reaching initializer is one) is a known non-mapping: those builtin types are not Mappings. Dict literals and dict(...) calls with builtin identity are mappings; everything else (names with unknown values, calls, attributes, comprehensions other than dict comprehensions) is typed-incomplete. Continue the implementation, fixtures and landing per LANES2.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Strict clippy has cleared the analysis, flow, RQL, policy, runtime, and MCP crates with no warnings; it is on the root all-target checks. Once it finishes, I’ll update the ExecPlan with the final evidence and commit the resolved merge plus the plan state.",
     "completion": {
       "stop_reason": "EndTurn",

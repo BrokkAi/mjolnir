@@ -187,7 +187,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Coordination: producer applied lint-only changes to java.rs after your active focused run started (unused resolve_java wrapper etc) and queued clippy rerun. Keep active run, then required full analysis lib and Java suites will rebuild current source. Do not rerun green focused checks separately; broader required Java issue suite covers issue3522. Record validation source hash or final diff after gates. Report any failures promptly.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Cargo released the lock and the full analysis-library target is now compiling. It has rebuilt the workspace dependencies and is currently compiling `brokk-bifrost-analysis`; I’m waiting for nextest to report the complete test run.",
     "completion": {
       "stop_reason": "EndTurn",

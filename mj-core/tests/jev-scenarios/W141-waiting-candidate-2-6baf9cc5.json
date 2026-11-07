@@ -117,7 +117,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The monitor change is live on the CI host as commit `94b7a34`. From the next cron tick, new merge batches launch on DeepSeek Flash at max effort with no subagents. Live batches keep their current setup.\n\nI'm waiting for the upgrade agent's plan before letting it touch the daemon.",
     "completion": {
       "stop_reason": "EndTurn",

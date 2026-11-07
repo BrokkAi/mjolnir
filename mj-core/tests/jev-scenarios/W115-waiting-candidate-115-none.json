@@ -82,7 +82,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "d file: the lib test `analyzer::store::writer::tests::writer_attribution_counts_busy_jobs_and_idle_waits` in crate `brokk-bifrost-store`, three repetitions each, label `rerun-writer`. probe47.sh supports `lib:<crate>` as the target (check; if it does not, extend it the way probe45.sh does). Run it when morannon load is lowest you can arrange (no other probes running for that lane), and record the load average at each run.\n\nPull logs into `evidence/eval47-20261028/6234/judge-validation/<lane>.<label>.log`, then write `evidence/eval47-20261028/6234/judge-probes/results.md`: for probe 1 a lane × four-test table (pass/fail/did-not-compile, one-line assertion message per failure, compile notes); for probe 2 the three results per lane with load.\n\nConstraints: verify each worktree is clean after its run; never touch lane sessions; no mj commands; no cargo target redirection or mbx setting changes; do not commit. Report briefly: per-lane pass counts, the writer rerun results, the results path, anything that blocked.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "All 15 Probe 1 lanes have now compiled and run the four tests, and every lane worktree is clean. Before Probe 2, I found separate #7424 probes currently using `k31max`, so I’m waiting for those lane jobs to finish; this honors the requested isolation and should also give the host more time to cool down.",
     "completion": {
       "stop_reason": "EndTurn",

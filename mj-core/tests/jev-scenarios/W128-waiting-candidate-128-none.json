@@ -332,7 +332,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Ordinary merge succeeded without admin/bypass. PR451 MERGED at2026-10-30T17:59:09Z exact merge SHA f9f5c78083377621558aaf0761c8d048dc532bd5. Monitor exactSHA master PUSH ci AND release to SUCCESS incl six platforms+publisher authorization/stagedassets/npm preflight. No tag until those both succeed per runbook. Don't use branch/PR results instead. Parent owns tag once ready, existing publicationauthorization remains explicit. No further audits/manualworkflowdispatch needed. Report final URLs/steps/failure evidence.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Exact-merge release preflight failed on Windows x86_64: `editor_bridge_http_needs_the_session_token_and_refuses_browsers` timed out waiting for ACP response `id:3`. Publisher was skipped.\n\nSaved the full failure log and reported it to the parent. Tagging remains blocked.",
     "completion": {
       "stop_reason": "EndTurn",

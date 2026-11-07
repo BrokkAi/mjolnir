@@ -117,7 +117,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Cancellation corrected: resume native_prior_while_cancellable polls executor every existing25ms interval, cancel token on request/drop, waits for blocking task completion before release; handoff helper propagates canceled parse error and JoinError. Native parser checks before/after bounded read, every JSONL read/decode and candidate mapping; deterministic >70KiB BufRead cancel test added. Parent owns final acceptance, controller suite currently compiling. Please no further broad review; quick confirm this closes reported cancellation stall except one bounded selected payload read (256MiB local archive) which is joined before cleanup. No extra new APIs unless concrete missing guarantee.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Yes. Explicit cancellation now stops parsing promptly and joins the blocking task before returning; it can still wait for one bounded payload read and hash. One limit: dropping the whole future cancels the token but does not join the blocking task. I sent that distinction to the parent.",
     "completion": {
       "stop_reason": "EndTurn",

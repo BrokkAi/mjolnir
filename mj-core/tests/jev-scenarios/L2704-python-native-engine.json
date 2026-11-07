@@ -922,7 +922,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The `suite_semantic` run on the superseded checkpoint finished: 204 failures among 2137 tests run. Nextest stopped early after reaching the failure limit, so 380 tests did not run. The core libraries passed.\n\nMost failures are Python `type_flow_client` tests. The rest are in:\n- `type_flow_answer_boundaries`\n- ICFG contracts\n- C++ value contracts\n- partial-flow differentials\n- the Python dependency pack\n\nThe likely cause is the checkpoint's per-build keys. Callers that skip `WorkspaceAnalyzer` got a fresh key on every build, so two builds of the same file never matched, and consumers dropped the targets that crossed between them. Under the approved contract, equal content gives equal keys, so these should pass again. I sent job 5A (00da4591) this baseline and asked it to give a reason for every failure that remains after its changes.\n\nI'm waiting on job 5A (content identity, no-reuse flow, request guard) and job 5B (a4b7d901, refusals at every currency check and cache).\n\nYour PR 2a scope answer is still open. The coordinator has approved the \"no reuse, measure first\" contract, and that is what is being built.",
     "completion": {
       "stop_reason": "EndTurn",

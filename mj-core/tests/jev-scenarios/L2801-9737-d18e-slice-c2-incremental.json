@@ -77,7 +77,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Continue",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The incremental listing certificate fix and its focused controls are complete. The remaining slice C controls and broader validation are still open; I sent the changed files, test results, and logs to the parent session.",
     "completion": {
       "stop_reason": "EndTurn",

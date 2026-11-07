@@ -52,7 +52,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "ntract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nRead /tmp/9755/m2m3/COMMON.md, then carry out /tmp/9755/m2m3/M3-THREADS.md in your lane /workspace/a25345803d8f8d276ad919b0392340ed/bifrost-dev/.mj/lanes/9755-m3-threads. Determine, statically and by temporary instrumentation on fixtures, whether the Rust call-target batch runs SQL off the calling thread or on another connection. Also determine whether per-worker readers are pinned to the operation's snapshot. Revert all edits, so the lane ends clean. Put report.md in your report directory.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The worker input copies the selection descriptors and opens a new selected operation on a worker reader. The code validates that reader, but I have not found a mechanism that pins it to the caller’s SQLite read transaction. I’m waiting for the fixture build to finish so I can confirm which paths execute.",
     "completion": {
       "stop_reason": "EndTurn",

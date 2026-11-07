@@ -247,7 +247,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "The host restarted, so your suite runs were killed; nothing of yours is running. Continue: keep the results you already have (note which suites finished), rerun only the suites or tests that did not finish, then complete the failure classification and send the handback.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The push-suite baseline comparison finished: 92 matching tests ran and passed on master; 8 branch tests were absent there. I’m waiting for the Python-feature policy suite’s master comparison to finish.",
     "completion": {
       "stop_reason": "EndTurn",

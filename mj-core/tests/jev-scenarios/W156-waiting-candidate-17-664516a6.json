@@ -322,7 +322,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Standing authorization now concrete: for exact originalcompletedNative rows a120 publishes ops-ready semanticapproval (strictpostNativePRIMARYactivity/sourcepre exact/USERseedclean/immutableoutput), proceedexistingpreservation+checkpointwhenDIRTY+suspension/ordinaryfinalizationmethod withoutfurtherparentmessage. Sourceclean rows preserve sourceclean gate, don'tinventdirtyexception; checkpointunchangedsource viaordinarycleanup if needed. a120maymessageyoudirectly approvalpaths; sendparentactualresult. Currentqueue748,753-e5,693,742,new719 headfrom errors/attempts/2defc02a31334d05a429b3443cb30e8c/dsf-719.json. No Nativeprompts/reruns/resampling/source reset/cleanupdiscard. Remainblockedonexacta120approvals, notuserpermission.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Approvals exist for 748, 693, and 742, but the audit-owned contract still excludes them. Waiting for a120’s ops-ready handoff; no live operations performed.",
     "completion": {
       "stop_reason": "EndTurn",

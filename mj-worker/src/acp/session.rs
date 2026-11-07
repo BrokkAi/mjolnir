@@ -954,7 +954,7 @@ pub(super) async fn serve_session(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                spec.turn_context.reset(&prompt_text);
+                spec.turn_context.reset(Some(&request_id), &prompt_text);
                 spec.step_clock.begin_turn();
                 if spec.harness == HarnessKind::Grok {
                     grok_usage.begin(session_id.to_string());

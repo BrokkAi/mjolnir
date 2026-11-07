@@ -77,7 +77,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "tory obligations. Include the human line, and JSON/SARIF through the existing paths.\n6. Cache and identity recipients: every reusable product that would carry the new meaning (ICFG dispatch and edge products, CompositionMemo, policy units), and which levers each needs (substrate token, ICFG pair). No values.\n7. The composition-side shape to propose to 07d292ca, who owns compose/ and taint_compose_provider.rs, with #8908 and #8959 reshaping them: a per-hop obligation reference keyed by call site, on Hop::Dispatch or the dispatch candidate, bound to the selected context. Read #8959's head (`gh pr view 8959`) for the shapes that are moving.\n8. Tests:\n   - an obligated finding beside an unrelated control;\n   - repeated obligations deduplicated;\n   - warm unit replay with cold/warm public equality;\n   - standalone and serialized finding output;\n   - both engines;\n   - a store-dimension case;\n   - an admission-boundary case.\nWrite 7947-design.md in your report directory, with Part A's evidence first, and hand back.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The design draft is written in the report directory. It names the typed carrier and cache keys, and flags one consequential choice: ICFG needs obligation evidence that survives discarded or clipped witness reconstruction, which appears to require per-derivation solver state. I’m waiting for the probe before finalizing Part A.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -202,7 +202,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Focused results accepted. Full validation/build CLI running child6b... now; no competing cargo. Once it reports rebuilt binary path, I'll ask you repeat exact isolated tmux repro post-fix. For now park, retain context and old repro details.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Parked. I’ve retained the pre-fix repro details and will wait for the rebuilt binary path and your request to repeat it.",
     "completion": {
       "stop_reason": "EndTurn",

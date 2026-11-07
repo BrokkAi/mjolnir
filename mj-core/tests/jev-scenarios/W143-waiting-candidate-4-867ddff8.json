@@ -87,7 +87,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Do not use source.find(\"path.basename\") or any other source-text locator; AGENTS requires AST/analyzer structure. Prefer existing test as regression if currentbaseline fails (scheduled build soonlinks). Then only extend its existing ambiguity/reassignment controls with namespace variants if needed, no new oracleassertion merely mirroringproducer. If baseline passes, force Available via realoracle only using structurally obtained capture range or AST/fixtures exactauthoredrange, no source.find. Parentwillnotify baselineendthenauthorizeedits. Identityreservation428/427 token-8872-js-ts-package-module-identity parentowns. Please also identifyintroducingcommit for namespace staticload contract#8025 if obviousblame.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Acknowledged. The namespace static-load path was introduced by `29c4f854f97` for #8025. No files were changed; I’m waiting for the baseline result before editing.",
     "completion": {
       "stop_reason": "EndTurn",

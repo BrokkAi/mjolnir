@@ -107,7 +107,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Correction: the clean worktree is the starting point, not a sign that the work is done or missing. Your assignment is to IMPLEMENT the work yourself in /workspace/31e44e629cb2bbaa225a83cd820af443/bifrost/.worktrees/models-config, starting from that clean detached HEAD. Nobody has done it yet. Re-read your original spawn message (tickets #4342 slices 1-2 and #4331 slice 1, with the parent decisions listed there) and the lane brief, write the ExecPlan, implement the Python models with policy fixtures, validate, commit in that worktree, and hand back per the brief's Finishing section. Do not stop until those slices are done or concretely blocked with evidence.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The lane now has exact-call policy fixtures for the four direct API rules, cookie and CSRF configuration cases, plus an end-to-end taint fixture joining Flask/Django request reads to response writes. The fixtures include the campaign controls (wrong receiver, safe values, non-sensitive cookie names, and non-reaching sources). I’m moving into validation now; the initial Cargo build is still waiting on shared compilation work, so I’m first checking formatting and plan consistency while it runs.",
     "completion": {
       "stop_reason": "EndTurn",

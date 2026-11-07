@@ -282,7 +282,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The only report was from the child that never started, `disk-full-worker-exit`. Its final status reads \"session … is StartupCleanup before its hand-off\". It failed at startup because the disk was full, and I closed it earlier. It did no work and changes nothing in my earlier answer.\n\nNo other children are running. My last question is still open: should I make worker and daemon logging stop crashing when the disk is full?",
     "completion": {
       "stop_reason": "EndTurn",

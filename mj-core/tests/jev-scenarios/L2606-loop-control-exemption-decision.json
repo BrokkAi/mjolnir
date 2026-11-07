@@ -142,7 +142,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "lowed by an unconditional reassignment must give nested_loop_reused=false, with your conditional break/continue/return controls and the inner-loop break control that did not run. Tag it #[hardwon(\"<12-char hash>: a nested function's return counted as a loop exit\")] with the commit that introduced the root exemption (git log -S), and save the fail-before log.\n3. Property mutators: do not fix. Write an issue-ready note to <report dir>/property-mutators-issue.md: the exact Python input, the query, the expected rows and the actual class-documentation row, the source of the expectation (Python property semantics and the query's declaration contract, with file:line), and whether this looks like a mapping bug or an intended choice. I will file it.\nThen rerun the rql lib tests, the Python policy tests (suite_bench_policy -E 'test(/python/)'), rql Clippy -D warnings and fmt. Commits end with Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>. Report the hashes, the fix hunk, the fail-before log and the note path.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Committed `fd58b6e85f` and `b526af63cf`; handed back the patch, fail-before log, and property issue note.\n\nPolicy tests, Clippy, and fmt pass. The nested-function fix passes, but the inner-loop control fails because of the explicitly preserved loop-root exemption. That conflict needs your decision.",
     "completion": {
       "stop_reason": "EndTurn",
