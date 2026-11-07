@@ -139,10 +139,15 @@ profiles, targets, and the other settings in `config.toml` change only through
 the dashboard, the cookie-authenticated web viewer settings, or the file
 itself.
 
-Sessions in containers and on remote targets do not receive the `api-token`
-file, so their agents cannot use it to change or destroy other sessions or to
-mint GitHub tokens. Their GitHub access comes only from the credentials
-Mjolnir syncs to them, described under
+Sessions in containers and on remote targets are not given the `api-token`
+file. An agent there can still copy it with the `fetch` tool if Mjolnir's data
+directory lies inside a directory `fetch` can read on a local session's target:
+that session's workspace, its sub-agent reports, or its temporary directory.
+The default data directory is outside all of them; one placed under `/tmp`
+through `MJ_DATA_DIR` is not, and an agent that copies the token and can reach
+the daemon's API gains everything listed above. Container and remote sessions
+get GitHub access only from the credentials Mjolnir syncs to them, described
+under
 [Credential synchronization and exclusion](#credential-synchronization-and-exclusion).
 That is the whole difference: a container or remote target does not keep an
 agent away from other sessions' files and conversations.
