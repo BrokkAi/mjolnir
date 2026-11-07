@@ -1095,6 +1095,14 @@ impl ProfileCatalog {
             }
             inner.refreshing.remove(&key);
             let Some(Ok(outcome)) = result else {
+                // The re-probe failed: the entry keeps its pre-edit copy and
+                // the identity stays stale. Re-arm the retry window so the
+                // next pass waits it out instead of re-probing the identity
+                // every poll; only a success discharges it.
+                inner.home_edit_retry_after.insert(
+                    key.0.clone(),
+                    tokio::time::Instant::now() + self.home_edit_retry_wait(),
+                );
                 return;
             };
             let Some(Entry::Ready(previous)) = inner.entries.get(&key).cloned() else {
@@ -2800,36 +2808,41 @@ mod tests {
         );
 
         // The failed model entry keeps serving its pre-edit copy; its
-        // sibling's success must not settle it. Every served entry re-probes:
-        // the default, the failed model's, and the new current model's.
+        // sibling's success must not settle it. The failure re-arms the
+        // retry window, so the next pass waits it out instead of re-probing
+        // the whole identity every poll.
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "the failed re-probe re-arms the retry window"
+        );
+        tokio::time::sleep(Duration::from_millis(60)).await;
         catalog.watch_homes();
         assert_eq!(
             calls.load(Ordering::SeqCst),
             6,
-            "a failed entry re-probes even when its sibling's re-probe succeeded"
+            "a failed entry re-probes after the window even when its sibling's re-probe succeeded"
         );
+        // That round fails too (the flag is still set), re-arming the
+        // window; let the failures land before allowing success.
+        while !catalog.lock().refreshing.is_empty() {
+            tokio::task::yield_now().await;
+        }
 
         failing.store(false, Ordering::SeqCst);
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let before = calls.load(Ordering::SeqCst);
-                catalog.watch_homes();
-                while !catalog.lock().refreshing.is_empty() {
-                    tokio::task::yield_now().await;
-                }
-                if calls.load(Ordering::SeqCst) == before {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(60)).await;
+        for _ in 0..4 {
+            catalog.watch_homes();
+            while !catalog.lock().refreshing.is_empty() {
+                tokio::task::yield_now().await;
             }
-        })
-        .await
-        .expect("the failed entry converges once its re-probe succeeds");
+            tokio::time::sleep(Duration::from_millis(60)).await;
+        }
         assert_eq!(
             current_model(&catalog, "solo").await.as_deref(),
             Some("solo-second")
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        assert_eq!(calls.load(Ordering::SeqCst), 9);
     }
 
     // Hard-won: #1337 review: a permanently failed entry kept its identity
