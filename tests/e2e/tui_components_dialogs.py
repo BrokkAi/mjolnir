@@ -25,6 +25,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from reliability_lab import TIMEOUT_SCALE
+
 
 _TEMP_TITLE = "dialog-probe"
 _SEARCH_QUERY = "dialog-no-match"
@@ -34,7 +36,7 @@ def _capture(tmux: Any) -> str:
     return str(tmux.capture())
 
 
-def _wait(tmux: Any, marker: str, description: str | None = None, timeout: float = 8) -> str:
+def _wait(tmux: Any, marker: str, description: str | None = None, timeout: float = 8 * TIMEOUT_SCALE) -> str:
     """Wait for a visible marker and return the resulting pane."""
 
     return str(tmux.wait_for(marker, description or f"{marker!r} is visible", timeout=timeout))
@@ -100,7 +102,7 @@ def _session_title(lab: Any, screen: str) -> str:
 
 
 def _open_palette_command(tmux: Any, query: str, marker: str) -> str:
-    tmux.send_key("F2")
+    tmux.send_prefix(":")
     _wait(tmux, "Commands", "command palette")
     tmux.send_text(query)
     _wait(tmux, marker, f"palette command {query!r}")
@@ -120,7 +122,7 @@ def probe_rename(lab: Any, tmux: Any, evidence: Any) -> None:
         evidence,
         tmux,
         "dialog-rename-open",
-        "F2, search for Rename session, and press Enter",
+        "Ctrl+B :, search for Rename session, and press Enter",
         "Rename session field and standard Cancel/Save buttons are visible",
         dialog,
     )
@@ -146,7 +148,7 @@ def probe_rename(lab: Any, tmux: Any, evidence: Any) -> None:
     tmux.wait_until(
         lambda: _TEMP_TITLE in _capture(tmux) and "Rename session" not in _capture(tmux),
         "temporary rename is saved",
-        timeout=8,
+        timeout=8 * TIMEOUT_SCALE,
     )
     _record(
         evidence,
@@ -170,7 +172,7 @@ def probe_rename(lab: Any, tmux: Any, evidence: Any) -> None:
     tmux.wait_until(
         lambda: original_title in _capture(tmux) and "Rename session" not in _capture(tmux),
         "original session title is restored",
-        timeout=8,
+        timeout=8 * TIMEOUT_SCALE,
     )
     _record(
         evidence,
@@ -235,7 +237,7 @@ def probe_new_wizard(lab: Any, tmux: Any, evidence: Any) -> None:
     """Open the new-session wizard, move a selector, and cancel in its footer."""
 
     del lab
-    tmux.send_key("M-n")
+    tmux.send_prefix("c")
     wizard = _wait(tmux, "New session", "new session wizard")
     _record(
         evidence,
@@ -277,9 +279,9 @@ def probe_resume_import(lab: Any, tmux: Any, evidence: Any) -> None:
 
     del lab
     # Resume moved to the prefix chord: ctrl+b arms, then g opens the picker.
-    tmux.send_key("C-b")
-    tmux.send_key("g")
-    resume = _wait(tmux, "Resume a session", "resume dialog")
+    tmux.send_prefix("g")
+    # The picker opens on its Live tab; Mjolnir, Import and Archive follow.
+    resume = _wait(tmux, "Running sessions", "resume dialog")
     _record(
         evidence,
         tmux,
@@ -290,12 +292,14 @@ def probe_resume_import(lab: Any, tmux: Any, evidence: Any) -> None:
     )
 
     tmux.send_key("Right")
+    _wait(tmux, "Mjolnir sessions · newest first", "Mjolnir tab")
+    tmux.send_key("Right")
     importing = _wait(tmux, "Importable sessions", "import tab")
     _record(
         evidence,
         tmux,
         "dialog-resume-import-tab",
-        "press Right on the resume list",
+        "press Right twice on the resume list",
         "Import tab and its search control are visible",
         importing,
     )
@@ -312,14 +316,19 @@ def probe_resume_import(lab: Any, tmux: Any, evidence: Any) -> None:
         searched,
     )
 
+    # Escape peels one layer at a time: the query, then the search box's hold
+    # on the keyboard, then the dialog itself.
     tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Resume a session" not in _capture(tmux), "resume/import dismissed")
+    _wait(tmux, "Importable sessions · newest first", "search cleared")
+    tmux.send_key("Escape")
+    tmux.send_key("Escape")
+    tmux.wait_until(lambda: "× Sessions" not in _capture(tmux), "resume/import dismissed")
     cancelled = _capture(tmux)
     _record(
         evidence,
         tmux,
         "dialog-resume-import-cancel",
-        "press Escape from Import search",
+        "press Escape three times from Import search",
         "resume dialog closes without importing a session",
         cancelled,
     )
@@ -329,13 +338,13 @@ def probe_web_dialog(lab: Any, tmux: Any, evidence: Any) -> None:
     """Open the web dialog and activate its shared Close button."""
 
     del lab
-    tmux.send_key("F4")
+    tmux.send_prefix("u")
     web = _wait(tmux, "Web viewer", "web dialog")
     _record(
         evidence,
         tmux,
         "dialog-web-open",
-        "press F4",
+        "press Ctrl+B u",
         "web dialog and title close control are visible",
         web,
     )
@@ -356,25 +365,28 @@ def probe_setup_double_click(lab: Any, tmux: Any, evidence: Any) -> None:
     """Selection and activation use the same row as keyboard Enter."""
     del lab
     from tui_components_tmux import locate_text
-    tmux.send_key("F7")
+    tmux.send_prefix("s")
     screen = _wait(tmux, "Interface", "setup categories")
     x, y = locate_text(screen, "Interface")
     tmux.mouse_click(x, y)
     selected = _capture(tmux)
-    if "Setup › Interface" in selected:
+    if "Settings › Interface" in selected:
         raise AssertionError("one setup click activated instead of selecting")
     # A fresh pair is sent together so capture latency cannot affect the interval.
     tmux.send_key("Home")
     tmux.mouse_click(x, y)
     tmux.mouse_click(x, y)
-    opened = _wait(tmux, "Setup › Interface", "double-click opens selected setup category")
+    opened = _wait(tmux, "Settings › Interface", "double-click opens selected setup category")
     _record(evidence, tmux, "setup-double-click", "select once, then double-click Interface", "Interface opens like Enter", opened)
     tmux.send_key("BSpace")
     _wait(tmux, "Interface", "setup parent category")
     tmux.send_key("Enter")
-    _wait(tmux, "Setup › Interface", "Enter reopens the restored selection")
+    _wait(tmux, "Settings › Interface", "Enter reopens the restored selection")
+    # Escape goes back one level at a time: first to the categories, then out.
     tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Setup › Interface" not in _capture(tmux), "setup dismissed without edits")
+    tmux.wait_until(lambda: "Settings › Interface" not in _capture(tmux), "setup page closed")
+    tmux.send_key("Escape")
+    tmux.wait_until(lambda: "× Settings" not in _capture(tmux), "setup dismissed without edits")
 
 
 def run_dialog_acceptance(lab: Any, tmux: Any, evidence: Any) -> None:

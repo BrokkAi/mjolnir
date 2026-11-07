@@ -30,7 +30,11 @@ import urllib.parse
 import urllib.request
 
 
-TIMEOUT = 20.0
+# Waits are tuned for an idle host. On a loaded one a daemon or a session can
+# take several times longer to come up, so MJ_E2E_TIMEOUT_SCALE multiplies
+# every wait in the lab and the tmux harness. The default, 1, changes nothing.
+TIMEOUT_SCALE = float(os.environ.get("MJ_E2E_TIMEOUT_SCALE", "1"))
+TIMEOUT = 20.0 * TIMEOUT_SCALE
 INTERNED_VIEWER_FIELDS = (
     "available_commands",
     "capabilities",

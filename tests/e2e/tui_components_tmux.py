@@ -22,14 +22,16 @@ import sys
 import time
 from typing import Callable, Iterable
 
-from reliability_lab import Lab, ScenarioFailure
+from reliability_lab import TIMEOUT_SCALE, Lab, ScenarioFailure
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-# The combined dashboard deliberately refuses to render below 80 columns.
-# Keep both sides of that boundary in the real-terminal evidence.
-DIMENSIONS = ((59, 18), (79, 18), (80, 18), (140, 40), (200, 60))
-DEFAULT_TIMEOUT = 15.0
+# The combined dashboard refuses to render below 60 columns and, from there,
+# below a height its panes need (22 rows at 80 columns, more when stacked).
+# Keep both sides of the width boundaries in the real-terminal evidence, with
+# enough height that only the width is under test.
+DIMENSIONS = ((59, 30), (79, 30), (80, 30), (140, 40), (200, 60))
+DEFAULT_TIMEOUT = 15.0 * TIMEOUT_SCALE
 
 
 def _write_text(path: pathlib.Path, text: str) -> None:
@@ -203,6 +205,11 @@ class TmuxController:
         if self.session is None:
             raise ScenarioFailure("no tmux session for key input")
         self.run("send-keys", "-t", self.session, key)
+
+    def send_prefix(self, key: str) -> None:
+        """Press the dashboard's prefix key (Ctrl+B), then `key`."""
+        self.send_key("C-b")
+        self.send_text(key)
 
     def send_text(self, text: str) -> None:
         if self.session is None:
@@ -407,6 +414,10 @@ def create_session(
     # opens the manager inside the combined dashboard; closing it returns to
     # the same surface and leaves the workspace pane's keyboard stops usable.
     tmux.send_key("BTab")
+    # A focus change takes effect when the next frame is drawn, and Enter acts
+    # on the focus the last frame had. Nothing on screen shows the move, so
+    # give the dashboard time to draw before activating.
+    time.sleep(0.5 * TIMEOUT_SCALE)
     tmux.send_key("Enter")
     tmux.wait_for("New workspace", "integrated workspace manager")
     tmux.send_key("Escape")
@@ -498,42 +509,63 @@ def dashboard_dimensions(tmux: TmuxController, evidence: Evidence) -> None:
 
 
 def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
-    """Changing only the sidebar size moves both support panes together."""
-    tmux.resize(80, 40)
+    """Changing only the sidebar size moves both support panes together.
+
+    Where the sidebar ends and the support panes start depends on the
+    terminal width and on how wide their tables are, so the probe compares
+    states instead of fixing columns: in every state Targets and Profiles
+    share a column; the narrow and wide sidebars differ; and restoring the
+    wide one restores the whole layout.
+    """
+    tmux.resize(200, 40)
     tmux.wait_until(
-        lambda: len(tmux.capture().splitlines()[0]) == 80
+        lambda: len(tmux.capture().splitlines()[0]) == 200
         and tmux.capture().splitlines()[0].endswith("╮"),
-        "dashboard rendered at 80 columns",
+        "dashboard rendered at 200 columns",
     )
-    for glyph, sidebar_width, support_x, label in [
-        ("▄", 40, 0, "wide"),
-        ("▁", 20, 20, "narrow"),
-        ("▄", 40, 0, "wide-again"),
-    ]:
+
+    def layout() -> tuple[int, int, int]:
+        """Columns of the sidebar's right edge, Targets and Profiles."""
+        lines = tmux.capture().splitlines()
+        sessions = next((line for line in lines if "▁" in line), "")
+        targets = next((line for line in lines if " Targets " in line), "")
+        quota = next((line for line in lines if " Profiles " in line), "")
+        return (
+            sessions.find("╮"),
+            targets.find("╭ Targets "),
+            quota.find("╭ Profiles "),
+        )
+
+    states: dict[str, tuple[int, int, int]] = {}
+    for glyph, label in [("▄", "wide"), ("▁", "narrow"), ("▄", "wide-again")]:
         screen = tmux.capture().splitlines()
         y = next(i for i, line in enumerate(screen) if "▁" in line)
         tmux.mouse_click(screen[y].index(glyph), y)
+        previous: list[tuple[int, int, int]] = []
 
-        def positioned():
-            lines = tmux.capture().splitlines()
-            sessions = next((line for line in lines if "▁" in line), "")
-            targets = next((line for line in lines if " Targets " in line), "")
-            quota = next((line for line in lines if " Profiles " in line), "")
-            return (
-                sessions.find("╮") == sidebar_width - 1
-                and targets.find("╭ Targets ") == support_x
-                and quota.find("╭ Profiles ") == support_x
-            )
+        def settled() -> bool:
+            # The same, complete layout on two reads in a row.
+            current = layout()
+            stable = bool(previous) and previous[-1] == current
+            previous.append(current)
+            return stable and -1 not in current
 
-        tmux.wait_until(positioned, f"support panes relayout with {label} sidebar")
-        screen = tmux.capture()
+        tmux.wait_until(settled, f"support panes settled with {label} sidebar")
+        states[label] = layout()
+        edge, targets_x, quota_x = states[label]
+        if targets_x != quota_x:
+            raise ScenarioFailure(f"Targets and Profiles are not aligned in {label}: {states}")
         evidence.event(
             f"sidebar-relayout-{label}",
-            f"click Sessions {glyph} at fixed 80x40",
-            f"Targets and Profiles begin at column {support_x}",
-            f"Targets and Profiles begin at column {support_x}",
-            evidence.capture(f"sidebar-relayout-{label}", screen),
+            f"click Sessions {glyph} at fixed 200x40",
+            "Targets and Profiles share a column",
+            f"sidebar ends at column {edge}; Targets and Profiles begin at column {targets_x}",
+            evidence.capture(f"sidebar-relayout-{label}", tmux.capture()),
         )
+    if states["narrow"][0] >= states["wide"][0]:
+        raise ScenarioFailure(f"the narrow sidebar is not narrower than the wide one: {states}")
+    if states["wide-again"] != states["wide"]:
+        raise ScenarioFailure(f"restoring the wide sidebar did not restore the layout: {states}")
 
 
 def run_workflow(
@@ -550,6 +582,8 @@ def run_workflow(
 
     tmux.start("dashboard-components", 140, 40)
     tmux.wait_for_any(("Sessions", "live-components"), "dashboard after direct reattach")
+    # The dashboard draws before the new daemon's web viewer listens.
+    lab.wait_daemon_status(port)
 
     dashboard_dimensions(tmux, evidence)
     if not dialogs_only:
@@ -569,36 +603,34 @@ def run_workflow(
         "Target actions dialog visible",
         evidence.capture("target-actions", target_screen),
     )
-    tmux.send_key("F1")
-    help_screen = tmux.wait_for("Keyboard shortcuts", "nested help over target actions")
+    # The Help key opens the command palette, and a dialog holds every prefix
+    # command except detach and refresh: opening the palette would move the
+    # keyboard out from under the dialog. The key is swallowed, the dialog stays.
+    tmux.send_prefix("?")
+    time.sleep(1.0 * TIMEOUT_SCALE)
+    held_screen = tmux.capture()
+    if " Commands " in held_screen or "Target actions" not in held_screen:
+        raise ScenarioFailure(
+            "the palette key was not held by the Target actions dialog:\n" + held_screen
+        )
     evidence.event(
-        "nested-help-open",
-        "F1",
-        "help overlay visible",
-        "help overlay visible",
-        evidence.capture("nested-help-open", help_screen),
-    )
-    tmux.send_key("Escape")
-    tmux.wait_until(lambda: "Keyboard shortcuts" not in tmux.capture(), "nested Help dismissed")
-    target_screen = tmux.wait_for("Target actions", "target actions restored after help")
-    evidence.event(
-        "nested-help-close",
-        "Escape",
-        "target actions restored",
-        "target actions restored",
-        evidence.capture("nested-help-close", target_screen),
+        "prefix-command-held-by-dialog",
+        "Ctrl+B ?",
+        "the palette stays closed and the dialog stays open",
+        "the palette stayed closed and the dialog stayed open",
+        evidence.capture("prefix-command-held-by-dialog", held_screen),
     )
     tmux.send_key("Escape")
     tmux.wait_until(lambda: "Target actions" not in tmux.capture(), "target actions dismissed")
 
-    # F2 is the user-facing route to the migrated representative form.
-    tmux.send_key("F2")
+    # Ctrl+B : is the user-facing route to the migrated representative form.
+    tmux.send_prefix(":")
     tmux.wait_for("Commands", "command palette")
     tmux.send_text("container settings")
     palette_screen = tmux.wait_for("Container settings", "container settings palette entry")
     evidence.event(
         "palette-container-settings",
-        "F2, type `container settings`",
+        "Ctrl+B :, type `container settings`",
         "Container settings command visible",
         "Container settings command visible",
         evidence.capture("palette-container-settings", palette_screen),
@@ -642,15 +674,20 @@ def run_workflow(
         "attached directory row visible",
         evidence.capture("container-mount-added", mount_screen),
     )
+    # The Access line sets the mode of the next directory to attach. It is a
+    # drop-down: open it, move to the next choice and commit. It starts
+    # read-only; the next choice is copy-on-write.
     tmux.send_key("Tab")
     tmux.send_key("Space")
-    checkbox_screen = tmux.wait_for("[✓]", "read-only checkbox toggled")
+    tmux.send_key("Down")
+    tmux.send_key("Enter")
+    access_screen = tmux.wait_for("Access: cow", "access mode for the next mount changed")
     evidence.event(
-        "container-read-only",
-        "Tab, Space",
-        "read-only checkbox checked",
-        "read-only checkbox checked",
-        evidence.capture("container-read-only", checkbox_screen),
+        "container-access-mode",
+        "Tab, Space, Down, Enter",
+        "the Access line reads copy-on-write",
+        "the Access line reads copy-on-write",
+        evidence.capture("container-access-mode", access_screen),
     )
     tmux.send_key("Tab")
     list_screen = tmux.wait_for("Attached directories", "mount list focus")
@@ -695,23 +732,23 @@ def run_workflow(
     from tui_components_actions import save_container_settings
     save_container_settings(lab, tmux, evidence)
 
-    # Verify ordinary help and palette after a migrated modal changes focus.
-    tmux.send_key("F1")
-    help_screen = tmux.wait_for("Keyboard shortcuts", "help after editor")
+    # Verify the Help key and the palette key after a migrated modal changes focus.
+    tmux.send_prefix("?")
+    help_screen = tmux.wait_for("Commands", "palette from the Help key after editor")
     evidence.event(
-        "help-after-editor",
-        "F1",
-        "help overlay visible",
-        "help overlay visible",
-        evidence.capture("help-after-editor", help_screen),
+        "palette-from-help-key-after-editor",
+        "Ctrl+B ?",
+        "command palette visible",
+        "command palette visible",
+        evidence.capture("palette-from-help-key-after-editor", help_screen),
     )
     tmux.send_key("Escape")
     tmux.wait_for("Sessions", "dashboard after help")
-    tmux.send_key("F2")
+    tmux.send_prefix(":")
     palette_screen = tmux.wait_for("Commands", "palette after editor")
     evidence.event(
         "palette-after-editor",
-        "F2",
+        "Ctrl+B :",
         "command palette visible",
         "command palette visible",
         evidence.capture("palette-after-editor", palette_screen),
@@ -725,6 +762,7 @@ def run_workflow(
     tmux.start("dashboard-destroy", 140, 40)
     tmux.wait_for_any(("Sessions", "live-components"), "dashboard after restoring bare target")
     tmux.wait_for("live-components", "owned session after target restoration")
+    lab.wait_daemon_status(port)
     from tui_components_actions import destroy_confirmation
     destroy_confirmation(lab, tmux, evidence)
     tmux.release()
