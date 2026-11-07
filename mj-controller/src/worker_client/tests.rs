@@ -1601,6 +1601,124 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
     assert!(outcomes[0].outcome.is_err());
 }
 
+// A profile with a role gives each session credentials assumed for it alone;
+// the host's unscoped export never reaches the session, not even when the
+// role cannot be assumed.
+#[cfg(unix)]
+#[tokio::test]
+async fn role_scoped_sessions_receive_assumed_credentials_and_never_the_unscoped_export() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = scratch.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let calls = scratch.path().join("calls");
+    // A stand-in for the AWS CLI: `configure export-credentials` is the
+    // unscoped export and must never run; `sts assume-role` prints the
+    // recorded output or the recorded AccessDenied line.
+    let aws = bin.join("aws");
+    std::fs::write(
+        &aws,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in configure) echo unscoped export ran >&2; exit 99;; esac\n\
+             echo x >> {calls}\n\
+             if [ -f \"$MJ_AWS_ASSUME_FIXTURE\" ]; then exec /bin/cat \"$MJ_AWS_ASSUME_FIXTURE\"; fi\n\
+             /bin/cat {denied} >&2; exit 254\n",
+            calls = calls.display(),
+            denied = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/aws-sts-assume-role-access-denied.txt")
+                .display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // The recorded output, expiring far in the future so only the cache's
+    // half-lifetime rule could ask for another call (it does not here).
+    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/aws-sts-assume-role.json"
+    ))
+    .unwrap();
+    recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
+    let fixture = scratch.path().join("assumed.json");
+    std::fs::write(&fixture, serde_json::to_vec(&recorded).unwrap()).unwrap();
+
+    let source = |fixture: &std::path::Path| mj_core::aws_credentials::AwsCredentialSource {
+        environment: BTreeMap::from([
+            ("PATH".into(), bin.to_string_lossy().into_owned()),
+            ("AWS_PROFILE".into(), "bedrock".into()),
+            (
+                "MJ_AWS_ASSUME_FIXTURE".into(),
+                fixture.to_string_lossy().into_owned(),
+            ),
+        ]),
+        role: Some(mj_core::config::AwsRoleConfig {
+            role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+            session_policy: None,
+            session_policy_arns: Vec::new(),
+            duration_seconds: None,
+            source_identity: false,
+        }),
+    };
+    let granted_received = scratch.path().join("granted");
+    let denied_received = scratch.path().join("denied");
+    let mut granted = codex_sync_target(
+        home.path(),
+        "role-granted",
+        "2026-09-25T20:00:00Z",
+        &granted_received,
+    );
+    granted.skips_login_file_sync = true;
+    granted.aws_credentials = Some(source(&fixture));
+    let mut denied = codex_sync_target(
+        home.path(),
+        "role-denied",
+        "2026-09-25T20:00:00Z",
+        &denied_received,
+    );
+    denied.skips_login_file_sync = true;
+    denied.aws_credentials = Some(source(&scratch.path().join("absent.json")));
+    let targets = [granted, denied];
+
+    let outcomes = reconcile_profile(&targets, None).await;
+    let granted_outcome = outcomes
+        .iter()
+        .find(|outcome| outcome.session_id == "role-granted")
+        .unwrap();
+    assert_eq!(
+        granted_outcome.outcome,
+        Ok(vec![CredentialSyncAction::Pushed])
+    );
+    let received: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&granted_received).unwrap()).unwrap();
+    assert_eq!(received["AccessKeyId"], "ASIAEXAMPLEEXAMPLE00");
+    assert_eq!(received["SessionToken"], "example-session-token");
+    // The refused session reports AWS's error and receives nothing.
+    let denied_outcome = outcomes
+        .iter()
+        .find(|outcome| outcome.session_id == "role-denied")
+        .unwrap();
+    let error = denied_outcome.outcome.as_ref().unwrap_err();
+    assert!(
+        error.contains("AccessDenied") && error.contains("remove [profiles."),
+        "{error}"
+    );
+    assert!(!error.contains("unscoped export ran"), "{error}");
+    assert!(!denied_received.exists());
+
+    // The next pass finds the cached credentials still fresh and installed:
+    // no new assume-role call and no push. The refused session retries.
+    let calls_before = std::fs::read_to_string(&calls).unwrap().lines().count();
+    let again = reconcile_profile(&targets, None).await;
+    assert!(
+        again
+            .iter()
+            .all(|outcome| outcome.session_id == "role-denied")
+    );
+    let calls_after = std::fs::read_to_string(&calls).unwrap().lines().count();
+    assert_eq!(calls_after, calls_before + 1);
+}
+
 /// #1160: a sync that a session's auth failure asked for says whether it
 /// reached that session, even when the session's login already matched the
 /// profile's. That match is what shows the profile's own login is the one the

@@ -300,10 +300,16 @@ pub(super) async fn reconcile_profile_guarded(
     } else {
         HostSlopcopLogin::Unknown
     };
-    let aws_credentials = match targets
-        .iter()
-        .find_map(|target| target.aws_credentials.clone())
-    {
+    // Without a role, every session of the profile receives the same export,
+    // so it is taken once per pass. With a role, each session receives
+    // credentials of its own (the session id is the role session name), so
+    // they are minted per session below.
+    let unscoped_aws_credentials = match targets.iter().find_map(|target| {
+        target
+            .aws_credentials
+            .clone()
+            .filter(|source| source.role.is_none())
+    }) {
         Some(source) => {
             let exported = tokio::task::spawn_blocking(move || {
                 crate::aws_credentials::export(
@@ -331,22 +337,19 @@ pub(super) async fn reconcile_profile_guarded(
     for pass in 0..2 {
         let mut pulled = false;
         for target in targets {
-            let aws_credentials = if target.aws_credentials.is_some() {
-                match &aws_credentials {
-                    Ok(credentials) => credentials.as_ref(),
-                    Err(error) => {
-                        outcomes.insert(
-                            target.session_id.clone(),
-                            CredentialSyncOutcome {
-                                session_id: target.session_id.clone(),
-                                outcome: Err(format!("{error:#}")),
-                            },
-                        );
-                        continue;
-                    }
+            let unscoped = match (&target.aws_credentials, &unscoped_aws_credentials) {
+                (Some(source), Ok(credentials)) if source.role.is_none() => credentials.as_ref(),
+                (Some(source), Err(error)) if source.role.is_none() => {
+                    outcomes.insert(
+                        target.session_id.clone(),
+                        CredentialSyncOutcome {
+                            session_id: target.session_id.clone(),
+                            outcome: Err(format!("{error:#}")),
+                        },
+                    );
+                    continue;
                 }
-            } else {
-                None
+                _ => None,
             };
             let result = match gate {
                 Some(gate) => gate
@@ -383,12 +386,13 @@ pub(super) async fn reconcile_profile_guarded(
                         } else {
                             None
                         };
+                        let scoped = scoped_aws_credentials(target).await?;
                         reconcile_session(
                             relays,
                             target,
                             &skills,
                             github_token.as_deref(),
-                            aws_credentials,
+                            scoped.as_ref().or(unscoped),
                             &slopcop_login,
                         )
                         .await
@@ -406,17 +410,20 @@ pub(super) async fn reconcile_profile_guarded(
                         Ok(None)
                     };
                     match github_token {
-                        Ok(github_token) => {
-                            reconcile_session(
-                                relays,
-                                target,
-                                &skills,
-                                github_token.as_deref(),
-                                aws_credentials,
-                                &slopcop_login,
-                            )
-                            .await
-                        }
+                        Ok(github_token) => match scoped_aws_credentials(target).await {
+                            Ok(scoped) => {
+                                reconcile_session(
+                                    relays,
+                                    target,
+                                    &skills,
+                                    github_token.as_deref(),
+                                    scoped.as_ref().or(unscoped),
+                                    &slopcop_login,
+                                )
+                                .await
+                            }
+                            Err(error) => Err(error),
+                        },
                         Err(error) => Err(error),
                     }
                 }
@@ -462,6 +469,35 @@ pub(super) async fn reconcile_profile_guarded(
         }
     }
     outcomes.into_values().collect()
+}
+
+/// The scoped AWS credentials of a session whose profile names a role, from
+/// the shared cache or a new `AssumeRole`. `None` for a session without a
+/// role, which shares the profile's unscoped export. A failure is this
+/// session's failed outcome: the worker keeps the credentials it has, and no
+/// path falls back to the unscoped export.
+async fn scoped_aws_credentials(
+    target: &CredentialSyncTarget,
+) -> Result<Option<mj_core::aws_credentials::AwsCredentials>> {
+    let Some(source) = target
+        .aws_credentials
+        .clone()
+        .filter(|source| source.role.is_some())
+    else {
+        return Ok(None);
+    };
+    let (profile_id, session_id) = (target.profile_id.clone(), target.session_id.clone());
+    tokio::task::spawn_blocking(move || {
+        crate::aws_assume_role::ScopedAwsCredentials::shared().credentials_for(
+            &profile_id,
+            &session_id,
+            &source,
+            &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
+        )
+    })
+    .await
+    .context("AWS role assumption task stopped")?
+    .map(Some)
 }
 
 /// The skills tree this session should converge to: the profile's own skills
