@@ -1,6 +1,6 @@
 //! Durable contracts for Mjolnir-managed child-agent sessions.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::continuation::GeneratedPrompt;
 use serde::{Deserialize, Serialize};
@@ -973,26 +973,17 @@ pub enum SubagentMcpRole {
 }
 
 impl SubagentMcpRole {
-    /// The arguments that start the `mj-review` server. Only a managed child
-    /// names its role, which selects its instructions; a top-level session's
-    /// arguments stay as earlier builds wrote them.
+    /// Only top-level sessions enforce the automatic push-review gate.
     #[must_use]
-    pub fn review_server_args(self, socket: &Path, harness: &str) -> Vec<String> {
-        let mut args: Vec<String> = [
-            "worker",
-            "subagent-mcp",
-            "--socket",
-            &socket.to_string_lossy(),
-            "--harness",
-            harness,
-            "--review-server",
-        ]
-        .map(str::to_owned)
-        .into();
-        if matches!(self, Self::Child | Self::FetchOnly) {
-            args.extend(["--role".to_owned(), self.id().to_owned()]);
-        }
-        args
+    pub fn supports_push_gate(self) -> bool {
+        matches!(self, Self::Parent | Self::MessageOnly)
+    }
+
+    /// Whether a session in this role is offered the `mj-review` server: the
+    /// role enforces the push gate and the launch turned the gate on.
+    #[must_use]
+    pub fn offers_review_server(self, review_gate: bool) -> bool {
+        review_gate && self.supports_push_gate()
     }
 
     #[must_use]
@@ -2280,7 +2271,7 @@ mod tests {
     }
 
     #[test]
-    fn review_tools_belong_to_the_review_server_and_no_mj_agents_role() {
+    fn review_tools_belong_to_the_review_server_for_gated_top_level_roles() {
         assert_eq!(REVIEW_MCP_SERVER, "mj-review");
         assert_eq!(
             REVIEW_MCP_TOOLS,
@@ -2295,6 +2286,11 @@ mod tests {
             for tool in REVIEW_MCP_TOOLS {
                 assert!(!role.tool_names().contains(tool), "{role} lists {tool}");
             }
+            assert!(!role.offers_review_server(false));
+            assert_eq!(
+                role.offers_review_server(true),
+                matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly)
+            );
         }
     }
 

@@ -481,21 +481,21 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
             };
             let text = match verdict {
                 crate::review::verdict::ReviewVerdict::Clean => format!(
-                    "Review clean for commits {range}. Tree {} is recorded as reviewed.",
+                    "Review clean for commits {range}. Tree {} is recorded as reviewed; you may push.",
                     short(tree)
                 ),
                 crate::review::verdict::ReviewVerdict::Findings { synthesis, .. }
                     if !verdict.is_complete() =>
                 {
                     format!(
-                        "Review incomplete for commits {range}:\n{synthesis}\nA reviewer failed, so override_review is unavailable. Address valid findings and call request_review again."
+                        "Review incomplete for commits {range}:\n{synthesis}\nAddress valid findings and call request_review again. The push stays blocked; override_review is unavailable while any reviewer has failed."
                     )
                 }
                 crate::review::verdict::ReviewVerdict::Findings { synthesis, .. } => format!(
-                    "Review of commits {range} found:\n{synthesis}\nFor each finding you will not fix, call override_review now, before committing any change, with the finding and your reason. Fix the rest, commit, and call request_review again."
+                    "Review of commits {range} found:\n{synthesis}\nFor each finding you will not fix, call override_review now, before committing any change, with the finding and your reason. Fix the rest, commit, and call request_review again before pushing. If you override every finding, you can push these commits as they are."
                 ),
                 crate::review::verdict::ReviewVerdict::Failed { reason } => format!(
-                    "Review of commits {range} failed: {reason}. Call request_review again."
+                    "Review of commits {range} failed: {reason}. Call request_review again; the push stays blocked until a review is clean."
                 ),
             };
             (text.clone(), None, None, text)

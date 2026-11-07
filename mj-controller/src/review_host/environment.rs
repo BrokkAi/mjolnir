@@ -215,12 +215,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         event: &mj_core::mailbox::MailboxEvent,
     ) -> Result<(), String> {
         let json = serde_json::to_string(event).map_err(|error| error.to_string())?;
-        // A sub-agent that handed back and parked while its review ran is
-        // woken by the verdict; a top-level session is never parked.
-        let unpark = crate::database::load_subagent(session_id)
-            .map_err(|error| format!("{error:#}"))?
-            .is_some();
-        crate::database::enqueue_mailbox_event(&event.key, session_id, &json, true, unpark)
+        crate::database::enqueue_mailbox_event(&event.key, session_id, &json, true, false)
             .map(|_| ())
             .map_err(|error| format!("{error:#}"))
     }

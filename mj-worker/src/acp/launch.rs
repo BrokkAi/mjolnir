@@ -9,10 +9,18 @@ pub struct SubagentMcpSocket {
     pub agent_mailboxes_enabled: bool,
     /// Whether a parent's spawn tool offers the subtle task type.
     pub subtle_subagents: bool,
-    /// Whether this launch offers the `mj-review` server beside `mj-agents`.
-    pub review_tools: bool,
+    /// Whether the launch's review gate is on. With a role that enforces the
+    /// push gate, the `mj-review` server is offered too.
+    pub review_gate: bool,
     /// False for legacy shared Codex homes, which must retain ACP delivery.
     pub profile_registration: bool,
+}
+
+impl SubagentMcpSocket {
+    /// Whether this launch offers the `mj-review` server.
+    pub fn offers_review_server(&self) -> bool {
+        self.role.offers_review_server(self.review_gate)
+    }
 }
 
 /// One configured MCP server exposed to the reviewer harness.
@@ -227,7 +235,7 @@ pub(super) fn session_request_meta(
         if spec
             .subagent_mcp_socket
             .as_ref()
-            .is_some_and(|socket| socket.review_tools)
+            .is_some_and(SubagentMcpSocket::offers_review_server)
         {
             allowed.extend(
                 mj_core::subagent::REVIEW_MCP_TOOLS
@@ -311,13 +319,19 @@ fn review_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
         return None;
     }
     let socket = spec.subagent_mcp_socket.as_ref()?;
-    if socket.profile_registration || !socket.review_tools {
+    if socket.profile_registration || !socket.offers_review_server() {
         return None;
     }
     let worker = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hel"));
-    let args = socket
-        .role
-        .review_server_args(&socket.path, spec.harness.id());
+    let args = vec![
+        "worker".into(),
+        "subagent-mcp".into(),
+        "--socket".into(),
+        socket.path.to_string_lossy().into_owned(),
+        "--harness".into(),
+        spec.harness.id().to_owned(),
+        "--review-server".into(),
+    ];
     Some(McpServer::Stdio(approve_owned_mcp(
         spec,
         McpServerStdio::new(mj_core::subagent::REVIEW_MCP_SERVER, worker).args(args),

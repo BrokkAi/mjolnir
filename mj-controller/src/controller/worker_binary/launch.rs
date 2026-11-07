@@ -683,13 +683,7 @@ impl Controller {
             })
             .collect::<Result<Vec<_>>>()?;
         }
-        // Top-level sessions and ordinary sub-agents may request review. A
-        // reviewer or the oracle never does. The worker derives the review
-        // tools and the push gate from this one value.
-        launch.review_trigger = if subagent
-            .as_ref()
-            .is_none_or(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
-        {
+        launch.review_trigger = if subagent.is_none() {
             self.config
                 .review
                 .for_session(session.review.as_ref())

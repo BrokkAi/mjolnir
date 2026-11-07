@@ -57,7 +57,7 @@ pub(super) fn configure_claude_subagent_mcp(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     agent_mailboxes_enabled: bool,
     subtle_subagents: bool,
-    review_tools: bool,
+    review_gate: bool,
 ) -> Result<()> {
     use mj_core::subagent::{
         REVIEW_MCP_SERVER, REVIEW_MCP_TOOLS, SUBAGENT_MCP_SERVER, SubagentMcpRole,
@@ -137,7 +137,7 @@ pub(super) fn configure_claude_subagent_mcp(
                 "args": args,
             }),
         );
-        if review_tools {
+        if role.offers_review_server(review_gate) {
             servers.insert(
                 REVIEW_MCP_SERVER.into(),
                 serde_json::json!({
@@ -145,10 +145,15 @@ pub(super) fn configure_claude_subagent_mcp(
                     // No `alwaysLoad`: the tools are needed only before a push,
                     // so Claude loads them on demand.
                     "command": root.join("hel"),
-                    "args": role.review_server_args(
-                        &root.join(SUBAGENT_SOCKET),
+                    "args": [
+                        "worker",
+                        "subagent-mcp",
+                        "--socket",
+                        root.join(SUBAGENT_SOCKET).to_string_lossy(),
+                        "--harness",
                         mj_core::config::HarnessKind::Claude.id(),
-                    ),
+                        "--review-server",
+                    ],
                 }),
             );
         } else {
@@ -186,7 +191,8 @@ pub(super) fn configure_claude_subagent_mcp(
             .tool_names()
             .iter()
             .map(|tool| format!("mcp__{SUBAGENT_MCP_SERVER}__{tool}"));
-        let review = review_tools
+        let review = role
+            .offers_review_server(review_gate)
             .then(|| {
                 REVIEW_MCP_TOOLS
                     .iter()
@@ -477,7 +483,7 @@ fn configure_codex_mcp_with_mailboxes(
     policy: mj_core::config::ExecutionPolicy,
     mailboxes_enabled: bool,
     subtle_subagents: bool,
-    review_tools: bool,
+    review_gate: bool,
 ) -> Result<bool> {
     if !private_staged_home(root, session_id, home) {
         return Ok(false);
@@ -557,13 +563,21 @@ fn configure_codex_mcp_with_mailboxes(
             server["default_tools_approval_mode"] = serde_json::json!("approve");
         }
         servers.insert(name.into(), toml::Value::try_from(server)?);
-        if review_tools {
+        if role.offers_review_server(review_gate) {
             // Unlike `mj-agents`, no `omit_tools_from`: Codex may defer these
             // tools until a search finds them, which suits tools needed only
             // before a push.
             let mut review = serde_json::json!({
                 "command": worker,
-                "args": role.review_server_args(&root.join(SUBAGENT_SOCKET), "codex"),
+                "args": [
+                    "worker",
+                    "subagent-mcp",
+                    "--socket",
+                    root.join(SUBAGENT_SOCKET).to_string_lossy(),
+                    "--harness",
+                    "codex",
+                    "--review-server",
+                ],
             });
             if policy == mj_core::config::ExecutionPolicy::ConfiguredApprovals {
                 review["default_tools_approval_mode"] = serde_json::json!("approve");
@@ -626,7 +640,7 @@ pub(super) fn configure_codex_profile(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
     options: crate::subagent_mcp::ParentTools,
-    review_tools: bool,
+    review_gate: bool,
 ) -> Result<bool> {
     configure_codex_mailbox_hook(root, environment)?;
     configure_codex_mcp_with_mailboxes(
@@ -637,7 +651,7 @@ pub(super) fn configure_codex_profile(
         policy,
         options.agent_mailboxes_enabled,
         options.subtle_subagents,
-        review_tools,
+        review_gate,
     )
 }
 
@@ -2974,15 +2988,16 @@ mod review_gate_tests {
 
     // Hard-won: 32d96d199: review registration required granting the delegation role.
     #[test]
-    fn the_review_server_is_registered_for_every_role_when_the_launch_offers_review_tools() {
+    fn the_review_server_is_registered_only_for_gated_top_level_sessions() {
         for role in [
             SubagentMcpRole::Parent,
             SubagentMcpRole::Child,
             SubagentMcpRole::MessageOnly,
             SubagentMcpRole::FetchOnly,
         ] {
-            for tools in [false, true] {
-                let expected = tools;
+            for gate in [false, true] {
+                let expected =
+                    gate && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
                 let (root, home) = staged_profile();
                 configure_claude_subagent_mcp(
                     root.path(),
@@ -2991,7 +3006,7 @@ mod review_gate_tests {
                     Some(role),
                     true,
                     true,
-                    tools,
+                    gate,
                 )
                 .unwrap();
                 let (config, allow) = claude_files(&home);
@@ -3006,7 +3021,7 @@ mod review_gate_tests {
                 assert_eq!(
                     servers.get("mj-review").is_some(),
                     expected,
-                    "{role} {tools}"
+                    "{role} {gate}"
                 );
                 for rule in REVIEW_RULES {
                     assert_eq!(allow.iter().any(|allowed| allowed == rule), expected);
@@ -3020,21 +3035,18 @@ mod review_gate_tests {
                         review["command"],
                         serde_json::json!(root.path().join("hel"))
                     );
-                    let socket_path = root.path().join(SUBAGENT_SOCKET);
-                    let mut expected_args = vec![
-                        "worker",
-                        "subagent-mcp",
-                        "--socket",
-                        socket_path.to_str().unwrap(),
-                        "--harness",
-                        "claude",
-                        "--review-server",
-                    ];
-                    // Only a managed child names its role, for its instructions.
-                    if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::FetchOnly) {
-                        expected_args.extend(["--role", role.id()]);
-                    }
-                    assert_eq!(string_args(review), expected_args);
+                    assert_eq!(
+                        string_args(review),
+                        [
+                            "worker",
+                            "subagent-mcp",
+                            "--socket",
+                            root.path().join(SUBAGENT_SOCKET).to_str().unwrap(),
+                            "--harness",
+                            "claude",
+                            "--review-server",
+                        ]
+                    );
                 }
 
                 for policy in [
@@ -3049,7 +3061,7 @@ mod review_gate_tests {
                         policy,
                         true,
                         true,
-                        tools,
+                        gate,
                     )
                     .unwrap();
                     let servers = codex_servers(&home);
@@ -3061,11 +3073,7 @@ mod review_gate_tests {
                         .collect();
                     assert!(!agents.contains(&"--review-gate"));
                     assert!(!agents.contains(&"--review-server"));
-                    assert_eq!(
-                        servers.contains_key("mj-review"),
-                        expected,
-                        "{role} {tools}"
-                    );
+                    assert_eq!(servers.contains_key("mj-review"), expected, "{role} {gate}");
                     if expected {
                         let review = &servers["mj-review"];
                         let args: Vec<_> = review["args"]
@@ -3074,20 +3082,18 @@ mod review_gate_tests {
                             .iter()
                             .map(|arg| arg.as_str().unwrap())
                             .collect();
-                        let socket_path = root.path().join(SUBAGENT_SOCKET);
-                        let mut expected_args = vec![
-                            "worker",
-                            "subagent-mcp",
-                            "--socket",
-                            socket_path.to_str().unwrap(),
-                            "--harness",
-                            "codex",
-                            "--review-server",
-                        ];
-                        if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::FetchOnly) {
-                            expected_args.extend(["--role", role.id()]);
-                        }
-                        assert_eq!(args, expected_args);
+                        assert_eq!(
+                            args,
+                            [
+                                "worker",
+                                "subagent-mcp",
+                                "--socket",
+                                root.path().join(SUBAGENT_SOCKET).to_str().unwrap(),
+                                "--harness",
+                                "codex",
+                                "--review-server",
+                            ]
+                        );
                         // Codex may defer these tools; mj-agents opts out of that.
                         assert!(review.get("omit_tools_from").is_none());
                         assert!(servers["mj-agents"].get("omit_tools_from").is_some());
