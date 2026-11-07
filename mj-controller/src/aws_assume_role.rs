@@ -45,16 +45,21 @@ struct ScopedEntry {
 }
 
 impl ScopedEntry {
-    /// Refresh once half of the granted lifetime has elapsed. That is derived
-    /// from the lifetime AWS granted, so it scales with `duration_seconds`,
-    /// and it leaves at least half of the shortest STS lifetime (15 minutes)
-    /// for retries against a credential sync pass about once a minute.
-    fn fresh_at(&self, now: SystemTime) -> bool {
+    /// When to refresh: once half of the granted lifetime has elapsed. That is
+    /// derived from the lifetime AWS granted, so it scales with
+    /// `duration_seconds`, and it leaves at least half of the shortest STS
+    /// lifetime (15 minutes) for retries. The one place the half-life is
+    /// computed: reuse and renewal scheduling both ask it.
+    fn refresh_at(&self) -> SystemTime {
         let lifetime = self
             .expires_at
             .duration_since(self.minted_at)
             .unwrap_or_default();
-        now < self.minted_at + lifetime / 2
+        self.minted_at + lifetime / 2
+    }
+
+    fn fresh_at(&self, now: SystemTime) -> bool {
+        now < self.refresh_at()
     }
 }
 
@@ -75,9 +80,10 @@ impl ScopedAwsCredentials {
         );
     }
 
-    /// How long until the credentials cached for this session and source reach
-    /// half their lifetime and are due to be renewed; `None` when none are
-    /// cached (or another caller is minting into the entry).
+    /// How long until the credentials cached for this session and source are
+    /// no longer fresh and are due to be renewed; `None` when none are cached
+    /// (or another caller is minting into the entry), or when they are due
+    /// already: no wait is a reason to retry, not to renew again at once.
     pub(crate) fn renew_in(
         &self,
         session_id: &str,
@@ -96,16 +102,37 @@ impl ScopedAwsCredentials {
                 })?,
         );
         let entry = cell.try_lock().ok()?;
-        let entry = entry.as_ref()?;
-        let lifetime = entry
-            .expires_at
-            .duration_since(entry.minted_at)
-            .unwrap_or_default();
-        Some(
-            (entry.minted_at + lifetime / 2)
-                .duration_since(now)
-                .unwrap_or_default(),
-        )
+        entry
+            .as_ref()?
+            .refresh_at()
+            .duration_since(now)
+            .ok()
+            .filter(|wait| !wait.is_zero())
+    }
+
+    /// Drop the credentials cached for this session and source, so the next
+    /// request mints new ones: for a session whose credentials may have been
+    /// refused, or lost from the worker. Blocking, like `credentials_for`: it
+    /// waits for a mint in progress for the key.
+    pub(crate) fn forget(&self, session_id: &str, source: &AwsCredentialSource) {
+        let Some(role) = source.role.as_ref() else {
+            return;
+        };
+        let cell = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&ScopedKey {
+                session_id: session_id.to_owned(),
+                role: role.clone(),
+                environment: source.environment.clone(),
+            })
+            .map(Arc::clone);
+        if let Some(cell) = cell {
+            *cell
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
     }
 
     /// Whether the cache holds credentials for the session.
@@ -558,11 +585,26 @@ mod tests {
                     .unwrap()
             };
             let first = mint();
+            // AWS reports whole seconds, so the granted lifetime can be a
+            // fraction of a second short.
+            let near = |wait: Option<Duration>, expected: Duration| {
+                let wait = wait.unwrap();
+                wait <= expected && expected - wait < Duration::from_secs(1)
+            };
+            assert!(near(cache.renew_in(SESSION, &source), lifetime / 2));
             clock.advance(lifetime / 2 - Duration::from_secs(1));
             assert_eq!(mint().encode().unwrap(), first.encode().unwrap());
             assert_eq!(aws.calls.load(Ordering::SeqCst), 1);
-            // Half the granted lifetime has passed: the next pass renews.
+            // The renewal is scheduled for the moment reuse stops.
+            assert!(near(
+                cache.renew_in(SESSION, &source),
+                Duration::from_secs(1)
+            ));
+            // Half the granted lifetime has passed: the next pass renews, and
+            // no renewal is scheduled for "now", which would loop without
+            // waiting.
             clock.advance(Duration::from_secs(1));
+            assert_eq!(cache.renew_in(SESSION, &source), None);
             mint();
             assert_eq!(aws.calls.load(Ordering::SeqCst), 2);
         }

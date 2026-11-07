@@ -704,6 +704,28 @@ pub enum CredentialSyncAction {
     SlopcopLoginRemoved,
 }
 
+/// The independent steps of one session's sync. Each fails on its own, and a
+/// result can say that a step is fine again only if it checked that step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SyncStep {
+    /// The role-scoped AWS credentials, renewed by the session's own task.
+    Aws,
+    /// The profile's one AWS export, reconciled with its login pass.
+    AwsExport,
+    HarnessLogin,
+    Skills,
+    GithubToken,
+    Slopcop,
+}
+
+/// One step that failed while the others ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepFailure {
+    pub step: SyncStep,
+    /// What failed, beginning with the step's name.
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSyncOutcome {
     pub session_id: String,
@@ -713,7 +735,20 @@ pub struct CredentialSyncOutcome {
     /// Steps of the sync that failed while the others ran, such as the AWS
     /// credentials. `outcome` then still lists what the other steps did, so
     /// their work is counted and reported.
-    pub step_failure: Option<String>,
+    pub step_failures: Vec<StepFailure>,
+}
+
+impl CredentialSyncOutcome {
+    /// The step failures as one line, for a log or a test.
+    pub fn failure_text(&self) -> Option<String> {
+        (!self.step_failures.is_empty()).then(|| {
+            self.step_failures
+                .iter()
+                .map(|failure| failure.detail.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    }
 }
 
 /// Reported to the UI loops only when something happened: an action was taken,
@@ -744,16 +779,24 @@ impl CredentialSyncResult {
         })
     }
 
-    pub fn failures(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.outcomes
-            .iter()
-            .filter_map(|outcome| match &outcome.outcome {
-                Err(detail) => Some((outcome.session_id.as_str(), detail.as_str())),
-                Ok(_) => outcome
-                    .step_failure
-                    .as_deref()
-                    .map(|detail| (outcome.session_id.as_str(), detail)),
-            })
+    /// Every failure, with the step it belongs to (`None` for a session whose
+    /// whole sync failed).
+    pub fn failures(&self) -> impl Iterator<Item = (&str, Option<SyncStep>, &str)> {
+        self.outcomes.iter().flat_map(|outcome| {
+            let whole = outcome
+                .outcome
+                .as_ref()
+                .err()
+                .map(|detail| (outcome.session_id.as_str(), None, detail.as_str()));
+            let steps = outcome.step_failures.iter().map(|failure| {
+                (
+                    outcome.session_id.as_str(),
+                    Some(failure.step),
+                    failure.detail.as_str(),
+                )
+            });
+            whole.into_iter().chain(steps)
+        })
     }
 
     /// Sessions that took at least one action of any kind.
@@ -848,12 +891,18 @@ impl RejectedLogins {
         // check that the profile's own login is the one the provider refused.
         let Some(CredentialSyncOutcome {
             outcome: Ok(actions),
-            step_failure: None,
+            step_failures,
             ..
         }) = reached
         else {
             return;
         };
+        if step_failures
+            .iter()
+            .any(|failure| failure.step == SyncStep::HarnessLogin)
+        {
+            return;
+        }
         if actions.iter().any(|action| {
             matches!(
                 action,

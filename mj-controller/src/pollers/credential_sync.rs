@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::credentials::SyncStep;
 
 /// One immediate sync and notice per session per cooldown, so a harness that
 /// repeats the same failed turn does not flood the UI.
@@ -96,7 +97,8 @@ pub fn schedule_due_credential_syncs(
 /// per-session failure.
 #[derive(Debug, Default)]
 pub struct CredentialSyncNotices {
-    pub(super) last_failures: std::collections::BTreeMap<(String, Option<String>), String>,
+    pub(super) last_failures:
+        std::collections::BTreeMap<(String, Option<String>, Option<SyncStep>), String>,
 }
 
 pub fn log_credential_sync_actions(result: &mj_core::credentials::CredentialSyncResult) {
@@ -168,7 +170,7 @@ impl CredentialSyncNotices {
             let session_id = &trigger.session_id;
             let session = state.session_notice_name(session_id);
             let sync_failure = result.failure.as_deref().or_else(|| {
-                result.failures().find_map(|(failed_session, detail)| {
+                result.failures().find_map(|(failed_session, _, detail)| {
                     (failed_session == session_id).then_some(detail)
                 })
             });
@@ -220,16 +222,16 @@ impl CredentialSyncNotices {
         let mut failures = std::collections::BTreeMap::new();
         if let Some(detail) = &result.failure {
             failures.insert(
-                (result.profile_id.clone(), None),
+                (result.profile_id.clone(), None, None),
                 format!(
                     "Credential sync for profile {} failed: {detail}",
                     result.profile_id
                 ),
             );
         }
-        for (session_id, detail) in result.failures() {
+        for (session_id, step, detail) in result.failures() {
             failures.insert(
-                (result.profile_id.clone(), Some(session_id.to_owned())),
+                (result.profile_id.clone(), Some(session_id.to_owned()), step),
                 format!(
                     "Credential sync for profile {} (session {}) failed: {detail}",
                     result.profile_id,
@@ -238,18 +240,24 @@ impl CredentialSyncNotices {
             );
         }
         // A key that stopped failing is forgotten silently, so the same failure
-        // after a clean cycle is reported again.
-        // A result about a few sessions only can end only their failures.
+        // after a clean cycle is reported again. A result can end only the
+        // failures of the steps it checked: the renewal task's result is about
+        // one session's role-scoped AWS credentials, and every other result
+        // is about everything but those.
         self.last_failures.retain(|key, _| {
             key.0 != result.profile_id
                 || failures.contains_key(key)
-                || (result.partial
-                    && !key.1.as_ref().is_some_and(|session| {
-                        result
-                            .outcomes
-                            .iter()
-                            .any(|outcome| outcome.session_id == *session)
-                    }))
+                || if result.partial {
+                    !(key.2 == Some(SyncStep::Aws)
+                        && key.1.as_ref().is_some_and(|session| {
+                            result
+                                .outcomes
+                                .iter()
+                                .any(|outcome| outcome.session_id == *session)
+                        }))
+                } else {
+                    key.2 == Some(SyncStep::Aws)
+                }
         });
         let mut notice = None;
         for (key, message) in failures {

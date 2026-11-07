@@ -210,6 +210,18 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - Decision (ninth review): merging an AWS step's result into a session whose login step failed keeps both (the login failure becomes a step failure beside the AWS actions). The "Hard-won" markers on #1424's tests are removed: they cited commits that will never be on master, and the defects were found in review before the feature landed.
   Date/Author: 2026-11-07 / Claude, from review.
 
+- Decision (tenth review): a session's queued job owns what authorises it. `JobHold` bundles the session's background admission, its turn among the session's steps and, for a renewal, its install lock; the `CredentialSyncJob` carries it from the moment it is queued on the actor until it has run or been dropped. Stopping the renewal task that queued the job (its target changed, the session went away) therefore no longer releases the admission while the job waits: a replacement task's cycle takes the install lock after the old job finishes. When the job's turn comes the actor drops it unrun if its reply receiver is gone (the awaiting task was stopped) or its admission was cancelled by a lifecycle operation, and refuses it as deferred if the session is no longer current. The pre-mint "claim or skip" is replaced by awaiting the session's install lock, so a replaced task's first cycle waits for the old one instead of skipping and sleeping a sync interval.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (tenth review): an authentication-triggered sync wakes the triggering session's renewal task. The task drops the cached credentials (`ScopedAwsCredentials::forget`), mints new ones and reinstalls or withdraws at once, and answers with its outcome, which the trigger's result merges in, so the notice names an AWS failure instead of advising `mj login`. If nobody is waiting for the answer the task reports it as an ordinary partial result. The task still reports the end of an earlier failure itself.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (tenth review): failures are keyed by the step they belong to (`SyncStep`: role-scoped AWS, the profile's AWS export, harness login, skills, GitHub token, slopcop), in `CredentialSyncOutcome::step_failures`, and the notice dedup key is (profile, session, step). A result clears only the steps it checked: the renewal task's partial result clears the `Aws` failure of the sessions it names; every other result clears everything except `Aws`. Neither an AWS success hides a login failure nor the reverse. A session whose whole login step failed keeps that failure as a `HarnessLogin` step failure when an AWS result is merged beside it.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (tenth review): renewal tasks are indexed by session id when reconciled against the published targets (one map lookup per task, not a scan of all targets per task). The renewal delay and the reuse test share one half-life function (`ScopedEntry::refresh_at`); a delay of zero (credentials due already) is reported as "no schedule" and the task retries after the sync interval instead of renewing in a tight loop.
+  Date/Author: 2026-11-07 / Claude, from review.
+
 ## Outcomes & Retrospective
 
 Implemented through Milestone 6 on 2026-11-07. A Bedrock profile with `[profiles.<id>.aws] role_arn = ...` now gives each container or SSH session credentials assumed for it alone (role session name `mj-<session id>`), narrowed by a session policy, renewed after half their lifetime through the existing credential sync, with no relay or database change. A refused role fails the launch with AWS's error line and a remedy, or fails the running session's sync outcome while the worker keeps what it has; nothing falls back to the unscoped export. Profiles without a role behave as before, and `mj doctor` warns about them and probes a configured role with a real throwaway AssumeRole. Every EC2 launch (ordinary and Move) requires IMDSv2, verified in the launch response, and doctor warns about a launch template that allows IMDSv1.
@@ -425,3 +437,5 @@ Revision note (2026-11-07, seventh review): sequential per-profile login pass re
 Revision note (2026-11-07, eighth review): per-session turn-taking before the admission slot, per-target reasons for an inapplicable role, labelled AWS errors, currency check before the mint. Reason: eighth review.
 
 Revision note (2026-11-07, ninth review): per-session AWS renewal tasks, SourceIdentity and an authenticated scope record, merge keeps AWS actions, test markers removed. Reason: ninth review.
+
+Revision note (2026-11-07, tenth review): jobs own their admission, turn and install lock; auth triggers wake the session's renewal task; failures are keyed by step; renewal tasks indexed by session; one half-life function. Reason: tenth review.

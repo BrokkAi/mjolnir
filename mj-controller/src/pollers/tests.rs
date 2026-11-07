@@ -1400,7 +1400,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(Vec::new()),
-            step_failure: None,
+            step_failures: Vec::new(),
         }],
         partial: false,
     };
@@ -1429,7 +1429,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err("worker proxy disconnected".into()),
-            step_failure: None,
+            step_failures: Vec::new(),
         }],
         partial: false,
         ..result
@@ -1457,7 +1457,7 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
-            step_failure: None,
+            step_failures: Vec::new(),
         }],
         partial: false,
     };
@@ -1505,7 +1505,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err(detail.to_owned()),
-            step_failure: None,
+            step_failures: Vec::new(),
         }],
         partial: false,
     };
@@ -1546,7 +1546,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
-            step_failure: None,
+            step_failures: Vec::new(),
         }],
         partial: false,
     };
@@ -1556,6 +1556,58 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
             .notice(&failed("container is gone"), None, &State::default())
             .is_some()
     );
+}
+
+#[test]
+fn a_result_clears_only_the_failures_of_the_steps_it_checked() {
+    use mj_core::credentials::{
+        CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult, StepFailure, SyncStep,
+    };
+
+    let result = |partial: bool, step_failures: Vec<StepFailure>| CredentialSyncResult {
+        profile_id: "work".into(),
+        trigger: None,
+        failure: None,
+        outcomes: vec![CredentialSyncOutcome {
+            session_id: "018f9dd2-a3b4".into(),
+            outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            step_failures,
+        }],
+        partial,
+    };
+    let failure = |step, detail: &str| {
+        vec![StepFailure {
+            step,
+            detail: detail.into(),
+        }]
+    };
+    // The session's own AWS renewal reports (a partial result); the profile's
+    // pass reports the login (a full one).
+    let aws_failed = || result(true, failure(SyncStep::Aws, "AWS credentials: refused"));
+    let aws_fine = || result(true, Vec::new());
+    let login_failed = || {
+        result(
+            false,
+            failure(SyncStep::HarnessLogin, "harness login: refused"),
+        )
+    };
+    let login_fine = || result(false, Vec::new());
+    let mut notices = CredentialSyncNotices::default();
+    let state = State::default();
+
+    assert!(notices.notice(&aws_failed(), None, &state).is_some());
+    assert!(notices.notice(&login_failed(), None, &state).is_some());
+
+    // The AWS success ends the AWS failure only: the login failure is not
+    // reported again, and a recurrence of the AWS one is.
+    assert_eq!(notices.notice(&aws_fine(), None, &state), None);
+    assert_eq!(notices.notice(&login_failed(), None, &state), None);
+    assert!(notices.notice(&aws_failed(), None, &state).is_some());
+
+    // The login success ends the login failure only.
+    assert_eq!(notices.notice(&login_fine(), None, &state), None);
+    assert_eq!(notices.notice(&aws_failed(), None, &state), None);
+    assert!(notices.notice(&login_failed(), None, &state).is_some());
 }
 
 // Hard-won: 9805bf67: a dead worker repeated the same credential-sync failure notice every poll
@@ -2012,7 +2064,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
                     vec![CredentialSyncOutcome {
                         session_id: session_id.into(),
                         outcome,
-                        step_failure: None,
+                        step_failures: Vec::new(),
                     }]
                 })
                 .unwrap_or_default(),
@@ -2056,7 +2108,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             outcomes: vec![CredentialSyncOutcome {
                 session_id: session_id.into(),
                 outcome: Err("worker proxy disconnected".into()),
-                step_failure: None,
+                step_failures: Vec::new(),
             }],
             partial: false,
         },
@@ -2259,15 +2311,20 @@ async fn only_the_apple_container_refresh_waits_for_its_startup() {
 
 #[test]
 fn a_result_about_one_sessions_aws_renewal_does_not_end_other_sessions_failures() {
-    use mj_core::credentials::{CredentialSyncOutcome, CredentialSyncResult};
+    use mj_core::credentials::{
+        CredentialSyncOutcome, CredentialSyncResult, StepFailure, SyncStep,
+    };
 
     let outcome = |session: &str, detail: Option<&str>| CredentialSyncOutcome {
         session_id: session.into(),
-        outcome: match detail {
-            Some(detail) => Err(detail.to_owned()),
-            None => Ok(Vec::new()),
-        },
-        step_failure: None,
+        outcome: Ok(Vec::new()),
+        step_failures: detail
+            .map(|detail| StepFailure {
+                step: SyncStep::Aws,
+                detail: detail.to_owned(),
+            })
+            .into_iter()
+            .collect(),
     };
     let result = |partial, outcomes| CredentialSyncResult {
         profile_id: "work".into(),

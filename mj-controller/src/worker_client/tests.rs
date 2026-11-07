@@ -1332,6 +1332,7 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
             &credential_sync::GithubSync::Known(None),
             &credential_sync::AwsSync::Unmanaged,
             &credential_sync::HostSlopcopLogin::Unknown,
+            credential_sync::JobHold::new(None, None, None, None),
         )
         .await
         .unwrap();
@@ -1604,7 +1605,7 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
             [CredentialSyncOutcome {
                 session_id: "remote".into(),
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
-                step_failure: None,
+                step_failures: Vec::new(),
             }]
         );
         let received: serde_json::Value =
@@ -1619,7 +1620,7 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
     let outcomes = reconcile_profile(&targets, None).await;
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0].session_id, "remote");
-    assert!(outcomes[0].step_failure.is_some());
+    assert!(!outcomes[0].step_failures.is_empty());
 }
 
 // A profile with a role gives each session credentials assumed for it alone;
@@ -1719,7 +1720,7 @@ async fn role_scoped_sessions_receive_assumed_credentials_and_never_the_unscoped
         .iter()
         .find(|outcome| outcome.session_id == "role-denied")
         .unwrap();
-    let error = denied_outcome.step_failure.as_deref().unwrap();
+    let error = denied_outcome.failure_text().unwrap();
     assert!(
         error.contains("AccessDenied") && error.contains("remove [profiles."),
         "{error}"
@@ -2151,7 +2152,7 @@ async fn a_session_holding_the_hosts_credentials_loses_them_when_its_new_role_fa
     let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
 
     assert_eq!(outcomes.len(), 1, "{outcomes:?}");
-    let error = outcomes[0].step_failure.as_deref().unwrap();
+    let error = outcomes[0].failure_text().unwrap();
     assert!(error.contains("AccessDenied"), "{error}");
     assert!(
         !root.path().join("aws").exists(),
@@ -2175,11 +2176,7 @@ async fn a_failing_mint_does_not_stop_the_sessions_other_sync_steps() {
     // not instead of it...
     assert_eq!(outcomes.len(), 1, "{outcomes:?}");
     assert!(
-        outcomes[0]
-            .step_failure
-            .as_deref()
-            .unwrap()
-            .contains("AccessDenied"),
+        outcomes[0].failure_text().unwrap().contains("AccessDenied"),
         "{outcomes:?}"
     );
     assert_eq!(
@@ -2224,11 +2221,7 @@ async fn a_failed_github_lookup_does_not_stop_the_aws_step() {
     let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
     assert!(granted_root.path().join("aws").exists(), "{outcomes:?}");
     assert!(
-        outcomes[0]
-            .step_failure
-            .as_deref()
-            .unwrap()
-            .contains("GitHub token"),
+        outcomes[0].failure_text().unwrap().contains("GitHub token"),
         "{outcomes:?}"
     );
 
@@ -2243,7 +2236,7 @@ async fn a_failed_github_lookup_does_not_stop_the_aws_step() {
     let target = aws_sync_session(home.path(), refused_root.path(), &missing_token, &cli);
     let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
     assert!(!refused_root.path().join("aws").exists(), "{outcomes:?}");
-    let failure = outcomes[0].step_failure.as_deref().unwrap();
+    let failure = outcomes[0].failure_text().unwrap();
     assert!(
         failure.contains("GitHub token") && failure.contains("AccessDenied"),
         "{failure}"
@@ -2307,7 +2300,7 @@ async fn a_slow_session_does_not_hold_up_another_sessions_install() {
     assert!(
         outcomes
             .iter()
-            .all(|outcome| outcome.step_failure.is_none() && outcome.outcome.is_ok()),
+            .all(|outcome| outcome.step_failures.is_empty() && outcome.outcome.is_ok()),
         "{outcomes:?}"
     );
     assert!(slow_root.join("aws").exists());
@@ -2373,6 +2366,7 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
                 &credential_sync::GithubSync::Known(None),
                 &aws,
                 &credential_sync::HostSlopcopLogin::Unknown,
+                credential_sync::JobHold::new(None, None, None, None),
             )
             .await
         }
@@ -2405,7 +2399,13 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
     ));
     let sync = reconcile().await.unwrap().unwrap();
     assert!(root.path().join("aws").exists());
-    assert_eq!(sync.failures, ["AWS credentials: AWS refused AssumeRole"]);
+    assert_eq!(
+        sync.failures
+            .iter()
+            .map(|failure| (failure.step, failure.detail.as_str()))
+            .collect::<Vec<_>>(),
+        [(SyncStep::Aws, "AWS credentials: AWS refused AssumeRole")]
+    );
     assert!(
         !sync
             .actions
@@ -2617,7 +2617,7 @@ async fn a_pull_and_a_push_in_one_pass_leave_every_session_on_the_newest_login()
     let outcomes = reconcile_profile(&targets, None).await;
 
     assert!(
-        outcomes.iter().all(|o| o.step_failure.is_none()),
+        outcomes.iter().all(|o| o.step_failures.is_empty()),
         "{outcomes:?}"
     );
     assert_eq!(
@@ -2699,7 +2699,7 @@ async fn a_clean_later_pass_replaces_the_failure_an_earlier_one_reported() {
 
     let flaky = outcomes.iter().find(|o| o.session_id == "flaky").unwrap();
     assert_eq!(flaky.outcome, Ok(Vec::new()), "{outcomes:?}");
-    assert_eq!(flaky.step_failure, None);
+    assert!(flaky.step_failures.is_empty());
     let puller = outcomes.iter().find(|o| o.session_id == "puller").unwrap();
     assert_eq!(puller.outcome, Ok(vec![CredentialSyncAction::Pulled]));
 }
@@ -2790,8 +2790,16 @@ async fn the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skip
     let install = tokio::spawn({
         let (gate, target, steps) = (gate.clone(), target.clone(), steps.clone());
         async move {
-            credential_sync::aws_cycle(&SessionRelays::Direct, Some(&gate), None, &target, &steps)
-                .await
+            credential_sync::aws_cycle(
+                &SessionRelays::Direct,
+                Some(&gate),
+                None,
+                &target,
+                &steps,
+                None,
+                false,
+            )
+            .await
         }
     });
     // The login step holds the session's slot; the mint finishes meanwhile.
@@ -2840,7 +2848,7 @@ async fn aws_errors_are_labelled_by_the_branch_that_failed() {
     let granting = granting_aws_cli(root.path());
     let installing = aws_sync_session(home.path(), root.path(), &token, &granting);
     let outcomes = reconcile_profile(std::slice::from_ref(&installing), None).await;
-    let failure = outcomes[0].step_failure.as_deref().unwrap();
+    let failure = outcomes[0].failure_text().unwrap();
     assert!(failure.contains("AWS credentials install"), "{failure}");
     assert!(!failure.contains("withdrawal"), "{failure}");
 
@@ -2851,8 +2859,7 @@ async fn aws_errors_are_labelled_by_the_branch_that_failed() {
     let outcomes = reconcile_profile(std::slice::from_ref(&withdrawing), None).await;
     assert!(
         outcomes[0]
-            .step_failure
-            .as_deref()
+            .failure_text()
             .unwrap()
             .contains("AWS credentials withdrawal"),
         "{outcomes:?}"
@@ -2880,6 +2887,8 @@ async fn a_session_that_is_no_longer_current_is_not_minted_for() {
         None,
         &target,
         &Default::default(),
+        None,
+        false,
     )
     .await;
     let outcomes = result;
@@ -2929,7 +2938,7 @@ async fn a_stalled_session_does_not_keep_another_session_from_being_renewed_on_a
             if result.partial
                 && result
                     .failures()
-                    .any(|(session, _)| session == "ok-session")
+                    .any(|(session, _, _)| session == "ok-session")
             {
                 return;
             }
@@ -2958,6 +2967,135 @@ async fn a_stalled_session_does_not_keep_another_session_from_being_renewed_on_a
     std::fs::write(&release, "").unwrap();
 }
 
+// A renewal task stopped while its job waited on the session's actor leaves
+// the job holding the session's admission and turn; the actor then drops the
+// job unrun, and only then are they free.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_aborted_renewals_queued_job_is_dropped_by_the_actor() {
+    use crate::session_manager::RelayConnectionJob;
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    let target = aws_sync_session(home.path(), &root, &token, &cli);
+    let session = target.session_id.clone();
+    // The job, if it ran, would withdraw these.
+    std::fs::write(root.join("aws"), "host credentials").unwrap();
+    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
+    let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());
+    let steps = credential_sync::SessionSteps::default();
+    let withdraw = || {
+        credential_sync::SyncWork::Aws(Box::new(credential_sync::AwsSync::Unavailable {
+            error: "no credentials".into(),
+            scoped_required: true,
+            expected_scope: None,
+        }))
+    };
+    let queue = |reply| async {
+        credential_sync::CredentialSyncJob {
+            target: target.clone(),
+            work: withdraw(),
+            reply,
+            hold: credential_sync::JobHold::new(
+                gate.try_start(&session),
+                Some(steps.enter(&session).await),
+                None,
+                None,
+            ),
+        }
+    };
+    let mut client = RelayClient::connect(&target.spec, &session).await.unwrap();
+
+    let (reply, response) = tokio::sync::oneshot::channel();
+    let queued = queue(reply).await;
+    // The task that awaited the job is gone; the job holds the session.
+    drop(response);
+    assert!(gate.is_busy(&session));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), steps.enter(&session))
+            .await
+            .is_err(),
+        "the session's turn was free while its job was queued"
+    );
+
+    Box::new(queued).run(&mut client).await;
+    assert!(root.join("aws").exists(), "an abandoned job ran");
+    assert!(!gate.is_busy(&session));
+    tokio::time::timeout(Duration::from_secs(5), steps.enter(&session))
+        .await
+        .expect("the turn was not released with the job");
+
+    // A job whose task is waiting still runs.
+    let (reply, response) = tokio::sync::oneshot::channel();
+    Box::new(queue(reply).await).run(&mut client).await;
+    response.await.unwrap().unwrap();
+    assert!(!root.join("aws").exists(), "a wanted job did not run");
+    assert!(!gate.is_busy(&session));
+}
+
+// An authentication failure may mean the session's credentials are no longer
+// good: the session's renewal task renews at once instead of at half the
+// credentials' lifetime, and the trigger's result says what it did.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_auth_trigger_reinstalls_deleted_scoped_credentials_at_once() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    // Granted for decades: only the trigger can make the renewal early.
+    let cli = granting_aws_cli(scratch.path());
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "auth-session", None);
+    let mut coordinator = CredentialSyncCoordinator::spawn();
+    let handle = coordinator.handle();
+    handle.set_targets(vec![target.clone()]);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let result = coordinator.result().await.expect("coordinator stopped");
+            if result.partial && result.pushed_to("auth-session") {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the first install was reported");
+
+    // The worker lost them (a replaced worker, a cleared home).
+    std::fs::remove_file(root.join("aws")).unwrap();
+    std::fs::remove_file(root.join("aws-scope.json")).unwrap();
+    handle.sync_profile_now(
+        &target.profile_id,
+        Some(mj_core::credentials::CredentialSyncCause {
+            session_id: "auth-session".into(),
+            reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+        }),
+    );
+    let triggered = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let result = coordinator.result().await.expect("coordinator stopped");
+            if result.trigger.is_some() {
+                return result;
+            }
+        }
+    })
+    .await
+    .expect("the trigger's result arrived");
+    assert!(
+        root.join("aws").exists(),
+        "the credentials were not reinstalled"
+    );
+    assert!(root.join("aws-scope.json").exists());
+    assert!(triggered.pushed_to("auth-session"), "{triggered:?}");
+    assert!(!triggered.partial);
+}
+
 #[test]
 fn a_failed_login_step_keeps_the_aws_steps_actions_in_the_outcome() {
     let mut outcomes = BTreeMap::from([(
@@ -2965,7 +3103,7 @@ fn a_failed_login_step_keeps_the_aws_steps_actions_in_the_outcome() {
         CredentialSyncOutcome {
             session_id: "session".into(),
             outcome: Err("worker proxy disconnected".into()),
-            step_failure: None,
+            step_failures: Vec::new(),
         },
     )]);
 
@@ -2973,13 +3111,13 @@ fn a_failed_login_step_keeps_the_aws_steps_actions_in_the_outcome() {
         &mut outcomes,
         "session",
         vec![CredentialSyncAction::Pushed],
-        None,
+        Vec::new(),
     );
 
     let merged = &outcomes["session"];
     assert_eq!(merged.outcome, Ok(vec![CredentialSyncAction::Pushed]));
     assert_eq!(
-        merged.step_failure.as_deref(),
+        merged.failure_text().as_deref(),
         Some("worker proxy disconnected")
     );
 }
@@ -3007,7 +3145,7 @@ async fn a_worker_before_protocol_55_is_left_to_the_automatic_upgrade_and_then_w
     // a worker whose build differs from the controller's when its session is
     // idle (`worker_upgrade::tests`: a quiet session with an old build is
     // due, a busy one waits), keeping the home.
-    let failure = outcomes[0].step_failure.as_deref().unwrap();
+    let failure = outcomes[0].failure_text().unwrap();
     assert!(
         failure.contains("replacing that worker automatically"),
         "{failure}"
@@ -3113,7 +3251,7 @@ async fn a_triggered_sync_reports_the_session_it_reached_with_nothing_to_change(
         [CredentialSyncOutcome {
             session_id: SESSION_ID.into(),
             outcome: Ok(Vec::new()),
-            step_failure: None,
+            step_failures: Vec::new(),
         }]
     );
     assert!(!received.exists(), "nothing was pushed");
@@ -3152,7 +3290,7 @@ async fn a_new_login_is_pushed_to_every_live_session_of_its_profile() {
             .map(|session| CredentialSyncOutcome {
                 session_id: (*session).into(),
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
-                step_failure: None,
+                step_failures: Vec::new(),
             })
             .collect::<Vec<_>>()
     );
