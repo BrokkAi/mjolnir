@@ -374,6 +374,8 @@ def report(args):
                 input_stats["n"] += 1
             if "verdict" not in record:
                 stats["errors"] += 1
+                # A failed request with a labeled action is an unsuccessful action.
+                stats["action_n"] += expected.get("action") is not None
                 if input_stats is not None:
                     input_stats["errors"] += 1
                 rows.append((identity, fixture["category"], record["repeat"], "error", record.get("error"), "", "", ""))
