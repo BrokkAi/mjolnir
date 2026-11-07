@@ -33,6 +33,83 @@ pub(super) fn unknown_slopcop_login() -> Result<Option<mj_core::slopcop::Slopcop
     bail!("tests do not read the host's slopcop login")
 }
 
+/// Which sessions a reconciliation is working on, and the one thing sessions
+/// of a profile must not do at once.
+///
+/// A session is reconciled by at most one pass at a time, so a session whose
+/// actor does not answer holds only itself: the next pass skips it and serves
+/// the profile's other sessions on schedule. What truly must not overlap is
+/// rewriting the profile's canonical login, so that has a lock of its own per
+/// profile, held only around the compare-and-write, never across a call to a
+/// worker.
+#[derive(Clone, Default)]
+pub(super) struct SessionsInFlight(Arc<InFlightState>);
+
+#[derive(Default)]
+struct InFlightState {
+    sessions: std::sync::Mutex<BTreeSet<String>>,
+    pulls: std::sync::Mutex<BTreeMap<String, Arc<std::sync::Mutex<()>>>>,
+    released: tokio::sync::Notify,
+}
+
+/// A session's reconciliation in progress. Dropping it, on any exit path,
+/// frees the session.
+pub(super) struct SessionClaim {
+    state: Arc<InFlightState>,
+    session_id: String,
+}
+
+impl Drop for SessionClaim {
+    fn drop(&mut self) {
+        self.state
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.session_id);
+        self.state.released.notify_one();
+    }
+}
+
+impl SessionsInFlight {
+    /// The session, unless a pass is already reconciling it.
+    pub(super) fn claim(&self, session_id: &str) -> Option<SessionClaim> {
+        self.0
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.to_owned())
+            .then(|| SessionClaim {
+                state: Arc::clone(&self.0),
+                session_id: session_id.to_owned(),
+            })
+    }
+
+    pub(super) fn is_claimed(&self, session_id: &str) -> bool {
+        self.0
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(session_id)
+    }
+
+    /// The lock around rewriting this profile's canonical login.
+    pub(super) fn login_pull_lock(&self, profile_id: &str) -> Arc<std::sync::Mutex<()>> {
+        Arc::clone(
+            self.0
+                .pulls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(profile_id.to_owned())
+                .or_default(),
+        )
+    }
+
+    /// Completes when some session has been freed since the last time.
+    async fn released(&self) {
+        self.0.released.notified().await;
+    }
+}
+
 pub struct CredentialSyncCoordinator {
     pub(super) handle: CredentialSyncHandle,
     pub(super) results: mpsc::UnboundedReceiver<CredentialSyncResult>,
@@ -78,9 +155,9 @@ impl CredentialSyncCoordinator {
                 SYNC_INTERVAL,
             );
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // A pull rewrites the canonical file, so one profile is never
-            // reconciled twice at once.
-            let mut busy = BTreeSet::<String>::new();
+            // Sessions are reconciled one pass at a time each; a profile's
+            // other sessions are not held up by one that does not answer.
+            let in_flight = SessionsInFlight::default();
             let mut queue = VecDeque::<SyncTrigger>::new();
             let mut previous_targets = BTreeMap::<String, CredentialSyncTarget>::new();
             loop {
@@ -110,9 +187,10 @@ impl CredentialSyncCoordinator {
                         let Some(trigger) = trigger else { break };
                         enqueue(&mut queue, trigger);
                     }
+                    // A session finished: a trigger waiting for it can run.
+                    _ = in_flight.released() => {}
                     completed = completed_rx.recv() => {
                         let Some(result) = completed else { break };
-                        busy.remove(&result.profile_id);
                         if result.trigger.is_some()
                             || result.failure.is_some()
                             || !result.outcomes.is_empty()
@@ -131,10 +209,6 @@ impl CredentialSyncCoordinator {
 
                 let mut deferred = VecDeque::new();
                 while let Some(trigger) = queue.pop_front() {
-                    if busy.contains(&trigger.profile_id) {
-                        deferred.push_back(trigger);
-                        continue;
-                    }
                     let targets: Vec<_> = targets_rx
                         .borrow()
                         .iter()
@@ -162,8 +236,24 @@ impl CredentialSyncCoordinator {
                         }
                         continue;
                     }
-                    busy.insert(trigger.profile_id.clone());
+                    // The session whose failure asked for this sync is reached
+                    // or the sync waits for it. With every session in flight
+                    // there is nothing to serve; the next schedule retries.
+                    if trigger
+                        .cause
+                        .as_ref()
+                        .is_some_and(|cause| in_flight.is_claimed(&cause.session_id))
+                        || targets
+                            .iter()
+                            .all(|target| in_flight.is_claimed(&target.session_id))
+                    {
+                        if trigger.cause.is_some() {
+                            deferred.push_back(trigger);
+                        }
+                        continue;
+                    }
                     let completed_tx = completed_tx.clone();
+                    let in_flight = in_flight.clone();
                     // The join is awaited so a panicked reconcile is reported
                     // and its profile always leaves the busy set. The reconcile
                     // runs as an ordinary task, never as `Handle::block_on` on
@@ -185,6 +275,7 @@ impl CredentialSyncCoordinator {
                                 gate.as_ref(),
                                 runtime.as_ref(),
                                 slopcop_login,
+                                &in_flight,
                             )
                             .await
                         })
@@ -246,6 +337,15 @@ pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
 ) -> Vec<CredentialSyncOutcome> {
+    reconcile_profile_with(&SessionsInFlight::default(), targets, triggered_by).await
+}
+
+#[cfg(all(test, unix))]
+pub(super) async fn reconcile_profile_with(
+    in_flight: &SessionsInFlight,
+    targets: &[CredentialSyncTarget],
+    triggered_by: Option<&str>,
+) -> Vec<CredentialSyncOutcome> {
     reconcile_profile_guarded(
         &SessionRelays::Direct,
         targets,
@@ -253,6 +353,7 @@ pub(super) async fn reconcile_profile(
         None,
         None,
         unknown_slopcop_login,
+        in_flight,
     )
     .await
 }
@@ -275,7 +376,17 @@ pub(super) async fn reconcile_profile_guarded(
     gate: Option<&Arc<crate::recovery_gate::RecoveryGate>>,
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
     slopcop_login: SlopcopLoginSource,
+    in_flight: &SessionsInFlight,
 ) -> Vec<CredentialSyncOutcome> {
+    // Sessions another pass is already working on are that pass's to finish.
+    // The claim that decides is taken per session below; this only spares the
+    // work of preparing for sessions that will be skipped.
+    let targets = targets
+        .iter()
+        .filter(|target| !in_flight.is_claimed(&target.session_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let targets = targets.as_slice();
     let Some(first) = targets.first().cloned() else {
         return Vec::new();
     };
@@ -350,6 +461,7 @@ pub(super) async fn reconcile_profile_guarded(
         skills: &skills,
         slopcop_login: &slopcop_login,
         triggered_by,
+        in_flight,
     };
     // What each session's AWS credentials turned out to be, as they arrive.
     let mut aws_credentials = targets
@@ -485,6 +597,7 @@ struct PassContext<'a> {
     skills: &'a Arc<CanonicalSkills>,
     slopcop_login: &'a HostSlopcopLogin,
     triggered_by: Option<&'a str>,
+    in_flight: &'a SessionsInFlight,
 }
 
 /// What reconciling one session in one pass found.
@@ -522,7 +635,15 @@ async fn reconcile_target(
         skills,
         slopcop_login,
         triggered_by,
+        in_flight,
     } = context;
+    // Held until this session's reconciliation ends, on any path.
+    let Some(_claim) = in_flight.claim(&target.session_id) else {
+        return TargetResult {
+            outcome: None,
+            pulled: false,
+        };
+    };
     // A failed GitHub token lookup is that step's failure, not the session's:
     // the AWS credentials, skills and logins do not depend on it.
     let github_token = |target: &CredentialSyncTarget| {
@@ -570,6 +691,7 @@ async fn reconcile_target(
                     &github,
                     &aws_credentials,
                     slopcop_login,
+                    &in_flight.login_pull_lock(&target.profile_id),
                 )
                 .await
             })
@@ -585,6 +707,7 @@ async fn reconcile_target(
                 &github,
                 &aws_credentials,
                 slopcop_login,
+                &in_flight.login_pull_lock(&target.profile_id),
             )
             .await
         }
@@ -768,6 +891,8 @@ pub(super) struct SessionCanonical {
     pub(super) github: GithubSync,
     pub(super) aws: AwsSync,
     pub(super) slopcop_login: HostSlopcopLogin,
+    /// Held around rewriting the profile's canonical login.
+    pub(super) login_pull: Arc<std::sync::Mutex<()>>,
 }
 
 impl SessionCanonical {
@@ -805,6 +930,7 @@ impl SessionCanonical {
             github,
             aws: AwsSync::Unmanaged,
             slopcop_login: HostSlopcopLogin::Unknown,
+            login_pull: Arc::default(),
         }
     }
 }
@@ -819,8 +945,10 @@ pub(super) async fn reconcile_session(
     github: &GithubSync,
     aws: &AwsSync,
     slopcop_login: &HostSlopcopLogin,
+    login_pull: &Arc<std::sync::Mutex<()>>,
 ) -> Result<Option<SessionSync>> {
     let mut canonical = SessionCanonical::read(target, skills.clone(), github.clone());
+    canonical.login_pull = Arc::clone(login_pull);
     canonical.aws = aws.clone();
     canonical.slopcop_login = slopcop_login.clone();
     match relays {
@@ -904,6 +1032,7 @@ pub(super) async fn reconcile_on(
                     &login.path,
                     &login.credential,
                     &login.bytes,
+                    &canonical.login_pull,
                     &mut actions,
                 )
                 .await
@@ -1045,6 +1174,7 @@ pub(super) async fn reconcile_credentials(
     canonical_path: &Path,
     canonical: &CredentialSnapshot,
     canonical_bytes: &[u8],
+    login_pull: &std::sync::Mutex<()>,
     actions: &mut Vec<CredentialSyncAction>,
 ) -> Result<()> {
     let session = client.credential_state().await?;
@@ -1082,13 +1212,26 @@ pub(super) async fn reconcile_credentials(
                     target.session_id
                 )
             })?;
-            write_credential_file(target.harness, canonical_path, &bytes).with_context(|| {
-                format!(
-                    "install fresher credentials from session {} for profile {}",
-                    target.session_id, target.profile_id
-                )
-            })?;
-            actions.push(CredentialSyncAction::Pulled);
+            // Sessions of a profile are reconciled together, and only this
+            // rewrite must not overlap: compare against the file as it is now,
+            // since another session may have pulled something fresher while
+            // this one's bytes were in flight, and write only if this is
+            // still the fresher copy.
+            let _rewriting = login_pull
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (now, _) = read_credential_file(target.harness, canonical_path)?;
+            if matches!(reconcile(&now, &session), SyncAction::Pull) {
+                write_credential_file(target.harness, canonical_path, &bytes).with_context(
+                    || {
+                        format!(
+                            "install fresher credentials from session {} for profile {}",
+                            target.session_id, target.profile_id
+                        )
+                    },
+                )?;
+                actions.push(CredentialSyncAction::Pulled);
+            }
         }
     }
     Ok(())

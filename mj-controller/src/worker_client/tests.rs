@@ -1332,6 +1332,7 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
             &credential_sync::GithubSync::Known(None),
             &credential_sync::AwsSync::Unmanaged,
             &credential_sync::HostSlopcopLogin::Unknown,
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -2206,6 +2207,79 @@ async fn the_secret_is_withdrawn_even_when_the_worker_reports_the_credentials_ab
     );
 }
 
+// Hard-won: 96c0993ac: one busy flag per profile let a session actor that never answers stop every later pass from serving the profile's other sessions.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_session_that_never_answers_does_not_stop_the_next_pass_for_the_others() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let (stuck_root, fast_root) = (scratch.path().join("stuck"), scratch.path().join("fast"));
+    std::fs::create_dir(&stuck_root).unwrap();
+    std::fs::create_dir(&fast_root).unwrap();
+    // The stuck session's worker answers about its AWS credentials only once
+    // this file exists, or fails the exchange after ten seconds.
+    let release = scratch.path().join("release-the-stuck-session");
+    let targets = vec![
+        aws_sync_session_named(
+            home.path(),
+            &stuck_root,
+            &token,
+            &cli,
+            "stuck-session",
+            Some(&release),
+        ),
+        aws_sync_session_named(home.path(), &fast_root, &token, &cli, "fast-session", None),
+    ];
+    let in_flight = credential_sync::SessionsInFlight::default();
+    let first_pass = tokio::spawn({
+        let (in_flight, targets) = (in_flight.clone(), targets.clone());
+        async move { credential_sync::reconcile_profile_with(&in_flight, &targets, None).await }
+    });
+    // The first pass serves the fast session and then waits on the stuck one.
+    let served = async {
+        while !fast_root.join("aws").exists() || in_flight.is_claimed("fast-session") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), served)
+        .await
+        .expect("the first pass served the fast session");
+    assert!(in_flight.is_claimed("stuck-session"));
+    assert!(!first_pass.is_finished());
+
+    // The fast session needs its credentials again. The next pass, on
+    // schedule, serves it and skips only the session still in flight.
+    std::fs::remove_file(fast_root.join("aws")).unwrap();
+    let outcomes = tokio::time::timeout(
+        Duration::from_secs(5),
+        credential_sync::reconcile_profile_with(&in_flight, &targets, None),
+    )
+    .await
+    .expect("the next pass was held up by the session that never answers");
+    assert_eq!(
+        outcomes
+            .iter()
+            .map(|outcome| outcome.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["fast-session"],
+        "{outcomes:?}"
+    );
+    assert!(fast_root.join("aws").exists());
+    assert!(
+        !first_pass.is_finished(),
+        "the stuck session is still in flight"
+    );
+
+    // Once it answers, the first pass ends and reports both sessions.
+    std::fs::write(&release, "").unwrap();
+    let first = first_pass.await.unwrap();
+    assert_eq!(first.len(), 2, "{first:?}");
+    assert!(!in_flight.is_claimed("stuck-session"));
+}
+
 // Hard-won: 96c0993ac: sessions were reconciled one after another, so a slow session actor kept already-minted credentials from reaching later sessions.
 #[cfg(unix)]
 #[tokio::test]
@@ -2271,6 +2345,7 @@ async fn scoped_credentials_the_controller_issued_survive_a_failed_renewal() {
         scoped_held: Some(issued.clone()),
     };
     let skills = Arc::new(CanonicalSkills::collect(&target));
+    let pull_lock = Arc::default();
     let reconcile = || {
         reconcile_session(
             &SessionRelays::Direct,
@@ -2279,6 +2354,7 @@ async fn scoped_credentials_the_controller_issued_survive_a_failed_renewal() {
             &credential_sync::GithubSync::Known(None),
             &unavailable,
             &credential_sync::HostSlopcopLogin::Unknown,
+            &pull_lock,
         )
     };
 
@@ -2420,6 +2496,7 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         Some(&gate),
         None,
         credential_sync::unknown_slopcop_login,
+        &Default::default(),
     )
     .await;
     assert!(

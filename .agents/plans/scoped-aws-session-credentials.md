@@ -168,6 +168,9 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - Decision (fourth review): a sync pass reconciles all sessions together (a `FuturesUnordered`), each starting when its own AWS credentials are known, so a slow session actor or mint holds only itself. The per-profile busy flag is unchanged: a pull rewrites the canonical login, so one profile is never reconciled by two passes at once, and ending a pass before a stuck session answered would need a timeout nobody has measured. A stuck session still holds its profile's next pass; the others have been served by then.
   Date/Author: 2026-11-07 / Claude, from review.
 
+- Decision (fifth review, replaces the busy-flag part of the previous entry): in-flight reconciliation is tracked per session, not per profile. `SessionsInFlight` (owned by the coordinator, passed to each pass) hands out one `SessionClaim` per session, released when its reconciliation ends on any path; a pass skips sessions another pass still holds, so a session actor that never answers holds only itself and the next pass, started on schedule, serves the profile's other sessions. A trigger whose own session is in flight waits for it, and a freed session wakes the coordinator. The one thing that must not overlap, rewriting the profile's canonical login, has its own per-profile lock held only around a compare-and-write: after a worker's fresher login arrives, the controller re-reads the canonical file under the lock and writes only if the session's copy is still the fresher one. The lock is never held across a call to a worker, and no timeout was added.
+  Date/Author: 2026-11-07 / Claude, from review.
+
 - Decision (fourth review): the wait for IMDSv2 to apply sleeps through the existing `targets::sleep_unless_cancelled`, and checks cancellation again before each poll. A `[profiles.<id>.aws]` table on a profile that does not use the AWS chain is no longer a refusal: the session starts without scoping, with a launch notice, and doctor warns. The cache's sweep runs once per sync pass, not on every call.
   Date/Author: 2026-11-07 / Claude, from review.
 
@@ -376,3 +379,5 @@ Revision note (2026-11-07, second review): applied-state wait for IMDSv2, per-se
 Revision note (2026-11-07, third review): withdrawal of unscoped credentials on a failed mint (relay protocol 55) and an independent AWS step in the session sync. Reason: third review.
 
 Revision note (2026-11-07, fourth review): independent sync steps, unconditional withdrawal, concurrent per-session dispatch, cancellable IMDS wait, step failures kept beside actions, sweep per pass, non-Bedrock table is a notice. Reason: fourth review.
+
+Revision note (2026-11-07, fifth review): per-session in-flight tracking replaces the per-profile busy flag; the canonical login rewrite has its own lock. Reason: a session that never answers must not hold the profile's other sessions.
