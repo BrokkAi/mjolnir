@@ -178,11 +178,12 @@ struct Inner {
     /// optimization: content hashes are reused while a file's stat holds,
     /// so a pass that no edit touched reads no file.
     home_stats: BTreeMap<PathBuf, HomeFiles>,
-    /// The catalog-input digest each identity's served answer was probed
-    /// from, recorded when a probe succeeds. The home watch compares these
-    /// against the current files, so an edit stays pending until a probe
-    /// that read the edited home actually published.
-    home_settled: BTreeMap<String, [u8; 32]>,
+    /// The catalog-input digest each served entry was probed from, recorded
+    /// when that entry's probe succeeds. The home watch compares every
+    /// served entry of an identity against the current files, so one entry's
+    /// failed re-probe cannot hide behind a sibling's success: the failed
+    /// entry keeps its older digest and stays stale.
+    home_settled: BTreeMap<CacheKey, [u8; 32]>,
     /// When the watch may launch the next re-probe for an identity whose
     /// edit re-probe failed. Bounded like the expiry refresh: a persistent
     /// failure is retried rarely, not every pass.
@@ -681,11 +682,13 @@ impl ProfileCatalog {
                         if let Some(Entry::Ready(choices)) =
                             inner.entries.get(&(identity.clone(), None)).cloned()
                         {
+                            let digest = inner.home_settled.get(&(identity.clone(), None)).copied();
                             started.extend(self.claim_models(
                                 &mut inner,
                                 &definition,
                                 &identity,
                                 &choices,
+                                digest,
                             ));
                         }
                         continue;
@@ -722,7 +725,14 @@ impl ProfileCatalog {
                     .definitions
                     .insert(identity.clone(), definition.clone());
                 if let Some(Entry::Ready(choices)) = inner.entries.get(&key).cloned() {
-                    started.extend(self.claim_models(&mut inner, &definition, &identity, &choices));
+                    let digest = inner.home_settled.get(&key).copied();
+                    started.extend(self.claim_models(
+                        &mut inner,
+                        &definition,
+                        &identity,
+                        &choices,
+                        digest,
+                    ));
                 }
                 if let Some(attempt) = attempt {
                     inner
@@ -792,12 +802,16 @@ impl ProfileCatalog {
     /// selected model is probed. Every probe launches the harness, and
     /// aggregating harnesses such as OpenCode advertise hundreds of models,
     /// so a model nobody selected is probed only when a reader asks for it.
+    /// `home_digest` is what the probe that produced `choices` staged from;
+    /// the copied current-model entry serves exactly that, so it settles at
+    /// the same digest.
     fn claim_models(
         &self,
         inner: &mut Inner,
         definition: &Definition,
         identity: &str,
         choices: &ProfileConfig,
+        home_digest: Option<[u8; 32]>,
     ) -> Vec<(CacheKey, Attempt)> {
         let mut started = Vec::new();
         for model in &choices.models {
@@ -814,7 +828,10 @@ impl ProfileCatalog {
             if current {
                 inner
                     .entries
-                    .insert(model_key, Entry::Ready(choices.clone()));
+                    .insert(model_key.clone(), Entry::Ready(choices.clone()));
+                if let Some(digest) = home_digest {
+                    inner.home_settled.insert(model_key, digest);
+                }
             } else {
                 let pending = self.attempt(definition, Some(model.value.clone()));
                 inner
@@ -888,7 +905,7 @@ impl ProfileCatalog {
     /// one that read it earlier records the old digest, and one that fails
     /// records nothing.
     fn watch_homes(self: &Arc<Self>) {
-        let (identities_by_home, stats, settled) = {
+        let (identities_by_home, stats, settled, served) = {
             let inner = self.lock();
             let mut identities_by_home: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
             for (identity, definition) in &inner.definitions {
@@ -909,6 +926,7 @@ impl ProfileCatalog {
                 identities_by_home,
                 inner.home_stats.clone(),
                 inner.home_settled.clone(),
+                inner.entries.keys().cloned().collect::<BTreeSet<_>>(),
             )
         };
         let mut polled = BTreeMap::new();
@@ -928,7 +946,11 @@ impl ProfileCatalog {
             // the pass observed.
             updates.push((home.clone(), current.clone()));
             for identity in &identities_by_home[home] {
-                if settled.get(identity) == Some(&current.digest) {
+                let every_entry_settled = served
+                    .iter()
+                    .filter(|key| key.0 == *identity)
+                    .all(|key| settled.get(key) == Some(&current.digest));
+                if every_entry_settled {
                     converged.insert(identity.clone());
                 } else {
                     stale.insert(identity.clone());
@@ -976,7 +998,7 @@ impl ProfileCatalog {
             .retain(|home, _| identities_by_home.contains_key(home));
         inner
             .home_settled
-            .retain(|identity, _| watched.contains(identity.as_str()));
+            .retain(|key, _| watched.contains(key.0.as_str()));
         inner.home_edit_retry_after.retain(|identity, _| {
             watched.contains(identity.as_str()) && !converged.contains(identity)
         });
@@ -1068,10 +1090,11 @@ impl ProfileCatalog {
             let Some(Entry::Ready(previous)) = inner.entries.get(&key).cloned() else {
                 return;
             };
-            if let Some(digest) = outcome.home_digest {
-                inner.home_settled.insert(key.0.clone(), digest);
+            let digest = outcome.home_digest;
+            if let Some(digest) = digest {
+                inner.home_settled.insert(key.clone(), digest);
             }
-            // A success converged the identity: discharge the failed-reprobe
+            // A success converged the entry: discharge the failed-reprobe
             // throttle so a genuinely new edit re-probes on the next pass
             // instead of waiting out the retry window. A failure keeps it.
             inner.home_edit_retry_after.remove(&key.0);
@@ -1082,7 +1105,7 @@ impl ProfileCatalog {
             let mut started = Vec::new();
             if key.1.is_none() {
                 let definition = inner.definitions[&key.0].clone();
-                started = self.claim_models(&mut inner, &definition, &key.0, &choices);
+                started = self.claim_models(&mut inner, &definition, &key.0, &choices, digest);
             }
             let changed = !started.is_empty()
                 || ProfileConfig {
@@ -1203,7 +1226,7 @@ impl ProfileCatalog {
                     match &result {
                         Ok(outcome) => {
                             if let Some(digest) = outcome.home_digest {
-                                inner.home_settled.insert(key.0.clone(), digest);
+                                inner.home_settled.insert(key.clone(), digest);
                             }
                             // See drive_refresh: a success discharges the
                             // failed-reprobe throttle; a failure keeps it.
@@ -1218,6 +1241,7 @@ impl ProfileCatalog {
                                     &definition,
                                     &key.0,
                                     &outcome.choices,
+                                    outcome.home_digest,
                                 ));
                             }
                         }
@@ -1916,6 +1940,27 @@ mod tests {
             description: None,
         }];
         Ok(choices)
+    }
+
+    /// A probe for model-specific entries that fails while the flag is set,
+    /// so a test can make one entry's re-probe fail while its sibling's
+    /// succeeds.
+    fn flaky_model_probe(
+        homes: BTreeMap<String, PathBuf>,
+        calls: Arc<AtomicUsize>,
+        failing: Arc<AtomicBool>,
+    ) -> Arc<ModelProbe> {
+        Arc::new(move |profile: String, _model: String| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let homes = homes.clone();
+            let failing = failing.clone();
+            Box::pin(async move {
+                if failing.load(Ordering::SeqCst) {
+                    anyhow::bail!("model report failed")
+                }
+                read_home_choices(&homes, &profile)
+            })
+        })
     }
 
     /// A probe that answers from the profile home's `config.toml`.
@@ -2694,6 +2739,74 @@ mod tests {
             "a new edit re-probes on the next pass even inside the retry window"
         );
         converge_on(&catalog, "solo", "solo-third").await;
+    }
+
+    // Hard-won: #1337 review: an identity-level settled digest let one
+    // entry's failed re-probe hide behind a sibling's success.
+    #[tokio::test]
+    async fn a_failed_entry_reprimes_even_when_its_sibling_reprobe_succeeded() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_home_model(root, "solo", "solo-first");
+        let calls = calls();
+        let failing = Arc::new(AtomicBool::new(false));
+        let (config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
+        let mut catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            home_model_probe(homes.clone(), calls.clone()),
+            flaky_model_probe(homes, calls.clone(), failing.clone()),
+        );
+        Arc::get_mut(&mut catalog).unwrap().home_edit_retry_wait = Duration::from_millis(50);
+        catalog.sync_now(&config).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        catalog.watch_homes();
+
+        // The edit re-probes every served entry; the default entry's probe
+        // succeeds and the model entry's fails.
+        failing.store(true, Ordering::SeqCst);
+        write_home_model(root, "solo", "solo-second");
+        catalog.watch_homes();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        while !catalog.lock().refreshing.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            current_model(&catalog, "solo").await.as_deref(),
+            Some("solo-second"),
+            "the default entry's re-probe published the edit"
+        );
+
+        // The failed model entry keeps serving its pre-edit copy; its
+        // sibling's success must not settle it. Every served entry re-probes:
+        // the default, the failed model's, and the new current model's.
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            6,
+            "a failed entry re-probes even when its sibling's re-probe succeeded"
+        );
+
+        failing.store(false, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let before = calls.load(Ordering::SeqCst);
+                catalog.watch_homes();
+                while !catalog.lock().refreshing.is_empty() {
+                    tokio::task::yield_now().await;
+                }
+                if calls.load(Ordering::SeqCst) == before {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(60)).await;
+            }
+        })
+        .await
+        .expect("the failed entry converges once its re-probe succeeds");
+        assert_eq!(
+            current_model(&catalog, "solo").await.as_deref(),
+            Some("solo-second")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
     }
 
     // Hard-won: #1337: an edit made while the daemon was stopped stayed stale after start.
