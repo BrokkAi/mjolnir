@@ -1738,7 +1738,7 @@ pub(crate) async fn transcript(args: TranscriptArgs) -> Result<()> {
     for item in &page.items {
         println!("[{}] {}", item.seq, item.role);
         if !item.text.trim().is_empty() {
-            println!("{}", item.text.trim_end());
+            println!("{}", sanitize_terminal_text(item.text.trim_end()));
         }
         println!();
     }
@@ -1761,7 +1761,13 @@ pub(crate) async fn diff(args: DiffArgs) -> Result<()> {
     if args.json {
         return print_json(&details);
     }
-    print!("{}", details.diff);
+    // A redirected patch keeps its exact bytes (CRLF, control characters) so
+    // it still applies; only a terminal gets the inert rendering.
+    if std::io::stdout().is_terminal() {
+        print!("{}", sanitize_terminal_text(&details.diff));
+    } else {
+        print!("{}", details.diff);
+    }
     std::io::stdout()
         .flush()
         .context("write the session diff")?;

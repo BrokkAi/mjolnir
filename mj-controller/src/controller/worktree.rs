@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::ProjectRepository;
 use mj_core::config::{Config, TargetTemplate};
 use mj_core::local_git::canonical_repository;
+use mj_core::remote_git::{GITHUB_SSH_REWRITE_PREFIXES, Shorthand, uses_github_ssh_rewrite_prefix};
 use mj_core::repository::{ProjectBundleSnapshot, RepositoryIdentity};
 use mj_core::state::{
     ManagedCheckoutKind, ManagedWorktree, ManagedWorktreeOptions, ManagedWorktreeTarget,
@@ -190,7 +191,9 @@ impl Controller {
             0 => {
                 let origin =
                     String::from_utf8(output.stdout).context("project Git origin was not UTF-8")?;
-                if let Some(identity) = ProjectSourceIdentity::git_remote(origin.trim()) {
+                if let Some(identity) =
+                    ProjectSourceIdentity::git_remote(origin.trim(), Shorthand::Rejected)
+                {
                     return Ok(identity);
                 }
             }
@@ -654,8 +657,6 @@ fn refresh_source_origin(
     Ok(())
 }
 
-const GITHUB_SSH_PREFIXES: [&str; 2] = ["git@github.com:", "ssh://git@github.com/"];
-
 /// Run a network Git command against `origin`. A host can hold an HTTPS
 /// credential for GitHub, such as a GitHub CLI login, without an SSH key;
 /// sessions there push over HTTPS. So when a GitHub SSH origin fails, the
@@ -677,14 +678,11 @@ fn origin_network_git_stdout(
     let Err(ssh_error) = result else {
         return result;
     };
-    if !GITHUB_SSH_PREFIXES
-        .iter()
-        .any(|prefix| origin_url.starts_with(prefix))
-    {
+    if !uses_github_ssh_rewrite_prefix(origin_url) {
         return Err(ssh_error);
     }
     let mut https_args = Vec::new();
-    for prefix in GITHUB_SSH_PREFIXES {
+    for prefix in GITHUB_SSH_REWRITE_PREFIXES {
         https_args.extend([
             "-c".to_owned(),
             format!("url.https://github.com/.insteadOf={prefix}"),

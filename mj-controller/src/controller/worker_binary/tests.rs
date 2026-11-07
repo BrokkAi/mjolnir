@@ -6099,7 +6099,12 @@ fn installed_digest_matches_bytes_on_linux_and_darwin_with_quoted_paths() {
 #[test]
 fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
     use mj_core::subagent::SubagentPolicy;
-    for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Dsh] {
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Codex,
+        HarnessKind::Dsh,
+        HarnessKind::OpenCode,
+    ] {
         let home = tempfile::tempdir().unwrap();
         let source = home.path().join(harness.agent_instructions_file());
         std::fs::write(&source, "User instructions without final newline").unwrap();

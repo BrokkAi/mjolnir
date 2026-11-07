@@ -65,6 +65,7 @@ use mj_core::config::{
     CONFIG_VERSION, ContainerTemplate, HarnessKind, HarnessProfile, PermissionMode, ProjectBundle,
     ProjectRepository, SshConnection,
 };
+use mj_core::remote_git::Shorthand;
 use mj_core::state::{ProjectSourceIdentity, STATE_VERSION, SessionRecord};
 
 pub(super) fn sample_config_state() -> (Config, AppState) {
@@ -1516,8 +1517,11 @@ fn viewer_session_applies_a_resolved_source_without_publishing_it() {
         .into_iter()
         .next()
         .expect("session");
-    let source = ProjectSourceIdentity::git_remote("git@github.com:BrokkAi/bifrost-dev.git")
-        .expect("GitHub source");
+    let source = ProjectSourceIdentity::git_remote(
+        "git@github.com:BrokkAi/bifrost-dev.git",
+        Shorthand::Allowed,
+    )
+    .expect("GitHub source");
 
     viewer.set_project_source(&source);
 
@@ -2797,9 +2801,6 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
     validate_action(&restart(), &snapshot).unwrap();
     validate_action(&interrupt_all(), &snapshot).unwrap();
 
-    // A workspace the snapshot does not list is refused, capability or not.
-    let error = validate_action(&change_workspace("missing"), &snapshot).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
     // An unknown session is still unknown.
     let error = validate_action(
         &ControllerAction::Restart {
@@ -3170,21 +3171,6 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
         &snapshot,
     )
     .unwrap();
-
-    let error = validate_action(
-        &ControllerAction::Resume {
-            session_id: "session-1".into(),
-            workspace_id: "missing".into(),
-            profile_id: "claude-1".into(),
-            target_id: "podman".into(),
-            queue: ResumeQueueDisposition::Start,
-            additional_mounts: None,
-            resource_allocation: None,
-        },
-        &snapshot,
-    )
-    .unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
 
     let error = validate_action(
         &ControllerAction::Suspend {
@@ -5162,6 +5148,69 @@ async fn settings_save_refuses_a_stale_draft_without_writing() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("hidden value of LAB_TOKEN"), "{body}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// Resume and change-workspace ask the store whether the workspace exists. The
+/// snapshot's copy of the workspace list lagged the store: it was read before
+/// the first session landed in the hidden `default` workspace and republished
+/// only by a few daemon actions.
+// Hard-won: #1334: `mj resume` answered "unknown workspace" for a session in `default` until a daemon restart, because the check read a published list that was empty when the daemon started.
+#[tokio::test]
+async fn resume_validates_the_workspace_against_the_store_not_the_published_list() {
+    if !in_isolated_store("resume_validates_the_workspace_against_the_store_not_the_published_list")
+    {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    assert!(
+        crate::database::list_workspaces().unwrap().is_empty(),
+        "an empty `default` is not listed, so the daemon starts with no workspace"
+    );
+    // The snapshot the server holds was built from that empty list.
+    let (app, mut actions, ..) = app_with_backend(
+        BTreeMap::new(),
+        |snapshot| assert!(snapshot.workspaces.is_empty()),
+        Some(Arc::new(SettingsReviewBackend)),
+    );
+    let cookie = login_cookie(&app).await;
+    let mut session = crate::controller::test_support::checkpoint_test_session("session-1");
+    session.state = SessionState::Stopped;
+    crate::database::save_session(&session).unwrap();
+
+    let resume = |workspace_id: &str| {
+        serde_json::to_string(&ControllerAction::Resume {
+            session_id: "session-1".into(),
+            workspace_id: workspace_id.into(),
+            profile_id: "codex-1".into(),
+            target_id: "podman".into(),
+            queue: ResumeQueueDisposition::Start,
+            additional_mounts: None,
+            resource_allocation: None,
+        })
+        .unwrap()
+    };
+    let response = tokio::spawn(post_action(app.clone(), cookie.clone(), resume("default")));
+    // A refusal never reaches the controller, so bound the wait for the action.
+    let request = tokio::time::timeout(Duration::from_secs(10), actions.recv()).await;
+    let Ok(Some(request)) = request else {
+        panic!(
+            "the resume was refused: {:?}",
+            response.await.unwrap().status()
+        );
+    };
+    assert!(matches!(request.action, ControllerAction::Resume { .. }));
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: None,
+            notice: None,
+        })
+        .unwrap();
+    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+
+    let response = post_action(app, cookie, resume("nosuch")).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(actions.try_recv().is_err());
 }
 
 struct SettingsReviewBackend;

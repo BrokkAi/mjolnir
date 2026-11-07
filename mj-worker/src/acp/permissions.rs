@@ -513,46 +513,66 @@ fn gh_script(script: &str) -> bool {
 
 /// Calls to Mjolnir's own MCP servers, for a harness that cannot be told to
 /// trust them. Under configured approvals DSH asks before every MCP tool call
-/// and has no per-server rule, so the worker allows calls to the servers this
-/// launch registered itself, as Claude's allowed tools and Codex's server
+/// and has no per-server rule, so the worker allows the tools the servers this
+/// launch registered itself list, as Claude's allowed tools and Codex's server
 /// approval mode do for those harnesses. Every other request still reaches a
-/// person.
+/// person. A title is matched against each owned tool's full name, never a
+/// server prefix, and DSH's double separator keeps server and tool apart.
+///
+/// OpenCode gets no such answers. It titles a call `<server>_<tool>`, and
+/// server names may contain `_`, so another server (for example one a
+/// project's own configuration adds, named `mj-agents_send` with a `message`
+/// tool) can produce exactly an owned title. Nothing in the request says which
+/// server a call belongs to, so its person decides, and can allow always.
 #[derive(Debug, Clone, Default)]
 pub(super) struct OwnedMcpApprovals {
-    /// The start of the permission title of each owned server's tool calls.
-    title_prefixes: Vec<String>,
+    /// The permission title of each owned server's tool calls, without any
+    /// argument the harness appends.
+    titles: Vec<String>,
+    /// Whether the harness follows the title with a space and an argument.
+    appends_argument: bool,
 }
 
 impl OwnedMcpApprovals {
     pub(super) fn for_launch(spec: &LaunchSpec) -> Self {
-        if spec.harness != HarnessKind::Dsh
-            || spec.execution_policy != ExecutionPolicy::ConfiguredApprovals
-        {
+        if spec.execution_policy != ExecutionPolicy::ConfiguredApprovals {
             return Self::default();
         }
         // dsh-acp names an MCP tool `mcp__<server>__<tool>` and titles its
         // call with that name, underscores shown as spaces, then any `path`
         // argument.
-        let title_prefixes = owned_acp_mcp_server_names(spec)
-            .into_iter()
-            .map(|server| format!("mcp__{server}__").replace('_', " "))
+        if spec.harness != HarnessKind::Dsh {
+            return Self::default();
+        }
+        let titles = owned_acp_mcp_tools(spec)
+            .iter()
+            .flat_map(|(server, tools)| {
+                tools
+                    .iter()
+                    .map(move |tool| format!("mcp__{server}__{tool}").replace('_', " "))
+            })
             .collect();
-        Self { title_prefixes }
+        Self {
+            titles,
+            appends_argument: true,
+        }
     }
 
-    /// The allowing answer when `request` is a call to an owned server.
+    /// The allowing answer when `request` is a call to an owned tool.
     pub(super) fn response(
         &self,
         request: &RequestPermissionRequest,
     ) -> Option<RequestPermissionResponse> {
         let title = request.tool_call.fields.title.as_deref()?;
-        let owned = self.title_prefixes.iter().any(|prefix| {
-            // No owned tool name starts with an underscore, so a space here
-            // means a longer server name, such as `mj-agents_`, that merely
-            // begins with an owned one.
-            title
-                .strip_prefix(prefix.as_str())
-                .is_some_and(|tool| !tool.is_empty() && !tool.starts_with(' '))
+        let owned = self.titles.iter().any(|owned| {
+            title == owned
+                || (self.appends_argument
+                    // One space then the argument; more spaces mean a longer
+                    // server or tool name that merely begins with an owned one.
+                    && title
+                        .strip_prefix(owned.as_str())
+                        .and_then(|rest| rest.strip_prefix(' '))
+                        .is_some_and(|argument| !argument.is_empty() && !argument.starts_with(' ')))
         });
         if owned {
             allow_permission_response(request)

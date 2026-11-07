@@ -1474,11 +1474,12 @@ async fn prepare_and_start_harness(
     // Persist only explicit and Mjolnir-generated overrides, never shell exports.
     config.environment = session_environment.clone();
 
-    if config.execution_policy == ExecutionPolicy::ConfiguredApprovals
+    if (config.execution_policy == ExecutionPolicy::ConfiguredApprovals
         && matches!(
             config.harness,
             HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::OpenCode | HarnessKind::Muse
-        )
+        ))
+        || super::json_gh_rules::configures_native_rules_always(config.harness)
     {
         let budget = preparation_step(
             root,
@@ -1488,15 +1489,27 @@ async fn prepare_and_start_harness(
             cancel,
         )
         .await?;
-        let home = credentials
-            .as_ref()
-            .map_err(|message| anyhow::anyhow!("{message}"))?
-            .home
-            .clone();
+        // Only the TOML-configured harnesses edit a file in their home.
+        let home = if matches!(config.harness, HarnessKind::Kimi | HarnessKind::Grok) {
+            Some(
+                credentials
+                    .as_ref()
+                    .map_err(|message| anyhow::anyhow!("{message}"))?
+                    .home
+                    .clone(),
+            )
+        } else {
+            None
+        };
         let root = root.to_owned();
         let session_id = config.session_id.clone();
         let harness = config.harness;
         let policy = config.execution_policy;
+        // A child, a None choice and a Mjolnir choice all leave delegation to
+        // Mjolnir (or to nobody), so OpenCode's own `subagent` tool goes.
+        let denials = super::json_gh_rules::OpenCodeDenials {
+            native_subagent: config.subagents.suppresses_native(),
+        };
         let native_base_environment = base_environment.clone();
         let native_explicit_environment = config.environment.clone();
         let mut environment = native_base_environment.clone();
@@ -1506,14 +1519,21 @@ async fn prepare_and_start_harness(
                 if step_cancel.is_cancelled() {
                     bail!("preparation cancelled before configuring command permissions");
                 }
-                super::gh_rules::configure_toml_gh_rules(
-                    &root,
-                    &session_id,
-                    &home,
+                if let Some(home) = &home {
+                    super::gh_rules::configure_toml_gh_rules(
+                        &root,
+                        &session_id,
+                        home,
+                        harness,
+                        policy,
+                    )?;
+                }
+                super::json_gh_rules::configure_json_gh_rules(
                     harness,
                     policy,
+                    denials,
+                    &mut environment,
                 )?;
-                super::json_gh_rules::configure_json_gh_rules(harness, policy, &mut environment)?;
                 environment.retain(|name, value| {
                     native_explicit_environment.contains_key(name)
                         || native_base_environment.get(name) != Some(value)

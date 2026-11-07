@@ -39,6 +39,7 @@ fn a_bounded_prompt_search_reports_that_it_stopped_early() {
     // many, and will present a partial answer as a whole one.
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(&database, &[("session-1", "bundle-1")]);
     for index in 0..50 {
         record_prompt_to(
             &database,
@@ -51,32 +52,92 @@ fn a_bounded_prompt_search_reports_that_it_stopped_early() {
         .unwrap();
     }
 
-    let found = search_prompts_bounded_from(
+    let found = search_prompt_page_from(
         &database,
         "session-1",
         "bundle-1",
         HistoryScope::Session,
         "ship",
+        None,
         10,
     )
     .unwrap();
     assert_eq!(found.entries.len(), 10);
     assert!(
-        found.truncated,
+        found.next.is_some(),
         "a search that stopped early reported a complete answer"
     );
 
-    let all = search_prompts_bounded_from(
+    let all = search_prompt_page_from(
         &database,
         "session-1",
         "bundle-1",
         HistoryScope::Session,
         "ship",
+        None,
         100,
     )
     .unwrap();
     assert_eq!(all.entries.len(), 50);
-    assert!(!all.truncated, "a complete answer reported itself partial");
+    assert!(
+        all.next.is_none(),
+        "a complete answer reported itself partial"
+    );
+
+    // Ten distinct prompts, each sent twice: the older copies add no match.
+    for round in 0..2 {
+        for index in 0..10 {
+            record_prompt_to(
+                &database,
+                "session-1",
+                "bundle-1",
+                100 + round * 10 + index,
+                Some("2026-01-01T00:00:00Z"),
+                &format!("repeat {index}"),
+            )
+            .unwrap();
+        }
+    }
+    // Hard-won: a58ad7eb8: a full page followed only by repeats claimed more matches existed
+    let repeats = search_prompt_page_from(
+        &database,
+        "session-1",
+        "bundle-1",
+        HistoryScope::Session,
+        "repeat",
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(repeats.entries.len(), 10);
+    assert!(repeats.next.is_none(), "repeated text is not another match");
+
+    // However often each is repeated, the ten texts fill one page exactly.
+    for round in 2..5 {
+        for index in 0..10 {
+            record_prompt_to(
+                &database,
+                "session-1",
+                "bundle-1",
+                100 + round * 10 + index,
+                Some("2026-01-01T00:00:00Z"),
+                &format!("repeat {index}"),
+            )
+            .unwrap();
+        }
+    }
+    let repeated = search_prompt_page_from(
+        &database,
+        "session-1",
+        "bundle-1",
+        HistoryScope::Session,
+        "repeat",
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(repeated.entries.len(), 10);
+    assert!(repeated.next.is_none());
 }
 
 /// The eviction the daemon performs depends on the typed cause reaching the
@@ -459,6 +520,14 @@ fn database_writer_reports_a_fatal_job_panic_without_hanging_shutdown() {
 
 fn event_digest(value: u64) -> String {
     format!("{value:064x}")
+}
+
+/// Prompt history keeps only sessions that exist, so a test that records
+/// prompts saves its sessions first.
+fn live_sessions(database: &Path, sessions: &[(&str, &str)]) {
+    for (id, bundle) in sessions {
+        save_session_to(database, &session(id, bundle)).unwrap();
+    }
 }
 
 pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
@@ -3335,7 +3404,7 @@ fn projection_page_apply_outruns_per_event_apply() {
 }
 
 #[test]
-fn deleting_operational_session_retains_relational_history_context() {
+fn deleting_an_operational_session_removes_its_prompts_and_keeps_its_context() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut state = State::default();
@@ -3354,14 +3423,16 @@ fn deleting_operational_session_retains_relational_history_context() {
     state.sessions.clear();
     save_state_to(&database, &state).unwrap();
 
-    let retained: String = connection
-        .query_row(
-            "SELECT text FROM prompt_history WHERE session_id = 'session-1'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(retained, "remember this");
+    let count = |sql: &str| -> i64 { connection.query_row(sql, [], |row| row.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT count(*) FROM prompt_history WHERE session_id = 'session-1'"),
+        0,
+        "a destroyed session's prompts leave the history"
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM session_contexts WHERE session_id = 'session-1'"),
+        1
+    );
 }
 
 #[test]
@@ -3387,6 +3458,14 @@ fn context_rejects_reassigning_a_session_to_another_project() {
 fn history_search_scopes_by_project_session_and_all_projects() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(
+        &database,
+        &[
+            ("session-1", "project-1"),
+            ("session-2", "project-1"),
+            ("session-3", "project-2"),
+        ],
+    );
     for (session, bundle, sequence, text) in [
         ("session-1", "project-1", 1, "fix parser"),
         ("session-2", "project-1", 1, "fix renderer"),
@@ -3440,10 +3519,130 @@ fn history_search_scopes_by_project_session_and_all_projects() {
 }
 
 #[test]
+fn wider_history_scopes_list_smaller_scopes_first_and_dedupe_at_the_smallest() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    live_sessions(
+        &database,
+        &[
+            ("session-1", "project-1"),
+            ("session-2", "project-1"),
+            ("session-3", "project-2"),
+        ],
+    );
+    // Oldest to newest. Date order alone would put "alpha elsewhere" and
+    // "alpha project" ahead of this session's older prompt.
+    for (ordinal, (session, bundle, text)) in [
+        ("session-1", "project-1", "alpha session old"),
+        ("session-2", "project-1", "alpha project"),
+        ("session-3", "project-2", "alpha elsewhere"),
+        ("session-2", "project-1", "alpha session old"),
+        ("session-1", "project-1", "alpha session new"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        record_prompt_to(
+            &database,
+            session,
+            bundle,
+            ordinal as u64,
+            Some("2026-08-12T00:00:00Z"),
+            text,
+        )
+        .unwrap();
+    }
+    let search = |scope, query: &str| {
+        search_prompts_from(&database, "session-1", "project-1", scope, query)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.text)
+            .collect::<Vec<_>>()
+    };
+    let texts = |scope| search(scope, "alpha");
+    let texts_for = |query: &str| search(HistoryScope::All, query);
+
+    assert_eq!(
+        texts(HistoryScope::All),
+        [
+            "alpha session new",
+            "alpha session old",
+            "alpha project",
+            "alpha elsewhere"
+        ]
+    );
+    assert_eq!(
+        texts(HistoryScope::Project),
+        ["alpha session new", "alpha session old", "alpha project"]
+    );
+    assert_eq!(
+        texts(HistoryScope::Session),
+        ["alpha session new", "alpha session old"]
+    );
+
+    // Paging two at a time from each `next` cursor yields the same sequence,
+    // with no gaps and no repeats, including across tier boundaries, even
+    // when an unseen prompt is sent again while the search is open.
+    let expected = texts(HistoryScope::All);
+    let mut paged = Vec::new();
+    let mut after = None;
+    let mut resent = false;
+    loop {
+        let page = search_prompt_page_from(
+            &database,
+            "session-1",
+            "project-1",
+            HistoryScope::All,
+            "alpha",
+            after,
+            2,
+        )
+        .unwrap();
+        assert!(page.entries.len() <= 2);
+        paged.extend(page.entries.into_iter().map(|entry| entry.text));
+        if !resent {
+            // Hard-won: 8e9b542d5: a text resent between pages moved past the cursor and was never listed
+            record_prompt_to(
+                &database,
+                "session-1",
+                "project-1",
+                50,
+                Some("2026-08-12T00:00:00Z"),
+                "alpha elsewhere",
+            )
+            .unwrap();
+            resent = true;
+        }
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(paged, expected);
+
+    assert!(
+        texts_for("al").is_empty(),
+        "too short for the trigram index"
+    );
+    assert!(texts_for("say \"alpha\"").is_empty());
+}
+
+#[test]
 fn abandoned_prompts_are_searchable_in_session_and_project_history() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
-    record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
+    live_sessions(
+        &database,
+        &[("session-1", "project-1"), ("session-2", "project-1")],
+    );
+    record_prompt_text_to(
+        &database,
+        "session-1",
+        "project-1",
+        None,
+        "unfinished draft",
+    )
+    .unwrap();
     record_prompt_to(
         &database,
         "session-2",
@@ -3506,6 +3705,27 @@ fn abandoned_prompts_are_searchable_in_session_and_project_history() {
 fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(
+        &database,
+        &[
+            ("session-1", "project-1"),
+            ("session-2", "project-1"),
+            ("session-3", "project-1"),
+        ],
+    );
+    // Hard-won: 9d9cc05e2: a retried command recorded its prompt again and moved it to the front
+    for (command_id, text) in [("cmd-1", "first"), ("cmd-2", "second"), ("cmd-1", "first")] {
+        record_user_prompt_to(&database, "session-3", command_id, text).unwrap();
+    }
+    assert_eq!(
+        session_prompts_from(&database, "session-3")
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.text)
+            .collect::<Vec<_>>(),
+        ["second", "first"],
+        "the retry is the same prompt, not a newer one"
+    );
     record_prompt_to(
         &database,
         "session-1",
@@ -3515,9 +3735,30 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
         "submitted prompt",
     )
     .unwrap();
-    record_abandoned_prompt_to(&database, "session-1", "project-1", "submitted prompt").unwrap();
-    record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
-    record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
+    record_prompt_text_to(
+        &database,
+        "session-1",
+        "project-1",
+        None,
+        "submitted prompt",
+    )
+    .unwrap();
+    record_prompt_text_to(
+        &database,
+        "session-1",
+        "project-1",
+        None,
+        "unfinished draft",
+    )
+    .unwrap();
+    record_prompt_text_to(
+        &database,
+        "session-1",
+        "project-1",
+        None,
+        "unfinished draft",
+    )
+    .unwrap();
     // The delivered prompt's ordinal remains its idempotency key after the
     // nullable-ordinal migration.
     record_prompt_to(
@@ -3549,17 +3790,11 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
         ]
     );
 
-    record_abandoned_prompt_to(&database, "session-2", "project-1", " \n\t ").unwrap();
+    record_prompt_text_to(&database, "session-2", "project-1", None, " \n\t ").unwrap();
     assert!(
-        search_prompts_from(
-            &database,
-            "session-2",
-            "project-1",
-            HistoryScope::Session,
-            "",
-        )
-        .unwrap()
-        .is_empty()
+        session_prompts_from(&database, "session-2")
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -3567,6 +3802,7 @@ fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe
 fn rebinding_a_session_moves_its_prompt_history_to_the_new_bundle() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
+    live_sessions(&database, &[("session-1", "project-1")]);
     record_prompt_to(
         &database,
         "session-1",
@@ -3626,28 +3862,6 @@ fn rebinding_a_session_moves_its_prompt_history_to_the_new_bundle() {
         "fix renderer",
     )
     .unwrap();
-}
-
-#[test]
-fn prompt_recording_is_idempotent_by_session_event_ordinal() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    for _ in 0..2 {
-        record_prompt_to(
-            &database,
-            "session-1",
-            "project-1",
-            7,
-            Some("2026-08-12T00:00:00Z"),
-            "ship it",
-        )
-        .unwrap();
-    }
-    let connection = open(&database).unwrap();
-    let count: i64 = connection
-        .query_row("SELECT count(*) FROM prompt_history", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(count, 1);
 }
 
 #[test]
@@ -7072,7 +7286,7 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
     }
     connection
         .execute_batch(
-            "DELETE FROM schema_migrations WHERE version = 115; PRAGMA user_version = 114;",
+            "DELETE FROM schema_migrations WHERE version >= 115; PRAGMA user_version = 114;",
         )
         .unwrap();
     drop(connection);

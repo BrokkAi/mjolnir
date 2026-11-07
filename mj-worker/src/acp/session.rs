@@ -8,6 +8,35 @@ pub(super) fn accept_live_history(live_history_enabled: &AtomicBool) {
     live_history_enabled.store(true, Ordering::Release);
 }
 
+/// How long after a session opens OpenCode needs before its tool registry has
+/// reloaded for the MCP servers it was given: its 100 ms debounce, doubled and
+/// rounded up.
+const OPENCODE_TOOL_REGISTRY_SETTLE: Duration = Duration::from_millis(250);
+
+/// Whether an OpenCode that named itself `agent_version` in `initialize` may
+/// still start a turn before its MCP tools are registered. OpenCode 2.2.6 and
+/// later wait for starting MCP servers before each model call
+/// (anomalyco/opencode#60490); an older one, such as the 2.2.1 in a container
+/// built from an older image, does not. A missing or unparseable version takes
+/// the safe side and counts as older.
+fn opencode_may_miss_first_prompt_tools(agent_version: Option<&str>) -> bool {
+    const FIXED_IN: [u64; 3] = [2, 2, 6];
+    let parsed = agent_version.and_then(|version| {
+        let mut parts = version.trim_start_matches('v').splitn(3, '.');
+        let mut next = |last: bool| {
+            let part = parts.next()?;
+            let digits = if last {
+                part.split(['-', '+']).next()?
+            } else {
+                part
+            };
+            digits.parse::<u64>().ok()
+        };
+        Some([next(false)?, next(false)?, next(true)?])
+    });
+    parsed.is_none_or(|version| version < FIXED_IN)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn serve_session(
     connection: &ConnectionTo<Agent>,
@@ -135,6 +164,12 @@ pub(super) async fn serve_session(
     )
     .await?;
 
+    let directories =
+        SessionDirectories::negotiate(spec, &initialized.agent_capabilities.session_capabilities);
+    if let Some(message) = directories.notice.clone() {
+        emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
+    }
+
     if spec.harness == HarnessKind::Claude && !background_subagents_supported {
         emit_runtime_event(events, RuntimeEvent::Warning {
             message: "This Claude adapter does not advertise backgroundSubagents. Foreground completion requires claude-agent-acp 0.95.0 or later; upgrade the container or worker to let prompts finish while background agents run.".into(),
@@ -224,7 +259,7 @@ pub(super) async fn serve_session(
         {
             // `session/resume` does not replay, so everything it sends is live.
             accept_live_history(live_history_enabled);
-            let request = resume_session_request(spec, session_id.clone());
+            let request = resume_session_request(spec, &directories.accepted, session_id.clone());
             offered_mcp_servers = request.mcp_servers.len();
             let resumed = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
@@ -232,7 +267,7 @@ pub(super) async fn serve_session(
                 .with_context(|| format!("resume ACP session {existing}"))
                 .map(|resumed| (resumed.meta, resumed.config_options, resumed.modes))
         } else {
-            let request = load_session_request(spec, session_id.clone());
+            let request = load_session_request(spec, &directories.accepted, session_id.clone());
             offered_mcp_servers = request.mcp_servers.len();
             let loaded = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
@@ -330,7 +365,7 @@ pub(super) async fn serve_session(
             // this, a fallback from a failed reload dropped every reply the new
             // session sent for the rest of the worker's life (R8-1).
             accept_live_history(live_history_enabled);
-            let request = new_session_request(spec, true);
+            let request = new_session_request(spec, &directories.accepted, true);
             offered_mcp_servers = request.mcp_servers.len();
             let created = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
@@ -354,6 +389,21 @@ pub(super) async fn serve_session(
                 false,
             )
         };
+    // OpenCode before 2.2.6 reloads its tool registry on a 100 ms debounce
+    // after an MCP server connects, and signals nobody when it is done. A
+    // prompt that starts a turn inside that window misses the `mj-agents` and
+    // `mj-memory` tools (measured on 2.2.1: prompts 0-80 ms after `tools/list`
+    // missed them almost always, prompts at 120 ms or later had them). So the
+    // first prompt to such a bridge waits until OPENCODE_TOOL_REGISTRY_SETTLE
+    // has passed since the open returned.
+    let mut first_prompt_not_before = (spec.harness == HarnessKind::OpenCode
+        && opencode_may_miss_first_prompt_tools(
+            initialized
+                .agent_info
+                .as_ref()
+                .map(|info| info.version.as_str()),
+        ))
+    .then(|| tokio::time::Instant::now() + OPENCODE_TOOL_REGISTRY_SETTLE);
 
     // An adapter that withholds the servers it was offered says so only in
     // its log. Checked after the open, because a Muse host that could not
@@ -867,6 +917,9 @@ pub(super) async fn serve_session(
                     )
                     .await?;
                     continue;
+                }
+                if let Some(not_before) = first_prompt_not_before.take() {
+                    tokio::time::sleep_until(not_before).await;
                 }
                 let prompt = prompt_for_harness(spec.harness, prompt);
                 let mut updates_before = agent_output_count.get();

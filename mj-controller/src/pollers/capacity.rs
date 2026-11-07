@@ -330,37 +330,36 @@ pub(crate) async fn collect_local_capacity_with(
 /// it is retried with the same backoff the executor and the relay use (launch
 /// finding R3-5); any other failure is reported at once.
 pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<CommandOutput> {
-    use crate::targets::{SSH_RETRY_ATTEMPTS, SshRefusal, ssh_refusal, ssh_retry_delay};
-    let attempts = match command.ssh_destination {
-        Some(_) => SSH_RETRY_ATTEMPTS,
-        None => 1,
-    };
-    for attempt in 1..=attempts {
-        let (output, ssh_session) = run_resource_command(command).await?;
+    use crate::targets::{SshRefusalRetry, ssh_refusal};
+    // The poller bounds the whole probe, retries included, with
+    // `RESOURCE_POLL_TIMEOUT`; a refusal that outlasts the retry bound fails it sooner.
+    let mut retry = SshRefusalRetry::for_command(command);
+    loop {
+        let (output, ssh_session) = run_resource_command(command, retry.walk()).await?;
         if output.status == 0 {
             return Ok(output);
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // A probe that printed the start marker ran, so its status is its own.
+        let refusal = match &ssh_session {
+            Some(lease) => lease.gate().refusal(output.status, &stderr),
+            None => ssh_refusal(output.status, &stderr),
+        };
         if let Some(destination) = command.ssh_destination.as_deref()
-            && let Some(refusal) = ssh_refusal(output.status, &stderr)
+            && let Some(refusal) = refusal
         {
-            // A refused session found its master alive; a connection closed
-            // before authentication may mean the master is gone.
-            if refusal == SshRefusal::BeforeAuthentication
-                && let Some(lease) = &ssh_session
-            {
-                lease.invalidate();
-            }
-            // Only Unix leases own a shared session slot; free it before backoff.
+            // The lease records what the refusal means while it is still held.
+            let walks_on = ssh_session
+                .as_ref()
+                .is_some_and(|lease| lease.note_refusal(refusal));
+            // Only Unix leases own a shared session slot; free it before the wait.
             #[cfg(unix)]
             drop(ssh_session);
-            if attempt < attempts {
-                let delay = ssh_retry_delay(attempt);
-                refusal.log_retry(destination, &command.purpose, attempt, delay, stderr.trim());
-                tokio::time::sleep(delay).await;
-                continue;
-            }
-            refusal.log_exhausted(destination, &command.purpose, stderr.trim());
+            let delay = retry
+                .next(refusal, walks_on, destination, &command.purpose, &stderr)
+                .with_context(|| format!("{} failed", command.purpose))?;
+            tokio::time::sleep(delay).await;
+            continue;
         }
         bail!(
             "{} failed with status {}: {}",
@@ -369,39 +368,46 @@ pub(super) async fn execute_resource_command(command: &CommandSpec) -> Result<Co
             stderr.trim()
         );
     }
-    unreachable!("the last attempt always returns")
 }
 
 /// Spawn one probe and collect its output, with the SSH session lease it ran
 /// on. The lease is returned so it outlives the child.
 async fn run_resource_command(
     command: &CommandSpec,
+    walk: &mut crate::targets::SshWalk,
 ) -> Result<(CommandOutput, Option<crate::targets::SshSessionLease>)> {
-    // A remote probe runs as one session on a shared SSH connection; the
-    // lease is held until the probe has exited.
-    let (command, ssh_session) = if command.ssh_session.is_some() {
-        let requested = command.clone();
-        let executor = crate::targets::CancellableProcessExecutor::with_timeout(
-            crate::targets::SSH_MASTER_OPEN_TIMEOUT,
-        );
-        let _cancel_preparation = executor.cancel_on_drop();
-        tokio::task::spawn_blocking(move || {
-            requested
-                .open_ssh_session(&executor)
-                .map(crate::targets::SessionCommand::into_parts)
-        })
-        .await
-        .context("join the SSH session lease for a resource probe")??
-    } else {
-        (command.clone(), None)
-    };
+    // A remote probe the daemon runs itself is one session on a shared SSH
+    // connection; the lease is held until the probe has exited. A probe that
+    // runs on the node is leased, retried and stripped of the start marker
+    // there, beside the connection it shares.
+    let (command, ssh_session) =
+        if command.ssh_session.is_some() && crate::targets::command_host(command).is_none() {
+            let requested = command.clone();
+            let executor = crate::targets::CancellableProcessExecutor::with_timeout(
+                crate::targets::SSH_MASTER_OPEN_TIMEOUT,
+            );
+            let _cancel_preparation = executor.cancel_on_drop();
+            let mut walked = std::mem::take(walk);
+            let (prepared, walked) = tokio::task::spawn_blocking(move || {
+                let prepared = requested
+                    .open_ssh_session(&executor, &mut walked)
+                    .map(crate::targets::SessionCommand::into_parts);
+                (prepared, walked)
+            })
+            .await
+            .context("join the SSH session lease for a resource probe")?;
+            *walk = walked;
+            prepared?
+        } else {
+            (command.clone(), None)
+        };
     let command = &command;
     let crate::streamed_child::ProxyStdio {
         mut child,
         stdin,
         stdout,
         stderr,
-    } = crate::streamed_child::spawn_proxy(command)
+    } = crate::streamed_child::spawn_session_proxy(command, ssh_session.as_ref())
         .await
         .with_context(|| format!("start {}", command.purpose))?;
     // Resource probes do not read input; closing the writer gives a child

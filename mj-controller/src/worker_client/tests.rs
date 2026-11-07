@@ -298,15 +298,13 @@ exit 1
 #[cfg(unix)]
 const WORKER_SOCKET_MISSING: &str = r"Error: connect worker socket /w/control.sock\n\nCaused by:\n    0: connect unix socket /w/control.sock\n    1: No such file or directory (os error 2)\n";
 
-/// A local relay proxy for a worker that binds its control socket only after
-/// `misses` connection attempts, or never when `misses` is `None`.
+/// The shell script of a relay proxy for a worker that binds its control
+/// socket only after `misses` connection attempts, or never when `misses` is
+/// `None`.
 #[cfg(unix)]
-fn relay_proxy_before_the_worker_binds(
-    directory: &std::path::Path,
-    misses: Option<u32>,
-) -> CommandSpec {
+fn worker_binds_after_script(directory: &std::path::Path, misses: Option<u32>) -> String {
     let counter = directory.join("attempts");
-    let script = format!(
+    format!(
         r#"
 count=$(cat {counter} 2>/dev/null || echo 0)
 echo $((count + 1)) > {counter}
@@ -322,8 +320,24 @@ while IFS= read -r request; do :; done
         counter = counter.display(),
         misses = misses.unwrap_or(u32::MAX),
         session = SESSION_ID
-    );
-    CommandSpec::new("sh", ["-c".to_owned(), script]).purpose("starting worker relay fixture")
+    )
+}
+
+/// A local relay proxy for a worker that binds its control socket only after
+/// `misses` connection attempts, or never when `misses` is `None`.
+#[cfg(unix)]
+fn relay_proxy_before_the_worker_binds(
+    directory: &std::path::Path,
+    misses: Option<u32>,
+) -> CommandSpec {
+    CommandSpec::new(
+        "sh",
+        [
+            "-c".to_owned(),
+            worker_binds_after_script(directory, misses),
+        ],
+    )
+    .purpose("starting worker relay fixture")
 }
 
 #[cfg(unix)]
@@ -405,6 +419,86 @@ async fn a_worker_socket_still_missing_after_the_retry_budget_is_one_warning() {
             && warnings[0].contains("No such file or directory"),
         "{}",
         warnings[0]
+    );
+}
+
+/// The worker has not bound its socket yet: the SSH session ran, so its shard
+/// accepted it, and only a refusal advances the walk. Each retry runs on the
+/// same shard (the same control socket) instead of visiting, and maybe
+/// opening, another master. The fixture is a fake `ssh` on the proxy's own
+/// `PATH`, and a probe lease so no master is checked or opened.
+// Hard-won: ca6580092: a retry after a missing worker socket reused a walk that had marked its shard visited, so each retry moved to another shard.
+#[cfg(unix)]
+#[test]
+fn a_missing_worker_socket_retries_on_the_same_shard() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "MJ_WORKER_SOCKET_SHARD_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().expect("temp dir");
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "a_missing_worker_socket_retries_on_the_same_shard",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let sockets = tempfile::tempdir_in("/tmp").expect("short control socket directory");
+    mj_core::targets::set_ssh_connection_sharing_for_test(Some(
+        mj_core::targets::SshSharingForTest::Directory(sockets.path().to_path_buf()),
+    ));
+    let directory = tempfile::tempdir().expect("temp dir");
+    let bin = directory.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let used = directory.path().join("control-paths");
+    let fake_ssh = bin.join("ssh");
+    std::fs::write(
+        &fake_ssh,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do case \"$arg\" in ControlPath=*) echo \"$arg\" >> {used};; esac; done\n{body}",
+            used = used.display(),
+            body = worker_binds_after_script(directory.path(), Some(4)),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let target = mj_core::targets::SshTarget {
+        destination: "socket-shard-host".into(),
+        ssh_args: Vec::new(),
+    };
+    let mut spec = CommandSpec::new("ssh", [target.destination.clone(), "worker-proxy".into()])
+        .ssh_probe_session(&target)
+        .purpose("starting worker relay fixture");
+    spec.env.insert("PATH".into(), path);
+
+    let client = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(RelayClient::connect_with_timeout(
+            &spec,
+            SESSION_ID,
+            Duration::from_secs(10),
+        ))
+        .expect("the connection is retried until the worker binds its socket");
+    mj_core::targets::set_ssh_connection_sharing_for_test(None);
+
+    assert_eq!(client.relay_version(), "retry-fixture");
+    assert_eq!(relay_proxy_attempts(directory.path()), 5);
+    let used = std::fs::read_to_string(&used).unwrap();
+    let distinct: std::collections::BTreeSet<_> = used.lines().collect();
+    assert_eq!(
+        (used.lines().count(), distinct.len()),
+        (5, 1),
+        "every attempt used one control socket: {used}"
     );
 }
 
