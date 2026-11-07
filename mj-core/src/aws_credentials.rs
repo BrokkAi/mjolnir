@@ -83,8 +83,9 @@ pub struct AwsCredentialSource {
     /// Whether credentials are minted for the role. A role is configured for
     /// every session of the profile, but only a session that receives synced
     /// credentials gets any: for a profile that does not authenticate with the
-    /// AWS credential chain nothing is minted, and credentials a session holds
-    /// from before are still withdrawn.
+    /// AWS credential chain nothing is minted. Credentials a session holds that
+    /// do not match the role's scope are still withdrawn; role-scoped
+    /// credentials it already holds stay until they expire.
     pub mints: bool,
     /// Where the harness's own configuration may name the AWS profile the
     /// role-scoped mint runs as (Codex's provider table). Only the pointer is

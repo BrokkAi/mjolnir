@@ -181,7 +181,7 @@ pub(crate) fn unused_role_notice(
     let withheld = credentials_withheld(profile, host, target_environment)?;
     profile.aws.as_ref()?;
     Some(format!(
-        "[profiles.{profile_id}.aws] has no effect on this session: {}. It runs without role-scoped credentials.",
+        "[profiles.{profile_id}.aws] has no effect on this session: {}. Mjolnir mints no role-scoped credentials for it.",
         withheld.why_a_role_cannot_apply()
     ))
 }
