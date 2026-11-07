@@ -25,6 +25,101 @@
     "authorization": {
       "messages": [
         {
+          "id": "user:15",
+          "role": "user",
+          "text": "what inference could we potentially offload from flash to local models, or use local models to help flash be more accurate? top 3 ideas"
+        },
+        {
+          "id": "user:756",
+          "role": "user",
+          "text": "cool. see if you can get 1 and 2 working. note that i have another agent using this machine and the display-connected gpu. if you can do your tests headless on one of the B5000s that's probably best"
+        },
+        {
+          "id": "user:922",
+          "role": "user",
+          "text": "my main photo library is D:\\Photos\\Originals, lots more there, but it's a slow hdd, recommend copying jpgs of anything you want to test with"
+        },
+        {
+          "id": "user:1099",
+          "role": "user",
+          "text": "there aren't many blurry photos in my kept Originals tho\n\nfor that you'll need to look in my unprocessed backlog in C:\\Users\\jbell\\Pictures\n\nthe phone imports are probably fertile ground for low quality pics"
+        },
+        {
+          "id": "user:1478",
+          "role": "user",
+          "text": "fuck\n\ni explicitly approve testing with flash, that's the entire point"
+        },
+        {
+          "id": "user:2357",
+          "role": "user",
+          "text": "re panoramas,\n\n1. any additional ideas to try? 2/3 success isn't amazing\n\n2. expensive is panorama geometry to compute? how optimized is our implementation? i'm basically asking how slow it would be if we moved it to the a4000 instead of the higher end b5000"
+        },
+        {
+          "id": "user:2568",
+          "role": "user",
+          "text": "continue (host rebooted)"
+        },
+        {
+          "id": "user:3060",
+          "role": "user",
+          "text": "the 4000 connected to monitor is the 20G model fwiw\n\nbut yes \"runs on slow 16G a4000\" should be a goal"
+        },
+        {
+          "id": "user:3859",
+          "role": "user",
+          "text": "/goal make panorama accuracy production quality"
+        },
+        {
+          "id": "user:7209",
+          "role": "user",
+          "text": "> Four sessions saved only 11 seconds\n\nwe should make this adaptive instead of hardcoding right? i assume B5000 has more processing capacity"
+        },
+        {
+          "id": "user:7214",
+          "role": "user",
+          "text": "(and on the other end of the scale, we do want to run on 8GB GPUs that are even smaller, but i don't have one to test here)"
+        },
+        {
+          "id": "user:22355",
+          "role": "user",
+          "text": "approved"
+        },
+        {
+          "id": "user:23055",
+          "role": "user",
+          "text": "i explicitly approve this and future flash tests"
+        },
+        {
+          "id": "user:23103",
+          "role": "user",
+          "text": "phone controls?"
+        },
+        {
+          "id": "user:23463",
+          "role": "user",
+          "text": "what's with the june shoot failures?"
+        },
+        {
+          "id": "user:23658",
+          "role": "user",
+          "text": "2+minutes it's definitely not an intentional panorama, i think flash is right\n\nnot sure about the other two, wdyt"
+        },
+        {
+          "id": "user:23972",
+          "role": "user",
+          "text": "great, so is enhanced local panorama evidence wired up to prod now?"
+        },
+        {
+          "id": "user:24121",
+          "role": "user",
+          "text": "what was the other local-inference project we spec'd out?"
+        },
+        {
+          "id": "user:24300",
+          "role": "user",
+          "text": "/compact"
+        },
+        {
           "id": "user:24320",
           "role": "user",
           "text": "i want to incorporate The preference-aware AWB module in SamsungLabs/modular_neural_isp, specifically its awb_ccm directory\n\nAWB should be on by default for auto-develop\n\nadd an AWB icon like the A icon to allow disabling it separately, we don't need to precompute all combinations tho\n\nideally we can do this in the existing develop pipeline rather than adding another raw decode stage"

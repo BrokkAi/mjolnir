@@ -1623,6 +1623,115 @@ async fn operator_activity_action_is_sessionless_and_reaches_controller() {
     assert_eq!(posted.await.unwrap().status(), StatusCode::ACCEPTED);
 }
 
+#[tokio::test]
+async fn guardian_permission_mode_is_hidden_and_refused_by_api() {
+    use agent_client_protocol::v1::schema::{
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        SessionConfigSelectOptions,
+    };
+    use mj_core::config::HarnessKind;
+    let mode_option = |current: &str, values: &[&str]| {
+        SessionConfigOption::select(
+            "mode",
+            "Mode",
+            current.to_owned(),
+            SessionConfigSelectOptions::Ungrouped(
+                values
+                    .iter()
+                    .map(|value| {
+                        SessionConfigSelectOption::new(value.to_string(), value.to_string())
+                    })
+                    .collect(),
+            ),
+        )
+        .category(SessionConfigOptionCategory::Mode)
+    };
+    // Muse container images built before muse-acp 0.10 carry the approval
+    // policy on `mode` instead of `approval_mode`; the worker enforces it
+    // there, so that is the selector the policy owns.
+    let auto_review = || {
+        SessionConfigOption::select(
+            "auto_review",
+            "Auto review",
+            "on",
+            SessionConfigSelectOptions::Ungrouped(vec![
+                SessionConfigSelectOption::new("on", "On"),
+                SessionConfigSelectOption::new("off", "Off"),
+            ]),
+        )
+    };
+    for (harness, raw, value) in [
+        (
+            HarnessKind::Claude,
+            vec![mode_option(
+                "auto",
+                &["default", "auto", "bypassPermissions"],
+            )],
+            "bypassPermissions",
+        ),
+        (
+            HarnessKind::Muse,
+            vec![
+                mode_option("promptUnmatched", &["promptUnmatched", "allowAll"]),
+                auto_review(),
+            ],
+            "allowAll",
+        ),
+    ] {
+        let enforcement = harness.resolve_execution_enforcement(
+            mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+            false,
+        );
+        let (app, mut actions, _, _, _) = app_with_snapshot(|snapshot| {
+            let session = &mut snapshot.sessions[0];
+            session.harness_kind = harness.id().into();
+            session.capabilities.set_config = true;
+            session.execution_enforcement = enforcement;
+            let facts = mj_core::acp::AcpSessionFacts::from_operational(
+                harness,
+                &Default::default(),
+                &raw,
+                None,
+            );
+            session.config_options = viewer_config_options(&raw, &facts);
+            session.policy_config_keys =
+                filter_policy_config_options(&mut session.config_options, enforcement, &raw);
+            assert!(session.config_options.is_empty(), "{harness:?}");
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/sessions/session-1/row")
+                    .header(COOKIE, cookie())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let row: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            row["row"]
+                .get("config_options")
+                .is_none_or(|options| options.as_array().unwrap().is_empty()),
+            "{harness:?}"
+        );
+        let response = post_action(
+            app,
+            cookie(),
+            format!(
+                r#"{{"action":"set-config","session_id":"session-1","key":"mode","value":"{value}"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{harness:?}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("permission policy"));
+        assert!(actions.try_recv().is_err());
+    }
+}
+
 /// A setting the harness never advertised is not a setting. Forwarding one
 /// asks the agent to refuse something the viewer should never have offered.
 #[tokio::test]

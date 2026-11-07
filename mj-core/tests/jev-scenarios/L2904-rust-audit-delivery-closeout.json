@@ -1,0 +1,120 @@
+{
+  "id": "L2904",
+  "title": "Rust audit delivery closeout",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "e65c99e141a12361e8f0a3d210afda0d",
+    "session_title": "10202-deep-pass-acceptance-audit",
+    "reply_position": 753,
+    "captured_at": "2026-11-06T13:38:52.387Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:59",
+          "role": "assistant",
+          "text": "Status: I've read the issue, the plan's progress log and the dispositions ledger. Next I'll check the rest of the plan, the source-catalog unknown reporting, the PR states and the durable receipts."
+        },
+        {
+          "id": "agent:115",
+          "role": "assistant",
+          "text": "Status: the catalog is metadata only, with no per-body role column. I'm now checking whether any roll-up or issue comment partitions all 4,257 bodies into the five acceptance roles."
+        },
+        {
+          "id": "agent:168",
+          "role": "assistant",
+          "text": "Status: I'm reading the final combined-validation receipt, then I'll check the durable retention of the receipts and write the verdict."
+        },
+        {
+          "id": "agent:223",
+          "role": "assistant",
+          "text": "The bounded pass meets its mutation-evidence acceptance, but it is not ready to call complete. Three stated deliverables are still open (items 1–3 below). I edited nothing and ran no builds. The handback went to the parent.\n\n**What holds up**\n- **Hold and scope:** the #5658 hold and the \"no whole-crate or current-master claim\" are stated consistently in the plan, the ledger and the PR bodies.\n- **Fault counts:** the ledger's 49 + 2 + 1 + 2 + 3 gives 57 unique faults, and the 11 replays are not added to that count.\n- **Foreign crates:** the eight foreign crates are source-only with no Rust fault selected, and the unknowns are stated.\n- **Delivery:** #10305 and #10311 are ready and mergeable. Their base branch head matches the #10327 head. The union validation at 7c0c775 passed its 5 tests, Clippy and static checks.\n\n**Missing before the parent calls it complete**\n1. **Public conclusions:** the last #10202 comment is from 11:26Z and still says the final input and semantic builds are running. The final catches, the PR heads, the union validation, #10334 and the ledger are not posted.\n2. **Role accounting:** the source catalog is metadata only (cfg true/false/unknown, bodyless, const and macro gaps). It has no held-or-eligible column. The final report must say the remaining cfg-true bodies are not individually classified.\n3. **Retention:** the dependency ledger, the edge reconciliation and the combined-validation receipts are not under `.agents/scratch/10202-rust-deep`.\n4. **Stale receipt labels:** the admission and publication bundle receipts still say independent review is pending, though the plan calls them independently audited.\n5. **Survivors:** survivors have counts only, with no per-survivor line saying meaningful, deferred or uncertain.\n6. **PR #10335:** it is still a draft, and its body says it stays one until the union receipt is accepted. That receipt is now accepted.\n7. **Plan close-out:** the plan still has unchecked progress items and says \"active\".\n\nThe full notes are in `.mj/agents/e65c99e141a12361e8f0a3d210afda0d/verdict.md`."
+        },
+        {
+          "id": "agent:432",
+          "role": "assistant",
+          "text": "Status: the r2 catalog and the reviewed scope catalogs are joinable by path, body hash and span. I'm now writing the builder."
+        },
+        {
+          "id": "agent:476",
+          "role": "assistant",
+          "text": "Item 2 is done and I've handed back the report to the parent. The role accounting builds reproducibly from the frozen r2 catalog.\n\n- **Output:** `/tmp/qs-rust-deep/source-role-accounting-closeout-r1/` holds `build.py`, `out/accounting.json` and `out/accounting.md`. The output is byte-identical across two runs, and the input hashes are recorded in the JSON.\n- **Roles across the 4,257 function rows (two Rust roots only):**\n\n  | Role | Rows |\n  | --- | --- |\n  | Bodyless | 67 |\n  | Source cfg FALSE | 1,215 |\n  | Source cfg UNKNOWN | 166 |\n  | Reviewed and excluded | 7 |\n  | Reviewed scope | 102 |\n  | Unknown and uninvestigated (default) | 2,700 |\n\n  The reviewed-scope bodies all joined to prior scope lists by path, body hash and span, with no failures.\n- **Held and eligible:** the native hold is not a counted role, because no per-body held data exists. The full eligible/held split was not performed.\n- **Dependency crates:** core, analysis and store have only bounded scope lists, not full catalogs, and are not joined.\n- **Edits:** I wrote nothing outside that `/tmp` directory, and ran no builds, source edits or network calls."
+        },
+        {
+          "id": "agent:599",
+          "role": "assistant",
+          "text": "I reviewed the final-conclusions draft and sent the findings back to the parent. The counts reconcile and nothing was edited. I found three wording points to fix before posting.\n\n**Counts that check out**\n- The accounting adds up: 102 + 7 + 1,215 + 166 + 2,700 + 67 = 4,257.\n- The 49 initial faults add up per wave.\n- 49 + 2 + 1 + 2 + 3 gives the 57 distinct faults, and the 11 replays are kept out of that count.\n- The 12 survivor lines agree with the wave totals.\n\n**Corrections**\n1. **#10335 head:** the 7c0c775 union validated the parser PR at d8246ed, but its final head is 754f056. The draft should say 754f056 gets its own carry and Clippy receipt.\n2. **Plan against draft:**\n   - The plan's Progress line 31 says the publication wave was \"independently audited\". The draft says only counts were parent-checked.\n   - The ledger row for the six uncaught parser faults says \"foreign-language-only by bounded source read\". The draft's table says \"relevance uncertain\".\n   - Align both before delivery.\n3. **Cache wording:** \"five old cache survivors\" includes one variant that was originally not covered. This is only a precision point.\n\nThe final bundle hashes and the parser status are still pending."
+        },
+        {
+          "id": "agent:753",
+          "role": "assistant",
+          "text": "The final-delivery bundle checks out, and I found no evidence gap that blocks closing #10202. Two delivery steps are still open.\n\n- **Hashes and members:**\n  - `member-index.json` hashes to fa2f3872…10d9, and `staging-receipt.json` hashes to 493186af…3012.\n  - All 82 listed members exist with matching hashes. The only extra files on disk are the index and the receipt.\n- **Conclusions:** the conclusions text in `/tmp` and the copy in the bundle are identical (9079aca8…a777), matching the receipt. I did not fetch the posted comment, so \"verbatim on comment 6686105545\" is the parent's statement.\n- **My seven earlier items:** all addressed.\n  - The accounting builder and outputs staged in the bundle match mine.\n  - The initial publication wave is stated as parent-checked only.\n  - The plan is deleted, with its path named in the commit message. Net change against `origin/master` is 14 lines of guidance.\n- **Open steps:**\n  - The plan branch is not on the remote yet, since its pre-push review is still running.\n  - #10202 is still open with the `agent-in-progress` label, so the parent must decide whether to close it or remove the label.\n- **Limitations:**\n  - The frozen ledger still says the six uncaught parser faults are \"foreign-language-only\". Only the conclusions' last sentence and the survivor addendum qualify that.\n  - There was no Cargo replay at the final #10335 head 259c74ae.\n  - The 12 remaining faults are uncertain or deferred, not equivalent.\n  - No whole-package or current-head claim is made.\n\nI ran no tests or network calls, and made no edits."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "lusions posted verbatim /tmp/qs-rust-deep/final-issue-conclusions.md at https://github.com/BrokkAi/bifrost-dev/issues/10202#issuecomment-6686105545 (no need network). Final bundle .agents/scratch/10202-rust-deep/final-delivery-r1 FROZEN82members; indexfa2f3872a65b7e4a6be98f01b08e71f5aa1eb2d2c8237b875644cbae7c4f10d9, receipt493186af52fdd00f7a4ac755f4e56f19b0149ba79c7b6d8456314b7bbf5c3012. Verify actual exactmembers/hash+that7missingitems from your verdict now addressed, using contained addenda notnewhistoricalaudits. ParserREADY259c74a reviewed; finalcarryqualification explicitly onlyupstreamScalaaliasrename/doc from754, 3b99 test/Clippyreceiptseparate. Plan finalretrospectiveb2ec223, deletion713e6317 on planworktree; netmasterdiffonly14linesexistingvalidationguidance, currentlyprepushreviewrunning. Child422qualifiesINITIALpublication5parentcheckedonly; no frozenreceipt rewritten. No rerun tests, source checks, liveAPI/CI/queue. Return finalremainingblockers(ifany), receipt countproof and importantlimitations.",
+    "assistant_text_tail": "The final-delivery bundle checks out, and I found no evidence gap that blocks closing #10202. Two delivery steps are still open.\n\n- **Hashes and members:**\n  - `member-index.json` hashes to fa2f3872…10d9, and `staging-receipt.json` hashes to 493186af…3012.\n  - All 82 listed members exist with matching hashes. The only extra files on disk are the index and the receipt.\n- **Conclusions:** the conclusions text in `/tmp` and the copy in the bundle are identical (9079aca8…a777), matching the receipt. I did not fetch the posted comment, so \"verbatim on comment 6686105545\" is the parent's statement.\n- **My seven earlier items:** all addressed.\n  - The accounting builder and outputs staged in the bundle match mine.\n  - The initial publication wave is stated as parent-checked only.\n  - The plan is deleted, with its path named in the commit message. Net change against `origin/master` is 14 lines of guidance.\n- **Open steps:**\n  - The plan branch is not on the remote yet, since its pre-push review is still running.\n  - #10202 is still open with the `agent-in-progress` label, so the parent must decide whether to close it or remove the label.\n- **Limitations:**\n  - The frozen ledger still says the six uncaught parser faults are \"foreign-language-only\". Only the conclusions' last sentence and the survivor addendum qualify that.\n  - There was no Cargo replay at the final #10335 head 259c74ae.\n  - The 12 remaining faults are uncertain or deferred, not equivalent.\n  - No whole-package or current-head claim is made.\n\nI ran no tests or network calls, and made no edits.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      753
+    ],
+    "user_position": 703,
+    "input_rationale": "The verification delivered, and the reply states a declarative handoff to the parent: decide whether to close #10202 or remove the label. The plan branch push is also pending but is the parent's own step. Borderline because the main result is complete.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": true,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:753"
+    ]
+  },
+  "context": {
+    "after": []
+  }
+}

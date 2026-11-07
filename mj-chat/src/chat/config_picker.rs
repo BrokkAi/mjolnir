@@ -228,6 +228,40 @@ pub(super) fn config_option_key(option: &SessionConfigOption) -> String {
 }
 
 impl ChatState {
+    /// Supplies the policy-owned setting keys for this chat's session.
+    pub fn set_policy_config_keys(&mut self, keys: &[String]) {
+        // Refreshes call this for every open chat; rebuilding the popups
+        // would move an open completion's highlight back to the first entry.
+        if self.policy_config_keys == keys {
+            return;
+        }
+        self.policy_config_keys = keys.to_vec();
+        if self.config_picker.as_ref().is_some_and(|picker| {
+            picker
+                .key
+                .as_deref()
+                .is_some_and(|key| !self.config_key_user_settable(key))
+        }) {
+            self.config_picker = None;
+        }
+        self.update_autocomplete();
+    }
+
+    pub(super) fn config_key_user_settable(&self, key: &str) -> bool {
+        // `/config mode` reaches whichever selector `mode` resolves to.
+        let resolved =
+            mj_core::acp::find_session_config_option(self.acp_surface.config_options(), key)
+                .map_or_else(|| key.to_owned(), |option| option.id.to_string());
+        !self
+            .policy_config_keys
+            .iter()
+            .any(|policy_key| *policy_key == resolved || policy_key == key)
+    }
+
+    pub(super) fn policy_config_notice(&self) -> &'static str {
+        "The target's permission policy sets this setting; use /plan to switch to Plan mode"
+    }
+
     pub(super) fn advertised_config_values(&self, key: &str) -> &[SessionConfigChoice] {
         match key {
             "model" => &self.model_values,
@@ -237,6 +271,9 @@ impl ChatState {
     }
 
     pub(super) fn config_values(&self, key: &str) -> Vec<SessionConfigChoice> {
+        if !self.config_key_user_settable(key) {
+            return Vec::new();
+        }
         session_config_choices(self.acp_surface.config_options(), key)
     }
 
@@ -249,8 +286,14 @@ impl ChatState {
     }
 
     pub(super) fn open_config_menu(&mut self) -> bool {
-        let Some(picker) = ConfigPicker::new_options(self.acp_surface.config_options(), true)
-        else {
+        let options = self
+            .acp_surface
+            .config_options()
+            .iter()
+            .filter(|option| self.config_key_user_settable(&config_option_key(option)))
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(picker) = ConfigPicker::new_options(&options, true) else {
             return false;
         };
         self.config_picker = Some(picker);
@@ -597,6 +640,22 @@ mod tests {
         )
     }
 
+    fn mode_option(current: &str, values: &[&str]) -> SessionConfigOption {
+        SessionConfigOption::select(
+            "mode",
+            "Permission mode",
+            current.to_owned(),
+            SessionConfigSelectOptions::Ungrouped(
+                values
+                    .iter()
+                    .map(|value| {
+                        SessionConfigSelectOption::new((*value).to_owned(), (*value).to_owned())
+                    })
+                    .collect(),
+            ),
+        )
+    }
+
     fn chat_with_models() -> ChatState {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_config_options(&[
@@ -646,7 +705,9 @@ mod tests {
             model_option("auto", &[("auto", "Auto")]),
             effort_option("high", &["low", "high"]),
             approval_option("prompt", &["prompt", "allow"]),
+            mode_option("default", &["default", "plan"]),
         ]);
+        chat.set_policy_config_keys(&["mode".into()]);
 
         chat.set_input("/config".into());
         assert_eq!(chat.submit_input(), ChatAction::None);
@@ -656,6 +717,11 @@ mod tests {
             drawn_transcript(&mut chat, 100, 24)
                 .join("\n")
                 .contains("Approval mode")
+        );
+        assert!(
+            !drawn_transcript(&mut chat, 100, 24)
+                .join("\n")
+                .contains("Permission mode")
         );
         type_text(&mut chat, "approval");
         assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
@@ -686,6 +752,25 @@ mod tests {
                 key: "approval_mode".into(),
                 value: "prompt".into(),
             }
+        );
+
+        chat.set_input("/config mode plan".into());
+        assert_eq!(chat.submit_input(), ChatAction::None);
+        assert!(chat.notice().is_some_and(
+            |notice| notice.contains("permission policy sets this") && notice.contains("/plan")
+        ));
+
+        // Hard-won: 2d6176f: `/config mode` reached a policy selector named otherwise
+        let mut interaction = mode_option("default", &["default", "plan"]);
+        interaction.id = "interaction_mode".into();
+        interaction = interaction.category(SessionConfigOptionCategory::Mode);
+        chat.set_config_options(&[interaction]);
+        chat.set_policy_config_keys(&["interaction_mode".into()]);
+        chat.set_input("/config mode plan".into());
+        assert_eq!(chat.submit_input(), ChatAction::None);
+        assert!(
+            chat.notice()
+                .is_some_and(|notice| notice.contains("permission policy sets this"))
         );
     }
 

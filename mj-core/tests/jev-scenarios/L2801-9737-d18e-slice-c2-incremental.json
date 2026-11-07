@@ -1,0 +1,113 @@
+{
+  "id": "L2801",
+  "title": "9737-d18e-slice-c2-incremental",
+  "category": "still-open-none",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "7c9a78d3fdbd52dd2f74b352dda9299e",
+    "session_title": "9737-d18e-slice-c2-incremental",
+    "reply_position": 704,
+    "captured_at": "2026-11-05T19:04:31.150Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:27",
+          "role": "assistant",
+          "text": "I’ll read the slice brief and inspect the relevant code, then make the requested change and run focused validation."
+        },
+        {
+          "id": "agent:110",
+          "role": "assistant",
+          "text": "The point-update listing retains its omission set, and the analyzer has the updated live-path snapshot. I’m using those together to compute the new revision’s certificate before crate reconciliation."
+        },
+        {
+          "id": "agent:218",
+          "role": "assistant",
+          "text": "The incremental fix compiles. I added a control that checks a normal edit, an oversized Rust file, and its removal; I’m running it with the existing scoped reconciliation test now."
+        },
+        {
+          "id": "agent:347",
+          "role": "assistant",
+          "text": "The focused test binary is still compiling. The library check passed; once the test finishes I’ll use its result to decide whether the certificate calculation needs another correction."
+        },
+        {
+          "id": "agent:448",
+          "role": "assistant",
+          "text": "Both focused controls pass, including the full-versus-scoped reconciliation check. I’m checking that copying the old certificate forward fails the oversized-file control, then I’ll run the remaining targeted validation."
+        },
+        {
+          "id": "agent:530",
+          "role": "assistant",
+          "text": "The copied-certificate mutant fails the oversized-file test as intended. The restored implementation is rebuilding for its final focused run; formatting and drift checks are also underway."
+        },
+        {
+          "id": "agent:596",
+          "role": "assistant",
+          "text": "The final test binary is still linking. The pack drift script could not start its `git` subprocess in this sandbox (`EPERM`); I’ll include that exact limitation in the handback."
+        },
+        {
+          "id": "agent:704",
+          "role": "assistant",
+          "text": "The incremental listing certificate fix and its focused controls are complete. The remaining slice C controls and broader validation are still open; I sent the changed files, test results, and logs to the parent session."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Continue",
+    "assistant_text_tail": "The incremental listing certificate fix and its focused controls are complete. The remaining slice C controls and broader validation are still open; I sent the changed files, test results, and logs to the parent session.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "The brief said to finish part 1 first if everything can't be done and to say what remains. The agent did that. The remaining slice C items are its own continuation, with no decision or input requested.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": true,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

@@ -1,0 +1,234 @@
+{
+  "id": "L2503",
+  "title": "mjolnir via claude2 required_final",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "136a9a99c5c09138774d3486a88d35fb",
+    "session_title": "mjolnir via claude2",
+    "reply_position": 1148,
+    "captured_at": "2026-10-24T02:33:29.916Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "upgrade kimi code to the latest release and check the release notes to see\nif it breaks anything in mj"
+        },
+        {
+          "id": "agent:69",
+          "role": "assistant",
+          "text": "While the child reviews the source changes, I'll check the pin's other references and confirm that the 2.3.1 binaries download."
+        },
+        {
+          "id": "agent:89",
+          "role": "assistant",
+          "text": "Now I'll run the official installer the way mj does, into an empty scratch directory, to confirm 2.3.1 installs and starts."
+        },
+        {
+          "id": "agent:153",
+          "role": "assistant",
+          "text": "The ACP `initialize` reply is identical apart from the version string and paths: same capabilities, same auth method. Now the pin change itself:"
+        },
+        {
+          "id": "agent:176",
+          "role": "assistant",
+          "text": "Pin bumped in `mj-core/src/harness_runtime.rs`. I'll have a second child run the tests that cover the pin while the review continues."
+        },
+        {
+          "id": "agent:191",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- mj gets Kimi from Moonshot's official `install.sh` rather than from the agent-dev container image. That is why `AGENTS.md` (\"Grok and Kimi are not in the image\") needs no Containerfile change for a Kimi bump, unlike Codex, Claude or Muse.\n- The `install_id` (`kimi-2.3.1`) is the directory name under `~/.cache/mjolnir/harnesses/kimi/`. Changing it makes workers install 2.3.1 next to the existing 2.1.1 instead of replacing it, so a rollback is only a pin change.\n- `initialize` matching proves only the handshake. The higher-risk parts are the on-disk records mj reads directly, such as `kimi_tasks.rs` parsing `usage.record` and `turn.ended` events. Those are not covered by any protocol version number, so the source diff matters more than the handshake.\n`─────────────────────────────────────────────────`\n\nDone so far:\n- **Latest release:** Kimi Code 2.3.1 (2026-10-23). mj pinned 2.1.1.\n- **Installer:** confirmed working. `KIMI_VERSION=2.3.1` with mj's install variables installs `bin/kimi`, which reports `2.3.1`.\n- **ACP handshake:** confirmed unchanged. The 2.1.1 and 2.3.1 `initialize` replies differ only in the version string and paths.\n- **Pin change:** made in `mj-core/src/harness_runtime.rs`, not committed.\n\nTwo children are still running. One is comparing the 2.2.0, 2.3.0 and 2.3.1 release notes and the source diff with what mj reads (session files, credentials, quota, OAuth error text, and upstream issue #4109). The other is running the related tests. I'll wait for both reports."
+        },
+        {
+          "id": "agent:318",
+          "role": "assistant",
+          "text": "The test child failed during startup: the shell did not answer within 10 seconds, before the child received its task. I'll close it and start a replacement."
+        },
+        {
+          "id": "agent:341",
+          "role": "assistant",
+          "text": "I started a replacement test child (`kimi-pin-tests-2`). If it fails to start too, I'll run the tests myself. The compatibility review child is still running. Waiting for both reports."
+        },
+        {
+          "id": "agent:372",
+          "role": "assistant",
+          "text": "The main risk in the report is the new cross-process session lock. I'll check the details, because mj restarts sessions and moves them between hosts."
+        },
+        {
+          "id": "agent:450",
+          "role": "assistant",
+          "text": "mj does not pass `--hostname` to Podman, so a container likely gets Podman's default hostname, which is the container ID. I'll check a live mj container."
+        },
+        {
+          "id": "agent:495",
+          "role": "assistant",
+          "text": "I closed the first child too early: closing deleted the report directory that the new child was told to read. I'll send the new child the relevant section directly."
+        },
+        {
+          "id": "agent:509",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- Kimi's lock treats any hostname other than its own as a live owner, with no expiry (`alive()` at `sessionLockService.ts:210`). That choice is safe for a shared network home directory. It is risky for mj, because a Podman container's hostname defaults to its container ID, which changes each time the container is recreated.\n- Same-host recovery uses \"PID alive and started after boot.\" Inside a container's small PID namespace, a reused PID can make a dead owner look alive.\n- `KIMI_CODE_SESSION_LOCK=0` returns to 2.1.1 behavior. Whether to use it depends on whether mj can actually reach those states, which is what the new child is checking.\n`─────────────────────────────────────────────────`\n\nStatus:\n- **Compatibility review (done):** found nothing that breaks mj in 2.1.1 → 2.3.1, at the source level. These are confirmed unchanged: the ACP server code (except two new error mappings), the credential file format, the OAuth error text, the quota and usage endpoints, the session file layout, and the task and usage records that `kimi_tasks.rs` reads. Upstream #4109 is still open and not fixed, so mj's workaround stays.\n- **One open risk:** the new per-session lock in Kimi 2.3.1. A child is checking whether a stale lock can block an mj session after container recreation, a move to another host, or PID reuse.\n- **Tests:** the replacement test child is still running.\n\nWaiting for both reports."
+        },
+        {
+          "id": "agent:610",
+          "role": "assistant",
+          "text": "The child recommends turning the lock off for mj-launched Kimi. Before I act, I'll check the two claims the recommendation depends on: Kimi does not release the lock on SIGTERM, and where mj sets Kimi's environment."
+        },
+        {
+          "id": "agent:681",
+          "role": "assistant",
+          "text": "I'll add the Kimi setting next to the MiMo one, plus a matching assertion in the existing test."
+        },
+        {
+          "id": "agent:704",
+          "role": "assistant",
+          "text": "The test child is still running. I'll ask it to also run the test that covers the new setting, since its earlier runs began before this edit."
+        },
+        {
+          "id": "agent:733",
+          "role": "assistant",
+          "text": "Formatting passes. The crates are named `brokk-mj-*`, so the commands I gave the test child (`-p mj-core`) will fail as written. It should find the right names on its own; I'll check its report.\n\n`★ Insight ─────────────────────────────────────`\n- Putting the switch in `configure_home_environment` (rather than only in the session launch at `launch.rs:913`) means model-discovery probes (`worker_runtime/discovery.rs:19`) also start Kimi without the lock. They run `kimi acp` against a staged home too, so they get the same treatment from one code path.\n- mj's checkpoint import already leaves `locks/` out, because it copies only `state.json` and wire files (`native_scan.rs:633-652`). Moves to another host were therefore never at risk. The risk was the case where the home stays in place: container replacement keeps `/var/lib/hel` (`container_upgrade.rs:332-363`) but gets a new hostname.\n`─────────────────────────────────────────────────`\n\nWaiting for the test report."
+        },
+        {
+          "id": "user:817",
+          "role": "user",
+          "text": "let's optimistically publish the new image while waiting"
+        },
+        {
+          "id": "agent:820",
+          "role": "assistant",
+          "text": "Kimi is not in the agent-dev image, so first I'll check what the publish workflow builds and what triggers it."
+        },
+        {
+          "id": "user:857",
+          "role": "user",
+          "text": "oh. how do we run kimi sessions then?"
+        },
+        {
+          "id": "agent:862",
+          "role": "assistant",
+          "text": "You asked how Kimi sessions run if Kimi isn't in the image. I'll hold the push until that's answered, because the answer decides whether publishing the image matters for Kimi at all."
+        },
+        {
+          "id": "user:883",
+          "role": "user",
+          "text": "we don't need to republish an unchanged image"
+        },
+        {
+          "id": "agent:915",
+          "role": "assistant",
+          "text": "Not pushing; you said an image republish isn't needed. To answer your question, I'm checking how the worker chooses between the managed Kimi install and the fallback launcher."
+        },
+        {
+          "id": "agent:940",
+          "role": "assistant",
+          "text": "Short answer: Kimi installs itself at session start, and how depends on the kind of target. The agent-dev image plays no part, so I agree there is no reason to republish it for this change. I haven't pushed anything.\n\n**Bare targets (local, SSH, EC2):** confirmed. These use the `Managed` runtime policy (`mj-controller/src/controller/worker_binary/launch.rs:1063-1069`). The worker runs Kimi's official installer with `KIMI_VERSION` set to the pin (`mj-core/src/harness_install.rs:689-710`) and puts the result in `~/.cache/mjolnir/harnesses/kimi/kimi-<version>/`. This host has `kimi-2.1.1` there now. After the bump, the first Kimi session installs `kimi-2.3.1` next to it.\n\n**Container targets (Podman, Docker):** confirmed. These use the `Ambient` policy, which runs the shell launcher at `mj-controller/src/controller/worker_binary/harness.rs:79` inside the container. It uses `kimi` if it's on `PATH`, then `$HOME/.kimi-code/bin/kimi` if that exists. Otherwise it downloads Kimi with `curl` and the installer, using the pinned version. The host's controller builds this script, so the pinned version comes from the host's mj build, not from the image.\n\nThere's a side effect, likely but not tested. Once a container has installed Kimi, the launcher reuses `$HOME/.kimi-code/bin/kimi` without checking its version. A container that installed 2.1.1 will therefore keep running 2.1.1 after this bump, until the container is replaced. The `KIMI_CODE_SESSION_LOCK=0` setting doesn't depend on the version, so it's harmless in an old container too.\n\n`★ Insight ─────────────────────────────────────`\n- An image rebuild could only matter here through the worker baked into the image. The Kimi version and the new environment variable both come from the host controller at launch (`launch.rs:817` and `:913`), so the image has no effect on which Kimi runs.\n- mj will still rebuild the image when this change reaches master, because the workflow runs on any change under `mj-core/**`. That rebuild happens on its own and needs no separate publish.\n`─────────────────────────────────────────────────`\n\nWhere things stand:\n- **Not committed:** the pin bump to 2.3.1 and `KIMI_CODE_SESSION_LOCK=0` in `HarnessKind::configure_home_environment`, with a test assertion. master has 2 newer, unrelated commits on origin.\n- **Still running:** the test child.\n\nOnce tests pass, do you want me to commit and push?"
+        },
+        {
+          "id": "agent:1148",
+          "role": "assistant",
+          "text": "All related tests pass, and the upgrade is ready but not committed.\n\n**Test results:** 0 failures in all filtered runs.\n- `brokk-mj-core` `harness` tests: 32 passed. They passed both before and after the lock change.\n- `config::` tests: 93 passed, including `every_harness_is_pointed_at_its_staged_home` with the new assertion.\n- Controller `worker_binary` tests: 93 passed.\n- Worker `kimi` tests: 31 passed.\n- `credentials` tests: 27 passed.\n- Checkpoint `kimi` test: 1 passed.\n\nFormatting also passes.\n\n**Does 2.3.1 break anything in mj?**\n- **One real problem, now fixed:** confirmed in the source, not seen in a live session. 2.3.1 adds a lock on each session, held while a turn runs. If Kimi is killed mid-turn, the lock file stays behind, and mj stops Kimi with SIGTERM then SIGKILL, which never releases it. A later Kimi process treats the leftover lock as still held in two cases:\n  - **Container replaced:** the container is replaced with its storage kept. The new container has a new hostname, and Kimi treats a lock from another hostname as held forever.\n  - **PID reused:** the old process ID now belongs to a running process, which can happen in a container's small range of process IDs.\n\n  Either way, every later prompt fails with error -32600. The fix sets `KIMI_CODE_SESSION_LOCK=0`, Kimi's documented switch for turning the lock off, in `mj-core/src/config/harness.rs`. Each mj session has its own Kimi home directory, so there is no second process for the lock to protect against.\n- **Unchanged (confirmed in source):** the ACP server apart from two new error mappings, the login and credential format, the OAuth error text mj matches, quota and usage endpoints, the session file layout, and the task and usage records that `kimi_tasks.rs` reads.\n- **Smaller behavior changes:** none needs a change in mj.\n  - Kimi's model list now uses a new format. mj receives it through ACP, so it isn't affected.\n  - Background-task waits stop after 90 seconds.\n  - Plugin skill names now include the plugin name.\n  - Sessions get automatic titles.\n- **Upstream #4109 is still open and not fixed:** turns that Kimi starts on its own still send no ACP updates, so mj's workaround stays.\n\n**Not tested:** I didn't run a live Kimi session through mj. Doing that would mean using a real Kimi login, which risks the token refresh signing out your stored login. The upgrade checks rest on the source diff, the installer run, and the `initialize` handshake comparison.\n\n**Changes waiting to commit:** the pin bump in `mj-core/src/harness_runtime.rs`, the lock setting in `mj-core/src/config/harness.rs`, and its test in `mj-core/src/config/tests.rs`. Origin/master has 2 newer, unrelated commits, so I would rebase before pushing. Pushing will start the usual automatic image rebuild.\n\nSeparately, your own Kimi install at `~/.kimi-code/bin/kimi` is still 2.0.2. mj doesn't use it on bare targets, and I left it alone. Do you want me to commit and push, upgrade that install, or both?"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "we don't need to republish an unchanged image",
+    "assistant_text_tail": "placed with its storage kept. The new container has a new hostname, and Kimi treats a lock from another hostname as held forever.\n  - **PID reused:** the old process ID now belongs to a running process, which can happen in a container's small range of process IDs.\n\n  Either way, every later prompt fails with error -32600. The fix sets `KIMI_CODE_SESSION_LOCK=0`, Kimi's documented switch for turning the lock off, in `mj-core/src/config/harness.rs`. Each mj session has its own Kimi home directory, so there is no second process for the lock to protect against.\n- **Unchanged (confirmed in source):** the ACP server apart from two new error mappings, the login and credential format, the OAuth error text mj matches, quota and usage endpoints, the session file layout, and the task and usage records that `kimi_tasks.rs` reads.\n- **Smaller behavior changes:** none needs a change in mj.\n  - Kimi's model list now uses a new format. mj receives it through ACP, so it isn't affected.\n  - Background-task waits stop after 90 seconds.\n  - Plugin skill names now include the plugin name.\n  - Sessions get automatic titles.\n- **Upstream #4109 is still open and not fixed:** turns that Kimi starts on its own still send no ACP updates, so mj's workaround stays.\n\n**Not tested:** I didn't run a live Kimi session through mj. Doing that would mean using a real Kimi login, which risks the token refresh signing out your stored login. The upgrade checks rest on the source diff, the installer run, and the `initialize` handshake comparison.\n\n**Changes waiting to commit:** the pin bump in `mj-core/src/harness_runtime.rs`, the lock setting in `mj-core/src/config/harness.rs`, and its test in `mj-core/src/config/tests.rs`. Origin/master has 2 newer, unrelated commits, so I would rebase before pushing. Pushing will start the usual automatic image rebuild.\n\nSeparately, your own Kimi install at `~/.kimi-code/bin/kimi` is still 2.0.2. mj doesn't use it on bare targets, and I left it alone. Do you want me to commit and push, upgrade that install, or both?",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Still open / needs you turn-ending label",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_positions": [
+      940,
+      1148
+    ],
+    "user_position": 883,
+    "input_rationale": "The Kimi 2.3.1 pin bump and lock fix are validated but uncommitted; the agent asks permission to commit and push and to upgrade the user's own install. The user had only said not to republish the image.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "approval_gate",
+    "request_message_ids": [
+      "agent:940",
+      "agent:1148"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-24T02:34:12.745Z",
+        "kind": "user",
+        "text": "both"
+      },
+      {
+        "at": "2026-10-24T02:34:33.958Z",
+        "kind": "agent",
+        "text": "Pushed as `c14eae2b5`. Now I'll upgrade your own install, leaving your shell startup files alone since `kimi` is already on your `PATH`."
+      },
+      {
+        "at": "2026-10-24T02:35:17.784Z",
+        "kind": "agent",
+        "text": "Both are done. The push also started the automatic image build, and `AGENTS.md` says to check that this run succeeds, so I'll find it."
+      },
+      {
+        "at": "2026-10-24T02:35:33.441Z",
+        "kind": "agent",
+        "text": "The image build and CI are both running for `c14eae2b5`. I'll watch them in the background."
+      },
+      {
+        "at": "2026-10-24T02:35:44.093Z",
+        "kind": "agent",
+        "text": "Both are done.  - **Pushed:** `c14eae2b5` \"Pin Kimi Code 2.3.1 and turn off its session lock\", rebased onto the 2 newer commits on master. It changes three files: the pin in `mj-core/src/harness_runti"
+      },
+      {
+        "at": "2026-10-24T02:43:00.000Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      }
+    ]
+  }
+}

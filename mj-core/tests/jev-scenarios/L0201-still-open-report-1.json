@@ -1,0 +1,477 @@
+{
+  "id": "L0201",
+  "title": "Still open report 1",
+  "category": "still-open-none",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "bb8c55c80004ba6787f58b0087265a22",
+    "session_title": "eval16 3452 dsm",
+    "reply_position": 812159,
+    "captured_at": "2026-09-18T21:10:40.651Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:24",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3452: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 844ca7606768b8dd504d3cd23af038a612e1f35a\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitati\n[... 2656 bytes omitted from the middle of this message ...]\nte must bind the exact API identity through the language's own resolver, and an unbound callee reports an unmet obligation, never a clean verdict.\n\nReference rows: JavaScript and TypeScript landed in 3f4c2eabf (`tests/fixtures/network-effect-boundary/{javascript,typescript}/`, `semantic-packs/web-network/{javascript,typescript}/`, `crates/bifrost-policy/policy-packs/bifrost.effects/policies/{javascript,typescript}/selected-boundary-no-network-io.rqlp`, `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs`). Copy their structure.\n\nDeliver, for this language:\n\n1. Fixture set under `tests/fixtures/network-effect-boundary/<language>/`: a finding tree (selected root -> helper chain across files -> concrete network API), a corrected tree (the caller owns the effect, the root is clean), a same-name near miss (a local or unrelated function with the API's name that must not become a proven effect by spelling), a recursion case (the helper reaches the effect exactly once and terminates), and an unresolved-helper case (coverage stays open, no clean verdict).\n2. Reviewed model under `semantic-packs/web-network/<language>/` (or the language's existing reviewed pack tree) declaring `bifrost.network_io` on the exact API identity at the arity the fixture writes.\n3. Policy specialization in `crates/bifrost-policy/policy-packs/bifrost.effects/` with the stable id `bifrost.effects.<language>.selected-boundary-no-network-io`, a documented declaration-selection block, and the manifest row.\n4. Acceptance: tests in `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs` covering all five fixtures, a CLI run through `--policy-file` (exit 1 finding, 0 corrected, 2 unresolved), and one MCP `run_policy` run.\n5. Update this language's row in the matrix doc with the evidence.\n\nIf the language cannot bind the exact API identity or cannot key its workspace callees (compare #3451 for Python), stop, file the focused capability-gap issue, link it on the row, and leave this ticket open. Do not fill the gap with text matching.\n\n"
+        },
+        {
+          "id": "agent:230760",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:247026",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:248109",
+          "role": "assistant",
+          "text": "Let me now experimentally probe the Kotlin binding routes with the current binary."
+        },
+        {
+          "id": "agent:266568",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:280200",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:295464",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:308175",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:308198",
+          "role": "assistant",
+          "text": "I'll start by checking the current state and the probe log from the previous session."
+        },
+        {
+          "id": "agent:308308",
+          "role": "assistant",
+          "text": "The receiver route probe passed and bound the effect. Let me look at the full probe output and other routes."
+        },
+        {
+          "id": "agent:308730",
+          "role": "assistant",
+          "text": "While that runs, let me read the matrix doc and existing acceptance tests."
+        },
+        {
+          "id": "agent:315030",
+          "role": "assistant",
+          "text": "Let me rewrite the probe to test declaration matching routes for Kotlin."
+        },
+        {
+          "id": "agent:323225",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:332288",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:351786",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:373807",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:386859",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:410313",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:430402",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:446144",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:465232",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:489242",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:504288",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:521543",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:521571",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state and reading the routed guidance."
+        },
+        {
+          "id": "agent:521724",
+          "role": "assistant",
+          "text": "Checkout is at the required base with the handoff's draft artifacts present. Let me read the routed guidance and the shared recipe."
+        },
+        {
+          "id": "agent:522558",
+          "role": "assistant",
+          "text": "Now let me examine the core semantic-model runtime code paths."
+        },
+        {
+          "id": "agent:530703",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:530704",
+          "role": "assistant",
+          "text": "I'll start by orienting myself in the repository and verifying the base state."
+        },
+        {
+          "id": "agent:530802",
+          "role": "assistant",
+          "text": "Base commit verified at `844ca7606768b8dd504d3cd23af038a612e1f35a`. Let me load the routed guidance and the current probe state."
+        },
+        {
+          "id": "agent:550061",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:550062",
+          "role": "assistant",
+          "text": "I'll start by getting oriented: verify the checkout state, the base commit, and read the key repository guidance."
+        },
+        {
+          "id": "agent:550138",
+          "role": "assistant",
+          "text": "Base commit confirmed: `844ca7606768b8dd504d3cd23af038a612e1f35a`. Let me read the routed guidance and existing reference implementations."
+        },
+        {
+          "id": "agent:551717",
+          "role": "assistant",
+          "text": "Let me read the Kotlin/JVM resolver paths in detail."
+        },
+        {
+          "id": "agent:572488",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:597337",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:597380",
+          "role": "assistant",
+          "text": "I'll start by verifying the current state of the checkout and the probe artifacts from the prior session."
+        },
+        {
+          "id": "agent:598921",
+          "role": "assistant",
+          "text": "Now let me examine the Kotlin resolver layer that needs to bind the shared JDK identity. First, the key functions:"
+        },
+        {
+          "id": "agent:611630",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:611762",
+          "role": "assistant",
+          "text": "I'll continue from the handoff. First, verify state and read the Scala probe evidence."
+        },
+        {
+          "id": "agent:612000",
+          "role": "assistant",
+          "text": "Scala shows the same `dispatch_unresolved` as Kotlin. Let me examine the Kotlin resolver and the Java receiver route that works."
+        },
+        {
+          "id": "agent:626070",
+          "role": "assistant",
+          "text": "Let me look at how the semantic model index is built and whether index entry counts are asserted in tests."
+        },
+        {
+          "id": "agent:631835",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:653974",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:665511",
+          "role": "assistant",
+          "text": "Now let me implement the core Kotlin resolver fix."
+        },
+        {
+          "id": "agent:665736",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:672864",
+          "role": "assistant",
+          "text": "Now the resolver functions and the unmaterialized binding gate:"
+        },
+        {
+          "id": "agent:685963",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:696940",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:714623",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:714624",
+          "role": "assistant",
+          "text": "I'll start by checking the background job state and the current working tree."
+        },
+        {
+          "id": "agent:714833",
+          "role": "assistant",
+          "text": "Cargo check is green. Let me survey the reference implementation and the current work in progress."
+        },
+        {
+          "id": "agent:720425",
+          "role": "assistant",
+          "text": "Let me capture the full probe outputs for Java, Kotlin, and Scala to see exactly which routes bind."
+        },
+        {
+          "id": "agent:729090",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:746722",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:746774",
+          "role": "assistant",
+          "text": "I'll start by verifying the current state of the working tree and the handoff's claims."
+        },
+        {
+          "id": "agent:746847",
+          "role": "assistant",
+          "text": "State matches the handoff. Let me review the existing modifications and the reference rows."
+        },
+        {
+          "id": "agent:747017",
+          "role": "assistant",
+          "text": "Let me read the matrix doc, the reference test suites, and routed guidance."
+        },
+        {
+          "id": "agent:751658",
+          "role": "assistant",
+          "text": "Now let me check the language epoch conventions, since the Kotlin resolution changed."
+        },
+        {
+          "id": "agent:756708",
+          "role": "assistant",
+          "text": "Now I'll create the near-miss fixture, fixture policy, and shipped policy."
+        },
+        {
+          "id": "agent:757229",
+          "role": "assistant",
+          "text": "Now let me wire the Java policy into the built-in catalog with placeholder hashes, then compute the real ones."
+        },
+        {
+          "id": "agent:760492",
+          "role": "assistant",
+          "text": "While that compiles, let me review the rest of the 3387 suite tail."
+        },
+        {
+          "id": "agent:762846",
+          "role": "assistant",
+          "text": "Now let me write the Java acceptance tests in the 3387 suite."
+        },
+        {
+          "id": "agent:763565",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:773573",
+          "role": "assistant",
+          "text": "Now let me add the Java tests to the suite file."
+        },
+        {
+          "id": "agent:782304",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:782305",
+          "role": "assistant",
+          "text": "I'll continue from the handoff. Let me first check the repository state and verify the current situation."
+        },
+        {
+          "id": "agent:797744",
+          "role": "assistant",
+          "text": "Now let me produce a rigorous before/after demonstration: I'll temporarily stash the production changes (keeping the tests, fixtures, and model) and show the Kotlin binding test fails at the base production behavior."
+        },
+        {
+          "id": "agent:803156",
+          "role": "assistant",
+          "text": "All validation is complete. Now let me stage and commit the work."
+        },
+        {
+          "id": "agent:803178",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:804416",
+          "role": "assistant",
+          "text": "Staged content is a superset of the handoff diff (the two new files were previously untracked, so `/tmp/full_work.diff` omitted them). No tracked content is missing. Let me re-verify the focused suites myself on this exact tree before committing."
+        },
+        {
+          "id": "agent:805065",
+          "role": "assistant",
+          "text": "The backgrounded process didn't survive the shell exit. Let me run it in a persistent session instead."
+        },
+        {
+          "id": "agent:805498",
+          "role": "assistant",
+          "text": "21/21 focused policy tests pass on the staged tree. Now the MCP suite, and check the handoff's recorded evidence logs still exist."
+        },
+        {
+          "id": "agent:806029",
+          "role": "assistant",
+          "text": "Focused suites pass on the staged tree. The base-failure log corroborates the before-state. Let me re-run the analysis lib suite (required check) while I review the remaining diffs."
+        },
+        {
+          "id": "agent:806609",
+          "role": "assistant",
+          "text": "Analysis lib confirmed: 3052 passed, 123 skipped. Now the policy/flow lib suite."
+        },
+        {
+          "id": "agent:806967",
+          "role": "assistant",
+          "text": "Policy/flow lib confirmed. Now clippy on the changed crates, plus verification of the pre-existing workspace-wide clippy failure at base."
+        },
+        {
+          "id": "agent:807493",
+          "role": "assistant",
+          "text": "Clippy clean on the changed crates. Now the language usage suites relevant to the Kotlin resolver change."
+        },
+        {
+          "id": "agent:808110",
+          "role": "assistant",
+          "text": "All re-verification green. Final format check and status before commit."
+        },
+        {
+          "id": "agent:810677",
+          "role": "assistant",
+          "text": "Let me re-run the remaining relevant suites (issues and semantic) so the full validation list is directly verified."
+        },
+        {
+          "id": "agent:812159",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\n1. Confirmed cause with structured evidence\n\nThe Java row had only the reference fixture `tests/fixtures/policy-substrate-p0/` (`acme-pure-has-no-network-io`, model `acme-http-client.json`): its policy selects its root by the written `@Pure` annotation name, which #3387 replaces, and its model is a fixture-only fake client that declares no JDK identity. Nothing in the tree let a Java call site bind a reviewed JDK network API, and no shipped specialization existed. Two structured resolver gaps also blocked the shared JVM model from being observed at call sites: a receiver-typed external Kotlin member access published no resolved reference text, so call dispatch could name the declaration a trace lands on but had no external callee identity to expand into a bindable summary (`derivation: \"incomplete\"`, `reason: \"dispatch_unresolved\"`, `witness_available: false`, 0 declared rows at base in `/tmp/base_kotlin_failure.log`), and a locally bound receiver (`val url: URL`, `fun send(url: URL)`) had no spelling path to its written type. Both were reproduced at base 844ca76 by reverting only the six production `.rs` files.\n\n2. Changes and reasons\n\nBase commit: `844ca7606768b8dd504d3cd23af038a612e1f35a`. Final commit: `f03cf4480f8b99a9fc179713c2e3c5da7e4da3c0` (detached HEAD, child of base, 32 files changed).\n\n- New one reviewed JDK model `semantic-packs/web-network/jvm/bifrost.web-network-jvm.json` (pack `bifrost.web-network-jvm`, manifest language `java`, ecosystem `jdk`) declaring `bifrost.network_io` on `java.net.URL.openConnection` at written arity 0. Placed under `jvm/` because Java, Kotlin and Scala compile to one classpath; Kotlin (#3453) and Scala (#3454) must activate this model, not ship their own. `URL.openConnection` at arity 0 was chosen over `java.net.http.HttpClient.send` because `new URL(address).openConnection()` is the receiver-typed external member shape the resolver already binds exactly, while `client.send(request, handler)` would additionally require the `HttpRequest` construction route and body-handler argument shape.\n- Shared family predicate `jvm_pack_languages_share_family` in `crates/bifrost-analysis/src/analyzer/jvm/external.rs`, used by the declaration surface, the semantic-model runtime lookups (`semantic_model/runtime.rs`), and the summary-binding filters in `brokk-bifrost-flow` and `brokk-bifrost-policy`. Equal labels agree; two different labels agree only when both are JVM labels, so a JVM pack can never answer a Python/npm target and vice versa, and the surfaces cannot drift.\n- Kotlin resolver (`get_definition/kotlin.rs`): a receiver-typed external member access publishes its canonical identity (`<owner FQN>.<member>`) as resolved reference text, and the receiver spelling ladder substitutes a locally bound `val`/`var`/`param` written type for a receiver that is exactly that name. Navigation-chain heads still fail closed. Both are query-time outcomes over unchanged persisted facts, so no Kotlin extraction epoch bump.\n- Shipped policy `bifrost.effects.java.selected-boundary-no-network-io` with a documented declaration-selection block whose ship-time selection is empty (an unconfigured repository has no purity obligation; purity is never inferred from an annotation, name, file name, or class-name pattern), plus catalog manifest and `builtin.rs` updates; manifest hashes `authored_hash = resolved_semantic_hash = 36559415dc014e7af9c4f04183970f995dc5ea1461939b910240bc88c3a67bcc`.\n- Fixtures `tests/fixtures/network-effect-boundary/java/{finding,corrected,recursion,unresolved,near-miss/workspace-same-name}` and `tests/fixtures/network-effect-boundary/policies/java.rqlp`; acceptance in `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs` (all five fixtures plus a Kotlin binding demonstration) and `tests/suite_mcp_cli/issue_3387_network_effect_boundary_mcp.rs`; matrix doc row updated in `.agents/docs/issue-3387-network-effect-boundary-matrix.md`.\n\n3. Exact validation commands and results\n\nAll runs with `JAVA_HOME` unset, `BIFROST_PARALLELISM=1`, `RAYON_NUM_THREADS=1`, nextest-owned c\n[... 3810 bytes omitted from the middle of this message ...]\njvm/bifrost.web-network-jvm.json` and declares `bifrost.network_io` on `java.net.URL.openConnection` at written arity 0, because the fixture's `new URL(address).openConnection()` is the receiver-typed external member shape the resolver already binds exactly; modeling `HttpClient.send` would additionally need the `HttpRequest` construction route and the body-handler argument shape. Java, Kotlin and Scala compile to one classpath, so the model sits under `jvm/` and all three labels read it; Kotlin #3453 and Scala #3454 activate this model rather than shipping JDK models of their own. A shared `jvm_pack_languages_share_family` predicate now decides pack-to-target language agreement on the declaration surface, the summary lookups in the semantic-model runtime, and the summary-binding filters in flow and policy, so a JVM pack can never answer a Python or npm target and the reverse never happens either. To demonstrate the shared identity from Kotlin, receiver-typed external member accesses now publish their canonical identity as resolved reference text, and the receiver spelling ladder substitutes a local binding's written type so `url.openConnection()` places on `java.net.URL`; both are query-time outcomes over unchanged persisted facts, so no extraction epoch bump was needed. The shipped Java specialization has an empty ship-time declaration selection, so an unconfigured repository carries no purity obligation and purity is never inferred from an annotation or a name. Fixtures cover the finding tree, the caller-owned correction, a same-name workspace near miss, recursion that terminates with one finding, and an unresolved helper that keeps coverage open, with CLI exits 1/0/2 plus an MCP `run_policy` run. The near-miss tree also holds an uncalled helper that really reaches the JDK identity, so the clean verdict is earned rather than caused by an empty reachable tree. The matrix doc records the Java row as delivered and points the Kotlin and Scala rows at the shared model, leaving their own fixtures to #3453 and #3454."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "lper case (coverage stays open, no clean verdict).\n2. Reviewed model under `semantic-packs/web-network/<language>/` (or the language's existing reviewed pack tree) declaring `bifrost.network_io` on the exact API identity at the arity the fixture writes.\n3. Policy specialization in `crates/bifrost-policy/policy-packs/bifrost.effects/` with the stable id `bifrost.effects.<language>.selected-boundary-no-network-io`, a documented declaration-selection block, and the manifest row.\n4. Acceptance: tests in `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs` covering all five fixtures, a CLI run through `--policy-file` (exit 1 finding, 0 corrected, 2 unresolved), and one MCP `run_policy` run.\n5. Update this language's row in the matrix doc with the evidence.\n\nIf the language cannot bind the exact API identity or cannot key its workspace callees (compare #3451 for Python), stop, file the focused capability-gap issue, link it on the row, and leave this ticket open. Do not fill the gap with text matching.\n\n",
+    "assistant_text_tail": "jvm/bifrost.web-network-jvm.json` and declares `bifrost.network_io` on `java.net.URL.openConnection` at written arity 0, because the fixture's `new URL(address).openConnection()` is the receiver-typed external member shape the resolver already binds exactly; modeling `HttpClient.send` would additionally need the `HttpRequest` construction route and the body-handler argument shape. Java, Kotlin and Scala compile to one classpath, so the model sits under `jvm/` and all three labels read it; Kotlin #3453 and Scala #3454 activate this model rather than shipping JDK models of their own. A shared `jvm_pack_languages_share_family` predicate now decides pack-to-target language agreement on the declaration surface, the summary lookups in the semantic-model runtime, and the summary-binding filters in flow and policy, so a JVM pack can never answer a Python or npm target and the reverse never happens either. To demonstrate the shared identity from Kotlin, receiver-typed external member accesses now publish their canonical identity as resolved reference text, and the receiver spelling ladder substitutes a local binding's written type so `url.openConnection()` places on `java.net.URL`; both are query-time outcomes over unchanged persisted facts, so no extraction epoch bump was needed. The shipped Java specialization has an empty ship-time declaration selection, so an unconfigured repository carries no purity obligation and purity is never inferred from an annotation or a name. Fixtures cover the finding tree, the caller-owned correction, a same-name workspace near miss, recursion that terminates with one finding, and an unresolved helper that keeps coverage open, with CLI exits 1/0/2 plus an MCP `run_policy` run. The near-miss tree also holds an uncalled helper that really reaches the JDK identity, so the clean verdict is earned rather than caused by an empty reachable tree. The matrix doc records the Java row as delivered and points the Kotlin and Scala rows at the shared model, leaving their own fixtures to #3453 and #3454.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 24,
+    "input_rationale": "FINAL REPORT with the Java row delivered. The Kotlin and Scala rows are separate issues, and the workspace-wide clippy failure is a pre-existing note, not a request.",
+    "label": "none",
+    "trigger": "still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-18T21:11:47.412Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

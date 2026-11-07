@@ -1,0 +1,158 @@
+{
+  "id": "L2210",
+  "title": "L2210",
+  "category": "still-open-none",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "7f7aec4a9e2a7b81cf3ebcca7efc58f1",
+    "session_title": "eval38 3787 dsf800",
+    "reply_position": 162192,
+    "captured_at": "2026-10-10T16:35:33.686Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3787: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 0722dea6bcb52ef5335695a701631d157c31cbf4\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls (a cargo command that starts no compiler for\nmore than ten minutes), you may run that command through plain cargo\n(/usr/local/cargo/bin/cargo) and say so in your report; do not move target/\nor change shared cache settings.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the reposi\n[... 2929 bytes omitted from the middle of this message ...]\n the #2904 benchmark case `pond-stopped-flag` (pond commit c0b34be) still reports its real race as open with `unresolved_target`. The race row names these unresolved calls (the `unresolved_calls` field on concurrency rows):\n\n| pond.go line | Call | Reason |\n|---|---|---|\n| 111 | `Eager()`, a function in another file of the same package | dynamic_or_incomplete_dispatch |\n| 117 | `opt(pool)`, a function value from a variadic slice | dynamic_or_incomplete_dispatch |\n| 136 | `Context(context.Background())(pool)`, a returned function value | dynamic_or_incomplete_dispatch |\n| 380 | `idleTicker.Stop()`, receiver typed by `time.NewTicker`'s result | dynamic_or_incomplete_dispatch |\n| 461 | `p.strategy.Resize(...)`, an interface method | dynamic_or_incomplete_dispatch |\n\nAcross pond, ants, cache2go and workerpool, `dynamic_or_incomplete_dispatch` accounts for 1,989 named unresolved-call occurrences, against about 900 for all unmodeled library calls together. It is the largest single reason the race analysis cannot prove a race.\n\nLine 380 is the case bc9ec425e addresses in the resolver, and it is still unresolved in race analysis. That suggests the new resolution does not yet reach semantic lowering.\n\n## Where race analysis reads targets\n\n- Go semantic lowering sets a call's declared targets in `lower_call_operands` (crates/bifrost-analysis/src/analyzer/go/semantic.rs). A same-file method selector is resolved there; other shapes fall through to Unknown with a dispatch gap.\n- An incomplete workspace dispatch becomes `UnresolvedTarget` in the race provider (crates/bifrost-rql/src/structural/search/concurrency.rs).\n\n## Request\n\nInclude Go semantic lowering's call targets (and the workspace dispatch the concurrency provider uses) in the native Go cutover, or record why they stay on the incumbent path. The pond lines above are ready-made acceptance cases: run `bifrost_benchmark go-race run --case pond-stopped-flag` and check that the 216/355 row's `unresolved_calls` shrinks.\n\nRelated: #2900 (Go race epic), #2904 (benchmark).\n\n"
+        },
+        {
+          "id": "agent:59",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state and reading the repository guidance."
+        },
+        {
+          "id": "agent:246",
+          "role": "assistant",
+          "text": "Clean checkout at the exact base commit. Now let me read the routed guidance files."
+        },
+        {
+          "id": "agent:428",
+          "role": "assistant",
+          "text": "Now let me look at the key source files from the issue."
+        },
+        {
+          "id": "agent:5133",
+          "role": "assistant",
+          "text": "Let me start fetching the evidence repository in the background while I continue investigating."
+        },
+        {
+          "id": "agent:10159",
+          "role": "assistant",
+          "text": "The background build died with the shell. Let me start it as a persistent session."
+        },
+        {
+          "id": "agent:78078",
+          "role": "assistant",
+          "text": "I have enough understanding to implement. Let me start with the declaration facts for `time.Ticker` (line 380 cause), then handle the package-level function-value case (line 111)."
+        },
+        {
+          "id": "agent:97346",
+          "role": "assistant",
+          "text": "Now let me write the Go helper module for package-level function-value targets."
+        },
+        {
+          "id": "agent:98592",
+          "role": "assistant",
+          "text": "Now let me implement the dispatch refinement hook."
+        },
+        {
+          "id": "agent:113820",
+          "role": "assistant",
+          "text": "Now let me extend the semantic lowering to resolve same-file package-level function-valued variables. First, examine the prepass structures."
+        },
+        {
+          "id": "agent:118168",
+          "role": "assistant",
+          "text": "Let me rework the Go helper to expose a shared written-names walk and chargeable budget, then wire the lowering."
+        },
+        {
+          "id": "agent:120090",
+          "role": "assistant",
+          "text": "Now let me implement the lowering extension."
+        },
+        {
+          "id": "agent:134787",
+          "role": "assistant",
+          "text": "All four tests pass. Now let me remove the debug scaffolding."
+        },
+        {
+          "id": "agent:144591",
+          "role": "assistant",
+          "text": "Let me make the stability proof cover cross-package writes to exported variables, following the JS/TS workspace-scan precedent."
+        },
+        {
+          "id": "agent:158024",
+          "role": "assistant",
+          "text": "Let me check whether those failures are pre-existing by temporarily reverting to base."
+        },
+        {
+          "id": "agent:160335",
+          "role": "assistant",
+          "text": "All validation is complete. Let me commit the work."
+        },
+        {
+          "id": "agent:162192",
+          "role": "assistant",
+          "text": "All work is committed and validated. Final report:\n\nFINAL REPORT\n\n## 1. Confirmed cause with structured evidence\n\nTwo distinct misses kept `dynamic_or_incomplete_dispatch` on the pond 216/355 row at base `0722dea6bc`:\n\n- **`Eager()` (pond.go:111, declared `var Eager = func() ResizingStrategy {...}` in resizer.go).** `lower_call_operands` resolves callees only from file-local prepasses (`package_functions` is same-file; `indirect_callable_targets` is file-local bindings), so a cross-file package-level function value stays `Unknown`. The workspace dispatch then resolves the callee through `resolve_go` to the *variable field*; a non-callable definition produces a `DispatchBoundaryKind::Unmaterialized` arm, and `WorkspaceConcurrencyProvider::exact_model_summary` records `dynamic_or_incomplete_dispatch`. Evidence: `get_definitions_by_location` at pond.go:111:18 returns `status: resolved`, `kind: field`, `path: resizer.go` — the value declaration, never the literal.\n- **`idleTicker.Stop()` (pond.go:380, receiver from `time.NewTicker(p.idleTimeout)`).** The resident resolver types a receiver from a call result through `callable_result_nominal_type`, which needs the callee's declared return type in the activated declaration overlay. The reviewed `go-concurrency-declarations` pack carried `time.NewTicker`/`time.Ticker.Stop` *summaries* but no `time.Ticker` type or `NewTicker`/`Stop`/`Reset` declarations, so the receiver stayed untyped. Evidence: baseline `get_definitions_by_location` at pond.go:380:21 returned `status: no_definition` (\"`Stop` is shadowed by a local Go binding\").\n\nBaseline acceptance row (pond c0b34be4, `benchmark/go-data-races`, buggy revision, row read@216:9/ write@355:3): `unresolved_calls` = 7 entries — 111, 117, 136 (`Context(context.Background())(pool)`), 136 (`context.Background`, unmodeled_external), 380, 388 (`context.Done`, unmodeled_external), 461 (`p.strategy.Resize`).\n\n## 2. Changes and reasons\n\nBase `0722dea6bcb52ef5335695a701631d157c31cbf4` → final `fbe801eb43a4a139a8491d8bb03d771ad8610cd3` (12 files, +1273/−12):\n\n- **`analyzer/go/call_values.rs` (new).** Structured resolution for direct calls through a package-level `var X = ...`: the single-name `var_spec` must write exactly one func literal, and the name must have no other written value or address observation. Stability scans every file of the declaring package, and — for an exported variable — every workspace Go file that imports the package (qualified and dot-imported writes), following the JS/TS `module_member_is_mutation_free` precedent. Returns the literal's exact span, plus the source bytes/nodes the scan paid so the caller can charge them.\n- **`semantic.rs` lowering.** `go_package_value_callable_literals` publishes file-local stable package function values into the existing `indirect_callable_targets` route, so a direct `X()` call's `declared_targets` become `Proven(Local(literal procedure))`; `ADAPTER_VERSION` rotates `go-value-semantics-v81` → `v82` so pre-change artifacts cannot keep serving old declared targets. A reassigned variable stays `Unknown`.\n- **`workspace_oracle/dispatch.rs`.** `refine_go_package_function_value_call`, consulted inside `resolve_prepared_call` when the ordinary lookup proved exactly one module-scope non-callable definition, materializes the literal's file, selects the procedure at the exact written span, and returns a complete, exhaustive, single-candidate `DispatchResult`. Fixes the cross-file case the file-scoped lowering cannot see, and is what the concurrency provider's workspace dispatch consumes.\n- **`models/go-concurrency-declarations.json` + regenerated `embedded/go-concurrency-declarations/`.** Added `time.Ticker` (struct), `time.NewTicker(d time.Duration) *time.Ticker`, `time.Ticker.Stop()`, `time.Ticker.Reset(d time.Duration)` with minted declaration ids; provenance now names `src/time/tick.go`. The existing reviewed complete `no_concurrency_effects` `time.Ticker.Stop` summary then closes the call.\n- **Tests.** New `tests/suite_bench_policy/issue_3787_go_semantic_call_targets.rs`: cross\n[... 4786 bytes omitted from the middle of this message ...]\nwo unresolved-call barriers but the remaining dynamic calls keep the row open by design.\n\n## 6. Draft GitHub approach comment\n\nGo race analysis was reading call targets from the semantic lowering's file-local prepasses and from a workspace dispatch that stopped at the package variable itself, so calls the exact resolver can prove kept showing up as `dynamic_or_incomplete_dispatch` on the #2904 pond row. I routed both consumers to the resolver's existing structured resolution. A direct call through a stable package-level function value — `var Eager = func() ...`, one func-literal write, no other writes or address observations anywhere in the package, plus import-qualified writes when the variable is exported — now dispatches to the literal's procedure, cross-file included. The lowering also names same-file stable function values directly, with the Go adapter version rotated so stale artifacts cannot serve the old declared targets. For the second gap, I added the reviewed `time.Ticker` declaration facts (`time.NewTicker`'s pointer result plus `Ticker.Stop`/`Ticker.Reset`), which lets the exact resolver type `idleTicker := time.NewTicker(...)` and bind the existing no-concurrency-effects `time.Ticker.Stop` summary. On pond c0b34be4 the 216/355 row's `unresolved_calls` shrinks from 7 to 5, with line 380 and line 111 gone; the row is otherwise unchanged and still open, and no other row's reasons, proof, coverage, ordering, or protection moved. Genuinely dynamic calls stay open: the variadic function value, the returned function value, the context calls without reviewed summaries, and the multi-implementation interface method, all pinned by new near-miss tests. Validation: analysis lib 5147/5149 and integration suites 7435/7436, with the only failures reproduced on the base commit in this container (absent Go toolchain, root user, one policy-CLI environment failure); workspace clippy `-D warnings` and rustfmt are clean. Committed as `fbe801eb43` on base `0722dea6bc`; no branch, push, or issue-state change was made."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "ove a race.\n\nLine 380 is the case bc9ec425e addresses in the resolver, and it is still unresolved in race analysis. That suggests the new resolution does not yet reach semantic lowering.\n\n## Where race analysis reads targets\n\n- Go semantic lowering sets a call's declared targets in `lower_call_operands` (crates/bifrost-analysis/src/analyzer/go/semantic.rs). A same-file method selector is resolved there; other shapes fall through to Unknown with a dispatch gap.\n- An incomplete workspace dispatch becomes `UnresolvedTarget` in the race provider (crates/bifrost-rql/src/structural/search/concurrency.rs).\n\n## Request\n\nInclude Go semantic lowering's call targets (and the workspace dispatch the concurrency provider uses) in the native Go cutover, or record why they stay on the incumbent path. The pond lines above are ready-made acceptance cases: run `bifrost_benchmark go-race run --case pond-stopped-flag` and check that the 216/355 row's `unresolved_calls` shrinks.\n\nRelated: #2900 (Go race epic), #2904 (benchmark).\n\n",
+    "assistant_text_tail": "wo unresolved-call barriers but the remaining dynamic calls keep the row open by design.\n\n## 6. Draft GitHub approach comment\n\nGo race analysis was reading call targets from the semantic lowering's file-local prepasses and from a workspace dispatch that stopped at the package variable itself, so calls the exact resolver can prove kept showing up as `dynamic_or_incomplete_dispatch` on the #2904 pond row. I routed both consumers to the resolver's existing structured resolution. A direct call through a stable package-level function value — `var Eager = func() ...`, one func-literal write, no other writes or address observations anywhere in the package, plus import-qualified writes when the variable is exported — now dispatches to the literal's procedure, cross-file included. The lowering also names same-file stable function values directly, with the Go adapter version rotated so stale artifacts cannot serve the old declared targets. For the second gap, I added the reviewed `time.Ticker` declaration facts (`time.NewTicker`'s pointer result plus `Ticker.Stop`/`Ticker.Reset`), which lets the exact resolver type `idleTicker := time.NewTicker(...)` and bind the existing no-concurrency-effects `time.Ticker.Stop` summary. On pond c0b34be4 the 216/355 row's `unresolved_calls` shrinks from 7 to 5, with line 380 and line 111 gone; the row is otherwise unchanged and still open, and no other row's reasons, proof, coverage, ordering, or protection moved. Genuinely dynamic calls stay open: the variadic function value, the returned function value, the context calls without reviewed summaries, and the multi-implementation interface method, all pinned by new near-miss tests. Validation: analysis lib 5147/5149 and integration suites 7435/7436, with the only failures reproduced on the base commit in this container (absent Go toolchain, root user, one policy-CLI environment failure); workspace clippy `-D warnings` and rustfmt are clean. Committed as `fbe801eb43` on base `0722dea6bc`; no branch, push, or issue-state change was made.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "Eval final report; commit fbe801eb43 is validated. 'Still open' refers to remaining unresolved-call entries on the pond row and an out-of-scope follow-up (interface receivers); the report states these stay open by design and asks nothing of the judge.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

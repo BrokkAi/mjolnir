@@ -217,9 +217,14 @@ pub(super) async fn run_daemon_runtime(
             .map(|target| target.session_id.clone())
             .collect(),
     );
+    // Fires once the startup start of Apple's container service has finished,
+    // however it ended, so the image refresher's first look sees the service
+    // as startup left it instead of mid-start.
+    let apple_container_settled = CancellationToken::new();
     let apple_container_startup = spawn_apple_container_startup(
         state.clone(),
         cancellation.clone(),
+        apple_container_settled.clone(),
         config.targets.values().any(|target| {
             matches!(
                 target,
@@ -417,6 +422,7 @@ pub(super) async fn run_daemon_runtime(
                 state.push_notice("", text);
             }
         },
+        apple_container_settled,
         cancellation.clone(),
     );
     let exit_when_idle = mj_core::config::env_override_os("DAEMON_EXIT_WHEN_IDLE").is_some();
@@ -1461,12 +1467,16 @@ fn spawn_store_compatibility_watch(cancellation: CancellationToken) -> tokio::ta
 fn spawn_apple_container_startup(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
+    settled: CancellationToken,
     apple_target_configured: bool,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !cfg!(target_os = "macos") || !apple_target_configured {
+        settled.cancel();
         return None;
     }
     Some(tokio::spawn(async move {
+        // Every way out of this task, a panic included, settles the start.
+        let _settled = settled.drop_guard();
         let command_cancelled = Arc::new(AtomicBool::new(false));
         let executor = CancellableProcessExecutor::new(command_cancelled.clone())
             .with_deadline(Duration::from_secs(90));

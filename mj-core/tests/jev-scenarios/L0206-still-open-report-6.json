@@ -1,0 +1,411 @@
+{
+  "id": "L0206",
+  "title": "Still open report 6",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "656af27439b51833cc61ccffb8b37ec7",
+    "session_title": "eval22 3644 grok",
+    "reply_position": 9663,
+    "captured_at": "2026-09-24T15:12:25.999Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:24",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3644: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 971393a3af610f82db95fb8e031da15b0c66bf72\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitations, and any separately actionable findings.\n6. A draft GitHub approach comment, 5 to 12 plain-language sentences.\n\n# Issue\n\nIssue #3644: Taint fixed-point incompleteness diagnostics discard retained coverage reasons\n\nThe fixed-point taint incompleteness diagnostic discards the coverage evidence needed to identify its cause.\n\nIn `crates/bifrost-policy/src/taint_policy.rs`, `ensure_taint_incomplete_diagnostic` passes only the lengths of unproven edges, partial edges, and boundaries to `taint_incomplete_diagnostic`. The resulting warning names the generic incomplete family and three counts, but cannot identify the responsible procedure/program point or proof/completeness reason.\n\nThe information already exists in `SummaryCoverage`: `SummaryEdge` retains topology, origin, proof and completeness; `SummaryBoundary` retains its program point, kind, proof, completeness and provenance (`crates/bifrost-flow/src/dataflow/summary_result.rs`). The loss happens at diagnostic projection.\n\nConfirmed by source inspection at both the historical base `18fa60ee98f92a8dca58ffbd3a5d949adb30ee19` and current `ca9b5bc2035674975de16fe0252595167ca6d69e`; this report does not claim a fresh current-head runtime replay.\n\nPlease preserve a deterministic, bounded selection of these existing typed reasons and locations in the diagnostic, with explicit omitted counts when truncated. Keep the total counts, completion state, findings and exit behavior unchanged. A regression should distinguish two fixed-point failures with equal coverage counts but different underlying reasons, and verify output bounds.\n\nRelated: #2838 added the missing diagnostic family; this is the remaining loss of reason detail. #2439 is the broader explanation model, and #3414 concerns human report presentation. This focused change can reuse existing coverage evidence without requiring a new explanation graph.\n\n"
+        },
+        {
+          "id": "user:7240",
+          "role": "user",
+          "text": "Series 22 #3644 landing. The lead accepted your frozen solution `12c04a82b909b17b92c46eb3a4d1c712c5da9c29` (base `971393a3af610f82db95fb8e031da15b0c66bf72`) as the overall winner at 4.5. The judge's acceptance record is `judge-review/lead-acceptance-review.json` for this ticket. The review found your diagnostic the only one located in its structured fields (`primary` and `related`), with the existing labels, the coverage order, exact omitted counts and a bound by construction. It deducted for the global 8-row cap and the byte offsets in the message rows, for the public constructors added to `brokk-bifrost-flow` for the unit test, and for the missing production-route and cross-process tests. Every point except the cross-process test is among the eight required corrections below. Land it in this same session, with the reconciliation and corrections below. Your initial score, report, bundle and usage stay frozen; everything below is a separate landing continuation and earns no initial credit. The session now runs on a different model and effort for the landing, and may run under a different agent harness; that is expected.\n\nWork without subagents. Read the repository AGENTS.md and its routed architecture, testing and publication guidance again before changing anything. Do not write to any memory directory or MEMORY.md. The harness fails a turn after 10 minutes without activity: never block on one command for more than 5 minutes; run long builds and suites in the background or with a timeout of at most 300000 ms and poll them to completion. Do not end the turn while a gate is still running.\n\n## Merge\n\nConfirm the tree is clean and `HEAD` is `12c04a82b909b17b92c46eb3a4d1c712c5da9c29`. Fetch origin and record the full hashes of `origin/master` and of the frozen solution. The lead last saw `origin/master` at `216b4b826352fabcfd376dde85ff38b18bb615b0` (the lead's local reading after a fetch at 2026-09-24T12:56Z); use what you fetch. Master changes since the base that touch the same area: In the lead's reading, master has gained the #3528 abort-route landing (`d4bbca7c81097490ae986913fe0002b94208c3bd` through `43dc1a87d60533fb4b18f3da3872229722e21751`: C#, JavaScript, TypeScript and Python semantics; new `tests/suite_bench_policy` modules `issue_3528_recursive_abort_routes.rs` and `judge_3528_common.rs` with their `mod` lines in `tests/suite_bench_policy/main.rs`; two `private` rows in `.open-core/public-paths.d/tests%2Fsuite_bench_policy.tsv`; edits to `issue_3528_recursive_scc_closure.rs`, `issue_2838_recursive_carry.rs` and `policy_branch_relations.rs`; one CHANGELOG entry), Java lint A5 work (`cec25e718` through `1fd08d41f`), the #3518 landing (through `0bb21b85b`: Scala `get_definition`, `tests/suite_issues`) and the #3648 landing (merge `216b4b826352fabcfd376dde85ff38b18bb615b0`: Scala adaptation, the Scala `ADAPTER_VERSION`, `tests/suite_semantic`). None of it touches `crates/bifrost-policy` or `crates/bifrost-flow`, the only two crates your solution changes. Two points matter for this landing. First, the #3528 landing changed the expectations in `tests/suite_bench_policy/issue_3528_recursive_scc_closure.rs`: the `JAVASCRIPT_HANDLER` and `TYPESCRIPT_HANDLER` rows now expect `Expected::Reached` (a complete run) instead of `Inconclusive` with `taint_analysis/partial_discovery`, the file adds `JAVASCRIPT_HANDLER_ARM` and `TYPESCRIPT_HANDLER_ARM` rows, and its module comment says Python and C# keep their own unrelated unknown. A fixture that was inconclusive at the base may be complete on the merged tree, so measure a fixture there before you rely on it. Second, if correction 5 adds a new `tests/suite_bench_policy` file, put its `mod` line in `main.rs` and its inventory row beside the ones the #3528 landing added; expect only a trivial adjacent-line merge. A #3507 landing was dispatched at 2026-09-24T12:47Z and may push before you do. It changes the C++ dispatch oracle, the C/C++ store epoch salt, `tests/suite_issues/main.rs` and `tests%2Fsuite_issues.tsv`; none of those are files this landing touches. A #3535 landing may foll\n[... 58375 bytes omitted from the middle of this message ...]\n       let outcome = evaluate_kernel(*language, path, harness_fixture(constant), &id);\n        let run = one_run(&outcome);\n        let complete = run.completion() == &PolicyRunCompletion::Complete;\n        let findings = run.findings().len();\n        let diagnostics = run.diagnostics().len();\n        facts.push(format!(\n            \"{name}:complete={complete},findings={findings},diagnostics={diagnostics}\"\n        ));\n        let expected_findings = match expected {\n            Decisive::Reached => 1,\n            Decisive::NotReached => 0,\n        };\n        if !complete || findings != expected_findings || diagnostics != 0 {\n            failures.push(format!(\n                \"{name}: completion={:?} findings={findings} diagnostics={:#?}\",\n                run.completion(),\n                run.diagnostics()\n            ));\n        }\n    }\n    obs(\"p7_decisive\", format!(\"cases={} {facts:?}\", DECISIVE.len()));\n    assert!(failures.is_empty(), \"{failures:#?}\");\n}\n\n// ---------------------------------------------------------------------------\n// P8: plan-time cause diagnostics unchanged\n// ---------------------------------------------------------------------------\n\n#[test]\nfn judge_3644_p8_plan_time_cause_diagnostics_unchanged() {\n    let mut observed = Vec::new();\n    for handler in HANDLERS\n        .iter()\n        .filter(|handler| matches!(handler.language, Language::CSharp | Language::Python))\n    {\n        let run = run_handler(handler);\n        let serialized =\n            serde_json::to_string(&run.diagnostics).expect(\"plan-time diagnostics JSON\");\n        observed.push((handler.path, serialized));\n    }\n    obs(\"p8_plan_time\", format!(\"{observed:?}\"));\n    assert!(\n        !P8_BASE_PLAN_TIME.is_empty(),\n        \"the base plan-time diagnostics are pinned from the first base run\"\n    );\n    let base = P8_BASE_PLAN_TIME\n        .iter()\n        .map(|(path, json)| (*path, json.to_string()))\n        .collect::<Vec<_>>();\n    assert_eq!(observed, base, \"plan-time cause diagnostics are byte-identical to base\");\n}\n```\n"
+        },
+        {
+          "id": "agent:7243",
+          "role": "assistant",
+          "text": "I'll start by confirming the workspace state and fetching origin."
+        },
+        {
+          "id": "agent:7254",
+          "role": "assistant",
+          "text": "The tree is clean, HEAD is the frozen solution, and `origin/master` is `216b4b826352fabcfd376dde85ff38b18bb615b0`, the same commit the lead saw. Next I'll re-read the routed guidance."
+        },
+        {
+          "id": "agent:7287",
+          "role": "assistant",
+          "text": "Now the frozen solution's own diff against the base, so I work from the authored change and not an exported diff."
+        },
+        {
+          "id": "agent:7321",
+          "role": "assistant",
+          "text": "I have the full authored diff. Now the merge: detach at `origin/master` and merge the frozen commit."
+        },
+        {
+          "id": "agent:7335",
+          "role": "assistant",
+          "text": "Master has 21 commits since the base and none of them touch `crates/bifrost-policy` or `crates/bifrost-flow`, so the merge should be clean."
+        },
+        {
+          "id": "agent:7350",
+          "role": "assistant",
+          "text": "Merge commit `f660ed10c157dbbe46556ae519606e5bfea79461`. I'll confirm the two merged files match the frozen versions byte for byte and that every other file matches master."
+        },
+        {
+          "id": "agent:7368",
+          "role": "assistant",
+          "text": "The merge is exact: the two crates equal the frozen versions, and everything else equals master. Now the identity check for the report."
+        },
+        {
+          "id": "agent:7476",
+          "role": "assistant",
+          "text": "The merge is done and clean (`f660ed10c`). I'm now reading the code the corrections touch, starting with how limit kinds are spelled."
+        },
+        {
+          "id": "agent:7520",
+          "role": "assistant",
+          "text": "Now the current fixed-point code on the merged tree, plus the `SummaryBoundaryKind` shape and the location helpers in `semantic_identity.rs`."
+        },
+        {
+          "id": "agent:7629",
+          "role": "assistant",
+          "text": "Still reading code for the corrections: I've confirmed `try_new_in_family` sorts and deduplicates `related`. Now I'm checking for an existing char-boundary truncation helper before writing one."
+        },
+        {
+          "id": "agent:7673",
+          "role": "assistant",
+          "text": "Rust 1.97 has `str::floor_char_boundary`, so I'll use it rather than a hand loop. Next, the label methods for each typed part."
+        },
+        {
+          "id": "agent:7769",
+          "role": "assistant",
+          "text": "I'm done surveying and about to write the corrected code. One last check: the `workspace` binding at the `ensure_taint_incomplete_diagnostic` call site."
+        },
+        {
+          "id": "agent:7836",
+          "role": "assistant",
+          "text": "`render.rs` now has an unused `IcfgLimitKind` import; I'll remove it and add `OracleRelationKind::label`."
+        },
+        {
+          "id": "agent:7864",
+          "role": "assistant",
+          "text": "Now switch `taint_policy.rs` to the shared labels and drop its two local tables."
+        },
+        {
+          "id": "agent:7882",
+          "role": "assistant",
+          "text": "The toolchain was re-synced in this container without `rustfmt`. I'll add the `rustfmt` and `clippy` components, which the gates need anyway."
+        },
+        {
+          "id": "agent:7910",
+          "role": "assistant",
+          "text": "It compiles. I'll run the two existing incompleteness unit tests to confirm commit A behaves before committing it."
+        },
+        {
+          "id": "agent:7932",
+          "role": "assistant",
+          "text": "Commit A passes. I'll commit it with exact paths."
+        },
+        {
+          "id": "agent:7943",
+          "role": "assistant",
+          "text": "Commit A is `14ec29f54`. Now commit B (correction 2): per-category selection of 3 rows with each category's own omitted count, on the existing structure."
+        },
+        {
+          "id": "agent:8010",
+          "role": "assistant",
+          "text": "The diagnostic limit is the private constant in `finding.rs` (`classification.rs` has a separate one for its own text). I'll make the `finding.rs` constant `pub(crate)` and write commit B."
+        },
+        {
+          "id": "agent:8027",
+          "role": "assistant",
+          "text": "Now the import and the frozen test's wide-coverage expectations (10 unproven, 1 partial, 1 boundary → `r00`–`r02` shown, `omitted 7 unproven edge(s)`, partial and boundary rows now shown)."
+        },
+        {
+          "id": "agent:8051",
+          "role": "assistant",
+          "text": "I wrote `ends_with` where I meant `contains`, and the frozen row text starts with `partial ` rather than `partial edge`. Fixing that assertion."
+        },
+        {
+          "id": "agent:8068",
+          "role": "assistant",
+          "text": "Passing. Let me check the build log for warnings before committing B."
+        },
+        {
+          "id": "agent:8079",
+          "role": "assistant",
+          "text": "Commit B is `de55fe51b`. Now commit C (correction 3): cut each free-text reason at 120 bytes so both the proof and completeness reasons survive in a row."
+        },
+        {
+          "id": "agent:8158",
+          "role": "assistant",
+          "text": "Commits A to C are in. I'm now rewriting the fixed-point block as a projection step plus a pure rendering step (commit D)."
+        },
+        {
+          "id": "agent:8174",
+          "role": "assistant",
+          "text": "Now I'll write the replacement block, lines 5369 to 5770."
+        },
+        {
+          "id": "agent:8183",
+          "role": "assistant",
+          "text": "Next, reverse-apply the frozen `brokk-bifrost-flow` hunks and confirm the file then equals master."
+        },
+        {
+          "id": "agent:8220",
+          "role": "assistant",
+          "text": "Let me see the test module's imports so the synthetic-row helpers use what is already in scope."
+        },
+        {
+          "id": "agent:8256",
+          "role": "assistant",
+          "text": "Now compile and let the errors tell me which imports to adjust."
+        },
+        {
+          "id": "agent:8270",
+          "role": "assistant",
+          "text": "Only missing imports and two now-unused ones. Let me look at the exact import lines to edit."
+        },
+        {
+          "id": "agent:8292",
+          "role": "assistant",
+          "text": "Clean compile with no warnings. Now run the incompleteness unit tests."
+        },
+        {
+          "id": "agent:8330",
+          "role": "assistant",
+          "text": "All four pass. Let me review commit D's production diff once before committing."
+        },
+        {
+          "id": "agent:8343",
+          "role": "assistant",
+          "text": "The diff is as intended. I'll commit D and then check that the equal-counts test catches the old count-only output."
+        },
+        {
+          "id": "agent:8411",
+          "role": "assistant",
+          "text": "I'll put the `mod` line right after the #3528 block. Before writing the inventory row by hand, let me find the repository's baseline-preserving inventory workflow."
+        },
+        {
+          "id": "agent:8453",
+          "role": "assistant",
+          "text": "Building the `suite_bench_policy` binary may take longer than five minutes, so I'll run it in the background and poll."
+        },
+        {
+          "id": "agent:8468",
+          "role": "assistant",
+          "text": "While that builds, I'll set up the evidence directory and a small gate runner that saves each gate's command, true exit code, and full log."
+        },
+        {
+          "id": "agent:8481",
+          "role": "assistant",
+          "text": "While the suite builds, I'll check the typestate incomplete diagnostic for the same loss, since the report must say whether it has it (pre-answer 7; report only, no change)."
+        },
+        {
+          "id": "agent:8513",
+          "role": "assistant",
+          "text": "The typestate evaluator emits `RunIncomplete` diagnostics only for binding omissions. Let me see what `evaluator.rs::retain_incomplete_diagnostic` adds for an inconclusive typestate run without one."
+        },
+        {
+          "id": "agent:8543",
+          "role": "assistant",
+          "text": "`retain_incomplete_diagnostic` serves match policies, not typestate. Let me check whether any typestate path writes a count-only incompleteness message."
+        },
+        {
+          "id": "agent:8578",
+          "role": "assistant",
+          "text": "The suite build is compiling the analysis crate from scratch, which will take a while. Meanwhile I'll check the container's CPU and memory limits to plan how many gates can run at once."
+        },
+        {
+          "id": "agent:8596",
+          "role": "assistant",
+          "text": "96 CPUs, no quota, and plenty of memory and disk. Cargo serializes builds on the shared target directory, so running gates in parallel gains little. I'll wait for the suite build to finish."
+        },
+        {
+          "id": "agent:8622",
+          "role": "assistant",
+          "text": "While that runs, I'll confirm that `line_column_for_offset`, which `policy_location` uses, returns 1-based line and column."
+        },
+        {
+          "id": "agent:8640",
+          "role": "assistant",
+          "text": "Confirmed: 1-based line and 1-based character column, the same values `primary` and `related` carry. I'll wait for the build notification."
+        },
+        {
+          "id": "agent:8722",
+          "role": "assistant",
+          "text": "`finding::*` is re-exported, so `PolicyLocationRelationship` is reachable from `brokk_bifrost::policy`. I'm finishing the production test (correction 5): adding the import, then rerunning it."
+        },
+        {
+          "id": "agent:8746",
+          "role": "assistant",
+          "text": "Both pass. The on-disk change is `cargo fmt`, and `cargo fmt --all` touched no other files. Committing E with exact paths."
+        },
+        {
+          "id": "agent:8761",
+          "role": "assistant",
+          "text": "Commit E is `f3acb7c91`. Now commit F: the inventory row, through the two-pass, baseline-preserving workflow the classification check prints."
+        },
+        {
+          "id": "agent:8778",
+          "role": "assistant",
+          "text": "Policy already classifies the new path, so pass 1 is the whole fix. I'll run it into a temporary directory and diff it against the current inventory before replacing anything."
+        },
+        {
+          "id": "agent:8816",
+          "role": "assistant",
+          "text": "The check passes, and git shows no mode change on the moved file. Committing the inventory row."
+        },
+        {
+          "id": "agent:8828",
+          "role": "assistant",
+          "text": "All corrections are committed; the tree to gate is `cbe4e992f`. Before the long gates, I'll fetch to see whether master has moved, so the gates run on the tree I intend to push."
+        },
+        {
+          "id": "agent:8844",
+          "role": "assistant",
+          "text": "Master advanced to `04b538d7d` with the #3664 Kotlin landing. Let me see which files it touches and whether any overlap mine."
+        },
+        {
+          "id": "agent:8858",
+          "role": "assistant",
+          "text": "No file overlaps. #3664 changes Kotlin semantics and `tests/suite_semantic`. I'll merge it now, before the gates, so the gated tree is the one I push."
+        },
+        {
+          "id": "agent:8931",
+          "role": "assistant",
+          "text": "While the gates run, I'll stage the judge probe outside the checkout and check its SHA-256 against `a08ba5f4...`. It goes into `tests/` only after the other gates, so it cannot affect their builds."
+        },
+        {
+          "id": "agent:8988",
+          "role": "assistant",
+          "text": "The policy crate passed: 726 passed, 4 skipped (the frozen run had 725; the new unit test accounts for the difference). The focused filter passed 4 of 4. The flow crate tests are next."
+        },
+        {
+          "id": "agent:9018",
+          "role": "assistant",
+          "text": "The flow crate passed: 363 of 363, the same count the judge's gate saw. The `suite_bench_policy` filter is running now."
+        },
+        {
+          "id": "agent:9119",
+          "role": "assistant",
+          "text": "The analysis crate's test build is long, about 15 minutes so far. I'll keep polling in chunks of under 5 minutes rather than re-arming the monitor."
+        },
+        {
+          "id": "agent:9147",
+          "role": "assistant",
+          "text": "The analysis tests are running now: 1783 of 3135 done so far."
+        },
+        {
+          "id": "agent:9159",
+          "role": "assistant",
+          "text": "The analysis crate passed: 3135 passed, 123 skipped. Clippy is running now."
+        },
+        {
+          "id": "agent:9208",
+          "role": "assistant",
+          "text": "That change is my probe installation. Running the exact probe command in the background, since the suite binary must be rebuilt."
+        },
+        {
+          "id": "agent:9231",
+          "role": "assistant",
+          "text": "Seven of eight pass. P3 fails, which is what I expected from the #3528 landing. Let me read every `JUDGE3644 OBS` line and the P3 failure message."
+        },
+        {
+          "id": "agent:9279",
+          "role": "assistant",
+          "text": "Restored: `main.rs` hash matches its pre-probe bytes (`fecf3047...`) and `git status --short` is empty. Now the bare merge base, with the probe installed the same way."
+        },
+        {
+          "id": "agent:9295",
+          "role": "assistant",
+          "text": "That on-disk change is from checking out the bare merge base, where `OracleRelationKind` has no `label()` yet. It is expected. Running the probe there."
+        },
+        {
+          "id": "agent:9373",
+          "role": "assistant",
+          "text": "Master moved again, to `6cb8050b7`. Let me see what it brings and whether any path overlaps this landing's inputs."
+        },
+        {
+          "id": "agent:9472",
+          "role": "assistant",
+          "text": "While those run, I'll write the source-equivalence record for the credited gates: the tested commit, the commands and logs, the paths that changed, and the dependency evidence."
+        },
+        {
+          "id": "agent:9565",
+          "role": "assistant",
+          "text": "Every second-pass gate passed with the same test counts as the first pass. Last, the judge probe on `708e084e9`: install, run, restore."
+        },
+        {
+          "id": "agent:9635",
+          "role": "assistant",
+          "text": "Everything is pushed and verified. Let me print the full OBS lines from the final run and the bare-base run so the report quotes them exactly."
+        },
+        {
+          "id": "agent:9650",
+          "role": "assistant",
+          "text": "I have all the evidence. One last lookup: the full hashes of the correction commits."
+        },
+        {
+          "id": "agent:9663",
+          "role": "assistant",
+          "text": "LANDING REPORT\n\nThe #3644 landing is pushed to master at `708e084e90550af6cc58df0dc2fd34a39ae889cd`. All eight corrections are in. Every required gate passed. Seven of the eight judge probes pass; P3 fails, and it fails the same way on the bare merge base, because the #3528 landing on master changed the fixture it tests (section 5). I pushed without stopping, as the landing instructions allow when master caused the change.\n\n## 1. Hashes\n\n| Role | Full hash |\n|---|---|\n| Base | `971393a3af610f82db95fb8e031da15b0c66bf72` |\n| Frozen solution | `12c04a82b909b17b92c46eb3a4d1c712c5da9c29` |\n| Fetch 1 of `origin/master` (start) | `216b4b826352fabcfd376dde85ff38b18bb615b0` |\n| Fetch 2 (before the gates) | `04b538d7d618b8a559c9a9749b863d62d98bb5bd` |\n| Fetch 3 (after the gates, before the push) | `6cb8050b78a88da6fbdc44bd1c51cb13e111f91b` |\n| Fetch 4 (after the push) | `708e084e90550af6cc58df0dc2fd34a39ae889cd` |\n| Merge 1 (frozen solution into `216b4b826`) | `f660ed10c157dbbe46556ae519606e5bfea79461` |\n| Correction A: shared `IcfgLimitKind` and `OracleRelationKind` labels | `14ec29f54cc89bb07a71e3781d13e135d2dd236f` |\n| Correction 2: 3 rows per category | `de55fe51b24964e94841dc9c89336831b11aa30b` |\n| Correction 3: 120-byte reason cut | `ab787a9cdd9a7a98ea87e808d00fb1aa42b41add` |\n| Corrections 1, 4, 8: projection and rendering split | `0f5f2f0beda92b9a0b48881b02fd4a2c53d5b024` |\n| Correction 5: production-route test | `f3acb7c91f90ff60c4505f8cb9da2bd49fa5855e` |\n| Inventory row (own commit) | `cbe4e992f9fdb9540fe56336869122b67c176aae` |\n| Merge 2 (`04b538d7d`, #3664) | `d6e268d6c7c5b5548eb677207246fd2981c00e99` |\n| Merge 3 (`6cb8050b7`, #3628) | `708e084e90550af6cc58df0dc2fd34a39ae889cd` |\n| First fully gated tree | `d6e268d6c…` |\n| Final gated and pushed head | `708e084e9…` |\n\n## 2. Merge\n\nAt the start the tree was clean and `HEAD` was the frozen solution. I diffed the frozen solution against `971393a3a` to get the authored change, not the exported diff. It touched two files: `crates/bifrost-policy/src/taint_policy.rs` and `crates/bifrost-flow/src/dataflow/summary_result.rs`.\n\n- **Merge 1 (`f660ed10c`):** automatic, with no conflicts. Master had 21 commits since the base and none touched either crate. I checked both sides of the result: the two crates are byte-identical to the frozen solution, and every other path equals `216b4b826`.\n- **Merge 2 (`d6e268d6c`):** master moved to `04b538d7d` (#3664: Kotlin semantics, a `tests/suite_semantic` module and fixture, two inventory rows). No path overlapped. Automatic, with no conflicts. After the merge, the tree differs from master only in the landing's eight files, and from the pre-merge commit only in master's eight files.\n- **Merge 3 (`708e084e9`):** master moved to `6cb8050b7` while the gates ran (#3628: `crates/bifrost-rql` structural search and its unit tests, `tests/suite_issues`, one inventory row). No path overlapped. Automatic, with no conflicts. It checked out the same way: against master only the landing's eight files differ, and against `d6e268d6c` only master's five.\n- **Correction 1 is not a merge resolution.** I removed the flow-crate hunks by reverse-applying the frozen diff for that file, not by checking the file out from master. `git diff origin/master -- crates/bifrost-flow` is now empty.\n- **Identities:** nothing moves. `POLICY_SUBSTRATE_EPOCH` is still `\"bifrost-policy-unit:substrate:3513-declaration-row-identity\"` (`crates/bifrost-policy/src/units.rs:111`), unchanged by master and by this landing. No analysis epoch, adapter version or language extraction epoch was bumped. The persisted evaluation row stores finding identities and unit keys, not diagnostics, and the diagnostic message is recomputed on every evaluation, so no persisted identity depends on it. The new `IcfgLimitKind::label` produces exactly the bytes `render.rs` wrote before, so rendered snapshots are unchanged too.\n\n## 3. Corrections\n\n1. **Public flow API removed (`0f5f2f0be`).** `SummaryEdge::retained`, `SummaryBoundary::retained`, `SummaryCoverage::from_retained` and the `pub` on `implicit_a\n[... 22765 bytes omitted from the middle of this message ...]\n2838 fixtures and pins.\n  - #2439 and #3414.\n  - `SummaryCoverage` retention, sorting and dedup.\n  - SARIF and human-report rendering.\n\n## 8. Draft public approach comment\n\nLanded in `708e084e9` on master; the original fix commit `12c04a82b` is preserved in its history. When a taint solve finished at a fixed point but was still incomplete, its warning kept only three numbers (unproven edges, partial edges and open boundaries), even though each retained coverage row records its procedure, program point and proof or completeness reason. The warning now keeps its family, its code and that count sentence unchanged, then lists the first three rows of each category in the order the solver already sorted them, with an exact count of the rows left out. Each row gives its location as path, line and column, its edge or boundary kind, its origin call site, and its reasons, each cut at 120 bytes, and the structured primary and related locations point at the same rows. The whole message stays under the 4096-byte report limit for any coverage by construction, and a location that cannot be built falls back to its file path instead of dropping the row. No persisted identity or epoch changes, because stored evaluation rows hold finding identities and unit keys, not diagnostics. On the TypeScript structural-receiver fixture, the warning was only the count sentence before; now it names the unproven exceptional return at `app.ts:37:1`, called from `app.ts:33:17`, where exceptional control flow is unsupported. Two fixed points with equal counts and different reasons now produce different warnings, and repeated runs, including separate processes with different parallelism, give byte-identical diagnostics. Limits: provenance shows at most three relation handles, the selection is a prefix rather than a ranking, cancelled and budget-exceeded runs keep their existing messages without rows, and related locations are deduplicated by location. The typestate incompleteness diagnostic has the same kind of gap and is left for a separate change."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "----------------------------\n// P8: plan-time cause diagnostics unchanged\n// ---------------------------------------------------------------------------\n\n#[test]\nfn judge_3644_p8_plan_time_cause_diagnostics_unchanged() {\n    let mut observed = Vec::new();\n    for handler in HANDLERS\n        .iter()\n        .filter(|handler| matches!(handler.language, Language::CSharp | Language::Python))\n    {\n        let run = run_handler(handler);\n        let serialized =\n            serde_json::to_string(&run.diagnostics).expect(\"plan-time diagnostics JSON\");\n        observed.push((handler.path, serialized));\n    }\n    obs(\"p8_plan_time\", format!(\"{observed:?}\"));\n    assert!(\n        !P8_BASE_PLAN_TIME.is_empty(),\n        \"the base plan-time diagnostics are pinned from the first base run\"\n    );\n    let base = P8_BASE_PLAN_TIME\n        .iter()\n        .map(|(path, json)| (*path, json.to_string()))\n        .collect::<Vec<_>>();\n    assert_eq!(observed, base, \"plan-time cause diagnostics are byte-identical to base\");\n}\n```\n",
+    "assistant_text_tail": "2838 fixtures and pins.\n  - #2439 and #3414.\n  - `SummaryCoverage` retention, sorting and dedup.\n  - SARIF and human-report rendering.\n\n## 8. Draft public approach comment\n\nLanded in `708e084e9` on master; the original fix commit `12c04a82b` is preserved in its history. When a taint solve finished at a fixed point but was still incomplete, its warning kept only three numbers (unproven edges, partial edges and open boundaries), even though each retained coverage row records its procedure, program point and proof or completeness reason. The warning now keeps its family, its code and that count sentence unchanged, then lists the first three rows of each category in the order the solver already sorted them, with an exact count of the rows left out. Each row gives its location as path, line and column, its edge or boundary kind, its origin call site, and its reasons, each cut at 120 bytes, and the structured primary and related locations point at the same rows. The whole message stays under the 4096-byte report limit for any coverage by construction, and a location that cannot be built falls back to its file path instead of dropping the row. No persisted identity or epoch changes, because stored evaluation rows hold finding identities and unit keys, not diagnostics. On the TypeScript structural-receiver fixture, the warning was only the count sentence before; now it names the unproven exceptional return at `app.ts:37:1`, called from `app.ts:33:17`, where exceptional control flow is unsupported. Two fixed points with equal counts and different reasons now produce different warnings, and repeated runs, including separate processes with different parallelism, give byte-identical diagnostics. Limits: provenance shows at most three relation handles, the selection is a prefix rather than a ranking, cancelled and budget-exceeded runs keep their existing messages without rows, and related locations are deduplicated by location. The typestate incompleteness diagnostic has the same kind of gap and is left for a separate change.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 7240,
+    "input_rationale": "LANDING REPORT: pushed, gates passed. It states a probe (P3) fails because master changed the fixture and the push proceeded as the landing instructions allow. The still-open issues are other tickets listed for the record.",
+    "label": "none",
+    "trigger": "Still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

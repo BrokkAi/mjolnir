@@ -1,0 +1,394 @@
+{
+  "id": "L2505",
+  "title": "eval46 3488 opusxhigh none",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "8190fd2f5b24328221b21405a6c543e5",
+    "session_title": "eval46 3488 opusxhigh",
+    "reply_position": 2707,
+    "captured_at": "2026-10-24T12:01:52.830Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3488: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). Direct unresolved contract questions to the series lead.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 2df91bfb592bda73a747d4f56668d616a0c32cb1\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls, report the evidence to the judge.\nDo not bypass the mbx cargo shim, redirect target/, set CARGO_TARGET_DIR,\nor change shared cache settings.\n\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories\n[... 1113 bytes omitted from the middle of this message ...]\njoin (`crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/runtime_values.rs`, `build_runtime_reads`) requires a memory load with a static key, so a call cannot use that route. Reading the code also suggests, not observed, that a `.get` call counts as a container escape and refutes subscript reads in the same module; test before relying on either claim. First write a `bifrost scan` test in the style of `tests/suite_bench_policy/issue_3463_python_process_inputs.rs` showing that `os.environ.get(\"K\")` reaching `os.system` reports nothing; then make it report one finding. Use the declaration route: a declared `os` module field `environ` typed `os._Environ` and a declared `get` method (see `tests/fixtures/semantic-model-packs/python-request-input-declarations.json`), with a `return-value` source bound through `resolved-call :proof declared` (see the JVM `system-getenv-to-runtime-exec.rqlp`). Files under `semantic-packs/`, `crates/bifrost-semantic-packs/embedded/` and `crates/bifrost-policy/policy-packs/` are frozen (`scripts/check-pack-authoring-drift.mjs`); use a test-only fixture pack and a fixture policy. A shadowed `os`, a local `environ` and a reassigned root must report nothing, by identity.\n\n# Issue\n\nIssue #3488: Python: ship os.environ.get(...) as a process-input source through the declaration route\n\nFollow-up to #3463 (merge 1cbbac59d). The landed row publishes `os.environ[\"K\"]` and `sys.argv[i]` as keyed-read sources. `os.environ.get(\"K\")` is not shipped: it is a call, not a memory load, so the keyed-read route cannot carry it. It needs a declared `os._Environ.get` member in the process-input declaration surface plus receiver-type flow from the `os.environ` value to that member.\n\nThe DataFlowBench template-1 cells do not use `.get`, so the acceptance is unaffected, but real Python code reads the environment through `.get` at least as often as through subscripts. Controls must match the subscript route: a shadowed `os`, a local `environ`, and a reassigned root stay clean by identity, not spelling.\n"
+        },
+        {
+          "id": "agent:50",
+          "role": "assistant",
+          "text": "Now let me look at the referenced test, fixtures, and code paths."
+        },
+        {
+          "id": "agent:106",
+          "role": "assistant",
+          "text": "I've confirmed the checkout is clean at the base commit and read the guidance. I'm now studying how `bifrost scan` accepts fixture policies and packs so I can write the failing regression test first."
+        },
+        {
+          "id": "agent:207",
+          "role": "assistant",
+          "text": "I'm starting a background build of the policy test suite now (it is slow), and reading the resolver code while it runs."
+        },
+        {
+          "id": "agent:247",
+          "role": "assistant",
+          "text": "Python 3.12 is available. Starting the background build of the queue's policy suite selection."
+        },
+        {
+          "id": "agent:289",
+          "role": "assistant",
+          "text": "I'm reading how Python resolves `os.system(...)` to the declared member, to see what's missing for `os.environ.get(...)`."
+        },
+        {
+          "id": "agent:389",
+          "role": "assistant",
+          "text": "Checking how workspace-local semantic models under `.bifrost/semantic-models/` get activated, since the scan test needs one."
+        },
+        {
+          "id": "agent:436",
+          "role": "assistant",
+          "text": "While the build continues, I'm drafting the test-only fixture pack, the fixture policy, and the regression test."
+        },
+        {
+          "id": "agent:487",
+          "role": "assistant",
+          "text": "The build is at the RQL crate. Meanwhile I'm reading the keyed-read join to check the judge's \"`.get` refutes subscript reads\" hypothesis."
+        },
+        {
+          "id": "agent:593",
+          "role": "assistant",
+          "text": "Build is at the MCP crate. Writing the regression test file now."
+        },
+        {
+          "id": "agent:640",
+          "role": "assistant",
+          "text": "The build only failed because I edited `main.rs` during compilation (mbx refused the result). Rerunning; only the test crate remains."
+        },
+        {
+          "id": "agent:656",
+          "role": "assistant",
+          "text": "Built. Now running the scan directly on the scratch workspace to get the fixture policy hash and see the base behavior."
+        },
+        {
+          "id": "agent:676",
+          "role": "assistant",
+          "text": "Even the sink did not bind. Let me read the full diagnostic to see whether my fixture pack's duplicate `os` module type is the cause."
+        },
+        {
+          "id": "agent:697",
+          "role": "assistant",
+          "text": "With my fixture active, the `os.system` sink stops binding (without it, sink=1). So declaring the `os` module in a second pack disturbs the sink. Investigating `gapped_member_surface`."
+        },
+        {
+          "id": "agent:725",
+          "role": "assistant",
+          "text": "Let me probe faster with variants of the fixture pack rather than reading all the dispatch code. First variant: give the module type a distinct id."
+        },
+        {
+          "id": "agent:782",
+          "role": "assistant",
+          "text": "I'll rewrite the fixture in the style of the #4651 fixture: schema version 15, CPython toolchain activation. The test workspace then declares `requires-python`."
+        },
+        {
+          "id": "agent:806",
+          "role": "assistant",
+          "text": "Now the sink binds and only the `.get` source fails, which matches the issue. Checking the fixture pack is selected and reading the source diagnostic in full."
+        },
+        {
+          "id": "agent:958",
+          "role": "assistant",
+          "text": "Before editing, checking the cached workspace member-mutation proof, since an exact receiver claim must also rule out `os.environ = ...` replacement."
+        },
+        {
+          "id": "agent:1032",
+          "role": "assistant",
+          "text": "From-import fails too, so I need to see the IR rather than guess. Looking for a tool that dumps a procedure's semantic IR."
+        },
+        {
+          "id": "agent:1066",
+          "role": "assistant",
+          "text": "I'll implement the planned change together with temporary debug output (env-gated, removed before commit), so one rebuild both tests the fix and shows the IR shape for the from-import case."
+        },
+        {
+          "id": "agent:1085",
+          "role": "assistant",
+          "text": "Now the edit: a shared helper for the import-bound module value, used at both existing points plus the new load point."
+        },
+        {
+          "id": "agent:1107",
+          "role": "assistant",
+          "text": "Now the helpers, next to `external_module_value_seed`:"
+        },
+        {
+          "id": "agent:1123",
+          "role": "assistant",
+          "text": "Adding one more temporary debug print at the entry of the exact-receiver identity query, then building the binary."
+        },
+        {
+          "id": "agent:1141",
+          "role": "assistant",
+          "text": "The python-analysis crate compiled cleanly; the build timed out further downstream. Continuing it in the background and polling."
+        },
+        {
+          "id": "agent:1156",
+          "role": "assistant",
+          "text": "While that builds: checking whether this change touches persisted facts (which would need an epoch or adapter version bump) or is query-time only."
+        },
+        {
+          "id": "agent:1177",
+          "role": "assistant",
+          "text": "The Python `ADAPTER_VERSION` covers IR lowering; my change is in query-time type flow over that IR, so no version or epoch bump is needed. Checking the build."
+        },
+        {
+          "id": "agent:1294",
+          "role": "assistant",
+          "text": "The summary pack is selected, but the run still has an unknown-semantics gap at `run`. I need to see how the exact-receiver dispatch closes a method call with a summary."
+        },
+        {
+          "id": "agent:1316",
+          "role": "assistant",
+          "text": "Coverage becomes exhaustive, but the external body is partial until a summary models it. Running the human verbose report to see which gap remains."
+        },
+        {
+          "id": "agent:1335",
+          "role": "assistant",
+          "text": "The finding itself is `definite, complete`. The run-level gap is separate. To isolate it, I'll scan the negative shape (unused `.get`, constant command) and a file with no `.get` call at all."
+        },
+        {
+          "id": "agent:1402",
+          "role": "assistant",
+          "text": "I'm narrowing down why the `.get` summary does not close the call. Quick experiment: a transfer-free summary variant, to test whether the omitted `default` argument blocks binding."
+        },
+        {
+          "id": "agent:1419",
+          "role": "assistant",
+          "text": "Still incomplete, so the summary's transfer is not the cause. Finding where `ValueFlowIncompleteCause::SemanticGap` is raised to identify the gap."
+        },
+        {
+          "id": "agent:1442",
+          "role": "assistant",
+          "text": "I'll add a temporary debug print of the blocked gap in the taint composition cause rendering, to see its capability and kind."
+        },
+        {
+          "id": "agent:1495",
+          "role": "assistant",
+          "text": "Fixing the debug print to print the exact blocked gap row, then rebuilding."
+        },
+        {
+          "id": "agent:1525",
+          "role": "assistant",
+          "text": "The composition path was not used; the human report said `engine: icfg`. Looking at the ICFG plan's gap path instead."
+        },
+        {
+          "id": "agent:1547",
+          "role": "assistant",
+          "text": "Adding a temporary debug print at the `Blocked` return to see the gap, then rebuilding."
+        },
+        {
+          "id": "agent:1743",
+          "role": "assistant",
+          "text": "Now the edit: move the identifier requirement into the instance-field branch and add the module-field branch."
+        },
+        {
+          "id": "agent:1766",
+          "role": "assistant",
+          "text": "Replacing the redundant equality check with an assertion (the binder's member is the access's own attribute name), then adding the helper."
+        },
+        {
+          "id": "agent:1786",
+          "role": "assistant",
+          "text": "Rebuilding the binary to test the gap discharge."
+        },
+        {
+          "id": "agent:1803",
+          "role": "assistant",
+          "text": "The positive now reports one definite finding with a conclusive run, and the negative is a conclusive clean run. The `from os import environ` form still fails at dispatch. Checking its debug trace."
+        },
+        {
+          "id": "agent:1892",
+          "role": "assistant",
+          "text": "The standalone binary has no regression catalog (that needs `test-support`), so I'll point it at a copy of the retained `bifrost.security` pack."
+        },
+        {
+          "id": "agent:1996",
+          "role": "assistant",
+          "text": "The budget allows 200,000 per-file steps, matching the existing `module_global_initializer_seed` usage, so that is fine. Now removing the duplicated lookup between the two seed helpers."
+        },
+        {
+          "id": "agent:2072",
+          "role": "assistant",
+          "text": "While that builds, updating the fixture policy's header comment to describe the summary requirement accurately."
+        },
+        {
+          "id": "agent:2106",
+          "role": "assistant",
+          "text": "The authored hash ignores comments, so the manifest stays valid. Running the new tests against the base `type_flow.rs`:"
+        },
+        {
+          "id": "agent:2134",
+          "role": "assistant",
+          "text": "At base, every positive shape is `inconclusive` with `\"findings\": []`, and the controls file has no finding at the real read either. That is the failing \"before\". Restoring the fix and rebuilding."
+        },
+        {
+          "id": "agent:2166",
+          "role": "assistant",
+          "text": "All 5 new tests pass with the fix, and 254 other Python-related policy tests (including #3463, #4651, #4342) pass too. Making a checkpoint commit before the broader validation."
+        },
+        {
+          "id": "agent:2183",
+          "role": "assistant",
+          "text": "Now the full policy suite (the merge queue's selection) in the background, and the pack-authoring drift check meanwhile."
+        },
+        {
+          "id": "agent:2196",
+          "role": "assistant",
+          "text": "Drift check passes. While the suite runs, checking whether a design chapter documents the Python process-input or module-value routes and should mention the declaration route."
+        },
+        {
+          "id": "agent:2231",
+          "role": "assistant",
+          "text": "I'll add one paragraph to the Python section of the semantic-models design chapter, since this is a durable rule about when a typed module value proves a receiver."
+        },
+        {
+          "id": "agent:2256",
+          "role": "assistant",
+          "text": "Policy suite is running (1,934 tests). Starting the workspace clippy gate in parallel, since it is a separate build."
+        },
+        {
+          "id": "agent:2270",
+          "role": "assistant",
+          "text": "While both run, identifying the Python usage and issue test modules for the language suites the brief requires."
+        },
+        {
+          "id": "agent:2285",
+          "role": "assistant",
+          "text": "`issue_3159_python_descriptor_invocation.rs` is directly relevant to the descriptor claim I now discharge. Reading what it pins."
+        },
+        {
+          "id": "agent:2299",
+          "role": "assistant",
+          "text": "That test pins class-instance descriptors, not module attributes, so it does not conflict. Polling the two background jobs."
+        },
+        {
+          "id": "agent:2469",
+          "role": "assistant",
+          "text": "It waited on the build lock and then recompiled the facade, likely because the library build unified features differently. Running it in the background and polling."
+        },
+        {
+          "id": "agent:2492",
+          "role": "assistant",
+          "text": "Full policy suite: 1,933 passed, 1 failed (the Go latency test). Reading its failure message."
+        },
+        {
+          "id": "agent:2525",
+          "role": "assistant",
+          "text": "Python usage and issue suites: 212 passed. Now the library tests (`brokk-bifrost-analysis --lib` as required, plus the two Python crates), and the Go latency rerun afterwards on a quiet machine."
+        },
+        {
+          "id": "agent:2543",
+          "role": "assistant",
+          "text": "876 library tests passed. Confirming the run actually covered all three crates."
+        },
+        {
+          "id": "agent:2556",
+          "role": "assistant",
+          "text": "Now the Go latency test alone, on a quiet machine (the policy test binary is already built):"
+        },
+        {
+          "id": "agent:2570",
+          "role": "assistant",
+          "text": "Passes alone in 8.6 s, so the earlier failure was load-induced. Now the before/after pass: I'll build the base `type_flow.rs` once, scan every witness, then restore the fix and scan again."
+        },
+        {
+          "id": "agent:2598",
+          "role": "assistant",
+          "text": "Now the base binary: swap in the base `type_flow.rs`, build only the `bifrost` binary, rerun the same table, then restore."
+        },
+        {
+          "id": "agent:2654",
+          "role": "assistant",
+          "text": "Formatting is clean. Reviewing the final code diff once more before committing."
+        },
+        {
+          "id": "agent:2665",
+          "role": "assistant",
+          "text": "All ASCII, and the diff reads correctly. Committing the design-chapter paragraph and the test formatting."
+        },
+        {
+          "id": "agent:2680",
+          "role": "assistant",
+          "text": "Final confirmation run of the new tests and the #3463 tests at the final commit (rebuilds only the test crate):"
+        },
+        {
+          "id": "agent:2696",
+          "role": "assistant",
+          "text": "29 passed at the final commit. Collecting final hashes and status."
+        },
+        {
+          "id": "agent:2707",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nI fixed #3488 with two changes to the Python type flow. `os.environ.get(\"K\")` reaching `os.system` now reports one definite finding on a conclusive run. A shadowed `os`, a local `environ`, and a reassigned root report nothing. All work is committed on the detached HEAD; the working tree is clean.\n\n## 1. Confirmed cause\n\nThe test setup was an active model declaring the `os` module field `environ` with type `os._Environ`, plus a declared `get` method on that class. The fixture policy selects `get` with `resolved-call :proof declared` and binds `return-value`. At the base commit, `os.environ.get(...)` reaching `os.system` binds no source (`src=0`), reports nothing, and the run is `inconclusive`. The source selector's diagnostic was `call_bindings did not establish complete actual-to-formal coverage (dispatch outcome=unproven, coverage=open, target_count=1)`.\n\nTwo engine gaps were responsible. I confirmed both with temporary debug output, which I removed before committing.\n\n- **Cause 1: the receiver was never typed.** `python_exact_value_class_at_in_query` in `crates/bifrost-python-analysis/src/analyzer/python/type_flow.rs` split the `os.environ` load into its base `os` and an `environ` access. It then stopped at `os`: the trace showed `value kind=Temporary node kind=identifier text=\"os\"`, and a module object has no exact class. The import binder was asked only about local or temporary values, never about a load. So `python_exact_external_receiver_identities` returned `None` and dispatch stayed unproven. `external_module_value_seed`, which reads declared module value types, was already used by the class-set path but not by this exact walk.\n- **Cause 2: a lowering claim on the load stayed open.** After fixing cause 1, the run was still inconclusive (\"procedure semantics for run is unknown\"). The blocking gap was `SemanticGap { subject: Value(6), capability: Calls, kind: Unknown, discharge: RuntimeReadBehavior, detail: \"descriptor or special-method invocation requires type refinement\" }` on the `os.environ` load. Before this change, only three things could discharge it:\n  - the callee value of a resolved call;\n  - the reviewed keyed-read model (the subscript route);\n  - the #4651 rule for declared fields read through `self`.\n\n  An `os.environ` value used as a receiver is none of these.\n\nThe `.get` call also needs a model under `:unmodeled require-model`; the shipped `os.system` closes only through its summary. I supplied a test-only summary for `os._Environ.get`.\n\nYour two notes, both now tested:\n- At base, `os.environ.get` is not a source: confirmed (`src=0`).\n- A `.get` call refutes subscript reads in the same module: confirmed. With the shipped #3463 policy, a file with only `os.environ[\"K\"]` reaching `os.system` gives `proven_by_summary` with 1 finding. Adding `return os.environ.get(\"OTHER\")` in another function gives `inconclusive` with 0 findings. This is the same before and after my change.\n\n## 2. Changes and reasons\n\nBase: `2df91bfb592bda73a747d4f56668d616a0c32cb1`. Commits: `9a483f4bcbcdc1b2e8da8f4ff235f5724085b0ff` (fix and tests) and `b9c425d3e8bb88e6b7e211aa76c98f038acd5952` (final: design note and test formatting).\n\n- **`type_flow.rs`, exact receiver walk.** A load is now first checked with the import binder. If the binder binds it to a module field that an active model declares with `value_type`, that declared class is the receiver's origin. Because Python code can replace a module attribute, this exact claim also needs the existing workspace scan for member writes and module-object escapes (`python_workspace_module_member_mutation_free`, cached per member). Otherwise the receiver is unknown.\n- **`type_flow.rs`, field-read gap discharge.** `python_external_field_read_discharges_gap` now also discharges the descriptor claim in one case: the binder binds the access to a module, and the model declares the member as one static field of that module. A module is not a class instance, so no descriptor runs, and a field that is present never reaches a module `__getattr__`. The binder already refuses a shado\n[... 5120 bytes omitted from the middle of this message ...]\nd. Two gaps in the Python type flow blocked it. First, the exact receiver walk split the `os.environ` read into the `os` module and an access, and a module has no class to start from. It now asks the import binder about the whole read and uses the field's declared type. Because code can replace a module attribute, that claim also needs proof that no workspace file writes `os.environ` or passes the `os` module around. Second, Python lowering marks every attribute read as one that might run a descriptor. For a module field that the binder proves and the model declares, that cannot happen, so the read now closes that claim. A shadowed `os`, a local `environ`, and a reassigned root never reach the declared member, because the binder refuses them by identity. The regression test runs `bifrost scan` with test-only declaration, summary, and policy fixtures, since the product packs are frozen. Before the change, every positive was inconclusive with no finding; after it, template 1 with `.get` reports one definite finding on a conclusive run. The DataFlowBench template-1 cells give the same results before and after. Two follow-ups remain: `from os import environ` is not yet an exact receiver, and any method call on `os.environ` still makes subscript reads in the same module incomplete.\n\n`★ Insight ─────────────────────────────────────`\n- In Bifrost, getting a source to bind is only half the work. The finding was `definite` once cause 1 was fixed, but the run stayed `inconclusive` because an unrelated lowering claim on the same load was still open. Run completeness and finding certainty are tracked separately.\n- The import binder carries the identity checks (shadowing, uniqueness, reassignment). Reusing it in both the receiver walk and the gap discharge excludes the controls without any name matching.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "` are frozen (`scripts/check-pack-authoring-drift.mjs`); use a test-only fixture pack and a fixture policy. A shadowed `os`, a local `environ` and a reassigned root must report nothing, by identity.\n\n# Issue\n\nIssue #3488: Python: ship os.environ.get(...) as a process-input source through the declaration route\n\nFollow-up to #3463 (merge 1cbbac59d). The landed row publishes `os.environ[\"K\"]` and `sys.argv[i]` as keyed-read sources. `os.environ.get(\"K\")` is not shipped: it is a call, not a memory load, so the keyed-read route cannot carry it. It needs a declared `os._Environ.get` member in the process-input declaration surface plus receiver-type flow from the `os.environ` value to that member.\n\nThe DataFlowBench template-1 cells do not use `.get`, so the acceptance is unaffected, but real Python code reads the environment through `.get` at least as often as through subscripts. Controls must match the subscript route: a shadowed `os`, a local `environ`, and a reassigned root stay clean by identity, not spelling.\n",
+    "assistant_text_tail": "d. Two gaps in the Python type flow blocked it. First, the exact receiver walk split the `os.environ` read into the `os` module and an access, and a module has no class to start from. It now asks the import binder about the whole read and uses the field's declared type. Because code can replace a module attribute, that claim also needs proof that no workspace file writes `os.environ` or passes the `os` module around. Second, Python lowering marks every attribute read as one that might run a descriptor. For a module field that the binder proves and the model declares, that cannot happen, so the read now closes that claim. A shadowed `os`, a local `environ`, and a reassigned root never reach the declared member, because the binder refuses them by identity. The regression test runs `bifrost scan` with test-only declaration, summary, and policy fixtures, since the product packs are frozen. Before the change, every positive was inconclusive with no finding; after it, template 1 with `.get` reports one definite finding on a conclusive run. The DataFlowBench template-1 cells give the same results before and after. Two follow-ups remain: `from os import environ` is not yet an exact receiver, and any method call on `os.environ` still makes subscript reads in the same module incomplete.\n\n`★ Insight ─────────────────────────────────────`\n- In Bifrost, getting a source to bind is only half the work. The finding was `definite` once cause 1 was fixed, but the run stayed `inconclusive` because an unrelated lowering claim on the same load was still open. Run completeness and finding certainty are tracked separately.\n- The import binder carries the identity checks (shadowing, uniqueness, reassignment). Reusing it in both the receiver walk and the gap discharge excludes the controls without any name matching.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Still open / needs you turn-ending label",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "Final report of an evaluation lane that was told to implement, validate and commit without stopping; no question to the judge remains. The pack authoring and listed limitations are informational scope notes, not asks.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null
+  },
+  "context": {
+    "after": []
+  }
+}

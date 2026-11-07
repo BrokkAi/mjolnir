@@ -245,6 +245,29 @@ pub fn find_session_config_option<'a>(
     }
 }
 
+/// The config option that offers `desired`: `selector` when the bridge lists
+/// it there, otherwise the bridge's Mode selector.
+pub fn execution_mode_option<'a>(
+    config_options: &'a [SessionConfigOption],
+    selector: Option<&str>,
+    desired: &str,
+) -> Option<&'a SessionConfigOption> {
+    let offers = |option: &&SessionConfigOption| select_contains(&option.kind, desired);
+    selector
+        .and_then(|id| {
+            config_options
+                .iter()
+                .filter(|option| option.id.to_string() == id)
+                .find(offers)
+        })
+        .or_else(|| {
+            config_options
+                .iter()
+                .filter(|option| option.category == Some(SessionConfigOptionCategory::Mode))
+                .find(offers)
+        })
+}
+
 pub fn select_contains(kind: &SessionConfigKind, desired: &str) -> bool {
     let SessionConfigKind::Select(select) = kind else {
         return false;

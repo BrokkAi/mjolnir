@@ -1,0 +1,258 @@
+{
+  "id": "L2310",
+  "title": "python-rule-blockers",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "31e44e629cb2bbaa225a83cd820af443",
+    "session_title": "bifrost via claude3",
+    "reply_position": 26906,
+    "captured_at": "2026-10-17T23:30:31.250Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "/goal close the gaps to enable effective python rules in #4321. if you disagree with a ticket's premise, or if it turns out to be based on incorrect or obsolete assumptions, comment, mark escalated, and move on. use concurrent subagents where that is useful."
+        },
+        {
+          "id": "user:458",
+          "role": "user",
+          "text": "We can just let the agents have a free for all, but if we find the agents mostly waiting for cargo, let's experiment with tasking one agent to own the build/test queue while you supervise and merge"
+        },
+        {
+          "id": "user:1212",
+          "role": "user",
+          "text": "you can bypass the queue with MBX_SCHEDULER=0 if you think you're being unnecessarily throttled"
+        },
+        {
+          "id": "user:5465",
+          "role": "user",
+          "text": "Yes"
+        },
+        {
+          "id": "user:8996",
+          "role": "user",
+          "text": "did you pull the #4438 directives yet?"
+        },
+        {
+          "id": "user:12084",
+          "role": "user",
+          "text": "master breakage you noticed is repaired (there are others but that's the big\none)"
+        },
+        {
+          "id": "user:13105",
+          "role": "user",
+          "text": "great. how about the actual policy work?"
+        },
+        {
+          "id": "user:13353",
+          "role": "user",
+          "text": "172 draft .rqlp files from the campaign under .agents/records/codeql-parity-2026-10/python/verification/\n\nthe fuck, we did a big campaign and then didn't generate actual rules?"
+        },
+        {
+          "id": "user:13745",
+          "role": "user",
+          "text": "the PRs are merged I think. yes, start the authoring. follow the pack authoring guidelines on public/premium pls"
+        },
+        {
+          "id": "user:18494",
+          "role": "user",
+          "text": "mj is fixed"
+        },
+        {
+          "id": "user:19841",
+          "role": "user",
+          "text": "2. what are the pros and cons of each?\n\n1. yes but check to see if anyone else has done this already\n\n0a. also land 4766\n0b. mj is fixed"
+        },
+        {
+          "id": "user:20920",
+          "role": "user",
+          "text": "fable, i'd like a second opinion on question 2"
+        },
+        {
+          "id": "user:21319",
+          "role": "user",
+          "text": "ok, let's do it, but if things get messier than expected let's re-evaluate"
+        },
+        {
+          "id": "user:22187",
+          "role": "user",
+          "text": "Recs accepted "
+        },
+        {
+          "id": "user:23582",
+          "role": "user",
+          "text": "Yes, but create a comment on a ticket for later"
+        },
+        {
+          "id": "user:23621",
+          "role": "user",
+          "text": "Create or comment*"
+        },
+        {
+          "id": "user:24011",
+          "role": "user",
+          "text": "What's next? "
+        },
+        {
+          "id": "user:24174",
+          "role": "user",
+          "text": "k"
+        },
+        {
+          "id": "user:24734",
+          "role": "user",
+          "text": "Yes"
+        },
+        {
+          "id": "agent:25193",
+          "role": "assistant",
+          "text": "PR #5512 is in the merge queue. It expands literal argument packs (`*(...)`, `*[...]` and string-keyed `**{...}`) for Python call binding.\n\n**Gate before and after:**\n\n| Rule | Before | After |\n| --- | --- | --- |\n| call-wrong-named-argument | 1 miss | exact |\n| call-wrong-named-class-argument | 1 miss | exact |\n| call-wrong-number-class-arguments | 2 misses, 1 extra | 1 miss (`*t3`), 1 extra (the `f4(q=4)`-style defect) |\n| call-wrong-arguments | 4 misses, 3 extras | 3 misses (`*t3` and the joined-receiver `e.spam(0)`), 3 extras (mox and `**y`) |\n\nThe two named-argument rules match exactly, but their runs end inconclusive, the standard we've accepted for shipping. Both go into pack batch 5 once #5512 lands. Named operands like `*t3` stay unexpanded, and the PR records that as a follow-up.\n\n**Five Rust macro test failures, likely unrelated.** They showed up on the branch, but the PR's only shared change is a new method that only Python calls. I expect they already fail on master, but I haven't confirmed it; the merge queue will show it.\n\n**Waiting on review:** pack PRs #97 (uninitialized-local) and #99 (7 variable rules).\n\n**Still yours to decide:**\n- whether to start a Python module initializer procedure, with an ExecPlan first;\n- whether to count the `f4(q=4)` defect, a real bug CodeQL misses, as a true positive.\n\nThose two decisions are what stand between the remaining call-argument rules and shipping."
+        },
+        {
+          "id": "user:25326",
+          "role": "user",
+          "text": "1. Yes. 2. It's a true positive. We shouldn't match CodeQL bug-for-bug"
+        },
+        {
+          "id": "agent:25329",
+          "role": "assistant",
+          "text": "Both decisions recorded. \"Don't match CodeQL bug-for-bug\" changes the gate for every rule, not just this one, so I'll save it as a standing rule."
+        },
+        {
+          "id": "agent:25414",
+          "role": "assistant",
+          "text": "Both decisions are recorded.\n\n**Decision 2: true positives.** I saved it as a standing rule for every CodeQL-parity gate and added it to the shared gate brief. Extra findings are now classified one by one:\n- **a real defect CodeQL misses** is kept, and documented in the fixture as a deliberate difference;\n- **a CodeQL exclusion of a non-defect** means our policy has a false positive, so the policy gets fixed.\n\n**Running now:**\n- **Pack batch 5: all four call-argument rules.** With #5512 merged and the gate amended, each could now pass:\n  - The `f4(q=4)` cases count as true positives.\n  - The `*t3` calls and the module-level `e.spam(0)` count as abstentions, but only if the run JSON shows an incompleteness diagnostic at each site. A miss without a diagnostic would be silent and would block the rule.\n  - The mox calls get CodeQL's exclusion, written structurally from Python's import facts. If RQL can't express it, the child stops.\n- **A read-only map for the module-initializer ExecPlan.** It covers:\n  - how JavaScript, TypeScript and Ruby identify and scope their initializer procedures;\n  - where Python would hook in, including module globals, class bodies and `if __name__ == \"__main__\":`;\n  - which consumers and shipped rules assume module code has no procedure;\n  - the cost and cache-identity effects;\n  - the open design questions.\n\n  I'll write the plan from that map and bring you any decisions that need you before implementation starts.\n\n**Also landed:** #5512 (literal argument packs) and pack PR #99, which shipped the 7 variable-usage rules. Pack PR #97 (uninitialized-local) is still waiting for review."
+        },
+        {
+          "id": "agent:25545",
+          "role": "assistant",
+          "text": "The map is in. I'll write the ExecPlan myself, so first I'll read the repo's plan standard and the full map."
+        },
+        {
+          "id": "agent:25606",
+          "role": "assistant",
+          "text": "I'll check the shared inventory mechanism that keeps top-level declarations as siblings, since the plan depends on Python reusing it rather than writing a private copy."
+        },
+        {
+          "id": "agent:25660",
+          "role": "assistant",
+          "text": "I filed issue #5598 and committed the ExecPlan (`.agents/plans/python-module-initializer.md`) on branch `python-module-initializer-plan`. Milestone 0, a measured prototype, has started. The 8 design decisions are in the plan's Decision Log, with reasons and file references.\n\nThe plan has five milestones:\n- **M0 (running):** a prototype of the inventory and lowering, plus the acceptance demonstration. `os.system(sys.argv[1])` at module level should produce a finding, its enclosing procedure should be `<file>`, and a class-body call should still have none. It also measures cost against master on CodeQL's Python tests and the shipped Python pack rules, and lists which findings change. It stops if wall-time overhead passes about 25% or a semantic budget runs out.\n- **M1 and M2:** the finished inventory and lowering. Module names are collected by extending the existing collector walk, not a parallel one.\n- **M3:** consumer checks, the adapter and policy-epoch bumps, and a review of every changed expected file. About 55 golden areas contain Python sources.\n- **M4:** a re-run of every shipped Python pack rule, then closeout. The durable decisions move into the design chapter, and the plan is deleted.\n\n**Also running:** pack batch 5, the four call-argument rules under the amended gate.\n\nIf you want to override either scope limit (class bodies, or pack policies keeping their function-only scopes), now is the cheapest time, before Milestone 1 builds on them."
+        },
+        {
+          "id": "agent:25799",
+          "role": "assistant",
+          "text": "Pack PR #100 is open. Before filing the two gaps, I'll check for existing issues. #5352, about RQL union rejecting mixed row kinds, looks close to the first one."
+        },
+        {
+          "id": "agent:25837",
+          "role": "assistant",
+          "text": "I'll file both gaps. The first is phrased so whoever picks it up checks first whether an existing structural construct already covers it, since the child searched but didn't prove it can't be done."
+        },
+        {
+          "id": "agent:25861",
+          "role": "assistant",
+          "text": "Batch 5 is up as pack PR #100, with the two call keyword rules, and I filed the two engine gaps that block the arity rules:\n\n- **[#5601](https://github.com/BrokkAi/bifrost-dev/issues/5601):** RQL can't keep or drop rows depending on whether the same file has a matching import, so CodeQL's mox exclusion can't be expressed. The issue asks whoever picks it up to first check whether an existing file-level structural construct already does this.\n- **[#5602](https://github.com/BrokkAi/bifrost-dev/issues/5602):** an incomplete call binding is reported once for the whole run, with no source location. That makes an abstention look the same as a silent miss. The fix is the same source attribution #5294 added for formatting facts.\n\nOnce both are fixed, `call-wrong-arguments` and `call-wrong-number-class-arguments` can ship, with `f4(q=4)` documented as a true positive. The module initializer (#5598) is needed only for the module-level `e.spam(0)` row. Milestone 0 of that plan is still running.\n\n**Open pack PRs:** #97 (uninitialized-local) and #100."
+        },
+        {
+          "id": "agent:25997",
+          "role": "assistant",
+          "text": "The M0 child is continuing on the same branch with two follow-ups:\n1. **Nested-entry growth.** It gets a per-phase breakdown, then removes duplicate traversal. Nested `def` and `class` bodies must not be walked or charged by the initializer, and the budget doesn't change. If the initializer still needs more than about 10% extra work after that, it stops, and the budget question comes to you.\n2. **Class-body ownership.** A procedure owns its span minus the holes the language declares. For the Python initializer, the holes are class bodies, and the shared ownership lookup respects them. It first checks whether JavaScript already has an equivalent concept to reuse. The acceptance results should match master for class-body calls (no owner), give `<file>` for module-level calls, and keep the method for calls inside methods.\n\nThen it re-measures cost and findings.\n\n`★ Insight ─────────────────────────────────────`\n- The budget miss was by one entry, but the important number is the ratio. Master used about 2.07 entries per source byte against a cap of 3, and the prototype used over 3. A budget scaled by source size makes a doubled traversal show up as a budget failure, even when wall time looks fine.\n- The class-body bug is a common failure when a frame is added: span containment assumes a procedure lowers everything inside its span. Holes make that assumption explicit and keep the lookup cheap. Deriving ownership from the lowered IR would mean building every procedure's IR for each lookup.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "agent:26195",
+          "role": "assistant",
+          "text": "I'm waiting on one measurement before the module-initializer cost decision.\n\n**Where it stands:**\n- **The ownership fix works.** Module-level calls belong to `<file>`, class-body calls still have no owner (as on master), and method calls keep their method.\n- **The extra cost is new coverage, not waste.** On CodeQL's test files, nested entries rose 48% (742,920 to 1,101,615). Nearly all of it is lowering module bodies that were never analyzed before, not a duplicated traversal. The pack run takes 11% longer.\n- **But CodeQL's tests are unusually module-heavy,** so that figure likely overstates the cost on ordinary code. I cloned click, requests, flask and tornado at pinned tags, and the child is re-measuring on them. It covers work per source byte, budget exhaustion, wall time, and every new finding with a judgement of whether it's a real defect.\n\nWhen it reports, I'll bring you the cost numbers and a recommendation on whether to continue as planned or revisit the budget."
+        },
+        {
+          "id": "agent:26342",
+          "role": "assistant",
+          "text": "I'm going ahead with the module initializer: on real code its cost is small.\n\n| Repository | Nested work added | Entries per source byte (budget 3) | Finding changes |\n| --- | ---: | ---: | ---: |\n| click 8.1.7 | +7.0% | 2.29 | 0 |\n| requests 2.32.3 | +7.7% | 2.19 | 0 |\n| flask 3.0.3 | +7.6% | 2.20 | 0 |\n| tornado 6.4.1 | +4.7% | 2.23 | 0 |\n\nNo query exhausted or truncated its budget, so the budget stays as it is. Wall time looked roughly flat, but the host was busy, so those timings are provisional. On CodeQL's test files the increase was 48%, because those files have unusually much top-level code.\n\nThe same child is now doing Milestones 1 to 3:\n- turning the prototype into finished code, with class bodies excluded from the module procedure's ownership;\n- bumping the adapter version and the policy epoch;\n- adding the acceptance golden test;\n- reviewing every changed expected file;\n- running full validation;\n- opening a draft PR.\n\nIt stops if any expected-output change can't be explained. Milestone 4, which re-runs every shipped pack rule and closes out the plan, comes after that.\n\n**Waiting on review:** pack PRs #97 (uninitialized-local) and #100 (call keyword rules)."
+        },
+        {
+          "id": "agent:26489",
+          "role": "assistant",
+          "text": "The module-initializer branch is waiting on one check before its PR opens. A Rust-only test timed out during validation, and the child is finding out whether our change caused it.\n\n**Done on the branch** (commit ab05542ab1, not pushed yet):\n- **Milestones 1 and 2 are complete.** The adapter version and the policy epoch are bumped.\n- **The acceptance golden passes.** A module-level `os.system(sys.argv[1])` is now a complete, proven finding inside the module procedure `<file>`. A call in a class body still has no procedure.\n- **All 18 changed expected files are explained.** 15 changed only ids, the Python tutorial gained a resolved dispatch, and one is the new golden.\n\n**Why the check matters.** The timed-out test is `partial_flow_differential::algorithm_differential_over_fixtures`, and it hit the 600 s limit. The branch changed shared code: procedure spans now exclude class bodies, and ownership lookup respects that. So this could be a real slowdown for all languages, or just the busy host.\n\n**What the child is doing:**\n- running the test alone on master and on the branch, back to back;\n- if the branch is slower, finding the cost and making procedures without class-body exclusions pay nothing;\n- then finishing validation, merging master, pushing and opening the draft PR."
+        },
+        {
+          "id": "agent:26650",
+          "role": "assistant",
+          "text": "The module-initializer engine change is open as draft PR #5663. I'm holding it as a draft until the pack re-run (Milestone 4) shows no regressions.\n\n**State of #5663:**\n- **Validation:** all 2,452 tests pass after merging current master, plus Clippy, fmt, the pack-drift and open-core checks.\n- **Expected outputs:** all 18 changed files are explained.\n- **The Rust timeout was already on master.** Master and the branch both timed out at the same file. After the master merge, which brought in upstream performance work, the test passes in 176 s.\n\n**Running now:** a re-run of every shipped public Python rule, plus the rules in pack PRs #97 and #100. It compares the PR tip against master at the same merge base, over each rule's fixture and its CodeQL upstream test. Module-level code is now analyzed, so new module-scope findings are expected. Each one gets read and judged as a real defect or a false positive under the amended gate.\n\nIf the re-run is clean, I'll mark #5663 ready and close out the plan. That means moving its decisions into the design chapter and posting the outcome on #5598."
+        },
+        {
+          "id": "agent:26784",
+          "role": "assistant",
+          "text": "The pack re-run for the module initializer is clean. 93 rules ran: none regressed, 91 are unchanged, and 2 improved. Those 2 improved rules account for 10 new findings, every one expected by CodeQL and a real defect:\n- **`insecure-protocol`:** 4 new findings, on lines that select SSLv2, SSLv3 and TLSv1. That is 4 of 28 expected rows, up from none, and the run stays inconclusive.\n- **`overly-permissive-file`:** 6 new findings, overly broad `chmod` and `open` modes. It now finds all 6 expected rows on a complete run, up from none.\n\nBoth rules improved because module-level code is now analyzed.\n\n**Closeout, in progress:**\n- The plan's durable decisions move into the design chapter on semantic procedures.\n- The plan file and its open-core row get deleted.\n- Master is merged and checked again.\n- The outcome gets posted on #5598.\n\nPR #5663 stays a draft until I've reviewed the design-chapter text. Then I'll mark it ready for the merge queue."
+        },
+        {
+          "id": "agent:26865",
+          "role": "assistant",
+          "text": "The closeout is pushed (f086c143c1) and the retrospective is posted on #5598. I'll review the new design-chapter section before marking #5663 ready."
+        },
+        {
+          "id": "agent:26906",
+          "role": "assistant",
+          "text": "PR #5663 is ready and in the merge queue. Python module bodies now lower as `<file>` initializer procedures, and plan #5598 is closed out.\n\n**What the change does:**\n- **Module-level code is analyzed.** Calls written at the top of a Python file now have an enclosing procedure. Receiver proofs, call bindings, flow and taint all run on them. A module-level `os.system(sys.argv[1])` is now a complete, proven finding.\n- **Class bodies stay unowned.** A procedure owns its span minus the holes its language declares, so a call in a class body still has no procedure, and it doesn't wrongly fall back to the file.\n- **Cost:** about 6% more analysis work on real projects, with the budget unchanged and no new exhaustion. On CodeQL's module-heavy tests the increase was 48%.\n- **Shipped rules:** none regressed. 10 new true positives appeared in `insecure-protocol` and `overly-permissive-file`, all expected by CodeQL.\n- **Durable decisions** are in `docs/src/content/docs/design/dataflow-engine.md`, in a new section called \"Module initializers and source ownership\". The plan file was deleted, and the retrospective is on #5598.\n\n**One thing I did without asking first:** my last command also removed the `agent-in-progress` label from #4652. No lane is working on it now, because its NoSQL content is deferred to v0.13.1, and dropping the label when standing down matches the repo's coordination rule. #4652 is still assigned to me. Say if you want the label back.\n\n**Still open:**\n- **Pack PRs waiting for review:** #97 (uninitialized-local) and #100 (call keyword rules).\n- **Engine issues blocking the remaining call-argument rules:**\n  - #5601: filter rows by whether the same file has a matching import, for the mox exclusion;\n  - #5602: attribute incomplete call bindings to their call sites;\n  - per-target bindings for joined receivers such as `e.spam(0)`.\n- **Other held-back rules:** bad-tag-filter, redos, and the three return-value rules from #4649.\n- **Small:** #5403, the policy reference documents transform ports that the compiler refuses."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "assistant_text_tail": "3 is ready and in the merge queue. Python module bodies now lower as `<file>` initializer procedures, and plan #5598 is closed out.\n\n**What the change does:**\n- **Module-level code is analyzed.** Calls written at the top of a Python file now have an enclosing procedure. Receiver proofs, call bindings, flow and taint all run on them. A module-level `os.system(sys.argv[1])` is now a complete, proven finding.\n- **Class bodies stay unowned.** A procedure owns its span minus the holes its language declares, so a call in a class body still has no procedure, and it doesn't wrongly fall back to the file.\n- **Cost:** about 6% more analysis work on real projects, with the budget unchanged and no new exhaustion. On CodeQL's module-heavy tests the increase was 48%.\n- **Shipped rules:** none regressed. 10 new true positives appeared in `insecure-protocol` and `overly-permissive-file`, all expected by CodeQL.\n- **Durable decisions** are in `docs/src/content/docs/design/dataflow-engine.md`, in a new section called \"Module initializers and source ownership\". The plan file was deleted, and the retrospective is on #5598.\n\n**One thing I did without asking first:** my last command also removed the `agent-in-progress` label from #4652. No lane is working on it now, because its NoSQL content is deferred to v0.13.1, and dropping the label when standing down matches the repo's coordination rule. #4652 is still assigned to me. Say if you want the label back.\n\n**Still open:**\n- **Pack PRs waiting for review:** #97 (uninitialized-local) and #100 (call keyword rules).\n- **Engine issues blocking the remaining call-argument rules:**\n  - #5601: filter rows by whether the same file has a matching import, for the mox exclusion;\n  - #5602: attribute incomplete call bindings to their call sites;\n  - per-target bindings for joined receivers such as `e.spam(0)`.\n- **Other held-back rules:** bad-tag-filter, redos, and the three return-value rules from #4649.\n- **Small:** #5403, the policy reference documents transform ports that the compiler refuses.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 25326,
+    "input_rationale": "The requested work (module initializers, PR #5663 in the merge queue, plan closed) is done. The 'Still open' list is a backlog of PRs awaiting review by others and engine issues the agent tracks; the label removal on #4652 is reported with a casual 'Say if you want the label back', not a request.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

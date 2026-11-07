@@ -903,6 +903,10 @@ impl DashboardContext {
                             if let Some(draft) = self.composer_drafts.get(&session_id) { chat.with_draft(draft.text.clone()) } else { chat }
                         } else { chat };
                         let mut chat = chat.open();
+                        super::drains::apply_policy_config_key(
+                            &mut chat,
+                            &self.runtime_sessions,
+                        );
                         if let Some(composer) = composer { chat.adopt_live_composer(composer); }
                         // Only a newly opened chat may receive a locator jump. A warm
                         // chat retains the reader's current position.

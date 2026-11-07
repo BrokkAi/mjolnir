@@ -1,0 +1,127 @@
+{
+  "id": "L3007",
+  "title": "10325-slice1a-delete-paths-and-tests",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "0ed1b27248a6a27f76b54ac40914acc0",
+    "session_title": "10325-slice1a-delete-paths-and-tests",
+    "reply_position": 550,
+    "captured_at": "2026-11-06T19:31:59.400Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:25",
+          "role": "assistant",
+          "text": "I'll start with the previous report and the last commit."
+        },
+        {
+          "id": "agent:73",
+          "role": "assistant",
+          "text": "I'm auditing every DELETE and UPDATE that the promotion predicate reads, before wiring the hook into them. The core crate's GC delete can't call a store function, so I'm checking how to route it."
+        },
+        {
+          "id": "agent:175",
+          "role": "assistant",
+          "text": "Status: the hook now sits in every blob-row writer I found. Next I'm reading the existing tests and the sole-writer guard before writing the step 5 and step 6 tests."
+        },
+        {
+          "id": "agent:232",
+          "role": "assistant",
+          "text": "Status: I'm checking how the selected views are populated, so the stale-generation test can set up an older state generation honestly."
+        },
+        {
+          "id": "agent:307",
+          "role": "assistant",
+          "text": "Status: three lifecycle tests are written. I'm now adding the candidate-class matrix test and the extended writer guard, then I'll build once."
+        },
+        {
+          "id": "agent:353",
+          "role": "assistant",
+          "text": "Seven of eight pass. The raw blob delete in the lifecycle test needs the `CascadeDelete` guard that production deletes use, so I'm fixing the test."
+        },
+        {
+          "id": "agent:472",
+          "role": "assistant",
+          "text": "Pins pass and no scan of the name rows remains. Now the tools tests and clippy."
+        },
+        {
+          "id": "agent:490",
+          "role": "assistant",
+          "text": "That wasn't needed; the background job will notify me. I'm waiting for it to finish."
+        },
+        {
+          "id": "agent:521",
+          "role": "assistant",
+          "text": "Clippy passes. I rewrote a test helper, so I'm re-running the definition-inventory tests, the core GC tests and the schema check."
+        },
+        {
+          "id": "agent:550",
+          "role": "assistant",
+          "text": "Steps 5 and 6 and the blob-delete hook are done, and the validation you listed passes. Nothing is committed, since I made no Git writes. The handback is delivered; the full report is at `/tmp/10325-slice1a-6.md`.\n\n- **Hook:**\n  - The reconcile function moved to a new core module, `crates/bifrost-core/src/definition_inventory.rs`, because the periodic GC is in core and cannot call store code. The owner function in store remains the only other writer.\n  - It now runs inside the deleting or publishing transaction at the batch loop, `register_blobs`, store `gc_with`, core GC, the capsule-repair delete, and the test-support incomplete-blob helper.\n  - The GC and repair predicates already skip mounted blobs, so those calls cannot demote anything in practice; I did not test them. The `register_blobs` hook does demote, and that is tested.\n- **Needs your confirmation:** the pin plans showed every blob delete scanning the name rows through the foreign-key cascade, because no index led with `blob_id`. I added `idx_workspace_file_definition_names_blob` to the unreleased migration 0288, regenerated `current-schema.sql` and moved `CURRENT_SCHEMA_OBJECTS_SHA256`. No lever changed.\n- **Tests and guard:** the lifecycle, stale-generation, candidate-class matrix, remount and configured-variant tests are in. The writer guard now allows exactly two writers of `definition_inventory_state`. Two new pins cover the blob deletes under both statistics states.\n- **Open:** I did not check whether the new core file needs an open-core classification row."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "SERT has one writer and definition_inventory_state has exactly the two writer functions; every other UPDATE or INSERT of the column fails the guard.\n- Pin any new or changed SQL in planner_statistics::pinned_queries under both statistics states.\n\nDo not touch crates/bifrost-analysis publication (slice 1b), crates/bifrost-flow/src/typestate, or the read_keys.rs encodings; no levers. Validation, at nice 10 under eatmydata, after `source /tmp/9947-pyenv.sh`: `cargo nextest run --max-fail 100 -p brokk-bifrost-store --lib`; `-p brokk-bifrost-core --lib`; `cargo nextest run --max-fail 100 -p brokk-bifrost-tools --lib -E 'test(/relational_query|python_analyzer_store|plan/)'`; `cargo clippy -p brokk-bifrost-store -p brokk-bifrost-core -p brokk-bifrost-tools --all-targets -- -D warnings`; `rustfmt --edition 2024 --check` on the edited files. Do not use `cargo fmt`. If you cannot finish, stop at a point that compiles and list exactly what remains. Write the report to /tmp/10325-slice1a-6.md and keep the handback short.",
+    "assistant_text_tail": "Steps 5 and 6 and the blob-delete hook are done, and the validation you listed passes. Nothing is committed, since I made no Git writes. The handback is delivered; the full report is at `/tmp/10325-slice1a-6.md`.\n\n- **Hook:**\n  - The reconcile function moved to a new core module, `crates/bifrost-core/src/definition_inventory.rs`, because the periodic GC is in core and cannot call store code. The owner function in store remains the only other writer.\n  - It now runs inside the deleting or publishing transaction at the batch loop, `register_blobs`, store `gc_with`, core GC, the capsule-repair delete, and the test-support incomplete-blob helper.\n  - The GC and repair predicates already skip mounted blobs, so those calls cannot demote anything in practice; I did not test them. The `register_blobs` hook does demote, and that is tested.\n- **Needs your confirmation:** the pin plans showed every blob delete scanning the name rows through the foreign-key cascade, because no index led with `blob_id`. I added `idx_workspace_file_definition_names_blob` to the unreleased migration 0288, regenerated `current-schema.sql` and moved `CURRENT_SCHEMA_OBJECTS_SHA256`. No lever changed.\n- **Tests and guard:** the lifecycle, stale-generation, candidate-class matrix, remount and configured-variant tests are in. The writer guard now allows exactly two writers of `definition_inventory_state`. Two new pins cover the blob deletes under both statistics states.\n- **Open:** I did not check whether the new core file needs an open-core classification row.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      550
+    ],
+    "user_position": 21,
+    "mjolnir": "worker Jev still-open language classification",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "No user input is needed.",
+    "input_rationale": "Sub-agent finished slice 1a steps 5-6 and explicitly asks the parent to confirm an unrequested schema change (index in the unreleased migration, moved schema hash). It also lists an unchecked open-core classification row. Mild: it is a confirmation of already-made work rather than a stop.",
+    "label": "required_final",
+    "kind": "approval_gate",
+    "request_message_ids": [
+      "agent:550"
+    ]
+  },
+  "context": {
+    "after": []
+  }
+}

@@ -1,0 +1,297 @@
+{
+  "id": "L0204",
+  "title": "Still open report 4",
+  "category": "still-open-none",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "15906131551d5db54c0628d76878d5d1",
+    "session_title": "eval20 3528 dsm",
+    "reply_position": 247768,
+    "captured_at": "2026-09-21T17:27:58.435Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3528: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 18fa60ee98f92a8dca58ffbd3a5d949adb30ee19\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confi\n[... 1614 bytes omitted from the middle of this message ...]\nixed point with unproven/partial edges and open boundary rows:\n\n- mutual recursion: 3 unproven edges, 3 partial edges, 2 open boundary rows;\n- self-recursive carry/payload: 2 unproven edges, 2 partial edges, 1 open boundary row.\n\nThe v0.8.0 recursive additions make this material for recall: Bifrost reaches only 11/74 newly added positives overall. This slice accounts for 12 of the 63 new positive inconclusives and has a shared diagnostic shape across four frontends.\n\nThis follows the diagnostic work in #2838 / PR #2889. That work made the incompleteness visible and explicitly left recursion proof closure and SCC introspection for later. It also sits under the summary architecture in #2445 and the DataFlowBench decisiveness epic #2839. Exceptional-return state is tracked separately by #3100 and its language children.\n\n## Evidence\n\n- Frozen release: https://github.com/BrokkAi/dataflowbench/releases/tag/v0.8.0\n- Bifrost build: `015ee1f76b049e1ebdbb2fe66fb0bcd01ba43b2f` (0.11.4)\n- Reports: `reports/bifrost-{csharp,javascript,python,typescript}-kernel.json`\n- Case IDs: `dfb-taint-<language>-<template>-{positive,negative}`\n\n## Scope and acceptance\n\n- First reproduce all 24 assertions on current master and retain exact before evidence; the release pin is evidence of the gap, not proof that master still has the same counts.\n- Explain the open boundary rows in terms of concrete SCC/call/access-path facts. Keep call identity, dataflow proof, and completeness distinct.\n- Close or soundly bound the recursive SCC so all 12 positives become `reached` and all 12 paired negatives become `not-reached`.\n- Preserve uncertainty when an edge or boundary is genuinely unresolved. A sink witness alone must not force `reached` while coverage is incomplete.\n- Add ordinary nonrecursive, depth-limited, mutually recursive, and unresolved-target near misses so the fix does not smear summaries across call contexts or objects.\n- Rerun the four affected DataFlowBench kernels and report both recall and negative-control precision before closing.\n\n"
+        },
+        {
+          "id": "agent:25",
+          "role": "assistant",
+          "text": "I'll start by verifying my checkout state and fetching the base commit."
+        },
+        {
+          "id": "agent:9587",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:9588",
+          "role": "assistant",
+          "text": "I'll pick up where the previous session left off — first checking the state of the release build and the working tree."
+        },
+        {
+          "id": "agent:21512",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:21513",
+          "role": "assistant",
+          "text": "I'll start by orienting myself in the current state of the checkout and the prepared evidence."
+        },
+        {
+          "id": "agent:52529",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:52530",
+          "role": "assistant",
+          "text": "I'll start by reviewing the current state of the checkout and the work already done."
+        },
+        {
+          "id": "agent:79993",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:79994",
+          "role": "assistant",
+          "text": "I'll start by reading the key routed guidance and understanding the current state of the work."
+        },
+        {
+          "id": "agent:99654",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:99655",
+          "role": "assistant",
+          "text": "I'll start by verifying the repository state and reading the routed guidance before touching code."
+        },
+        {
+          "id": "agent:99736",
+          "role": "assistant",
+          "text": "State confirmed. Let me read the routed guidance and re-verify the probe instrumentation."
+        },
+        {
+          "id": "agent:110359",
+          "role": "assistant",
+          "text": "Let me check the consumers of the marker and verify probe evidence about abort paths."
+        },
+        {
+          "id": "agent:127203",
+          "role": "assistant",
+          "text": "Now let me check whether adapter semantics are persisted (epoch/store implications) before choosing the fix shape."
+        },
+        {
+          "id": "agent:134937",
+          "role": "assistant",
+          "text": "Now let me implement the shared helper in the CFG builder."
+        },
+        {
+          "id": "agent:134994",
+          "role": "assistant",
+          "text": "Now the shared session helper in `lowering.rs`:"
+        },
+        {
+          "id": "agent:135016",
+          "role": "assistant",
+          "text": "Now wire the JS/TS adapter:"
+        },
+        {
+          "id": "agent:135215",
+          "role": "assistant",
+          "text": "Now the C# adapter:"
+        },
+        {
+          "id": "agent:135391",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:135475",
+          "role": "assistant",
+          "text": "I'll pick up from the handoff. First, let me verify the working tree state and the current edits."
+        },
+        {
+          "id": "agent:135543",
+          "role": "assistant",
+          "text": "Working tree matches the handoff. Now let me wire the Python `comparison_control` gap."
+        },
+        {
+          "id": "agent:159872",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:187189",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:187190",
+          "role": "assistant",
+          "text": "I'll start by checking the background test run and verifying the current state of the working tree."
+        },
+        {
+          "id": "agent:187310",
+          "role": "assistant",
+          "text": "Build still running. Let me review the current diff while it compiles."
+        },
+        {
+          "id": "agent:188274",
+          "role": "assistant",
+          "text": "The fix flips those 5 pre-existing rows, as expected. Now let me review the draft regression module fully before installing it."
+        },
+        {
+          "id": "agent:189384",
+          "role": "assistant",
+          "text": "Now let me update the manifest, register the module, and update the two issue_2838 test files."
+        },
+        {
+          "id": "agent:189412",
+          "role": "assistant",
+          "text": "Now the issue_2838 updates:"
+        },
+        {
+          "id": "agent:189523",
+          "role": "assistant",
+          "text": "Now the diagnostics test file:"
+        },
+        {
+          "id": "agent:192913",
+          "role": "assistant",
+          "text": "Now I'll align the unresolved-target rows with the probe shape:"
+        },
+        {
+          "id": "agent:193667",
+          "role": "assistant",
+          "text": "All 12 pass with the fix. Now let me capture the before-state failure of the new production-shaped rows at base."
+        },
+        {
+          "id": "agent:194882",
+          "role": "assistant",
+          "text": "Now the validation suites. Starting with the crate-level lib tests:"
+        },
+        {
+          "id": "agent:199387",
+          "role": "assistant",
+          "text": "Crate suites pass. Now the integration suites:"
+        },
+        {
+          "id": "agent:202762",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:202763",
+          "role": "assistant",
+          "text": "I'll pick up where the previous session left off. Let me first verify the state of the repository and then complete the remaining validation steps."
+        },
+        {
+          "id": "agent:202950",
+          "role": "assistant",
+          "text": "State matches the handoff. Let me review the working tree diff, then start the long-running checks."
+        },
+        {
+          "id": "agent:206572",
+          "role": "assistant",
+          "text": "Background processes get killed when the exec call returns, so I'll run long jobs in persistent sessions and poll them."
+        },
+        {
+          "id": "agent:208130",
+          "role": "assistant",
+          "text": "Clippy passed cleanly. Now the flaky-test rerun in isolation:"
+        },
+        {
+          "id": "agent:209521",
+          "role": "assistant",
+          "text": "All focused checks pass. Committing the work now:"
+        },
+        {
+          "id": "agent:214476",
+          "role": "assistant",
+          "text": "Now re-running the required suites against the committed tree:"
+        },
+        {
+          "id": "agent:229982",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:229983",
+          "role": "assistant",
+          "text": "I'll pick up where the handoff left off: polling the final validation session."
+        },
+        {
+          "id": "agent:247768",
+          "role": "assistant",
+          "text": "All validation is complete. Writing the report.\n\nFINAL REPORT\n\nBase commit (checked out detached, verified clean before work): `18fa60ee98f92a8dca58ffbd3a5d949adb30ee19`\nFinal commit on detached HEAD: `3517a70de3b893b312ac403baac018b63be65602` — \"Close recursive SCC fixed points by discharging unlowered implicit aborts (#3528)\"\n\n## 1. Confirmed cause with structured evidence\n\nThe three v0.8.0 recursive templates were not blocked by the dataflow proof; they were blocked by an **open exceptional-exit boundary row** that only becomes load-bearing inside a recursive SCC.\n\n- Base kernel reports (`/workspace/logs/before_reports`, `tool_build_identity = 18fa60ee…`) show the positives retaining the witness `Controlled input reaches the benchmark sink` while the run stays `inconclusive`, with exactly the diagnostics the issue quotes: `taint analysis is incomplete after reaching a fixed point: 3 unproven edge(s), 3 partial edge(s), and 2 open boundary row(s)` for `mutual-recursive-transform`, and `2 unproven edge(s), 2 partial edge(s), and 1 open boundary row(s)` for `recursive-carry` / `recursive-payload-transform`; the paired negatives carry the same incompleteness.\n- Structured probe evidence (env-gated coverage probe, removed before commit; `/workspace/probe/logs/before-fx/*.stderr`): every unproven/partial row is an `ExceptionalReturn` edge whose origin is a `CallSiteId`, rejected with `callee-exit evidence does not prove this Exceptional completion returns to its caller: unsupported exceptional_control_flow: implicit exceptions from runtime coercion or operator dispatch are not yet lowered`; both open boundary rows are `Semantic(Unsupported { capability: ExceptionalControlFlow })` at each procedure's exceptional exit point (`ProgramPointId(2)`), where the plan records `abort_user_code=false`.\n- Root cause: the C#, JavaScript, and Python adapters publish an `ExceptionalControlFlow` / `Unsupported` gap for a *represented* operator or comparison whose abort edge they do not lower (JS `+`, C# `+`/`checked`/`is`-pattern/subscript/cast, Python truth-test and comparison dispatch). That gap carried `SemanticGapDischarge::None`, so the exit-boundary classifiers (`semantic/icfg.rs::matched_return_gaps_are_implicit_abort_only`, `value_flow/plan.rs::exceptional_return_edge_is_abort_only` and `exceptional_exit_boundary_is_abort_only`) could not see that the omitted transfer only unwinds. Nonrecursive callees absorb this ubiquitous gap; a recursive call turns the callee's exceptional exit into a return edge inside the SCC, and the plan-wide `abort_paths_only_unwind()` requirement then never holds, so the fixed point is reached with the boundary still open. Rust already had the rule (`be1fb5f0b`), which is why Rust was not affected.\n- Soundness: the discharge is granted only when the throw cannot enter handler or cleanup user code, so a retained witness cannot force `reached` while coverage is incomplete; that is pinned by the new `try/catch` and unresolved-target rows.\n\n## 2. Changes and reasons\n\n- `crates/bifrost-analysis/src/analyzer/semantic/cfg.rs` (+31): new `ProcedureCfgBuilder::throw_completion_leaves_procedure(scope)`, an iterative scope-chain walk — `Function` returns true, `Disconnected | Handler | Cleanup` return false, `Yieldable | Breakable | Loop` are transparent, chain end returns false.\n- `crates/bifrost-analysis/src/analyzer/semantic/lowering.rs` (+38): new `ProcedureLoweringSession::add_unlowered_implicit_exception_gap(...)`, which publishes the same `ExceptionalControlFlow` / `Unsupported` gap but sets `NonRejoiningExceptionalExit` exactly when that walk answers true, because the exact lowering scope has no active handler or cleanup user code.\n- Call sites now pass the lowering scope and route through it: 6 in `csharp/semantic.rs`, 6 in `js_ts/semantic/control.rs`, 2 in `python/semantic.rs`. `rust/semantic.rs`'s `add_non_rejoining_exceptional_exit_gap` delegates to the same helper (behaviour preserved, gains the handler check), so all five front ends share one contract instead of two similar ones.\n- No extraction \n[... 6256 bytes omitted from the middle of this message ...]\nr default 96-way concurrency (12.1s at HEAD, 17.9s at base) and passes alone in 0.89s, which matches the failure class that profile already documents.\n\n## 6. Draft GitHub approach comment\n\nThe three recursive templates DataFlowBench v0.8.0 added stayed inconclusive in C#, JavaScript, Python, and TypeScript even though the positive witness was retained, and the blocker was an open exceptional-exit boundary row rather than the propagation proof. The adapters publish an `ExceptionalControlFlow` unsupported gap for a represented operator or comparison whose abort edge they do not lower (JavaScript `+`, C# `+`/`checked`/pattern/subscript/cast, Python truth tests and comparisons), and that gap carried no discharge, so the exit classifier could not tell that the omitted transfer only unwinds. Without recursion the same gap is absorbed; inside a recursive SCC it keeps the boundary open, so the fixed point is reached while the run cannot be decisive. The fix adds one shared lowering helper that marks that gap as a non-rejoining exceptional exit exactly when the exact lowering scope has no active handler or cleanup frame, decided by an iterative walk of the scope chain; a scope that can catch or clean up keeps the plain gap, so a retained witness can never force `reached` while coverage is incomplete. Rust's existing non-rejoining rule now delegates to the same helper, so all five front ends share one contract, and because the discharge is derived at lowering time and is not persisted, no language extraction epoch moved. On the v0.8.0 kernels all 12 positives now complete as `reached` and all 12 paired negatives as `not-reached`, with no other row changed and no negative false positives before or after; the four-language total goes from 77/140 to 89/140 positives reached. New `suite_bench_policy` rows pin the templates plus nonrecursive, depth-limited, call-context, unresolved-target, object-state, and `try/catch` near misses in every affected language, so the closure cannot pass by smearing summaries across call contexts."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "p,javascript,python,typescript}-kernel.json`\n- Case IDs: `dfb-taint-<language>-<template>-{positive,negative}`\n\n## Scope and acceptance\n\n- First reproduce all 24 assertions on current master and retain exact before evidence; the release pin is evidence of the gap, not proof that master still has the same counts.\n- Explain the open boundary rows in terms of concrete SCC/call/access-path facts. Keep call identity, dataflow proof, and completeness distinct.\n- Close or soundly bound the recursive SCC so all 12 positives become `reached` and all 12 paired negatives become `not-reached`.\n- Preserve uncertainty when an edge or boundary is genuinely unresolved. A sink witness alone must not force `reached` while coverage is incomplete.\n- Add ordinary nonrecursive, depth-limited, mutually recursive, and unresolved-target near misses so the fix does not smear summaries across call contexts or objects.\n- Rerun the four affected DataFlowBench kernels and report both recall and negative-control precision before closing.\n\n",
+    "assistant_text_tail": "r default 96-way concurrency (12.1s at HEAD, 17.9s at base) and passes alone in 0.89s, which matches the failure class that profile already documents.\n\n## 6. Draft GitHub approach comment\n\nThe three recursive templates DataFlowBench v0.8.0 added stayed inconclusive in C#, JavaScript, Python, and TypeScript even though the positive witness was retained, and the blocker was an open exceptional-exit boundary row rather than the propagation proof. The adapters publish an `ExceptionalControlFlow` unsupported gap for a represented operator or comparison whose abort edge they do not lower (JavaScript `+`, C# `+`/`checked`/pattern/subscript/cast, Python truth tests and comparisons), and that gap carried no discharge, so the exit classifier could not tell that the omitted transfer only unwinds. Without recursion the same gap is absorbed; inside a recursive SCC it keeps the boundary open, so the fixed point is reached while the run cannot be decisive. The fix adds one shared lowering helper that marks that gap as a non-rejoining exceptional exit exactly when the exact lowering scope has no active handler or cleanup frame, decided by an iterative walk of the scope chain; a scope that can catch or clean up keeps the plain gap, so a retained witness can never force `reached` while coverage is incomplete. Rust's existing non-rejoining rule now delegates to the same helper, so all five front ends share one contract, and because the discharge is derived at lowering time and is not persisted, no language extraction epoch moved. On the v0.8.0 kernels all 12 positives now complete as `reached` and all 12 paired negatives as `not-reached`, with no other row changed and no negative false positives before or after; the four-language total goes from 77/140 to 89/140 positives reached. New `suite_bench_policy` rows pin the templates plus nonrecursive, depth-limited, call-context, unresolved-target, object-state, and `try/catch` near misses in every affected language, so the closure cannot pass by smearing summaries across call contexts.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "FINAL REPORT with fix and validation done. The match is incidental, and the report asks the judge for nothing.",
+    "label": "none",
+    "trigger": "still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-21T21:19:24.691Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

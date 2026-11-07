@@ -30,11 +30,6 @@
           "text": "my local mbx space used (physical=compressed) is about 50:70:4400 targets:actions:incremental, i think this is a bug? incremental is so large that it's crowding out the others which i think is not what we want"
         },
         {
-          "id": "user:140",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:150",
           "role": "user",
           "text": "bump"
@@ -55,31 +50,6 @@
           "text": "goals, descending order\n\n0. maximize usefulness of the space mbx is given\n1. least surprise\n3. minimize configuration complexity"
         },
         {
-          "id": "user:981",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:995",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:1083",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:1287",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:1350",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:1976",
           "role": "user",
           "text": "incremental: i figured 10% was already ambitious over existing hardcoded 8GB but if you think 20% is better given that the 8GB is frequently irrelevant then sure\nprotection: what are we protecting, is this even relevant\njdx: one way to find out! but he listens to data"
@@ -90,44 +60,9 @@
           "text": "10%/10GB wfm\nlet's take the opportunity to clean the fuck out of no-longer-relevant features like this protection\n\n3c3f7e292385dbe040e3c36857bd0a9e is working on adjacent permitting stuff, pls coordinate"
         },
         {
-          "id": "user:2287",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:2302",
           "role": "user",
           "text": "oh and we do want to fix that orphaned wt bug"
-        },
-        {
-          "id": "user:2317",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:2441",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:2544",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:2595",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:2885",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:2997",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "user:3370",
@@ -143,21 +78,6 @@
           "id": "user:3914",
           "role": "user",
           "text": "Then create a build with all our PRs merged including the other session's and install when t locally, then watch it for issues "
-        },
-        {
-          "id": "user:4237",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:4735",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:5519",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "user:6395",
