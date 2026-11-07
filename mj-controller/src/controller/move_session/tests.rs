@@ -2786,6 +2786,7 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
                     guardian_review_model: None,
                     codex_profile: None,
                     muse_auto_review: None,
+                    aws: None,
                     ..mj_core::config::HarnessProfile::new(kind, home.clone())
                 },
             );

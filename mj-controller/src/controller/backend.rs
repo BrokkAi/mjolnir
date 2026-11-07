@@ -1304,6 +1304,151 @@ pub(super) fn locator_after_provision_named(
     })
 }
 
+/// Make the instance require IMDSv2, the token-based form of the instance
+/// metadata service, which plain HTTP GETs (such as a server-side request
+/// forgery) cannot use. One rule for every instance Mjolnir adopts: a fresh
+/// launch, a Move destination recorded by an older daemon that never asked
+/// for it, or a `Created` destination found again after a crash. An instance
+/// that allows IMDSv1 is changed in place, because it was accepted and may
+/// already hold work; only a failure to change it fails the launch, and the
+/// caller's cleanup then removes the instance.
+///
+/// The requirement is met only when the instance reports `HttpTokens:
+/// required` and `State: applied`. Right after a launch or a change EC2
+/// reports the new value with state `pending`, while the old behavior may
+/// still be in effect, so the instance is not adopted until the state
+/// changes.
+pub(super) fn ensure_imdsv2(
+    profile: &str,
+    region: &str,
+    instance_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    ensure_imdsv2_until(
+        profile,
+        region,
+        instance_id,
+        executor,
+        AWS_SSH_READY_TIMEOUT,
+        Instant::now,
+        // The pauses add up to minutes; cancelling the provisioning must end
+        // the wait, not be noticed when it is over.
+        |pause| {
+            targets::sleep_unless_cancelled(pause, &|| executor.cancellation_requested());
+        },
+    )
+}
+
+pub(super) fn ensure_imdsv2_until(
+    profile: &str,
+    region: &str,
+    instance_id: &str,
+    executor: &impl CommandExecutor,
+    timeout: Duration,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+) -> Result<()> {
+    let global = |tail: &[&str]| -> Vec<String> {
+        ["--profile", profile, "--region", region, "ec2"]
+            .into_iter()
+            .chain(tail.iter().copied())
+            .map(str::to_owned)
+            .collect()
+    };
+    // (HttpTokens, State) as the instance reports them.
+    let options = || -> Result<(String, String)> {
+        let output = execute_checked(
+            executor,
+            CommandSpec::new(
+                "aws",
+                global(&[
+                    "describe-instances",
+                    "--instance-ids",
+                    instance_id,
+                    "--query",
+                    "Reservations[0].Instances[0].MetadataOptions",
+                    "--output",
+                    "json",
+                ]),
+            )
+            .purpose("check EC2 instance metadata options")
+            .stage(ProvisionStage::Booting),
+        )?;
+        let options: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .context("parse EC2 instance metadata options")?;
+        let field = |name: &str| {
+            options
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("missing")
+                .to_owned()
+        };
+        Ok((field("HttpTokens"), field("State")))
+    };
+    let (mut tokens, mut state) = options()?;
+    if tokens != "required" {
+        execute_checked(
+            executor,
+            CommandSpec::new(
+                "aws",
+                global(&[
+                    "modify-instance-metadata-options",
+                    "--instance-id",
+                    instance_id,
+                    "--http-tokens",
+                    "required",
+                    "--output",
+                    "json",
+                ]),
+            )
+            .purpose("require IMDSv2 on EC2 instance")
+            .stage(ProvisionStage::Booting),
+        )
+        .with_context(|| {
+            format!(
+                "EC2 instance {instance_id} allows IMDSv1 and Mjolnir could not require IMDSv2 on it; the instance profile's credentials would be readable with a plain HTTP GET"
+            )
+        })?;
+        (tokens, state) = options()?;
+    }
+    // The same deadline and first pause as the wait for SSH on a new
+    // instance, with the pause doubling: a change that is slow to apply is
+    // not polled at a fixed rate, and a state that never changes is bounded
+    // by the launch's own deadline. Cancelling the operation ends the wait.
+    let started = now();
+    let mut pause = AWS_SSH_READY_RETRY_DELAY;
+    loop {
+        ensure!(
+            tokens == "required",
+            "EC2 instance {instance_id} reports HttpTokens {tokens} after Mjolnir required IMDSv2 on it"
+        );
+        match state.as_str() {
+            "applied" => return Ok(()),
+            "pending" => {}
+            other => bail!(
+                "EC2 instance {instance_id} reports instance metadata state {other} instead of applied"
+            ),
+        }
+        ensure!(
+            !executor.cancellation_requested(),
+            "cancelled while waiting for IMDSv2 to apply on the new instance"
+        );
+        let elapsed = now().duration_since(started);
+        ensure!(
+            elapsed < timeout,
+            "IMDSv2 was still pending on EC2 instance {instance_id} after {}s, so the instance was not adopted",
+            timeout.as_secs()
+        );
+        sleep(pause.min(timeout - elapsed));
+        pause *= 2;
+        ensure!(
+            !executor.cancellation_requested(),
+            "cancelled while waiting for IMDSv2 to apply on the new instance"
+        );
+        (tokens, state) = options()?;
+    }
+}
+
 /// Resolve a created instance. Callers persist its ID before these long waits.
 pub(super) fn ec2_locator_after_launch(
     canonical: &TargetTemplate,
@@ -1342,6 +1487,8 @@ pub(super) fn ec2_locator_after_launch(
         .purpose("wait for EC2 session instance to run")
         .stage(ProvisionStage::Booting),
     )?;
+    // Before anything uses the instance, whichever path adopted it.
+    ensure_imdsv2(&profile, region, &instance_id, executor)?;
     let field = match address_source {
         AwsAddressSource::PublicDns => "PublicDnsName",
         AwsAddressSource::PublicIp => "PublicIpAddress",

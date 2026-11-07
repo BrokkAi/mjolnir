@@ -2589,6 +2589,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             ..mj_core::config::HarnessProfile::new(
                 kind,
                 directory.path().join(format!("{}-home", kind.id())),
@@ -2674,6 +2675,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             ..mj_core::config::HarnessProfile::new(
                 kind,
                 directory.path().join(format!("{}-home", kind.id())),
@@ -2766,6 +2768,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        aws: None,
     }
 }
 
@@ -3069,6 +3072,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        aws: None,
     }
 }
 
@@ -3425,6 +3429,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
 
@@ -3779,6 +3784,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        aws: None,
     }
 }
 
@@ -5343,6 +5349,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
 
@@ -5500,6 +5507,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };
         let canonical = profile.authentication_marker();
@@ -5650,6 +5658,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };
         let marker = profile.authentication_marker();
@@ -6244,4 +6253,81 @@ fn installing_a_local_stage_links_the_login_and_never_writes_through_an_earlier_
         std::fs::read_to_string(&profile_login).unwrap(),
         "profile login"
     );
+}
+
+#[test]
+fn refreshing_profile_configuration_clears_every_aws_file_including_the_scope_record() {
+    let executor = SshHostExecutor::default();
+    install::clear_profile_configuration(
+        &executor,
+        &targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: "c".repeat(64),
+            workspace_storage: Default::default(),
+        },
+        "0123456789abcdef0123456789abcdef",
+        "/home/agent/.codex",
+        HarnessKind::Codex,
+    )
+    .unwrap();
+    let commands = executor.commands.borrow();
+    let script = commands
+        .last()
+        .unwrap()
+        .args
+        .iter()
+        .find(|argument| argument.contains("rm -rf"))
+        .expect("the removal script runs");
+    for name in mj_core::aws_credentials::FILES {
+        assert!(script.contains(name), "{name} is not cleared: {script}");
+    }
+}
+
+#[test]
+fn launching_where_the_role_cannot_apply_announces_why() {
+    let home = tempfile::tempdir().unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let mut profile = mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path());
+    profile
+        .environment
+        .insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
+    profile.aws = Some(mj_core::config::AwsRoleConfig {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        session_policy: None,
+        session_policy_arns: Vec::new(),
+        duration_seconds: None,
+        source_identity: false,
+    });
+    let mut config = mj_core::config::Config::default();
+    config.profiles.insert("bedrock".into(), profile);
+    config.targets.insert(
+        "localhost".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    let mut session = crate::controller::test_support::checkpoint_test_session(id);
+    session.last_profile = "bedrock".into();
+    session.target_template_id = "localhost".into();
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: format!("/home/me/.local/share/hel/workers/{id}").into(),
+    });
+    let controller = Controller {
+        config,
+        state: mj_core::state::State {
+            sessions: [(id.to_owned(), session)].into_iter().collect(),
+            ..Default::default()
+        },
+    };
+
+    let notice = controller.aws_role_notice(id).unwrap().unwrap();
+
+    assert!(
+        notice.contains("[profiles.bedrock.aws] has no effect on this session"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("raw local sessions read the host's own AWS files"),
+        "{notice}"
+    );
+    // Nothing is minted or synced for a session the role cannot apply to.
+    assert!(controller.aws_credential_source(id).unwrap().is_none());
 }
