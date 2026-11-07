@@ -28,6 +28,12 @@ impl HostState {
                     let _ = reply.send(None);
                     return false;
                 }
+                // Reviews that recovery did not restore are missing from the
+                // maps, so "no review" cannot be answered truthfully.
+                HostEvent::HasOpenReview { reply, .. } => {
+                    let _ = reply.send(Err(reason.clone()));
+                    return false;
+                }
                 event => return Box::pin(self.handle_without_startup_failure(event)).await,
             }
         }

@@ -59,8 +59,9 @@ pub(super) enum HostEvent {
         step: ReviewStep,
     },
     /// Whether the session has a review open: being prepared, being opened,
-    /// or running. The verdict is saved before the review closes, so a review
-    /// that is gone has either delivered its verdict or never produced one.
+    /// or running. The verdict is queued for delivery before the review
+    /// closes, so a review that is gone has either queued its verdict or never
+    /// produced one.
     HasOpenReview {
         session_id: String,
         reply: oneshot::Sender<Result<bool, String>>,
