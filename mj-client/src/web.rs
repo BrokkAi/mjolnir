@@ -39,6 +39,12 @@ pub struct BrowserTranscriptEntry {
     /// When a finished tool call ended. `None` for every other entry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_ended_at_ms: Option<i64>,
+    /// A user-role prompt that Mjolnir submitted itself, such as a retry, an
+    /// automatic continuation or another session's message. The server
+    /// decides this once (`ChatEntry::is_user_authored`); the viewer must not
+    /// repeat the rules.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub generated: bool,
     pub lines: Vec<String>,
     /// Mailbox events split into a header and report continuation lines, from
     /// the same bounded text as `lines`. Each event is a separate disclosure.

@@ -156,6 +156,14 @@ fn generated_prompts_neither_renew_allowance_nor_grant_authorization() {
     completed(&mut relay, "auto-continue-first");
     submit_relay(&mut relay, "review-forward-123", prompt("Fix this finding"));
     completed(&mut relay, "review-forward-123");
+    // Hard-won: 8b08e8bc1: handback reminders and peer-session messages counted as user authorization
+    for id in [
+        mj_core::subagent::handback_reminder_command_id(7),
+        mj_core::continuation::GeneratedPrompt::SessionMessageTurn.command_id("peer-1"),
+    ] {
+        submit_relay(&mut relay, &id, prompt("Please also update the docs"));
+        completed(&mut relay, &id);
+    }
     assert_eq!(relay.snapshot.continuation.attempts, 1);
     assert_eq!(
         relay.snapshot.continuation.user_command_id.as_deref(),

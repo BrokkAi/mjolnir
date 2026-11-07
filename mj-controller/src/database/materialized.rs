@@ -198,7 +198,7 @@ pub(super) fn materialized_user_message(
     oldest_first: bool,
 ) -> Result<Option<(u64, String)>> {
     let mut statement = connection.prepare(if oldest_first {
-        "SELECT position, body_json
+        "SELECT position, body_json, stable_id
          FROM materialized_transcript_items
          WHERE session_id = ?1
            AND json_extract(
@@ -211,7 +211,7 @@ pub(super) fn materialized_user_message(
            ) = 'user'
          ORDER BY position, stable_id"
     } else {
-        "SELECT position, body_json
+        "SELECT position, body_json, stable_id
          FROM materialized_transcript_items
          WHERE session_id = ?1
            AND json_extract(
@@ -225,17 +225,26 @@ pub(super) fn materialized_user_message(
          ORDER BY position DESC, stable_id DESC"
     })?;
     let rows = statement.query_map([session_id], |row| {
-        Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, u64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     })?;
     for row in rows {
-        let (position, body_json) = row?;
+        let (position, body_json, stable_id) = row?;
         let body: TranscriptBody = serde_json::from_str(&body_json)
             .with_context(|| format!("parse materialized user message for session {session_id}"))?;
         let TranscriptBody::User { content } = body else {
             continue;
         };
         let text = mj_core::transcript::materialized_content_text(&content);
-        if !text.trim().is_empty() {
+        // The first message names the session, whoever wrote it (a child's
+        // spawn brief is its first prompt). The last one is the person's.
+        if !text.trim().is_empty()
+            && (oldest_first
+                || mj_core::continuation::is_user_authored_message(Some(&stable_id), &text))
+        {
             return Ok(Some((position, text)));
         }
     }

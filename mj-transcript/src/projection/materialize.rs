@@ -188,7 +188,7 @@ pub fn materialized_session_from_entries(
     let started_at_ms = entries
         .iter()
         .rev()
-        .find(|entry| entry.role == ChatRole::User)
+        .find(|entry| entry.is_user_authored())
         .and_then(|entry| entry.recorded_at_ms)
         .unwrap_or_default();
     let applied_event_digest = if latest_seq == 0 {

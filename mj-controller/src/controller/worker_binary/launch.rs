@@ -649,7 +649,7 @@ impl Controller {
         {
             launch.initial_commands = crate::database::load_startup_group(
                 session_id,
-                &format!("subagent-spawn-{}", child.request_key),
+                &mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&child.request_key),
             )?
             .into_iter()
             .map(|step| {

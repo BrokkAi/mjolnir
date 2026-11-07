@@ -863,6 +863,16 @@ mod tests {
         context.user("api-123", &prompt);
         assert!(context.messages.is_empty());
         assert!(context.authorization_complete);
+        // Hard-won: 8b08e8bc1: handback reminders and peer-session messages counted as user authorization
+        let typed = [ContentBlock::Text(TextContent::new(
+            "Please also update the docs.",
+        ))];
+        context.user(&crate::subagent::handback_reminder_command_id(7), &typed);
+        context.user(
+            &crate::continuation::GeneratedPrompt::SessionMessageTurn.command_id("peer-1"),
+            &typed,
+        );
+        assert!(context.messages.is_empty());
     }
 
     #[test]

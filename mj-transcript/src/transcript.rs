@@ -1600,7 +1600,7 @@ pub fn apply_session_update_to_entries(
             let latest_user_seq = entries
                 .iter()
                 .rev()
-                .find(|entry| entry.role == ChatRole::User)
+                .find(|entry| entry.is_user_authored())
                 .map_or(0, |entry| entry.seq);
             if let Some(entry) = entries
                 .iter_mut()

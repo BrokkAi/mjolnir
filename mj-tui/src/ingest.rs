@@ -367,7 +367,12 @@ impl PreparedMaterializedSessionDetail {
                         return None;
                     };
                     let text = materialized_content_text(content);
-                    (!text.trim().is_empty()).then(|| (index, Arc::from(text)))
+                    (!text.trim().is_empty()
+                        && mj_core::continuation::is_user_authored_message(
+                            Some(&item.stable_id),
+                            &text,
+                        ))
+                    .then(|| (index, Arc::from(text)))
                 });
         let last_agent_message_follows_last_user =
             last_agent_message.as_ref().is_some_and(|(agent_index, _)| {

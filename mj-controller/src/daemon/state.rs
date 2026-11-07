@@ -1143,7 +1143,12 @@ impl RuntimeState {
                     .is_some_and(|child| {
                         child.kind != mj_core::subagent::SubagentKind::Reviewer
                             && step.group_id.as_deref()
-                                == Some(format!("subagent-spawn-{}", child.request_key).as_str())
+                                == Some(
+                                    mj_core::continuation::GeneratedPrompt::subagent_spawn_id(
+                                        &child.request_key,
+                                    )
+                                    .as_str(),
+                                )
                     });
             let ready = if !delivers || worker_initial {
                 None
