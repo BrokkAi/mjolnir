@@ -1040,10 +1040,26 @@ fn note_session_refusal(
     output: &CommandOutput,
 ) -> Option<(SshRefusal, bool)> {
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // `scp` exits with a status of its own (normally 1) while relaying the
+    // refusal of the `ssh` it runs, and carries no start marker, so only that
+    // stderr can tell. Copying again is safe, as with Move's rsync.
+    let is_scp = session.command().program == "scp";
     let Some(lease) = session.lease() else {
-        return ssh_refusal(output.status, &stderr).map(|refusal| (refusal, false));
+        let refusal = if is_scp {
+            ssh_refusal_in_stderr(&stderr)
+        } else {
+            ssh_refusal(output.status, &stderr)
+        };
+        return refusal.map(|refusal| (refusal, false));
     };
-    let refusal = lease.gate().refusal(output.status, &stderr)?;
+    let refusal = if is_scp {
+        if output.status == 0 {
+            return None;
+        }
+        ssh_refusal_in_stderr(&stderr)?
+    } else {
+        lease.gate().refusal(output.status, &stderr)?
+    };
     Some((refusal, lease.note_refusal(refusal)))
 }
 
@@ -3340,6 +3356,51 @@ mod executor_tests {
             );
             assert_eq!(fake.attempts(), 3, "cancellable: {cancellable}");
         }
+        set_ssh_connection_sharing_for_test(None);
+    }
+
+    /// `scp` exits 1, not ssh's 255, while relaying the refusal of the `ssh` it
+    /// runs; the copy is still retried instead of failing.
+    // Hard-won: af9848339: scp's own exit status hid an SSH session refusal from the retry
+    #[test]
+    fn an_scp_that_relays_a_refused_session_is_retried() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fast_retries = FastRetries::new();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let directory = tempfile::tempdir().unwrap();
+        let script = r#"#!/bin/sh
+dir=$(dirname "$0")
+count=$(cat "$dir/attempts" 2>/dev/null || echo 0)
+echo $((count + 1)) > "$dir/attempts"
+if [ "$count" -eq 0 ]; then
+  echo 'mux_client_request_session: session request failed: Session open refused by peer' >&2
+  echo 'scp: Connection closed' >&2
+  exit 1
+fi
+exit 0
+"#;
+        let fake = directory.path().join("scp");
+        std::fs::write(&fake, script).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ssh = SshTarget {
+            destination: "fake-host".to_owned(),
+            ssh_args: Vec::new(),
+        };
+        let mut command = ssh::scp_download(&ssh, "remote-file", "local-file");
+        let path = std::env::var("PATH").unwrap_or_default();
+        command.env.insert(
+            "PATH".to_owned(),
+            format!("{}:{path}", directory.path().display()),
+        );
+
+        let output = ProcessExecutor.execute(&command).expect("scp runs");
+
+        assert_eq!(output.status, 0);
+        let attempts = std::fs::read_to_string(directory.path().join("attempts")).unwrap();
+        assert_eq!(attempts.trim(), "2");
         set_ssh_connection_sharing_for_test(None);
     }
 
