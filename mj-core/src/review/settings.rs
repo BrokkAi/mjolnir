@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 pub enum ReviewModelFamily {
     Terra,
     Sol,
-    Haiku,
-    Flash,
+    Sonnet,
+    DeepSeek,
     Grok,
     Kimi,
 }
@@ -20,12 +20,10 @@ impl ReviewModelFamily {
             Some(Self::Terra)
         } else if model.starts_with("gpt-") && model_matches_family(model, "sol") {
             Some(Self::Sol)
-        } else if model.starts_with("claude-") && model.contains("haiku") {
-            Some(Self::Haiku)
-        } else if (model.starts_with("deepseek-") && model_matches_family(model, "flash"))
-            || matches!(model, "dsf" | "dsfmax")
-        {
-            Some(Self::Flash)
+        } else if model.starts_with("claude-") && model_matches_family(model, "sonnet") {
+            Some(Self::Sonnet)
+        } else if model.starts_with("deepseek-") && model_matches_family(model, "pro") {
+            Some(Self::DeepSeek)
         } else if model.starts_with("grok-")
             && !["non-reasoning", "multi-agent", "build"]
                 .iter()

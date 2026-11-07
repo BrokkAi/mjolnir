@@ -339,7 +339,7 @@ precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
 [review]
 [[review.reviewers]]
 model = "gpt-6.10-terra"
-effort = "xhigh"
+effort = "high"
 
 [[review.reviewers]]
 model = "gpt-6.1-sol"
@@ -350,7 +350,7 @@ effort = "medium"
 | --- | --- | --- | --- | --- |
 | `reviewers` | array of tables | no | empty | Up to three choices, each with a nonempty `model` and optional `effort`. Each choice is served by an enabled profile offering that model and effort. |
 
-An empty reviewer list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers from enabled profiles' advertised models. The first available combination wins: Terra, Sol, and Haiku; Terra and Sol; three Haiku; two DeepSeek Flash; Grok; or Kimi K3.1 or newer. Within a family, the newest advertised version wins. If no match exists, choose reviewers in **Settings → Code Review**. Reviewers run as hidden child sessions with independent conversations. See [Code review](/turn-review/).
+An empty reviewer list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers from enabled profiles' advertised models. The first available combination wins: Terra at high effort plus Sol at medium effort; two Sonnet reviewers at high effort; two DeepSeek Pro reviewers at high effort; two Grok reviewers at high effort; or two Kimi reviewers (K3.1 or newer) at high effort. When Terra and Sol are available, Anthropic models are not added. Within a family, subscription offerings win over usage-priced offerings, then models offered by more enabled profiles, then the newest advertised version. If no match exists, choose reviewers in **Settings → Code Review**. Reviewers run as hidden child sessions with independent conversations. See [Code review](/turn-review/).
 
 Push review is available for Claude Code, Codex, and DSH primaries, the harnesses that receive Mjolnir delegation tools. They receive `request_review` and a pre-push gate; other harnesses run without review and receive a transcript notice.
 

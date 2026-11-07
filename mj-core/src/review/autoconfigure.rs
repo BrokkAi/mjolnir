@@ -143,20 +143,13 @@ pub fn autoconfigure(
         let index = match family {
             ReviewModelFamily::Terra => 0,
             ReviewModelFamily::Sol => 1,
-            ReviewModelFamily::Haiku => 2,
-            ReviewModelFamily::Flash => 3,
+            ReviewModelFamily::Sonnet => 2,
+            ReviewModelFamily::DeepSeek => 3,
             ReviewModelFamily::Grok => 4,
             ReviewModelFamily::Kimi => 5,
         };
         let current = &mut selected[index];
         let better = current.as_ref().is_none_or(|(old_offer, old)| {
-            // The plain Flash model is the general reviewer; max is a distinct
-            // variant, not a better candidate, so billing and profile counts
-            // never promote it.
-            let plain = |identity: &str| !identity.contains("max");
-            if index == 3 && plain(&id) != plain(old) {
-                return plain(&id);
-            }
             let subscribed = |offer: &ModelOffer| offer.subscription_profiles > 0;
             if subscribed(offer) != subscribed(old_offer) {
                 return subscribed(offer);
@@ -194,20 +187,13 @@ pub fn autoconfigure(
         }
     };
     let mut adjusted = Vec::new();
-    let reviewers = if selected[0].is_some() && selected[1].is_some() && selected[2].is_some() {
+    let reviewers = if selected[0].is_some() && selected[1].is_some() {
         vec![
-            choice(0, "xhigh", &mut adjusted),
-            choice(1, "medium", &mut adjusted),
-            choice(2, "high", &mut adjusted),
-        ]
-    } else if selected[0].is_some() && selected[1].is_some() {
-        vec![
-            choice(0, "xhigh", &mut adjusted),
+            choice(0, "high", &mut adjusted),
             choice(1, "medium", &mut adjusted),
         ]
     } else if selected[2].is_some() {
         vec![
-            choice(2, "high", &mut adjusted),
             choice(2, "high", &mut adjusted),
             choice(2, "high", &mut adjusted),
         ]
@@ -217,9 +203,15 @@ pub fn autoconfigure(
             choice(3, "high", &mut adjusted),
         ]
     } else if selected[4].is_some() {
-        vec![choice(4, "high", &mut adjusted)]
+        vec![
+            choice(4, "high", &mut adjusted),
+            choice(4, "high", &mut adjusted),
+        ]
     } else if selected[5].is_some() {
-        vec![choice(5, "high", &mut adjusted)]
+        vec![
+            choice(5, "high", &mut adjusted),
+            choice(5, "high", &mut adjusted),
+        ]
     } else {
         return None;
     };
@@ -252,8 +244,8 @@ mod tests {
     }
 
     #[test]
-    fn known_empty_haiku_efforts_use_harness_default_but_unknown_keeps_table_effort() {
-        let models = choices(&["claude-haiku-4.5"]);
+    fn known_empty_sonnet_efforts_use_harness_default_but_unknown_keeps_table_effort() {
+        let models = choices(&["claude-sonnet-4.5"]);
         let known = autoconfigure(&merged_model_offers(&models), |_| Some(Vec::new())).unwrap();
         let unknown = autoconfigure(&merged_model_offers(&models), |_| None).unwrap();
         assert!(known.reviewers.iter().all(|choice| choice.effort.is_none()));
@@ -270,17 +262,17 @@ mod tests {
         let models = choices(&["gpt-6-terra", "gpt-6-sol"]);
         let configured = autoconfigure(&merged_model_offers(&models), |model| {
             Some(if model.ends_with("terra") {
-                choices(&["low", "high", "max"])
+                choices(&["low", "max"])
             } else {
                 choices(&["high", "xhigh"])
             })
         })
         .unwrap();
-        assert_eq!(configured.reviewers[0].effort.as_deref(), Some("high"));
+        assert_eq!(configured.reviewers[0].effort.as_deref(), Some("low"));
         assert_eq!(configured.reviewers[1].effort.as_deref(), Some("high"));
         assert_eq!(configured.adjusted.len(), 2);
-        assert_eq!(configured.adjusted[0].requested, "xhigh");
-        assert_eq!(configured.adjusted[0].used.as_deref(), Some("high"));
+        assert_eq!(configured.adjusted[0].requested, "high");
+        assert_eq!(configured.adjusted[0].used.as_deref(), Some("low"));
         assert_eq!(configured.adjusted[1].requested, "medium");
         assert_eq!(configured.adjusted[1].used.as_deref(), Some("high"));
     }
@@ -297,36 +289,35 @@ mod tests {
                     "gpt-6-terra",
                     "gpt-6.10-terra",
                     "gpt-6.1-sol",
-                    "claude-haiku-4.5",
+                    "claude-sonnet-4.5",
                     "grok-4.6",
                 ],
-                &[
-                    ("gpt-6.10-terra", "xhigh"),
-                    ("gpt-6.1-sol", "medium"),
-                    ("claude-haiku-4.5", "high"),
-                ],
+                &[("gpt-6.10-terra", "high"), ("gpt-6.1-sol", "medium")],
             ),
             (
                 &["gpt-6-terra", "gpt-6-sol", "grok-4.6"],
-                &[("gpt-6-terra", "xhigh"), ("gpt-6-sol", "medium")],
+                &[("gpt-6-terra", "high"), ("gpt-6-sol", "medium")],
             ),
             (
-                &["claude-haiku-4.5", "deepseek-v3-flash"],
+                &["claude-sonnet-4.5", "deepseek-v4-pro"],
+                &[("claude-sonnet-4.5", "high"), ("claude-sonnet-4.5", "high")],
+            ),
+            (
                 &[
-                    ("claude-haiku-4.5", "high"),
-                    ("claude-haiku-4.5", "high"),
-                    ("claude-haiku-4.5", "high"),
+                    "deepseek-v4-pro",
+                    "deepseek-v4-flash",
+                    "deepseek-v4-flash-max",
                 ],
-            ),
-            (
-                &["deepseek-v3-flash", "deepseek-v4-flash-max"],
-                &[("deepseek-v3-flash", "high"), ("deepseek-v3-flash", "high")],
+                &[("deepseek-v4-pro", "high"), ("deepseek-v4-pro", "high")],
             ),
             (
                 &["grok-4.6", "kimi-k3.1", "grok-4.20-multi-agent-0309"],
-                &[("grok-4.6", "high")],
+                &[("grok-4.6", "high"), ("grok-4.6", "high")],
             ),
-            (&["kimi-k3.1", "kimi-k3.2"], &[("kimi-k3.2", "high")]),
+            (
+                &["kimi-k3.1", "kimi-k3.2"],
+                &[("kimi-k3.2", "high"), ("kimi-k3.2", "high")],
+            ),
             (&["unrelated-model", "kimi-k3"], &[]),
         ];
         for (ids, expected) in cases {
@@ -393,27 +384,26 @@ mod tests {
         ("gpt-5.6-terra", "gpt-5.6-terra"),
     ];
     const CLAUDE: &[(&str, &str)] = &[
-        ("haiku", "Haiku 4.5"),
-        ("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"),
+        ("sonnet", "Sonnet 4.5"),
+        ("claude-sonnet-4-5-20251001", "claude-sonnet-4-5-20251001"),
     ];
     const OPENROUTER: &[(&str, &str)] = &[
         ("openrouter/~openai/gpt-terra-latest", "GPT Terra (latest)"),
         ("openrouter/~openai/gpt-sol-latest", "GPT Sol (latest)"),
         (
-            "openrouter/~anthropic/claude-haiku-latest",
-            "Claude Haiku (latest)",
+            "openrouter/~anthropic/claude-sonnet-latest",
+            "Claude Sonnet (latest)",
         ),
-        ("openrouter/anthropic/claude-haiku-5.5", "Claude Haiku 5.5"),
+        (
+            "openrouter/anthropic/claude-sonnet-5.5",
+            "Claude Sonnet 5.5",
+        ),
         ("openrouter/openai/gpt-5.6-terra", "GPT 5.6 Terra"),
     ];
 
     #[test]
     fn subscription_models_beat_newer_latest_aliases_from_a_usage_priced_profile() {
-        let expected = expect(&[
-            ("gpt-6.1-terra", "xhigh"),
-            ("gpt-6.1-sol", "medium"),
-            ("haiku", "high"),
-        ]);
+        let expected = expect(&[("gpt-6.1-terra", "high"), ("gpt-6.1-sol", "medium")]);
         // The live catalog: four codex and six claude profiles, one OpenRouter profile.
         let mut profiles = vec![(true, OPENROUTER)];
         profiles.extend(std::iter::repeat_n((false, CODEX), 4));
@@ -422,7 +412,7 @@ mod tests {
         profiles.reverse();
         assert_eq!(pick_named(&profiles), expected);
         // One profile each ties the profile counts, so only the subscription
-        // tier keeps the newer `latest` aliases and Haiku 5.5 from winning.
+        // tier keeps the newer `latest` aliases and Sonnet 5.5 from winning.
         assert_eq!(
             pick_named(&[(true, OPENROUTER), (false, CODEX), (false, CLAUDE)]),
             expected
@@ -435,12 +425,12 @@ mod tests {
             pick_named(&[(
                 false,
                 &[
-                    ("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"),
-                    ("haiku", "Haiku 4.5"),
+                    ("claude-sonnet-4-5-20251001", "claude-sonnet-4-5-20251001"),
+                    ("sonnet", "Sonnet 4.5"),
                 ],
             )])[0]
                 .0,
-            "haiku"
+            "sonnet"
         );
     }
 
@@ -448,14 +438,10 @@ mod tests {
     fn usage_priced_models_are_used_when_no_subscription_offers_the_family() {
         assert_eq!(
             pick(&[
-                (false, &["gpt-6-terra", "gpt-6-sol"]),
-                (true, &["claude-haiku-4.5", "gpt-6.1-terra"]),
+                (false, &["grok-4.6"]),
+                (true, &["claude-sonnet-4.5", "gpt-6.1-terra"]),
             ]),
-            expect(&[
-                ("gpt-6-terra", "xhigh"),
-                ("gpt-6-sol", "medium"),
-                ("claude-haiku-4.5", "high"),
-            ])
+            expect(&[("claude-sonnet-4.5", "high"), ("claude-sonnet-4.5", "high")])
         );
     }
 
@@ -463,15 +449,11 @@ mod tests {
     fn more_offering_profiles_beat_a_newer_version_within_subscriptions() {
         assert_eq!(
             pick(&[
-                (false, &["gpt-6-terra", "gpt-6-sol", "claude-haiku-4.5"]),
-                (false, &["gpt-6-terra", "gpt-6.1-sol", "claude-haiku-4.5"]),
-                (false, &["gpt-6.1-terra", "gpt-6-sol", "claude-haiku-5"]),
+                (false, &["gpt-6-terra", "gpt-6-sol", "claude-sonnet-4.5"]),
+                (false, &["gpt-6-terra", "gpt-6.1-sol", "claude-sonnet-4.5"]),
+                (false, &["gpt-6.1-terra", "gpt-6-sol", "claude-sonnet-5"]),
             ]),
-            expect(&[
-                ("gpt-6-terra", "xhigh"),
-                ("gpt-6-sol", "medium"),
-                ("claude-haiku-4.5", "high"),
-            ])
+            expect(&[("gpt-6-terra", "high"), ("gpt-6-sol", "medium")])
         );
     }
 
@@ -482,7 +464,7 @@ mod tests {
                 (false, &["gpt-6-terra", "gpt-6.1-terra", "gpt-6-sol"]),
                 (false, &["gpt-6-terra", "gpt-6.1-terra", "gpt-6-sol"]),
             ]),
-            expect(&[("gpt-6.1-terra", "xhigh"), ("gpt-6-sol", "medium")])
+            expect(&[("gpt-6.1-terra", "high"), ("gpt-6-sol", "medium")])
         );
     }
 
@@ -497,27 +479,27 @@ mod tests {
                 (true, &["kimi-k3.2"]),
                 (true, &["kimi-k3.2"]),
             ]),
-            expect(&[("kimi-k3.1", "high")])
+            expect(&[("kimi-k3.1", "high"), ("kimi-k3.1", "high")])
         );
     }
 
     #[test]
-    fn plain_flash_beats_max_even_when_max_is_subscribed_or_more_offered() {
-        let flash = ("deepseek-v3-flash", "high");
+    fn flagship_pro_beats_flash_even_when_flash_is_subscribed_or_more_offered() {
+        let pro = ("deepseek-v4-pro", "high");
         for order in [false, true] {
-            // Only a usage-priced profile offers plain Flash; a subscription
-            // offers Max.
+            // Only a usage-priced profile offers Pro; a subscription
+            // offers Flash Max.
             let mut profiles: Vec<(bool, &[&str])> = vec![
-                (true, &["deepseek-v3-flash"]),
+                (true, &["deepseek-v4-pro"]),
                 (false, &["deepseek-v4-flash-max"]),
             ];
             if order {
                 profiles.reverse();
             }
-            assert_eq!(pick(&profiles), expect(&[flash, flash]), "billing {order}");
-            // Three profiles offer Max, one offers plain Flash.
+            assert_eq!(pick(&profiles), expect(&[pro, pro]), "billing {order}");
+            // Three profiles offer Flash Max, one offers Pro.
             let mut profiles: Vec<(bool, &[&str])> = vec![
-                (false, &["deepseek-v3-flash"]),
+                (false, &["deepseek-v4-pro"]),
                 (false, &["deepseek-v4-flash-max"]),
                 (false, &["deepseek-v4-flash-max"]),
                 (false, &["deepseek-v4-flash-max"]),
@@ -525,7 +507,7 @@ mod tests {
             if order {
                 profiles.reverse();
             }
-            assert_eq!(pick(&profiles), expect(&[flash, flash]), "count {order}");
+            assert_eq!(pick(&profiles), expect(&[pro, pro]), "count {order}");
         }
     }
 

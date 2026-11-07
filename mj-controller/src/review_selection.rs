@@ -546,8 +546,8 @@ mod tests {
     #[tokio::test]
     async fn legacy_auto_keeps_effort_offered_by_any_matching_profile() {
         let model = SessionConfigChoice {
-            value: "claude-haiku-4.5".into(),
-            name: "Haiku".into(),
+            value: "claude-sonnet-4.5".into(),
+            name: "Sonnet".into(),
             description: None,
         };
         let profile = |efforts: Vec<SessionConfigChoice>| ProfileConfig {
@@ -587,12 +587,12 @@ mod tests {
     #[tokio::test]
     async fn legacy_auto_known_empty_efforts_use_default_and_remain_persistable() {
         let model = SessionConfigChoice {
-            value: "claude-haiku-4.5".into(),
-            name: "Haiku".into(),
+            value: "claude-sonnet-4.5".into(),
+            name: "Sonnet".into(),
             description: None,
         };
         let available = vec![(
-            "haiku".into(),
+            "sonnet".into(),
             ProfileConfig {
                 model: Some(model.value.clone()),
                 models: vec![model],
@@ -608,14 +608,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(known.get("claude-haiku-4.5"), Some(&true));
+        assert_eq!(known.get("claude-sonnet-4.5"), Some(&true));
         assert!(
             configured
                 .reviewers
                 .iter()
                 .all(|choice| choice.effort.is_none())
         );
-        assert_eq!(configured.adjusted.len(), 3);
+        assert_eq!(configured.adjusted.len(), 2);
     }
 
     fn catalog_profile(models: &[&str]) -> ProfileConfig {
@@ -625,8 +625,8 @@ mod tests {
                 .iter()
                 .map(|value| SessionConfigChoice {
                     value: (*value).into(),
-                    name: if *value == "haiku" {
-                        "Haiku 4.5"
+                    name: if *value == "sonnet" {
+                        "Sonnet 4.5"
                     } else {
                         value
                     }
@@ -644,12 +644,12 @@ mod tests {
     fn live_catalog() -> Vec<(String, ProfileConfig)> {
         let codex =
             catalog_profile(&["gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-terra"]);
-        let claude = catalog_profile(&["haiku", "claude-haiku-4-5-20251001"]);
+        let claude = catalog_profile(&["sonnet", "claude-sonnet-4-5-20251001"]);
         let openrouter = catalog_profile(&[
             "openrouter/~openai/gpt-terra-latest",
             "openrouter/~openai/gpt-sol-latest",
-            "openrouter/~anthropic/claude-haiku-latest",
-            "openrouter/anthropic/claude-haiku-5.5",
+            "openrouter/~anthropic/claude-sonnet-latest",
+            "openrouter/anthropic/claude-sonnet-5.5",
             "openrouter/openai/gpt-5.6-terra",
         ]);
         let mut available = vec![("openrouter".to_owned(), openrouter)];
@@ -686,10 +686,7 @@ mod tests {
         assert!(blocked(&[]).is_empty());
         // Outside every drafted family: nothing to guess about.
         assert!(blocked(&["other"]).is_empty());
-        assert_eq!(
-            blocked(&["other", "claude3", "codex2"]),
-            ["codex2", "claude3"]
-        );
+        assert_eq!(blocked(&["other", "claude3", "codex2"]), ["codex2"]);
         // A pinned profile decides without Autoconfigure.
         let pinned = LegacyReview {
             profile: Some("codex1".into()),
@@ -713,7 +710,7 @@ mod tests {
         let candidate = |id: &str, harness, quota| SubagentCandidate {
             profile_id: id.to_owned(),
             harness,
-            choices: catalog_profile(&["haiku"]),
+            choices: catalog_profile(&["sonnet"]),
             quota,
             unhealthy: BTreeMap::new(),
         };
@@ -755,19 +752,15 @@ mod tests {
         .unwrap();
         assert_eq!(
             picked(&configured),
-            [
-                ("gpt-6.1-terra", None),
-                ("gpt-6.1-sol", None),
-                ("haiku", None)
-            ]
+            [("gpt-6.1-terra", None), ("gpt-6.1-sol", None)]
         );
     }
 
     #[tokio::test(start_paused = true)]
     async fn auto_effort_probes_share_one_deadline() {
         let model = SessionConfigChoice {
-            value: "claude-haiku-4.5".into(),
-            name: "Haiku".into(),
+            value: "claude-sonnet-4.5".into(),
+            name: "Sonnet".into(),
             description: None,
         };
         let offered = ProfileConfig {
@@ -789,8 +782,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(choices.reviewers.len(), 3);
-        assert_eq!(known.get("claude-haiku-4.5"), Some(&false));
+        assert_eq!(choices.reviewers.len(), 2);
+        assert_eq!(known.get("claude-sonnet-4.5"), Some(&false));
         assert_eq!(
             tokio::time::Instant::now().duration_since(start),
             std::time::Duration::from_secs(10)

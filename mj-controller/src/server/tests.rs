@@ -5305,8 +5305,8 @@ impl api::SubagentBackend for SettingsReviewBackend {
             Ok(mj_core::worker_launch::ProfileConfig {
                 model: model.clone(),
                 models: vec![mj_core::acp::SessionConfigChoice {
-                    value: model.unwrap_or_else(|| "claude-haiku-4.5".into()),
-                    name: "Terra".into(),
+                    value: model.unwrap_or_else(|| "claude-sonnet-4.5".into()),
+                    name: "Sonnet 4.5".into(),
                     description: None,
                 }],
                 efforts: vec![mj_core::acp::SessionConfigChoice {
@@ -5338,9 +5338,9 @@ async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
     let stored = std::fs::read(&path).unwrap();
     let identity = Config::load_from(&path).unwrap().profiles["claude"].capabilities_key("claude");
     let capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot = serde_json::from_value(serde_json::json!({"profiles": {identity: {
-        "choices": {"status": "ready", "value": {"model": "claude-haiku-4.5", "observed_at": 0, "efforts": [{"value": "high", "name": "High", "description": null}],
-            "models": [{"value": "claude-haiku-4.5", "name": "Terra", "description": null}]}},
-        "efforts": {"claude-haiku-4.5": {"status": "ready", "value": [{"value": "high", "name": "High", "description": null}]}}
+        "choices": {"status": "ready", "value": {"model": "claude-sonnet-4.5", "observed_at": 0, "efforts": [{"value": "high", "name": "High", "description": null}],
+            "models": [{"value": "claude-sonnet-4.5", "name": "Sonnet 4.5", "description": null}]}},
+        "efforts": {"claude-sonnet-4.5": {"status": "ready", "value": [{"value": "high", "name": "High", "description": null}]}}
     }}})).unwrap();
     let (app, ..) = app_with_backend(
         BTreeMap::new(),
@@ -5357,8 +5357,11 @@ async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
-        reply["draft"]["review"]["reviewers"][0]["model"],
-        "claude-haiku-4.5"
+        reply["draft"]["review"]["reviewers"],
+        serde_json::json!([
+            {"model": "claude-sonnet-4.5", "effort": "high"},
+            {"model": "claude-sonnet-4.5", "effort": "high"}
+        ])
     );
     assert!(reply["draft"]["review"].get("profile").is_none());
     assert_eq!(std::fs::read(&path).unwrap(), stored);

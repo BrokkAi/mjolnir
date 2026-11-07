@@ -2006,7 +2006,7 @@ mod tests {
                 let models = if profile == "codex" {
                     vec!["gpt-6-terra", "gpt-6-sol"]
                 } else {
-                    vec!["claude-haiku-4.5"]
+                    vec!["claude-sonnet-4.5"]
                 };
                 Ok(ProfileConfig {
                     model: Some(models[0].into()),
@@ -2031,7 +2031,7 @@ mod tests {
         Arc::get_mut(&mut catalog).unwrap().config_path = Some(path);
         let mut config = test_config(&[
             ("codex", HarnessKind::Codex),
-            ("haiku", HarnessKind::Claude),
+            ("sonnet", HarnessKind::Claude),
         ]);
         config.review = mj_core::config::ReviewConfig::legacy_default();
         catalog.sync(&config);
@@ -2043,7 +2043,7 @@ mod tests {
             path,
             &[
                 ("codex", HarnessKind::Codex),
-                ("haiku", HarnessKind::Claude),
+                ("sonnet", HarnessKind::Claude),
             ],
         );
     }
@@ -2074,7 +2074,7 @@ mod tests {
         catalog.upgrade_legacy_review(2).await.unwrap();
         let review = Config::load_from(&path).unwrap().review;
         assert!(!review.is_legacy());
-        assert_eq!(review.reviewers.len(), 3);
+        assert_eq!(review.reviewers.len(), 2);
         assert_eq!(review.reviewers[0].model, "gpt-6-terra");
     }
 
@@ -2111,12 +2111,12 @@ mod tests {
         }
     }
 
-    /// A catalog over codex, haiku and an OpenCode "openrouter" profile whose
+    /// A catalog over codex, sonnet and an OpenCode "openrouter" profile whose
     /// catalogue holds only `latest` aliases, with quota reports `reports`.
     fn billing_catalog(path: &Path, reports: QuotaReports) -> Arc<ProfileCatalog> {
         let profiles = [
             ("codex", HarnessKind::Codex),
-            ("haiku", HarnessKind::Claude),
+            ("sonnet", HarnessKind::Claude),
             ("openrouter", HarnessKind::OpenCode),
         ];
         legacy_review_file_with(path, &profiles);
@@ -2124,11 +2124,11 @@ mod tests {
             Box::pin(async move {
                 let models = match profile.as_str() {
                     "codex" => vec!["gpt-6.1-terra", "gpt-6.1-sol"],
-                    "haiku" => vec!["haiku"],
+                    "sonnet" => vec!["sonnet"],
                     _ => vec![
                         "openrouter/~openai/gpt-terra-latest",
                         "openrouter/~openai/gpt-sol-latest",
-                        "openrouter/~anthropic/claude-haiku-latest",
+                        "openrouter/~anthropic/claude-sonnet-latest",
                     ],
                 };
                 Ok(ProfileConfig {
@@ -2137,7 +2137,12 @@ mod tests {
                         .into_iter()
                         .map(|value| mj_core::acp::SessionConfigChoice {
                             value: value.into(),
-                            name: if value == "haiku" { "Haiku 4.5" } else { value }.into(),
+                            name: if value == "sonnet" {
+                                "Sonnet 4.5"
+                            } else {
+                                value
+                            }
+                            .into(),
                             description: None,
                         })
                         .collect(),
@@ -2186,20 +2191,11 @@ mod tests {
             let catalog = Arc::clone(&catalog);
             tokio::spawn(async move { catalog.upgrade_legacy_review(1).await })
         };
-        // The upgrade waits for the Claude profile's first report, whose
-        // billing is not known otherwise.
-        tokio::time::advance(Duration::from_secs(5)).await;
-        assert!(Config::load_from(&path).unwrap().review.is_legacy());
-        reports.lock().unwrap().insert(
-            "haiku".into(),
-            subscription_report("haiku", HarnessKind::Claude),
-        );
+        // OpenAI fills both slots, so an unused Claude profile's unknown
+        // billing must not delay the upgrade.
         upgrade.await.unwrap().unwrap();
         assert!(!Config::load_from(&path).unwrap().review.is_legacy());
-        assert_eq!(
-            upgraded_models(&path),
-            ["gpt-6.1-terra", "gpt-6.1-sol", "haiku"]
-        );
+        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra", "gpt-6.1-sol"]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2212,44 +2208,38 @@ mod tests {
                 subscription_report("codex", HarnessKind::Codex),
             ),
             (
-                "haiku".to_owned(),
-                subscription_report("haiku", HarnessKind::Claude),
+                "sonnet".to_owned(),
+                subscription_report("sonnet", HarnessKind::Claude),
             ),
         ])));
         let catalog = billing_catalog(&path, reports);
         catalog.upgrade_legacy_review(1).await.unwrap();
-        assert_eq!(
-            upgraded_models(&path),
-            ["gpt-6.1-terra", "gpt-6.1-sol", "haiku"]
-        );
+        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra", "gpt-6.1-sol"]);
     }
 
     #[tokio::test(start_paused = true)]
     async fn legacy_upgrade_does_not_persist_while_a_drafted_profile_has_no_billing() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("custom-config.toml");
-        // The Claude profile's quota probe never reports.
+        // The selected OpenAI profile's quota probe never reports.
         let reports: QuotaReports = Arc::new(Mutex::new(BTreeMap::from([(
-            "codex".to_owned(),
-            subscription_report("codex", HarnessKind::Codex),
+            "sonnet".to_owned(),
+            subscription_report("sonnet", HarnessKind::Claude),
         )])));
         let catalog = billing_catalog(&path, reports.clone());
         let error = catalog.upgrade_legacy_review(1).await.unwrap_err();
         assert!(
-            error.to_string().contains("quota reports: haiku"),
+            error.to_string().contains("quota reports: codex"),
             "{error:#}"
         );
         assert!(Config::load_from(&path).unwrap().review.is_legacy());
         // A report that arrives before the next attempt lets it finish.
         reports.lock().unwrap().insert(
-            "haiku".into(),
-            subscription_report("haiku", HarnessKind::Claude),
+            "codex".into(),
+            subscription_report("codex", HarnessKind::Codex),
         );
         catalog.upgrade_legacy_review(2).await.unwrap();
-        assert_eq!(
-            upgraded_models(&path),
-            ["gpt-6.1-terra", "gpt-6.1-sol", "haiku"]
-        );
+        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra", "gpt-6.1-sol"]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2263,10 +2253,10 @@ mod tests {
                     return std::future::pending::<Result<ProfileConfig>>().await;
                 }
                 Ok(ProfileConfig {
-                    model: Some("claude-haiku-4.5".into()),
+                    model: Some("claude-sonnet-4.5".into()),
                     models: vec![mj_core::acp::SessionConfigChoice {
-                        value: "claude-haiku-4.5".into(),
-                        name: "Haiku".into(),
+                        value: "claude-sonnet-4.5".into(),
+                        name: "Sonnet".into(),
                         description: None,
                     }],
                     efforts: Vec::new(),
@@ -2282,7 +2272,7 @@ mod tests {
         Arc::get_mut(&mut catalog).unwrap().config_path = Some(path.clone());
         let mut config = test_config(&[
             ("codex", HarnessKind::Codex),
-            ("haiku", HarnessKind::Claude),
+            ("sonnet", HarnessKind::Claude),
         ]);
         config.review = mj_core::config::ReviewConfig::legacy_default();
         catalog.sync(&config);
@@ -2333,7 +2323,7 @@ mod tests {
             mj_core::config::CONFIG_VERSION
         )).unwrap();
         let choice = mj_core::config::SubagentChoice {
-            model: "claude-haiku-4.5".into(),
+            model: "claude-sonnet-4.5".into(),
             effort: None,
         };
         assert!(
@@ -2383,7 +2373,7 @@ mod tests {
         let error = ProfileCatalog::persist_legacy_review_to(
             &path,
             vec![mj_core::config::SubagentChoice {
-                model: "haiku".into(),
+                model: "sonnet".into(),
                 effort: None,
             }],
             false,

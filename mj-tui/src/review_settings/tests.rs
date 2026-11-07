@@ -68,7 +68,7 @@ fn autoconfigure_button_fills_rows_with_offered_efforts() {
     assert!(dialog.review.reviewers.is_empty());
     let suggested = dialog.suggested().unwrap();
     assert_eq!(suggested[0].model, "gpt-6-terra");
-    assert_eq!(suggested[0].effort.as_deref(), Some("xhigh"));
+    assert_eq!(suggested[0].effort.as_deref(), Some("high"));
     assert!(
         dialog
             .form
@@ -86,11 +86,11 @@ fn autoconfigure_button_fills_rows_with_offered_efforts() {
 #[test]
 fn autoconfigure_skips_models_only_usage_priced_profiles_offer() {
     let config = config();
-    let subscription = ["gpt-6.1-terra", "gpt-6.1-sol", "claude-haiku-4.5"];
+    let subscription = ["gpt-6.1-terra", "gpt-6.1-sol", "claude-sonnet-4.5"];
     let api = [
         "openrouter/~openai/gpt-terra-latest",
         "openrouter/~openai/gpt-sol-latest",
-        "openrouter/~anthropic/claude-haiku-latest",
+        "openrouter/~anthropic/claude-sonnet-latest",
     ];
     let mut snapshot = catalog(&config, &subscription);
     // Two usage-priced profiles outnumber the one subscription, so only the
@@ -118,17 +118,17 @@ fn autoconfigure_skips_models_only_usage_priced_profiles_offer() {
     };
     assert_eq!(
         suggested(&["codex-1", "codex-2"]),
-        ["gpt-6.1-terra", "gpt-6.1-sol", "claude-haiku-4.5"]
+        ["gpt-6.1-terra", "gpt-6.1-sol"]
     );
     // Unknown billing counts as a subscription, so the newer aliases win.
     assert!(suggested(&[])[0].starts_with("openrouter/"));
 }
 
-const SUBSCRIPTION_MODELS: [&str; 3] = ["gpt-6.1-terra", "gpt-6.1-sol", "claude-haiku-4.5"];
+const SUBSCRIPTION_MODELS: [&str; 3] = ["gpt-6.1-terra", "gpt-6.1-sol", "claude-sonnet-4.5"];
 const API_MODELS: [&str; 3] = [
     "openrouter/~openai/gpt-terra-latest",
     "openrouter/~openai/gpt-sol-latest",
-    "openrouter/~anthropic/claude-haiku-latest",
+    "openrouter/~anthropic/claude-sonnet-latest",
 ];
 
 /// Every profile offers the subscription models except `api`, which offers
@@ -219,7 +219,7 @@ fn autoconfigure_button_uses_the_quota_reports_present_when_pressed() {
         );
     }
     press_autoconfigure(&mut dashboard);
-    assert_eq!(setup_review_models(&dashboard), SUBSCRIPTION_MODELS);
+    assert_eq!(setup_review_models(&dashboard), SUBSCRIPTION_MODELS[..2]);
 }
 
 #[test]
@@ -262,7 +262,7 @@ fn an_opencode_profile_without_a_report_is_usage_priced() {
     let snapshot = billing_snapshot(&dashboard.config, &["openrouter"]);
     dashboard.set_profile_capabilities(snapshot);
     press_autoconfigure(&mut dashboard);
-    assert_eq!(setup_review_models(&dashboard), SUBSCRIPTION_MODELS);
+    assert_eq!(setup_review_models(&dashboard), SUBSCRIPTION_MODELS[..2]);
 }
 
 #[test]
@@ -517,7 +517,16 @@ fn golden_review_settings() {
     let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
     dashboard.begin_setup();
     dashboard.begin_setup_review();
-    dashboard.set_profile_capabilities(catalog(&dashboard.config, &["gpt-6-terra", "gpt-6-sol"]));
+    dashboard.set_profile_capabilities(catalog(
+        &dashboard.config,
+        &[
+            "gpt-6-terra",
+            "gpt-6-sol",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+        ],
+    ));
+    press_autoconfigure(&mut dashboard);
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal
         .draw(|frame| crate::render::render(frame, &mut dashboard))
@@ -528,7 +537,21 @@ fn golden_review_settings() {
         .draw(|frame| crate::render::render(frame, &mut dashboard))
         .unwrap();
     let narrow = buffer_lines(narrow_terminal.backend().buffer()).join("\n");
-    let rendered = format!("=== Wide (100x30) ===\n{wide}\n=== Narrow (60x30) ===\n{narrow}");
+    let mut anthropic = DashboardState::new(config(), Default::default(), Default::default());
+    anthropic.begin_setup();
+    anthropic.begin_setup_review();
+    anthropic.set_profile_capabilities(catalog(
+        &anthropic.config,
+        &["claude-sonnet-5-5", "claude-haiku-5-5"],
+    ));
+    press_autoconfigure(&mut anthropic);
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut anthropic))
+        .unwrap();
+    let anthropic = buffer_lines(terminal.backend().buffer()).join("\n");
+    let rendered = format!(
+        "=== Wide (100x30) ===\n{wide}\n=== Narrow (60x30) ===\n{narrow}\n=== Anthropic (100x30) ===\n{anthropic}"
+    );
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),
         "review-settings",
@@ -708,7 +731,7 @@ fn autoconfigure_warms_newly_selected_model_within_existing_wait() {
     let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
     dashboard.begin_setup();
     dashboard.begin_setup_review();
-    let initial = catalog(&dashboard.config, &["claude-haiku-5-5"]);
+    let initial = catalog(&dashboard.config, &["claude-sonnet-5-5"]);
     dashboard.set_profile_capabilities(initial);
     let Mode::Setup(setup) = &mut dashboard.mode else {
         panic!("setup")
@@ -716,7 +739,7 @@ fn autoconfigure_warms_newly_selected_model_within_existing_wait() {
     let editor = setup.review_editor.as_mut().unwrap();
     editor.pending_autoconfigure = Some((
         vec![SubagentChoice {
-            model: "claude-haiku-5-5".into(),
+            model: "claude-sonnet-5-5".into(),
             effort: Some("xhigh".into()),
         }],
         Instant::now(),
@@ -744,13 +767,13 @@ fn legacy_draft_autoconfigure_warms_the_recomputed_models() {
     let mut dashboard = DashboardState::new(legacy, Default::default(), Default::default());
     dashboard.begin_setup();
     dashboard.begin_setup_review();
-    dashboard.set_profile_capabilities(catalog(&dashboard.config, &["claude-haiku-5-5"]));
+    dashboard.set_profile_capabilities(catalog(&dashboard.config, &["claude-sonnet-5-5"]));
     let Mode::Setup(setup) = &mut dashboard.mode else {
         panic!("setup")
     };
     setup.review_editor.as_mut().unwrap().pending_autoconfigure = Some((
         vec![SubagentChoice {
-            model: "claude-haiku-5-5".into(),
+            model: "claude-sonnet-5-5".into(),
             effort: Some("xhigh".into()),
         }],
         Instant::now(),
@@ -782,12 +805,12 @@ fn legacy_draft_autoconfigure_warms_the_recomputed_models() {
 fn autoconfigure_ignores_a_failed_profile_that_does_not_offer_the_model() {
     let mut config = config();
     let mut snapshot = catalog(&config, &["gpt-6-terra", "gpt-6-sol"]);
-    // The models offer high but not xhigh.
+    // Medium is the closest offered effort below Terra's requested high.
     for entry in snapshot.profiles.values_mut() {
         for model in ["gpt-6-terra", "gpt-6-sol"] {
             entry.efforts.insert(
                 model.into(),
-                CapabilityState::Ready(vec![choice("medium"), choice("high")]),
+                CapabilityState::Ready(vec![choice("low"), choice("medium")]),
             );
         }
     }
@@ -816,7 +839,7 @@ fn autoconfigure_ignores_a_failed_profile_that_does_not_offer_the_model() {
     assert!(!dialog.review.reviewers.is_empty());
     for reviewer in &dialog.review.reviewers {
         assert!(
-            matches!(reviewer.effort.as_deref(), Some("medium" | "high")),
+            matches!(reviewer.effort.as_deref(), Some("low" | "medium")),
             "{reviewer:?}"
         );
     }
@@ -825,7 +848,7 @@ fn autoconfigure_ignores_a_failed_profile_that_does_not_offer_the_model() {
             .review
             .reviewers
             .iter()
-            .any(|reviewer| reviewer.effort.as_deref() == Some("high"))
+            .any(|reviewer| reviewer.effort.as_deref() == Some("medium"))
     );
     let notice = dialog.effort_notice.as_deref().unwrap();
     assert!(notice.contains("Adjusted reviewer efforts"), "{notice}");
