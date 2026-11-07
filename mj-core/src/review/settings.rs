@@ -101,7 +101,17 @@ pub fn model_version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
         )
     };
     let numbers = |id: &str| {
-        id.split(|c: char| !c.is_ascii_digit())
+        // A context capacity such as K3's `-256k` is not a release version.
+        id.split(['-', '_', '.', '/'])
+            .filter(|part| {
+                !part
+                    .strip_suffix('k')
+                    .or_else(|| part.strip_suffix('m'))
+                    .is_some_and(|size| {
+                        !size.is_empty() && size.bytes().all(|b| b.is_ascii_digit())
+                    })
+            })
+            .flat_map(|part| part.split(|c: char| !c.is_ascii_digit()))
             .filter(|p| !p.is_empty())
             .filter_map(|p| p.parse::<u64>().ok())
             .collect::<Vec<_>>()
@@ -109,6 +119,12 @@ pub fn model_version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
     alias(left)
         .cmp(&alias(right))
         .then_with(|| numbers(left).cmp(&numbers(right)))
+        // Highspeed is a same-version speed variant, not a newer model.
+        .then_with(|| {
+            right
+                .ends_with("-highspeed")
+                .cmp(&left.ends_with("-highspeed"))
+        })
         .then_with(|| left.cmp(right))
 }
 

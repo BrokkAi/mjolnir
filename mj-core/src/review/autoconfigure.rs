@@ -300,6 +300,7 @@ mod tests {
     }
 
     // Hard-won: ed508ae8c: stripping Kimi Code's provider selected an older Kimi model.
+    // Hard-won: 9541bf079: K3's 256k context suffix outranked the newer K3.1 Pro release.
     #[test]
     fn autoconfigure_uses_first_matching_row_and_newest_family_versions() {
         type Case = (
@@ -334,12 +335,28 @@ mod tests {
                 &[("deepseek-v4-pro", "high"), ("deepseek-v4-pro", "high")],
             ),
             (
-                &["grok-4.6", "kimi-k3.1", "grok-4.20-multi-agent-0309"],
+                &[
+                    "grok-4.6",
+                    "kimi-code/k3.1-pro",
+                    "grok-4.20-multi-agent-0309",
+                ],
                 &[("grok-4.6", "high"), ("grok-4.6", "high")],
             ),
             (
-                &["kimi-k3.1", "kimi-k3.2"],
-                &[("kimi-k3.2", "high"), ("kimi-k3.2", "high")],
+                // The live Kimi Code catalog, including an older model with
+                // a larger context and the same-version Highspeed variant.
+                &[
+                    "kimi-code/kimi-for-coding",
+                    "kimi-code/kimi-for-coding-highspeed",
+                    "kimi-code/k3",
+                    "kimi-code/k3.1-pro",
+                    "kimi-code/k3-256k",
+                    "kimi-code/k3.1-pro-highspeed",
+                ],
+                &[
+                    ("kimi-code/k3.1-pro", "high"),
+                    ("kimi-code/k3.1-pro", "high"),
+                ],
             ),
             (
                 &["unrelated-model", "kimi-k3"],
@@ -504,12 +521,12 @@ mod tests {
         // offers this one. Subscription wins before counts are compared.
         assert_eq!(
             pick(&[
-                (false, &["kimi-k3.1"]),
-                (true, &["kimi-k3.2"]),
-                (true, &["kimi-k3.2"]),
-                (true, &["kimi-k3.2"]),
+                (false, &["kimi-code/k3"]),
+                (true, &["kimi-code/k3.1-pro"]),
+                (true, &["kimi-code/k3.1-pro"]),
+                (true, &["kimi-code/k3.1-pro"]),
             ]),
-            expect(&[("kimi-k3.1", "high"), ("kimi-k3.1", "high")])
+            expect(&[("kimi-code/k3", "high"), ("kimi-code/k3", "high")])
         );
     }
 
