@@ -190,6 +190,18 @@ impl AwsCredentials {
     }
 }
 
+/// Withdraw the session's AWS credentials. The credential file is the secret;
+/// without it the native process provider finds nothing to use, and a later
+/// install writes every file again.
+pub fn remove(home: &Path) -> Result<crate::credentials::CredentialSnapshot> {
+    match std::fs::remove_file(home.join(SHARED_CREDENTIALS_FILE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("remove session AWS credentials"),
+    }
+    state(home)
+}
+
 pub fn snapshot(bytes: &[u8]) -> crate::credentials::CredentialSnapshot {
     crate::credentials::CredentialSnapshot {
         present: true,

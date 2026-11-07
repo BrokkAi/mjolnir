@@ -110,7 +110,11 @@ pub const RELAY_TURN_CAPTURE_REMOVED_PROTOCOL: u32 = 53;
 /// child failed) under its own heading, and says when a child whose turn
 /// failed can still take a message. Older workers get the report as text.
 pub const RELAY_SUBAGENT_REPORT_STATE_PROTOCOL: u32 = 54;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_SUBAGENT_REPORT_STATE_PROTOCOL;
+/// 55 adds RemoveAwsCredentials: the controller withdraws a session's AWS
+/// credentials when the profile requires role-scoped credentials and none can
+/// be issued, instead of leaving the host's own credentials installed.
+pub const RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL: u32 = 55;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

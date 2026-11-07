@@ -192,6 +192,8 @@ pub enum RelayRequest {
     InstallAwsCredentials {
         data: String,
     },
+    /// Delete the session's AWS credentials.
+    RemoveAwsCredentials,
     /// The host's slopcop login, like the GitHub token, stays on the control
     /// connection, outside the journal.
     SlopcopLoginState,
@@ -395,6 +397,7 @@ impl RelayRequest {
             Self::RemoveGithubToken => "remove_github_token",
             Self::AwsCredentialsState => "aws_credentials_state",
             Self::InstallAwsCredentials { .. } => "install_aws_credentials",
+            Self::RemoveAwsCredentials => "remove_aws_credentials",
             Self::SlopcopLoginState => "slopcop_login_state",
             Self::InstallSlopcopLogin { .. } => "install_slopcop_login",
             Self::RemoveSlopcopLogin => "remove_slopcop_login",
@@ -422,6 +425,7 @@ impl RelayRequest {
             Self::AwsCredentialsState | Self::InstallAwsCredentials { .. } => {
                 super::RELAY_AWS_CREDENTIALS_PROTOCOL
             }
+            Self::RemoveAwsCredentials => super::RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL,
             Self::SlopcopLoginState
             | Self::InstallSlopcopLogin { .. }
             | Self::RemoveSlopcopLogin => super::RELAY_SLOPCOP_LOGIN_PROTOCOL,

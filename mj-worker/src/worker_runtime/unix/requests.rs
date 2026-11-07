@@ -427,6 +427,9 @@ pub(crate) fn apply_credential_request_at(
         RelayRequest::AwsCredentialsState => Ok(credential_state_payload(
             &mj_core::aws_credentials::state(&endpoint.home)?,
         )),
+        RelayRequest::RemoveAwsCredentials => Ok(credential_state_payload(
+            &mj_core::aws_credentials::remove(&endpoint.home)?,
+        )),
         RelayRequest::SlopcopLoginState => Ok(credential_state_payload(
             &mj_core::slopcop::read_login(&slopcop_login_path)?.0,
         )),

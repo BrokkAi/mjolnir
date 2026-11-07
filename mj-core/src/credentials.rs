@@ -695,6 +695,9 @@ pub enum CredentialSyncAction {
     GithubTokenPushed,
     /// A stale session token was removed because the controller has none.
     GithubTokenRemoved,
+    /// The session's AWS credentials were withdrawn, because the profile
+    /// requires role-scoped credentials and none could be issued.
+    AwsCredentialsRemoved,
     /// The host's slopcop login replaced the session copy.
     SlopcopLoginPushed,
     /// The session copy was removed because the host is signed out.

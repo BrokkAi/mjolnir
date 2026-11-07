@@ -233,6 +233,12 @@ impl RelayClient {
         )
     }
 
+    /// Delete the session's AWS credentials. Needs a worker at relay protocol
+    /// 55 or later.
+    pub async fn remove_aws_credentials(&mut self) -> Result<CredentialSnapshot> {
+        credential_snapshot(self.call(RelayRequest::RemoveAwsCredentials).await?)
+    }
+
     /// Read this session's credential file. Callers must keep these bytes out
     /// of durable relay observations, logs, and archives.
     pub async fn read_credentials(&mut self) -> Result<Vec<u8>> {

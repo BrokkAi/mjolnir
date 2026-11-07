@@ -874,6 +874,27 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         }
     }
 
+    // Withdrawing the credentials deletes the secret file, reports them absent
+    // and leaves the way open to install again.
+    let removed =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::RemoveAwsCredentials).await;
+    assert!(matches!(
+        removed,
+        RelayResponsePayload::CredentialState { present: false, .. }
+    ));
+    assert!(
+        !temp
+            .path()
+            .join(mj_core::aws_credentials::SHARED_CREDENTIALS_FILE)
+            .exists()
+    );
+    let again =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::RemoveAwsCredentials).await;
+    assert!(matches!(
+        again,
+        RelayResponsePayload::CredentialState { present: false, .. }
+    ));
+
     // The host's slopcop login takes the same connection-only route.
     let login =
         mj_core::slopcop::SlopcopLogin::new("slopcop-secret", Some("https://slopcop.example"))
