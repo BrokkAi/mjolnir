@@ -349,6 +349,9 @@ pub enum GithubSpelling {
     Scp,
     /// `ssh://[git@]host[:port]/owner/repository`.
     Ssh,
+    /// `git://github.com/owner/repository`. GitHub stopped serving the
+    /// protocol in 2022, but an older remote may still be written this way.
+    Git,
 }
 
 /// Which GitHub host a remote names.
@@ -377,9 +380,12 @@ pub struct GithubRemote {
 impl GithubRemote {
     /// Whether the remote names GitHub's main endpoint without an explicit
     /// port. `ssh://git@github.com:22/...` and `ssh.github.com` are the same
-    /// repository over another route, and identities keep them apart.
+    /// repository over another route, and identities keep them apart, as they
+    /// do for `git://`, which was never a GitHub identity.
     pub fn is_default_endpoint(&self) -> bool {
-        self.host == GithubHost::GithubCom && self.port.is_none()
+        self.host == GithubHost::GithubCom
+            && self.port.is_none()
+            && self.spelling != GithubSpelling::Git
     }
 }
 
@@ -439,6 +445,16 @@ pub fn parse_github_remote(source: &str, shorthand: Shorthand) -> Option<GithubR
                     return None;
                 }
                 (GithubSpelling::Ssh, host, url.port())
+            }
+            "git" => {
+                if !host_name.eq_ignore_ascii_case("github.com")
+                    || url.port().is_some()
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                {
+                    return None;
+                }
+                (GithubSpelling::Git, GithubHost::GithubCom, None)
             }
             _ => return None,
         };
@@ -773,7 +789,13 @@ mod tests {
             ),
             ("alice@github.com:o/r", None, false),
             ("ssh://alice@github.com/o/r", None, false),
-            ("git://github.com/o/r", None, false),
+            (
+                "git://github.com/o/r",
+                Some("o/r Git GithubCom None"),
+                false,
+            ),
+            ("git://github.com:9418/o/r", None, false),
+            ("git://gitlab.com/o/r", None, false),
             ("acme/widget/child", None, false),
             ("-o/r", None, false),
             ("o/r$", None, false),

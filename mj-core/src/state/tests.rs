@@ -1111,6 +1111,11 @@ fn git_remote_keeps_the_identities_stored_for_each_remote_spelling() {
                 "ssh://ssh.github.com:443/o/r",
             )),
         ),
+        // `git://` is a GitHub spelling to the parser, never a GitHub identity.
+        (
+            "git://github.com/o/r.git",
+            Some(("git:git://github.com/o/r", "r", "git://github.com/o/r")),
+        ),
         // An owner/repo parse must not turn this route into the GitHub
         // identity: identities are stored, and it was a network remote.
         (
