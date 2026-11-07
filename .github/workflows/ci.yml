@@ -7,6 +7,11 @@ on:
   # release.yml runs the whole suite on the tagged commit before publishing.
   workflow_call: {}
 
+# Jobs build and run pull-request code (build scripts, tests); none writes to
+# the repository, so the token is read-only and checkouts keep no credentials.
+permissions:
+  contents: read
+
 # In a call from release.yml, github.workflow is the caller's name and the ref
 # is the tag, so this group is per release and does not cancel branch CI.
 concurrency:
@@ -19,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
     - uses: dtolnay/rust-toolchain@1.99.1
       with:
         components: rustfmt
@@ -29,6 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
     - uses: dtolnay/rust-toolchain@1.99.1
     - name: Cache pinned cargo-machete
       id: machete-tool
@@ -48,6 +57,8 @@ jobs:
       CARGO_BUILD_TARGET: x86_64-unknown-linux-musl
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
     - name: Test RunsOn launch-template helper
       run: bash scripts/test-update-runson-launch-template.sh
@@ -130,6 +141,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@1.99.1
@@ -174,6 +187,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
     - uses: dtolnay/rust-toolchain@1.99.1
       with:
         components: clippy
@@ -197,6 +212,8 @@ jobs:
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@1.99.1
@@ -242,6 +259,8 @@ jobs:
       CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@1.99.1
@@ -280,6 +299,8 @@ jobs:
       CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@1.99.1
@@ -317,6 +338,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: ${{ matrix.target }}
@@ -348,6 +371,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: 24
