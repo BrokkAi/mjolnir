@@ -124,7 +124,10 @@
     "next": "No user input is needed.",
     "input_rationale": "Sub-agent finished slice 1a steps 5-6 and explicitly asks the parent to confirm an unrequested schema change (index in the unreleased migration, moved schema hash). It also lists an unchecked open-core classification row. Mild: it is a confirmation of already-made work rather than a stop.",
     "label": "required_final",
-    "kind": "approval_gate"
+    "kind": "approval_gate",
+    "request_message_ids": [
+      "agent:550"
+    ]
   },
   "context": {
     "after": []

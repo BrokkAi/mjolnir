@@ -211,7 +211,12 @@
     "next": "The cited user request remains open.",
     "input_rationale": "After the third round of reconciler timing findings the agent put a design question (override vs simplify) to the user, was told the user was away, and restates it; it will not push past an open finding without the answer.",
     "label": "required_final",
-    "kind": "blocking_decision"
+    "kind": "blocking_decision",
+    "request_message_ids": [
+      "agent:3075",
+      "agent:3217",
+      "agent:3525"
+    ]
   },
   "context": {
     "after": [

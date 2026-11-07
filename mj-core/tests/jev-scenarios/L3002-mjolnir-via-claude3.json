@@ -220,7 +220,11 @@
     "next": "The cited user request remains open.",
     "input_rationale": "The reply commits the SetConfig fix and then hands over the open design question (how to settle prompts rejected or removed out of order), which the agent had already said stays open for the user. The agent is holding the push on that answer.",
     "label": "required_final",
-    "kind": "blocking_decision"
+    "kind": "blocking_decision",
+    "request_message_ids": [
+      "agent:4727",
+      "agent:4926"
+    ]
   },
   "context": {
     "after": [

@@ -191,7 +191,12 @@
     "next": "The cited user request remains open.",
     "input_rationale": "Review found structural gaps in learning SSH capacity from refusals; the agent stopped work on that part, offered three designs and holds the push until the user picks. The readiness fix proceeds separately.",
     "label": "required_final",
-    "kind": "blocking_decision"
+    "kind": "blocking_decision",
+    "request_message_ids": [
+      "agent:3638",
+      "agent:3693",
+      "agent:3925"
+    ]
   },
   "context": {
     "after": [

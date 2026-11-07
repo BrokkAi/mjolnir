@@ -290,7 +290,11 @@
     ],
     "project": "bifrost-dev",
     "is_child": false,
-    "kind": "approval_gate"
+    "kind": "approval_gate",
+    "request_message_ids": [
+      "agent:268735",
+      "agent:268910"
+    ]
   },
   "context": {
     "after": [

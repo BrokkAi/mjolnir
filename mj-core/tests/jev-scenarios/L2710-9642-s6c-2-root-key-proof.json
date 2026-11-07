@@ -109,7 +109,10 @@
     ],
     "project": "bifrost-dev",
     "is_child": true,
-    "kind": "user_action"
+    "kind": "user_action",
+    "request_message_ids": [
+      "agent:579"
+    ]
   },
   "context": {
     "after": [],

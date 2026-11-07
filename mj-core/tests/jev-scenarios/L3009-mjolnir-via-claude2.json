@@ -386,7 +386,12 @@
     "next": "The cited user request remains open.",
     "input_rationale": "The default instance's daemon is stuck and blocks the agent's mj-agents calls; the agent stops and asks which of two courses to take. It also repeats the earlier question whether to fix the stale-daemon.json upgrade bug.",
     "label": "required_final",
-    "kind": "blocking_decision"
+    "kind": "blocking_decision",
+    "request_message_ids": [
+      "agent:11777",
+      "agent:12178",
+      "agent:12385"
+    ]
   },
   "context": {
     "after": [

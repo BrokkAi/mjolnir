@@ -384,7 +384,10 @@
     "next": "The cited user request remains open.",
     "input_rationale": "The agent pushed PR #10434 without the workflow-file edit and states that only the user, with a token carrying the workflow scope, can land it; the user then asks for a command to run.",
     "label": "required_final",
-    "kind": "user_action"
+    "kind": "user_action",
+    "request_message_ids": [
+      "agent:288052"
+    ]
   },
   "context": {
     "after": [

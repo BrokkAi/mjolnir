@@ -104,7 +104,10 @@
     "kind": "next_work_menu",
     "judgment": "2026-11-06 blind second labeler (still-open corpus)",
     "menu": "unsolicited",
-    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent."
+    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent.",
+    "request_message_ids": [
+      "agent:591"
+    ]
   },
   "context": {
     "after": [

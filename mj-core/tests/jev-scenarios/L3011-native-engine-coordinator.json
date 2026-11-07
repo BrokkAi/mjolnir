@@ -265,7 +265,11 @@
     "next": "No user input is needed.",
     "input_rationale": "The case reply itself says nothing needs a decision, but reply 38060 laid out two process changes only the user can make to stop repeated ICFG version-pair collisions, and 38347 says the gap persists. Nothing resolves it by the case reply. Lower confidence: the agent keeps working without being blocked, so it may be informational.",
     "label": "required_earlier",
-    "kind": "user_action"
+    "kind": "user_action",
+    "request_message_ids": [
+      "agent:38060",
+      "agent:38347"
+    ]
   },
   "context": {
     "after": [

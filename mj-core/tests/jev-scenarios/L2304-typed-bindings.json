@@ -583,7 +583,11 @@
     "project": "bifrost-dev",
     "is_child": false,
     "kind": "blocking_decision",
-    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:102502",
+      "agent:102736"
+    ]
   },
   "context": {
     "after": []

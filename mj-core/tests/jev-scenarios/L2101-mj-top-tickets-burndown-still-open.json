@@ -287,7 +287,10 @@
     "project": "mjolnir",
     "is_child": false,
     "kind": "approval_gate",
-    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:7812"
+    ]
   },
   "context": {
     "after": [

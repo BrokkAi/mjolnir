@@ -289,7 +289,10 @@
     "next": "The cited user request remains open.",
     "input_rationale": "The requested merge and push is done, but the reply leaves a commit-and-upstream-PR decision for the user and says the build is ready for the user to install. The SessionWiki item is an approval gate; the install is a user action. The user then says not to track it.",
     "label": "required_final",
-    "kind": "approval_gate"
+    "kind": "approval_gate",
+    "request_message_ids": [
+      "agent:1954"
+    ]
   },
   "context": {
     "after": [

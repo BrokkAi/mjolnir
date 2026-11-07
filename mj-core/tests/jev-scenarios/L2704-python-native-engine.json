@@ -286,7 +286,12 @@
     ],
     "project": "bifrost-dev",
     "is_child": false,
-    "kind": "approval_gate"
+    "kind": "approval_gate",
+    "request_message_ids": [
+      "agent:515885",
+      "agent:516231",
+      "agent:516943"
+    ]
   },
   "context": {
     "after": [

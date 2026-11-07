@@ -234,7 +234,10 @@
     "next": "No user input is needed.",
     "input_rationale": "Fix is pushed, but the agent could not close the issue or remove the label and tells the user to run the command; it also offers to file the cancel-path follow-up as a separate issue if the user wants. The user action is the main open item, the follow-up filing is a minor approval gate.",
     "label": "required_final",
-    "kind": "user_action"
+    "kind": "user_action",
+    "request_message_ids": [
+      "agent:5149"
+    ]
   },
   "context": {
     "after": [
