@@ -648,7 +648,10 @@ pub(super) fn viewer_snapshot_selected(
             .0
             .get_mut(&session_id)
             .expect("selected session");
-        session.move_recovery = move_recoveries.get(&session.id).cloned();
+        session.move_recovery = move_recoveries
+            .get(&session.id)
+            .cloned()
+            .map(|recovery| recovery.with_public_failure(session.launch_error.as_deref()));
         if let Some(record) = controller.state.sessions.get(&session.id)
             && let Some(source) = project_sources.source(record, controller)
         {

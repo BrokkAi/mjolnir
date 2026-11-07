@@ -131,7 +131,19 @@ pub fn cookie_key_path() -> PathBuf {
 /// ordinary first use; an unreadable or too-short one is replaced loudly,
 /// because refusing to start would be a worse answer than asking phones to
 /// enter the viewer code again.
+///
+/// The key has one creator: a file lock beside it serializes every caller in
+/// every process, and the key is re-read under the lock, so concurrent first
+/// uses (the phone server starting while sessions launch, parallel renewals)
+/// all end with the key the first of them wrote. The key file itself is
+/// replaced atomically, so the unlocked read below never sees a partial key.
 pub fn load_or_create_cookie_key(path: &std::path::Path) -> AnyResult<Vec<u8>> {
+    if let Ok(key) = std::fs::read(path)
+        && key.len() >= COOKIE_KEY_BYTES
+    {
+        return Ok(key);
+    }
+    let _creating = lock_cookie_key(path)?;
     match std::fs::read(path) {
         Ok(key) if key.len() >= COOKIE_KEY_BYTES => return Ok(key),
         Ok(key) => tracing::warn!(
@@ -149,6 +161,33 @@ pub fn load_or_create_cookie_key(path: &std::path::Path) -> AnyResult<Vec<u8>> {
     mj_core::config::atomic_write(path, &key)
         .with_context(|| format!("persist Mjolnir phone cookie key {}", path.display()))?;
     Ok(key.to_vec())
+}
+
+/// The lock that makes one caller the creator of the key at `path`.
+fn lock_cookie_key(path: &std::path::Path) -> AnyResult<mj_core::file_lock::FileLock> {
+    let mut lock_name = path.as_os_str().to_owned();
+    lock_name.push(".lock");
+    let lock_path = PathBuf::from(lock_name);
+    if let Some(parent) = lock_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create phone cookie key directory {}", parent.display()))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&lock_path)
+        .with_context(|| format!("open phone cookie key lock {}", lock_path.display()))?;
+    file.lock()
+        .with_context(|| format!("lock phone cookie key {}", path.display()))?;
+    Ok(mj_core::file_lock::FileLock::new(file))
 }
 
 /// Options for the daemon's phone service.

@@ -58,6 +58,14 @@ pub(super) enum HostEvent {
         epoch: u64,
         step: ReviewStep,
     },
+    /// Whether the session has a review open: being prepared, being opened,
+    /// or running. The verdict is queued for delivery before the review
+    /// closes, so a review that is gone has either queued its verdict or never
+    /// produced one.
+    HasOpenReview {
+        session_id: String,
+        reply: oneshot::Sender<Result<bool, crate::review_host::OpenReviewUnknown>>,
+    },
     /// A finished reviewer child whose review no longer tracks it. The host
     /// owns every reviewer child close, so the delegation loop hands it here
     /// instead of closing it again itself.

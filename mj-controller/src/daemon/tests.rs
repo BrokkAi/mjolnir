@@ -1036,6 +1036,13 @@ fn zombie_only_daemon_group_counts_as_gone() {
 }
 
 pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
+    test_runtime_state_with(Controller {
+        config: Config::default(),
+        state: mj_core::state::State::default(),
+    })
+}
+
+pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
@@ -1044,10 +1051,7 @@ pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
     );
     Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
-        Controller {
-            config: Config::default(),
-            state: mj_core::state::State::default(),
-        },
+        controller,
         recovery.observer(),
         upgrades.observer(),
         Vec::new(),
@@ -1535,7 +1539,7 @@ fn active_child_session_ids_skips_children_that_already_stopped() {
     .map(|subagent| (subagent.child_session_id.clone(), subagent.into()))
     .collect();
 
-    let children = active_child_session_ids(&state, &parent.id);
+    let children = state.active_child_session_ids(&parent.id);
 
     assert_eq!(children, vec!["running-child".to_owned()]);
 }
@@ -5992,6 +5996,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             models: Default::default(),
             legacy_subagents: None,
             ..mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, home)

@@ -49,27 +49,6 @@ pub(super) async fn report_worker_upgrade(
     }
 }
 
-/// Children of `parent_session_id` whose session is still active, in the
-/// order they should be stopped before the parent. A child that already
-/// stopped needs nothing and would make `force_stop` fail on it.
-pub(super) fn active_child_session_ids(
-    state: &mj_core::state::State,
-    parent_session_id: &str,
-) -> Vec<String> {
-    state
-        .subagents
-        .values()
-        .filter(|child| child.parent_session_id == parent_session_id)
-        .filter(|child| {
-            state
-                .sessions
-                .get(&child.child_session_id)
-                .is_some_and(|session| session.state.is_active())
-        })
-        .map(|child| child.child_session_id.clone())
-        .collect()
-}
-
 pub(super) struct DaemonStageReportingExecutor<E> {
     pub(super) inner: E,
     pub(super) state: Arc<RuntimeState>,

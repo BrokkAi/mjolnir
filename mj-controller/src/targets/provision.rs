@@ -601,6 +601,15 @@ pub fn ec2_launch_command(aws: &AwsTemplate, session_id: &str) -> Result<Command
         ManagedResourceKind::Ec2Instance,
         session_id,
     ));
+    // IMDS is the instance metadata service at 169.254.169.254, where code on
+    // the instance can read its instance profile's credentials; IMDSv2 demands
+    // a session token obtained with an HTTP PUT first, which simple
+    // request-forgery bugs cannot send. `ec2_locator_after_launch` enforces
+    // it on every instance Mjolnir adopts, whatever launched it.
+    args.extend([
+        "--metadata-options".to_owned(),
+        "HttpTokens=required".to_owned(),
+    ]);
     args.extend(["--output".to_owned(), "json".to_owned()]);
     Ok(CommandSpec::new("aws", args)
         .purpose("launch EC2 session instance")
