@@ -88,14 +88,23 @@ pub(in crate::controller) fn worker_recovery_command(
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // Entries are matched with `case`, not grep, so only the listings
+    // themselves can fail, and a failing listing exits nonzero.
     let script = format!(
         "root={root}; parent={parent}; name={name}; \
+         hel_lists() {{ \
+           while IFS= read -r hel_entry; do \
+             case \"$hel_entry\" in \"$2\"|\"$3\") return 0 ;; esac; \
+           done <<MJ_ENTRIES
+$1
+MJ_ENTRIES
+           return 1; }}; \
          if [ -d \"$root\" ]; then \
            entries=$(ls -1A \"$root\") || exit 1; \
-           if printf '%s\\n' \"$entries\" | grep -qxF -e {state} -e {journal}; then \
+           if hel_lists \"$entries\" {state} {journal}; then \
              printf 'recoverable\\n'; else printf 'nothing\\n'; fi; \
          elif entries=$(ls -1A \"$parent\"); then \
-           if printf '%s\\n' \"$entries\" | grep -qxF -- \"$name\"; then exit 1; fi; \
+           if hel_lists \"$entries\" \"$name\" \"$name\"; then exit 1; fi; \
            printf 'nothing\\n'; \
          else exit 1; fi",
         root = targets::posix_quote(worker_root),
@@ -111,15 +120,27 @@ pub(in crate::controller) fn worker_recovery_command(
 /// Ask the target whether `worker_root` holds anything to recover. Only the
 /// install step creates a child's root and only its cleanup removes it, and
 /// only a worker that reached its durable relay writes relay state there.
+///
+/// A worker that is still starting has not written relay state yet, so an
+/// empty root counts as nothing to recover only when no worker for it is
+/// running afterwards. Liveness is checked after the listing, so a worker that
+/// started in between is seen.
 pub(in crate::controller) fn worker_recovery(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> WorkerRecovery {
-    match executor.execute(&worker_recovery_command(locator, worker_root)) {
-        Ok(output) if output.status == 0 => match String::from_utf8_lossy(&output.stdout).trim() {
-            "recoverable" => WorkerRecovery::Recoverable,
-            "nothing" => WorkerRecovery::NothingToRecover,
+    let answer = |command: CommandSpec| match executor.execute(&command) {
+        Ok(output) if output.status == 0 => {
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        }
+        _ => None,
+    };
+    match answer(worker_recovery_command(locator, worker_root)).as_deref() {
+        Some("recoverable") => WorkerRecovery::Recoverable,
+        Some("nothing") => match answer(worker_liveness_command(locator, worker_root)).as_deref() {
+            Some("dead") => WorkerRecovery::NothingToRecover,
+            Some("alive" | "starting") => WorkerRecovery::Recoverable,
             _ => WorkerRecovery::Unknown,
         },
         _ => WorkerRecovery::Unknown,

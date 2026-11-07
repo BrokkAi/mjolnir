@@ -864,6 +864,8 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
 /// fails, so a close that tries to reconnect or restart a worker is visible.
 struct RootProbeExecutor {
     probe_fails: bool,
+    /// What the worker liveness probe answers.
+    worker: &'static str,
     purposes: std::sync::Mutex<Vec<String>>,
 }
 
@@ -874,6 +876,11 @@ impl CommandExecutor for RootProbeExecutor {
             "probe Mjolnir worker root" if self.probe_fails => {
                 anyhow::bail!("ssh: connect to host morannon: connection timed out")
             }
+            "probe Mjolnir worker daemon liveness" => Ok(CommandOutput {
+                status: 0,
+                stdout: format!("{}\n", self.worker).into_bytes(),
+                stderr: Vec::new(),
+            }),
             "probe Mjolnir worker root"
             | "stop a borrowed-target sub-agent and remove its private worker state" => {
                 ProcessExecutor.execute(command)
@@ -908,6 +915,7 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
 
     let unreachable = RootProbeExecutor {
         probe_fails: true,
+        worker: "dead",
         purposes: Default::default(),
     };
     controller
@@ -935,6 +943,7 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
 
     let answered = RootProbeExecutor {
         probe_fails: false,
+        worker: "dead",
         purposes: Default::default(),
     };
     controller
@@ -945,6 +954,7 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
         *answered.purposes.lock().unwrap(),
         [
             "probe Mjolnir worker root",
+            "probe Mjolnir worker daemon liveness",
             "stop a borrowed-target sub-agent and remove its private worker state"
         ]
     );
@@ -958,6 +968,7 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
 async fn close_child_with_partial_root(
     name: &str,
     has_state: bool,
+    worker: &'static str,
 ) -> Option<(Vec<String>, bool, SessionState, bool)> {
     if !in_isolated_store(name) {
         return None;
@@ -977,6 +988,7 @@ async fn close_child_with_partial_root(
     seed_child_reports(&mut controller, session_id, directory.path());
     let executor = RootProbeExecutor {
         probe_fails: false,
+        worker,
         purposes: Default::default(),
     };
     let result = controller
@@ -1004,6 +1016,7 @@ async fn closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery() {
     let Some((purposes, ok, state, _)) = close_child_with_partial_root(
         "closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery",
         false,
+        "dead",
     )
     .await
     else {
@@ -1014,6 +1027,7 @@ async fn closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery() {
         purposes,
         [
             "probe Mjolnir worker root",
+            "probe Mjolnir worker daemon liveness",
             "stop a borrowed-target sub-agent and remove its private worker state"
         ]
     );
@@ -1030,6 +1044,7 @@ async fn closing_a_child_whose_root_has_relay_state_keeps_worker_recovery() {
     let Some((purposes, _, _, state_kept)) = close_child_with_partial_root(
         "closing_a_child_whose_root_has_relay_state_keeps_worker_recovery",
         true,
+        "dead",
     )
     .await
     else {
@@ -1046,6 +1061,40 @@ async fn closing_a_child_whose_root_has_relay_state_keeps_worker_recovery() {
         "{purposes:?}"
     );
     assert!(state_kept);
+}
+
+/// A worker that is still starting has written no relay state yet. Its empty
+/// root is not "nothing to recover": the close keeps the recovery path so the
+/// conversation the worker is about to start is synchronized, not deleted.
+// Hard-won: #1438: an empty root of a worker that was still starting read as nothing to recover
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
+async fn closing_a_child_whose_worker_is_still_starting_keeps_worker_recovery() {
+    let Some((purposes, _, _, _)) = close_child_with_partial_root(
+        "closing_a_child_whose_worker_is_still_starting_keeps_worker_recovery",
+        false,
+        "starting",
+    )
+    .await
+    else {
+        return;
+    };
+    assert_eq!(
+        purposes[..2],
+        [
+            "probe Mjolnir worker root",
+            "probe Mjolnir worker daemon liveness"
+        ]
+    );
+    assert!(
+        !purposes
+            .iter()
+            .any(|purpose| purpose.starts_with("stop a borrowed-target")),
+        "{purposes:?}"
+    );
 }
 
 /// A child closed by an older daemon can retain a checkpoint; reports
