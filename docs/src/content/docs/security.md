@@ -227,25 +227,26 @@ Claude Remote Control or claude.ai connectors.
 
 ## SSH host keys are trusted on first use
 
-Mjolnir's SSH connections accept a host key they have never seen, record it in
-`known_hosts`, and refuse a key that later changes
-(`StrictHostKeyChecking=accept-new`). This applies to SSH machines, to EC2
-instances, whose key is always new at first contact, and to the Git-over-SSH
-fetches Mjolnir runs on the controller, such as its clone cache and checkpoint
-checks. Someone who can intercept a first connection can present their own key,
-and it is trusted from then on. Git commands that run on a target, inside a
-container or on an SSH machine, use that target's own SSH settings and
-`known_hosts` instead; with OpenSSH's defaults they refuse an unknown key
-rather than trust it.
+Mjolnir's own SSH connections accept a host key they have never seen, record it
+in `known_hosts`, and refuse a key that later changes
+(`StrictHostKeyChecking=accept-new`). That covers its connections to SSH
+machines and EC2 instances, whose key is always new at first contact, and the
+Git fetches it runs for its clone cache and checkpoint checks, whether those run
+on the controller or on an SSH machine that hosts a target's containers. Someone
+who can intercept a first connection can present their own key, and it is
+trusted from then on. Other Git commands that run on a target follow that
+target's own SSH settings.
 
 A key that is already in `known_hosts` is checked, not trusted anew. To avoid
 first-use trust:
 
-- Before the first connection, add each host's key to the `known_hosts` file of
-  the user that runs Mjolnir on the controller. Take the expected fingerprint
-  from a source you trust, such as the SSH key fingerprints your Git host
-  publishes, and compare it with the key you add. `ssh-keyscan` only reports
-  what the network presents, so it is not a check by itself.
+- Before the first connection, add the verified key of each Git host and each
+  machine to the `known_hosts` file of the account Mjolnir uses, on every
+  machine involved: the controller and each SSH machine you use as a target.
+  Take the expected fingerprint from a source you trust, such as the SSH key
+  fingerprints your Git host publishes, and compare it with the key you add.
+  `ssh-keyscan` only reports what the network presents, so it is not a check by
+  itself.
 - To refuse unknown keys outright on an SSH machine, add
   `"-o", "StrictHostKeyChecking=yes"` to its `extra_args`; Mjolnir puts
   `extra_args` first, so it wins. EC2 machines take the same option in
