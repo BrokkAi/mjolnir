@@ -303,6 +303,32 @@ fn a_guardian_mode_selector_stays_owned_without_auto_on_offer() {
     assert!(policy_permits(guardian, &options, Some("mode"), "plan"));
 }
 
+/// A `mode` selector without the optional Mode category is still the one a
+/// SetConfig for `mode` reaches, so the policy owns it.
+// Hard-won: 9888b76: a `mode` selector without the Mode category was not owned
+#[test]
+fn an_uncategorized_mode_selector_is_policy_owned() {
+    let options: Vec<SessionConfigOption> = serde_json::from_value(json!([{
+        "id": "mode", "name": "Mode", "type": "select", "currentValue": "auto",
+        "options": [
+            {"value": "auto", "name": "Auto"}, {"value": "plan", "name": "Plan"},
+            {"value": "bypassPermissions", "name": "Bypass"}
+        ]
+    }]))
+    .unwrap();
+    let guardian = HarnessKind::Claude.execution_enforcement(ExecutionPolicy::ConfiguredApprovals);
+    assert_eq!(
+        guardian.unwrap().owned_config_keys(&options),
+        vec!["mode".to_owned()]
+    );
+    assert!(!policy_permits(
+        guardian,
+        &options,
+        Some("mode"),
+        "bypassPermissions"
+    ));
+}
+
 /// A model whose catalogue omits Auto has refused it as plainly as an error
 /// answer: leaving Plan takes Claude's default mode with a warning.
 // Hard-won: d33f5a5: an unadvertised policy mode failed the command instead of keeping the session usable

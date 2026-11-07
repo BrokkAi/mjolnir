@@ -169,7 +169,8 @@ impl ExecutionEnforcement {
         self,
         options: &[agent_client_protocol::v1::schema::SessionConfigOption],
     ) -> Vec<String> {
-        use agent_client_protocol::v1::schema::SessionConfigOptionCategory;
+        // `mode` resolves the way a SetConfig for it does: the option with
+        // that id, else the Mode-category one.
         let mode = self.acp_mode.and_then(|_| {
             self.acp_mode_selector
                 .and_then(|selector| {
@@ -177,11 +178,7 @@ impl ExecutionEnforcement {
                         .iter()
                         .find(|option| option.id.to_string() == selector)
                 })
-                .or_else(|| {
-                    options
-                        .iter()
-                        .find(|option| option.category == Some(SessionConfigOptionCategory::Mode))
-                })
+                .or_else(|| crate::acp::find_session_config_option(options, "mode"))
                 .map(|option| option.id.to_string())
         });
         mode.into_iter()
