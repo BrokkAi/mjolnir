@@ -964,12 +964,14 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
 }
 
 /// Close a Closing child whose root holds the binary and an exit record, plus
-/// relay state when `has_state`. Returns the commands run and the result.
+/// relay state when `has_state`. The child carries the restart intent a failed
+/// checkpoint-only restart left behind. Returns the commands run, the result,
+/// the final state, whether the relay state survived and whether the intent did.
 async fn close_child_with_partial_root(
     name: &str,
     has_state: bool,
     worker: &'static str,
-) -> Option<(Vec<String>, bool, SessionState, bool)> {
+) -> Option<(Vec<String>, bool, SessionState, bool, bool)> {
     if !in_isolated_store(name) {
         return None;
     }
@@ -986,6 +988,23 @@ async fn close_child_with_partial_root(
     let mut controller = failed_subagent_controller(&worker_root, session_id);
     controller.state.sessions.get_mut(session_id).unwrap().state = SessionState::Closing;
     seed_child_reports(&mut controller, session_id, directory.path());
+    let intent = crate::database::WorkerRestartIntent {
+        operation_id: "failed-checkpoint-only-restart".into(),
+        target: controller.state.sessions[session_id]
+            .target
+            .clone()
+            .unwrap(),
+        desired_build: String::new(),
+    };
+    crate::worker_lifecycle::run_blocking(session_id, "seed intent", &ProcessExecutor, || {
+        crate::database::begin_worker_restart(session_id, &intent)?;
+        crate::database::advance_worker_restart(
+            session_id,
+            &intent.operation_id,
+            crate::database::WorkerRestartPhase::Swapping,
+        )
+    })
+    .unwrap();
     let executor = RootProbeExecutor {
         probe_fails: false,
         worker,
@@ -1000,6 +1019,9 @@ async fn close_child_with_partial_root(
         result.is_ok(),
         controller.state.sessions[session_id].state,
         worker_root.join(mj_core::relay::RELAY_STATE_FILE).exists(),
+        crate::database::load_worker_restart(session_id)
+            .unwrap()
+            .is_some(),
     ))
 }
 
@@ -1007,13 +1029,14 @@ async fn close_child_with_partial_root(
 /// relay leaves a root with the binary and an exit record but no relay state.
 /// A checkpoint-only worker refuses it, so its close settles like an absent root.
 // Hard-won: #1438: a partial worker root without relay state kept its close retrying a recovery the worker refuses
+// Hard-won: #1438: a child's close left the restart intent of its failed checkpoint-only restart behind
 #[tokio::test]
 #[cfg_attr(
     windows,
     ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
 )]
 async fn closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery() {
-    let Some((purposes, ok, state, _)) = close_child_with_partial_root(
+    let Some((purposes, ok, state, _, intent_left)) = close_child_with_partial_root(
         "closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery",
         false,
         "dead",
@@ -1032,6 +1055,7 @@ async fn closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery() {
         ]
     );
     assert_eq!(state, SessionState::Stopped);
+    assert!(!intent_left, "teardown proved the worker gone");
 }
 
 /// A root with relay state keeps the recovery path and is not cleaned up.
@@ -1041,7 +1065,7 @@ async fn closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery() {
     ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
 )]
 async fn closing_a_child_whose_root_has_relay_state_keeps_worker_recovery() {
-    let Some((purposes, _, _, state_kept)) = close_child_with_partial_root(
+    let Some((purposes, _, _, state_kept, _)) = close_child_with_partial_root(
         "closing_a_child_whose_root_has_relay_state_keeps_worker_recovery",
         true,
         "dead",
@@ -1073,7 +1097,7 @@ async fn closing_a_child_whose_root_has_relay_state_keeps_worker_recovery() {
     ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
 )]
 async fn closing_a_child_whose_worker_is_still_starting_keeps_worker_recovery() {
-    let Some((purposes, _, _, _)) = close_child_with_partial_root(
+    let Some((purposes, _, _, _, _)) = close_child_with_partial_root(
         "closing_a_child_whose_worker_is_still_starting_keeps_worker_recovery",
         false,
         "starting",
