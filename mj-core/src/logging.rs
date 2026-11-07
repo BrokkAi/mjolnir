@@ -184,6 +184,57 @@ pub fn stdout_line(args: std::fmt::Arguments<'_>) {
         .write_all(line.as_bytes());
 }
 
+/// The timestamp format in log file names. It sorts as text in time order.
+pub const LOG_TIMESTAMP_FORMAT: &str = "%Y%m%dT%H%M%S%.3fZ";
+
+/// Marks a daemon's log that was kept because the daemon did not shut down
+/// cleanly: `mj-daemon-<time>-<pid>.log` becomes
+/// `mj-daemon-<time>-<pid>.crashed.log`. Retention treats such logs as a kind
+/// of their own, so ordinary logs cannot push them out.
+const CRASHED_LOG_MARK: &str = ".crashed";
+
+/// The name `mj-daemon-<time>-<pid>.log` is kept under after a crash, or
+/// `None` when `name` is not an unmarked managed log name.
+pub fn crashed_log_name(name: &str) -> Option<String> {
+    let stem = name.strip_suffix(".log")?;
+    (name.starts_with("mj-") && !stem.ends_with(CRASHED_LOG_MARK))
+        .then(|| format!("{stem}{CRASHED_LOG_MARK}.log"))
+}
+
+/// `name` without its crashed mark, and whether it had one. Everything that
+/// parses managed log names reads them through this, so a crashed log parses
+/// as the log it was.
+pub fn without_crashed_mark(name: &str) -> (std::borrow::Cow<'_, str>, bool) {
+    match name
+        .strip_suffix(".log")
+        .and_then(|stem| stem.strip_suffix(CRASHED_LOG_MARK))
+    {
+        Some(stem) => (std::borrow::Cow::Owned(format!("{stem}.log")), true),
+        None => (std::borrow::Cow::Borrowed(name), false),
+    }
+}
+
+/// The start time and process of a daemon-kind log, read from its file name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonLogName {
+    pub started: String,
+    pub pid: u32,
+    pub crashed: bool,
+}
+
+/// Parse `mj-daemon-<time>-<pid>.log`, with or without the crashed mark. The
+/// `mj node` process that serves a daemon writes the same kind of log.
+pub fn parse_daemon_log_name(name: &str) -> Option<DaemonLogName> {
+    let (name, crashed) = without_crashed_mark(name);
+    let stem = name.strip_prefix("mj-daemon-")?.strip_suffix(".log")?;
+    let (started, pid) = stem.split_once('-')?;
+    Some(DaemonLogName {
+        started: started.to_owned(),
+        pid: pid.parse().ok()?,
+        crashed,
+    })
+}
+
 #[macro_export]
 macro_rules! diagnostic_stderr {
     ($($arg:tt)*) => { $crate::logging::stderr_line(format_args!($($arg)*)) };

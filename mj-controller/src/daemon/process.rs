@@ -88,6 +88,7 @@ pub(super) async fn run_daemon_runtime(
     cancellation: CancellationToken,
 ) -> Result<()> {
     let progress = super::diagnostics::DaemonProgressMonitor::start()?;
+    let startup_began = Instant::now();
     // Before this daemon can start a checkpoint, so every checkpoint file older
     // than this belongs to a checkpoint that no longer runs.
     let started = SystemTime::now();
@@ -184,6 +185,7 @@ pub(super) async fn run_daemon_runtime(
     manager.control.update_model_policies(&controller);
     let manager_targets = manager.targets;
     manager_targets.send_replace(dashboard_worker_targets(&controller));
+    log_relay_actors_launched(&manager_targets.borrow());
     let manager_updates = manager.updates;
     let manager_control = manager.control.clone();
     let manager_shutdown = manager.shutdown;
@@ -238,12 +240,14 @@ pub(super) async fn run_daemon_runtime(
     let bootstrapping = Instant::now();
     let bootstrap = async {
         let move_operations = blocking(crate::database::load_move_operations).await?;
+        let moves = move_operations.len();
         let move_sessions = move_operations
             .iter()
             .map(|operation| operation.selection.session_id.clone())
             .collect::<BTreeSet<_>>();
         let mut lifecycle_owned = state.recover_moves(move_operations)?;
         let restart_intents = blocking(crate::database::load_session_restarts).await?;
+        let restarts = restart_intents.len();
         lifecycle_owned.extend(
             restart_intents
                 .iter()
@@ -251,8 +255,32 @@ pub(super) async fn run_daemon_runtime(
         );
         lifecycle_owned.extend(state.recover_restarts(restart_intents)?);
         lifecycle_owned.extend(move_sessions.iter().cloned());
+        let (retained_cleanups, startup_cleanups) = {
+            let owner = state.owner();
+            let sessions = &owner.controller().state.sessions;
+            (
+                sessions
+                    .values()
+                    .filter(|session| {
+                        session.state == mj_core::state::SessionState::Stopped
+                            && session.target.is_some()
+                    })
+                    .count(),
+                sessions
+                    .values()
+                    .filter(|session| session.state == mj_core::state::SessionState::StartupCleanup)
+                    .count(),
+            )
+        };
         state.resume_retained_cleanups();
         state.resume_startup_cleanups(true);
+        tracing::info!(
+            moves,
+            restarts,
+            retained_cleanups,
+            startup_cleanups,
+            "daemon startup: recovery of moves, restarts and cleanups queued"
+        );
         state.restore_startup_deliveries(&cancellation).await?;
         Ok::<_, anyhow::Error>((move_sessions, lifecycle_owned))
     }
@@ -477,6 +505,7 @@ pub(super) async fn run_daemon_runtime(
         });
         interrupted_close_tasks.push(interrupted_close_task);
     }
+    let interrupted_closes = interrupted_close_tasks.len();
     // A destroy that failed left its record in `Error` with the target still
     // present; it is finished the way `mj destroy` finishes it. The branch is
     // kept, because whether to delete it was that command's choice and is not
@@ -504,6 +533,12 @@ pub(super) async fn run_daemon_runtime(
             });
         }));
     }
+    let interrupted_destroys = interrupted_close_tasks.len() - interrupted_closes;
+    tracing::info!(
+        interrupted_closes,
+        interrupted_destroys,
+        "daemon startup: interrupted closes and destroys resumed"
+    );
     // Whatever is still in an in-flight lifecycle state now has no owner: the
     // moves, the interrupted closes, and the checkpointing rows above are
     // every operation that legitimately resumes. The list comes from the
@@ -513,6 +548,10 @@ pub(super) async fn run_daemon_runtime(
         let unowned = unowned_interrupted_lifecycles(
             &controller,
             &move_owned.union(&move_sessions).cloned().collect(),
+        );
+        tracing::info!(
+            sessions = unowned.len(),
+            "daemon startup: interrupted lifecycles to mark failed"
         );
         (!unowned.is_empty()).then(|| {
             let state = state.clone();
@@ -559,6 +598,10 @@ pub(super) async fn run_daemon_runtime(
     // view watcher instead.
     let tombstone_sweep = {
         let tombstones = tombstone_session_ids(&controller);
+        tracing::info!(
+            sessions = tombstones.len(),
+            "daemon startup: tombstones to discard"
+        );
         (!tombstones.is_empty()).then(|| {
             let state = state.clone();
             let upgrade_work = startup_work.clone();
@@ -635,6 +678,11 @@ pub(super) async fn run_daemon_runtime(
     let mut outcome = async {
         write_metadata(&daemon_metadata_path, &metadata)?;
         reach_test_hook("daemon_metadata_before_listening").await?;
+        tracing::info!(
+            elapsed_ms = startup_began.elapsed().as_millis(),
+            resumed_close_and_destroy_tasks = interrupted_close_tasks.len(),
+            "daemon startup recovery finished"
+        );
         tracing::info!("the daemon is serving");
         drop(startup_work);
         loop {
@@ -1050,6 +1098,24 @@ pub(super) async fn run_daemon_runtime(
 
 /// Log a startup phase that took long enough to matter, so a slow start after
 /// an upgrade records where its time went.
+/// One line naming how many session relay actors the daemon starts at once and
+/// what kind of target each reaches, so a slow start can be read against the
+/// size of its reconnect burst.
+fn log_relay_actors_launched(targets: &[crate::session_manager::RelaySessionTarget]) {
+    let mut by_kind = BTreeMap::<&'static str, usize>::new();
+    for target in targets {
+        let kind = target.worker_recovery.as_ref().map_or("unknown", |plan| {
+            mj_core::targets::locator_kind_name(&plan.source_target)
+        });
+        *by_kind.entry(kind).or_default() += 1;
+    }
+    tracing::info!(
+        actors = targets.len(),
+        by_target_kind = ?by_kind,
+        "daemon startup: session relay actors launched"
+    );
+}
+
 fn log_startup_phase(phase: &'static str, started: Instant) {
     let took = started.elapsed();
     if took >= EpilogueClock::LOGGED_STEP {

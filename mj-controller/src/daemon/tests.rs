@@ -950,6 +950,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
             kind: LifecycleKind::Resume,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
+            last_stage_change: tokio::time::Instant::now(),
             resume_workspace_id: Some("workspace-a".into()),
             resume_destination: None,
             notice: None,
@@ -978,6 +979,7 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
             kind: LifecycleKind::Resume,
             started_at_epoch_seconds: epoch_seconds().saturating_sub(45),
             active_stages: BTreeMap::new(),
+            last_stage_change: tokio::time::Instant::now(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -2642,6 +2644,7 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
             kind,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
+            last_stage_change: tokio::time::Instant::now(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -2693,6 +2696,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
             kind: LifecycleKind::Suspend,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
+            last_stage_change: tokio::time::Instant::now(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -3371,6 +3375,113 @@ async fn force_destruction_preemption_times_out_without_destroying() {
             .to_string()
             .contains("did not stop after cancellation"),
         "{error:#}"
+    );
+}
+
+/// A running Create whose stages keep starting and finishing is progressing,
+/// however long it takes in total.
+#[tokio::test(start_paused = true)]
+async fn a_create_that_keeps_finishing_stages_is_not_failed_as_stalled() {
+    let state = test_runtime_state();
+    state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+            |_state, _session_id, _cancelled| async move {
+                std::future::pending::<()>().await;
+                #[allow(unreachable_code)]
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        "session-1".into(),
+    );
+    // Four hours in total, each stage well under the bound.
+    for _ in 0..24 {
+        executor.stage_started(ProvisionStage::Syncing);
+        tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+        state
+            .check_create_progress("session-1", create::CREATE_STALL_BOUND)
+            .expect("a Create that is making progress is not stalled");
+        executor.stage_finished(ProvisionStage::Syncing);
+        tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+        state
+            .check_create_progress("session-1", create::CREATE_STALL_BOUND)
+            .expect("a Create that is making progress is not stalled");
+    }
+}
+
+/// Queueing at a container's start gate is waiting for a turn, not a stalled
+/// stage: it may last longer than the stall bound, and admission restarts the
+/// clock.
+#[tokio::test(start_paused = true)]
+async fn a_create_queued_at_the_start_gate_longer_than_the_bound_is_not_stalled() {
+    let state = test_runtime_state();
+    state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+            |_state, _session_id, _cancelled| async move {
+                std::future::pending::<()>().await;
+                #[allow(unreachable_code)]
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        "session-1".into(),
+    );
+    let bound = create::CREATE_STALL_BOUND;
+    executor.stage_started(ProvisionStage::WaitingForStartSlot);
+    tokio::time::sleep(bound * 3).await;
+    state
+        .check_create_progress("session-1", bound)
+        .expect("a queued Create is not stalled");
+    executor.stage_finished(ProvisionStage::WaitingForStartSlot);
+    // Admitted: the clock starts again from admission, and the next stage can
+    // stall like any other.
+    executor.stage_started(ProvisionStage::Starting);
+    tokio::time::sleep(bound - Duration::from_secs(1)).await;
+    state.check_create_progress("session-1", bound).unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(state.check_create_progress("session-1", bound).is_err());
+}
+
+// Hard-won: #1438: a 120 s total deadline cancelled slow Creates mid-provision, and removing it outright left a command that hangs on a live connection with nothing to end its start.
+#[tokio::test(start_paused = true)]
+async fn a_create_stalled_in_one_stage_fails_its_start_and_names_the_stage() {
+    let state = test_runtime_state();
+    state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+            |_state, _session_id, _cancelled| async move {
+                std::future::pending::<()>().await;
+                #[allow(unreachable_code)]
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        "session-1".into(),
+    );
+    executor.stage_started(ProvisionStage::Syncing);
+    let bound = create::CREATE_STALL_BOUND;
+    tokio::time::sleep(bound - Duration::from_secs(1)).await;
+    state.check_create_progress("session-1", bound).unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let error = state
+        .check_create_progress("session-1", bound)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("stalled in: Sync")
+            && error.contains("no stage started or finished for 601 s"),
+        "{error}"
     );
 }
 
@@ -8893,6 +9004,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
             kind: LifecycleKind::Move,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
+            last_stage_change: tokio::time::Instant::now(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,

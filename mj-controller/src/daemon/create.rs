@@ -3,6 +3,17 @@ use super::*;
 /// How long creating a parent's report root on its target may take.
 const REPORT_ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long a reviewer child's Create may go with no provisioning stage
+/// starting or finishing before its start is failed. It bounds idleness, not
+/// the whole Create, so a slow Create that keeps progressing is never failed.
+///
+/// The longest single stage measured on 2026-11-06 under a load average of
+/// about 200 on morannon was about 190 s (a `mkdir`); ten minutes is about
+/// three times that worst case. The bound exists because the Create's
+/// executor and `CommandSpec` have no per-command timeout, so a remote command
+/// that hangs on a live connection would otherwise wait for ever (#1438).
+pub(super) const CREATE_STALL_BOUND: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 impl RuntimeState {
     pub(super) async fn start_create_session(
         self: &Arc<Self>,
@@ -224,29 +235,34 @@ impl RuntimeState {
             report_root: None,
         })
         .await?;
-        let handle = self
-            .session_manager
-            .wait_for_session(child, Duration::from_secs(120))
-            .await?;
-        tokio::time::timeout(Duration::from_secs(120), async {
-            loop {
-                let view = handle.view();
-                if view.connected
-                    && view
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|snapshot| snapshot.operational.agent_capabilities.is_some())
-                {
-                    return Ok::<_, anyhow::Error>(());
-                }
-                if let Some(error) = view.error {
-                    anyhow::bail!("{error:?}");
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+        // No total deadline here: one counted queue time and cancelled an
+        // accepted Create mid-provision, which left the child without a worker
+        // root (#1438). Each wait ends with the Create's own outcome: the
+        // child is ready, its record says the Create failed or it was closed,
+        // or the Create has stalled for `CREATE_STALL_BOUND`.
+        let handle = loop {
+            self.reviewer_child_can_still_start(child)?;
+            if let Ok(handle) = self.session_manager.session(child.to_owned()).await {
+                break handle;
             }
-        })
-        .await
-        .context("reviewer harness did not become ready")??;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        loop {
+            let view = handle.view();
+            if view.connected
+                && view
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.operational.agent_capabilities.is_some())
+            {
+                break;
+            }
+            if let Some(error) = view.error {
+                anyhow::bail!("{error:?}");
+            }
+            self.reviewer_child_can_still_start(child)?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         use crate::server_runtime::api::ExportRuntime;
         Arc::clone(self)
             .queue_startup(
@@ -260,19 +276,65 @@ impl RuntimeState {
                 },
             )
             .await?;
-        tokio::time::timeout(Duration::from_secs(120), async {
-            loop {
-                match self.startup_status(child.to_owned()).await? {
-                    Some(crate::server::api::StartStatus::Submitted { .. }) => return Ok(()),
-                    Some(crate::server::api::StartStatus::Failed { message }) => {
-                        anyhow::bail!("{message}")
-                    }
-                    _ => tokio::time::sleep(Duration::from_millis(100)).await,
+        // The startup delivery waits for the harness and fails the step when
+        // the session reaches a state that cannot take it, so a status that
+        // stays pending ends either in a submit or in a failure.
+        loop {
+            match self.startup_status(child.to_owned()).await? {
+                Some(crate::server::api::StartStatus::Submitted { .. }) => return Ok(()),
+                Some(crate::server::api::StartStatus::Failed { message }) => {
+                    anyhow::bail!("{message}")
+                }
+                _ => {
+                    self.reviewer_child_can_still_start(child)?;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
-        })
-        .await
-        .context("reviewer first prompt did not start")?
+        }
+    }
+
+    /// Fail unless the reviewer child's record is still one a Create can
+    /// finish: missing, closed, failed or destroyed children never become
+    /// ready, so waiting for them would never end. Also fail a Create that has
+    /// stalled (see [`CREATE_STALL_BOUND`]).
+    fn reviewer_child_can_still_start(&self, child: &str) -> Result<()> {
+        self.check_create_progress(child, CREATE_STALL_BOUND)?;
+        let Some(record) = self.session_record(child) else {
+            anyhow::bail!("reviewer child {child} no longer exists");
+        };
+        match record.state {
+            mj_core::state::SessionState::Provisioning
+            | mj_core::state::SessionState::Running
+            | mj_core::state::SessionState::Disconnected
+            | mj_core::state::SessionState::Checkpointing => Ok(()),
+            state => match record.last_error {
+                Some(cause) => anyhow::bail!("reviewer child {child} is {state:?}: {cause}"),
+                None => anyhow::bail!("reviewer child {child} is {state:?}"),
+            },
+        }
+    }
+
+    /// Fail when the child's running Create has gone `bound` without a
+    /// provisioning stage starting or finishing. The stage signal is the one
+    /// the lifecycle already keeps for its progress display. Waiting for a
+    /// container start slot is a stage of its own and is never a stall;
+    /// admission ends it and so restarts the clock.
+    pub(super) fn check_create_progress(&self, child: &str, bound: Duration) -> Result<()> {
+        let Some((idle, stages)) = self.create_stall(child) else {
+            return Ok(());
+        };
+        if idle < bound {
+            return Ok(());
+        }
+        let stage = if stages.is_empty() {
+            "between stages".to_owned()
+        } else {
+            stages.join(" + ")
+        };
+        anyhow::bail!(
+            "the reviewer child {child} stalled while provisioning: no stage started or finished for {} s (stalled in: {stage})",
+            idle.as_secs()
+        )
     }
 
     pub async fn start_create_session_controlled(

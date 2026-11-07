@@ -82,6 +82,23 @@ pub(super) fn container_start_gate(
     })))
 }
 
+/// Take a start slot of the container's gate. A child that has to queue shows
+/// the wait as its own stage, from the moment it begins waiting until it is
+/// admitted, so the queue is visible and is not mistaken for a stalled stage.
+async fn admit_container_start<'a>(
+    gate: &'a tokio::sync::Semaphore,
+    executor: &impl CommandExecutor,
+) -> Option<tokio::sync::SemaphorePermit<'a>> {
+    match gate.try_acquire() {
+        Ok(permit) => Some(permit),
+        Err(tokio::sync::TryAcquireError::Closed) => None,
+        Err(tokio::sync::TryAcquireError::NoPermits) => {
+            let _waiting = ProvisionStageGuard::new(executor, ProvisionStage::WaitingForStartSlot);
+            gate.acquire().await.ok()
+        }
+    }
+}
+
 /// Whether starting a child worker can be tried again.
 ///
 /// Only a worker that provably never published its control socket qualifies:
@@ -393,7 +410,7 @@ impl Controller {
                         // part that does not survive a crowd.
                         let gate = container_start_gate(&backend);
                         let _admitted = match &gate {
-                            Some(gate) => gate.acquire().await.ok(),
+                            Some(gate) => admit_container_start(gate, executor).await,
                             None => None,
                         };
                         self.connect_and_start_worker(

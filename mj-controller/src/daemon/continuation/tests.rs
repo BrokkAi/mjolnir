@@ -1746,6 +1746,7 @@ fn lifecycle_entry(kind: LifecycleKind) -> ActiveLifecycle {
         kind,
         started_at_epoch_seconds: 1,
         active_stages: BTreeMap::new(),
+        last_stage_change: tokio::time::Instant::now(),
         resume_workspace_id: None,
         resume_destination: None,
         notice: None,

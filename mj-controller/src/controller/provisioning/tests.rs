@@ -1731,6 +1731,62 @@ impl CommandExecutor for RawRegistrationExecutor {
     }
 }
 
+/// A child that has to queue for a container start slot shows the wait as its
+/// own stage, from the first moment it waits until it is admitted; a child
+/// that finds a free slot reports nothing.
+#[tokio::test]
+async fn waiting_for_a_container_start_slot_is_its_own_stage_until_admission() {
+    #[derive(Default)]
+    struct StageRecorder {
+        events: Mutex<Vec<(bool, targets::ProvisionStage)>>,
+    }
+
+    impl CommandExecutor for StageRecorder {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            unreachable!("waiting for a start slot runs no commands: {command:?}");
+        }
+
+        fn stage_started(&self, stage: targets::ProvisionStage) {
+            self.events.lock().unwrap().push((true, stage));
+        }
+
+        fn stage_finished(&self, stage: targets::ProvisionStage) {
+            self.events.lock().unwrap().push((false, stage));
+        }
+    }
+
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let free = StageRecorder::default();
+    let permit = admit_container_start(&gate, &free)
+        .await
+        .expect("a free slot");
+    assert!(free.events.lock().unwrap().is_empty());
+
+    let queued = std::sync::Arc::new(StageRecorder::default());
+    let waiter = {
+        let (gate, queued) = (gate.clone(), queued.clone());
+        tokio::spawn(async move { admit_container_start(&gate, &*queued).await.is_some() })
+    };
+    while queued.events.lock().unwrap().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        *queued.events.lock().unwrap(),
+        vec![(true, targets::ProvisionStage::WaitingForStartSlot)],
+        "the stage is open while the child waits"
+    );
+    drop(permit);
+    assert!(waiter.await.unwrap(), "admitted once the slot is free");
+    assert_eq!(
+        *queued.events.lock().unwrap(),
+        vec![
+            (true, targets::ProvisionStage::WaitingForStartSlot),
+            (false, targets::ProvisionStage::WaitingForStartSlot)
+        ],
+        "the stage closes on admission"
+    );
+}
+
 #[test]
 fn provisioning_reports_the_pull_stage_only_while_waiting() {
     #[derive(Default)]

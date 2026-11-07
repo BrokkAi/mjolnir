@@ -552,6 +552,7 @@ impl RuntimeState {
             if operation.operation_id != operation_id || !operation.is_running() {
                 return;
             }
+            operation.last_stage_change = tokio::time::Instant::now();
             if active {
                 let started_at = stage
                     .started_at_epoch_seconds()
@@ -578,6 +579,24 @@ impl RuntimeState {
         if changed {
             self.publish_revision();
         }
+    }
+
+    /// How long the session's running Create has gone without a provisioning
+    /// stage starting or finishing, and the stages it is in now (empty
+    /// between stages). `None` when no Create is running for the session, or
+    /// while it waits for a container start slot: a queue is not a stall.
+    pub(super) fn create_stall(&self, session_id: &str) -> Option<(Duration, Vec<String>)> {
+        let owner = self.owner();
+        let operation = owner.lifecycle.get(session_id)?;
+        let queued = operation
+            .active_stages
+            .contains_key(&ProvisionStage::WaitingForStartSlot);
+        (operation.kind == LifecycleKind::Create && operation.is_running() && !queued).then(|| {
+            (
+                operation.last_stage_change.elapsed(),
+                operation.stage_labels(),
+            )
+        })
     }
 
     /// Record something the daemon did on its own, for every attached surface

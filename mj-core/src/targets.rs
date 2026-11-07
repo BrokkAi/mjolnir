@@ -47,6 +47,9 @@ pub enum ProvisionStage {
     /// rather than starting a second download of the same image.
     PullingImage,
     WaitingForContainerUpgrade,
+    /// Queued behind other children starting in the same container. This is
+    /// waiting for a turn, not work, so it never counts as a stall.
+    WaitingForStartSlot,
     Provisioning,
     Booting,
     Cloning,
@@ -76,6 +79,7 @@ impl ProvisionStage {
             Self::WaitingForContainerUpgrade => {
                 "Container upgrade pending; waiting for accepted work".into()
             }
+            Self::WaitingForStartSlot => "Waiting for a container start slot".into(),
             Self::Provisioning => "Provision".into(),
             Self::Booting => "Boot".into(),
             Self::Cloning => "Clone".into(),
@@ -2855,8 +2859,8 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
 }
 mod convert;
 pub use convert::{
-    RecordedTarget, StoredTarget, TargetConversionError, locator_needs_connection,
-    ssh_args_with_identity,
+    RecordedTarget, StoredTarget, TargetConversionError, locator_kind_name,
+    locator_needs_connection, ssh_args_with_identity,
 };
 
 mod ssh;
