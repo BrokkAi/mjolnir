@@ -8,14 +8,14 @@ const USAGE_SCOPE_KEY: &str = "mjolnir.dev/usage-scope";
 /// whole turn (every model step of the prompt). Another version, for example
 /// one found on PATH, may report only the last step, so its report keeps the
 /// adapter's undeclared scope.
-const WHOLE_TURN_VERSION: &str = "2.2.1";
+const WHOLE_TURN_VERSION: &str = "2.2.6";
 
 /// Whether this OpenCode, as it named itself in `initialize`, reports whole turns.
 pub fn reports_whole_turns(agent_version: Option<&str>) -> bool {
     agent_version == Some(WHOLE_TURN_VERSION)
 }
 
-/// OpenCode 2.2.1 sums its model steps into one per-prompt figure but does not
+/// OpenCode 2.2.6 sums its model steps into one per-prompt figure but does not
 /// declare a scope, and it counts differently from the rest of mj: `input`
 /// excludes cache reads and writes, and `output` excludes reasoning. Fold both
 /// back in so input and output are the full counts, then mark the report as a
@@ -63,7 +63,7 @@ mod tests {
     use mj_core::usage::pricing;
     use std::collections::BTreeMap;
 
-    /// `usage` of a recorded OpenCode 2.2.1 `session/prompt` response (a
+    /// `usage` of a recorded OpenCode 2.2.6 `session/prompt` response (a
     /// three-step turn with reasoning and cache reads), as it crosses ACP.
     const RECORDED: &str = r#"{"inputTokens":15434,"outputTokens":468,"totalTokens":43649,
         "thoughtTokens":99,"cachedReadTokens":27648}"#;
