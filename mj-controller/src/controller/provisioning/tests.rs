@@ -1863,16 +1863,20 @@ fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns
 
     let waiting = StageRecorder::default();
     crate::image_pull_gate::with_image_ready(&target, &waiting, || {
-        assert!(
-            waiting.finished.lock().unwrap().is_empty(),
-            "the wait's stage carries into the work without a gap"
+        assert_eq!(
+            *waiting.finished.lock().unwrap(),
+            vec![targets::ProvisionStage::WaitingForImagePull],
+            "the queue stage closes before pull work starts"
         );
         Ok(())
     })
     .expect("the launch proceeds once the download finishes");
     assert_eq!(
         *waiting.stages.lock().unwrap(),
-        vec![targets::ProvisionStage::PullingImage]
+        vec![
+            targets::ProvisionStage::WaitingForImagePull,
+            targets::ProvisionStage::PullingImage
+        ]
     );
     let notices = waiting.notices.lock().unwrap();
     assert!(

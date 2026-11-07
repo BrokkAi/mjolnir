@@ -3041,3 +3041,102 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             .contains("cycle")
     );
 }
+
+#[test]
+#[cfg_attr(windows, ignore = "local bare target fixture")]
+fn ordinary_children_inherit_the_parent_effective_review_setting() {
+    const MARKER: &str = "MJ_TEST_CHILD_EFFECTIVE_REVIEW";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "ordinary_children_inherit_the_parent_effective_review_setting",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let project = tempfile::tempdir().unwrap();
+    let mut config = registration_config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    // Global review is off; the first parent enables it with a session
+    // selection, then the same parent explicitly disables it.
+    config.review = mj_core::config::ReviewConfig::default();
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let mut parent = super::test_support::checkpoint_test_session(parent_id);
+    parent.target_template_id = "localhost".into();
+    parent.project_directory = Some(project.path().to_path_buf());
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    parent.target = Some(TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
+    });
+    parent.review = Some(mj_core::config::SessionReview::Push {
+        reviewers: Some(vec![mj_core::config::SubagentChoice {
+            model: "review-model".into(),
+            effort: None,
+        }]),
+    });
+    controller.state.sessions.insert(parent_id.into(), parent);
+    crate::database::save_state(&controller.state).unwrap();
+
+    let register_worker = |controller: &mut Controller, request_key: &str| {
+        controller
+            .register_subagent(RegisterSubagentRequest {
+                kind: mj_core::subagent::SubagentKind::Worker,
+                reviewer_launch: None,
+                parent_session_id: parent_id.into(),
+                task_name: request_key.into(),
+                profile_id: "codex".into(),
+                model: None,
+                effort: None,
+                fast_mode: false,
+                working_directory: PathBuf::new(),
+                initial_prompt: "work".into(),
+                request_key: request_key.into(),
+                report_root: None,
+            })
+            .unwrap()
+    };
+    let enabled = register_worker(&mut controller, "review-enabled");
+    let backend = |child_id: &str| targets::TargetLocator::LocalBare {
+        worker_root: mj_core::config::data_dir()
+            .join("workers")
+            .join(child_id)
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let enabled_launch = controller
+        .current_worker_launch_config(
+            &enabled.child_session_id,
+            &backend(&enabled.child_session_id),
+        )
+        .unwrap();
+    assert!(
+        enabled_launch.review_tools(),
+        "session-specific parent review enables child review tools"
+    );
+
+    controller.state.sessions.get_mut(parent_id).unwrap().review =
+        Some(mj_core::config::SessionReview::Off);
+    crate::database::save_state(&controller.state).unwrap();
+    let disabled = register_worker(&mut controller, "review-disabled");
+    let disabled_launch = controller
+        .current_worker_launch_config(
+            &disabled.child_session_id,
+            &backend(&disabled.child_session_id),
+        )
+        .unwrap();
+    assert!(
+        !disabled_launch.review_tools(),
+        "explicitly disabled parent review disables child review tools"
+    );
+}

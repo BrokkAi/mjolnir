@@ -46,6 +46,9 @@ pub enum ProvisionStage {
     /// Waiting for a background download of this target's image to finish,
     /// rather than starting a second download of the same image.
     PullingImage,
+    /// Queued behind another task pulling this image. This is waiting for a
+    /// turn, not work, so it never counts as a stall.
+    WaitingForImagePull,
     WaitingForContainerUpgrade,
     /// Queued behind another task holding the worker binary store for this
     /// target. This is waiting for a turn, not work.
@@ -82,6 +85,7 @@ impl ProvisionStage {
     pub fn label(&self) -> String {
         match self {
             Self::PullingImage => "Pull image".into(),
+            Self::WaitingForImagePull => "Waiting for another image pull".into(),
             Self::WaitingForContainerUpgrade => {
                 "Container upgrade pending; waiting for accepted work".into()
             }
@@ -115,7 +119,8 @@ impl ProvisionStage {
     pub fn is_queue_wait(&self) -> bool {
         matches!(
             self,
-            Self::WaitingForContainerUpgrade
+            Self::WaitingForImagePull
+                | Self::WaitingForContainerUpgrade
                 | Self::WaitingForWorkerStore
                 | Self::WaitingForSshConnection
                 | Self::WaitingForStartSlot

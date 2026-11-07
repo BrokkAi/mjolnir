@@ -175,12 +175,9 @@ pub(crate) fn hold_image_pull<'a>(
 /// Run `work` with nothing downloading this target's image underneath it.
 ///
 /// For a container target this waits for a background download of the same
-/// image on the same host, and reports the wait as the "Pull image" stage with
-/// a notice saying what it is waiting for. `work` is where the engine pulls a
-/// missing image (the probe or the run command), and it can take minutes, so
-/// the stage stays open from the first moment of waiting until `work` returns:
-/// a pull that no command stage covers must not look like a stalled Create. A
-/// target that runs no image just runs `work`.
+/// image on the same host. Contention is reported as queue time; once this
+/// caller owns the lock, `work` runs under the "Pull image" stage. A target
+/// that runs no image just runs `work`.
 pub(crate) fn with_image_ready<T>(
     target: &TargetTemplate,
     executor: &impl CommandExecutor,
@@ -191,22 +188,20 @@ pub(crate) fn with_image_ready<T>(
     };
     let image = container.image.clone();
     let lock = image_pull_mutex(&host, &image);
-    // The wait opens the stage and the work inherits it, so the stage has no
-    // gap between the two.
-    let mut pulling = None;
+    let mut waiting = None;
     let guard = hold_image_pull(
         &lock,
         || executor.cancellation_requested(),
         || {
-            pulling = Some(ProvisionStageGuard::new(
+            waiting = Some(ProvisionStageGuard::new(
                 executor,
-                ProvisionStage::PullingImage,
+                ProvisionStage::WaitingForImagePull,
             ));
             executor.notify_notice(&format!("Waiting for image {image} to finish downloading"));
         },
     )?;
-    let pulling =
-        pulling.unwrap_or_else(|| ProvisionStageGuard::new(executor, ProvisionStage::PullingImage));
+    drop(waiting);
+    let pulling = ProvisionStageGuard::new(executor, ProvisionStage::PullingImage);
     let result = work();
     drop(guard);
     drop(pulling);

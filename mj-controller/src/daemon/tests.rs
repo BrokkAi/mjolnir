@@ -3448,6 +3448,7 @@ async fn a_create_queued_for_a_turn_longer_than_the_bound_is_not_stalled() {
     );
     let bound = create::CREATE_STALL_BOUND;
     for queue in [
+        ProvisionStage::WaitingForImagePull,
         ProvisionStage::WaitingForStartSlot,
         ProvisionStage::WaitingForWorkerStore,
         ProvisionStage::WaitingForSshConnection,

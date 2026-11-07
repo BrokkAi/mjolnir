@@ -686,16 +686,27 @@ impl Controller {
         // Top-level sessions and ordinary sub-agents may request review. A
         // reviewer or the oracle never does. The worker derives the review
         // tools and the push gate from this one value.
-        launch.review_trigger = if subagent
-            .as_ref()
-            .is_none_or(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
-        {
-            self.config
+        launch.review_trigger = match subagent.as_ref() {
+            None => self
+                .config
                 .review
                 .for_session(session.review.as_ref())
-                .trigger()
-        } else {
-            Default::default()
+                .trigger(),
+            Some(child) if child.kind == mj_core::subagent::SubagentKind::Worker => {
+                match self.state.sessions.get(&child.parent_session_id) {
+                    Some(parent) => self
+                        .config
+                        .review
+                        .for_session(parent.review.as_ref())
+                        .trigger(),
+                    None => {
+                        tracing::warn!(session_id, parent_session_id = %child.parent_session_id,
+                            "sub-agent parent session is missing; launching child without review tools");
+                        Default::default()
+                    }
+                }
+            }
+            Some(_) => Default::default(),
         };
         // Older workers still read this launch field. Push capture does not
         // need working-tree baselines at startup.
