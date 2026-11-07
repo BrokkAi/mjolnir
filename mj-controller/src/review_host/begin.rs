@@ -107,13 +107,7 @@ impl HostState {
             let outcome = result
                 .await
                 .unwrap_or_else(|_| Err(StartRefusal("the review host stopped".into())));
-            let _ = reply.send(outcome.map(|note| {
-                let mut accepted = accepted.expect("accepted review has a capture");
-                if let (Some(note), Some(fields)) = (note, accepted.as_object_mut()) {
-                    fields.insert("notice".into(), note.into());
-                }
-                accepted
-            }));
+            let _ = reply.send(outcome.map(|()| accepted.expect("accepted review has a capture")));
         });
     }
 }

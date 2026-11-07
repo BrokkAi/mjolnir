@@ -72,13 +72,9 @@ impl HostState {
                 pending_outcome: None,
                 queued_outcomes: Vec::new(),
                 ended_while_queued: BTreeMap::new(),
-                snapshot: None,
-                awaiting_snapshot: None,
-                checkout_note: None,
-                closing_children: BTreeSet::new(),
             },
         );
-        self.start_group(&session_id, requests);
+        self.run(&session_id, requests);
         Ok(())
     }
 }

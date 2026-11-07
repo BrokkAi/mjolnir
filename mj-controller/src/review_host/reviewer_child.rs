@@ -112,16 +112,11 @@ impl HostState {
             return;
         };
         // A push review covers one repository when it names a worktree, so
-        // its reviewer reads context from that repository, not the session's:
-        // from the group's own checkout of the reviewed commit, or from the
-        // requester's checkout when that could not be made.
-        let working_directory =
-            slot.snapshot
-                .clone()
-                .or_else(|| match group.driver.deltas.as_slice() {
-                    [delta] => Some(delta.root.clone()),
-                    _ => None,
-                });
+        // its reviewer reads context from that checkout, not the session's.
+        let working_directory = match group.driver.deltas.as_slice() {
+            [delta] => Some(delta.root.clone()),
+            _ => None,
+        };
         let epoch = slot.epoch;
         let environment = self.environment.clone();
         let events = self.events.clone();
@@ -342,25 +337,19 @@ impl HostState {
             .flat_map(|group| group.registrations.iter())
             .filter_map(|item| item.child_session_id.clone())
             .collect();
-        if let Some(slot) = self.reviews.get_mut(session_id) {
-            slot.closing_children.extend(children.iter().cloned());
-        }
         for child in children {
             self.close_child(child);
         }
     }
 
     pub(super) fn close_reviewer_role(&mut self, session_id: &str, role: &str) {
-        let child = self
+        if let Some(child) = self
             .reviews
             .get(session_id)
             .and_then(|slot| slot.state.active_group.as_ref())
             .and_then(|group| group.registrations.iter().find(|item| item.role == role))
-            .and_then(|item| item.child_session_id.clone());
-        if let Some(child) = child {
-            if let Some(slot) = self.reviews.get_mut(session_id) {
-                slot.closing_children.insert(child.clone());
-            }
+            .and_then(|item| item.child_session_id.clone())
+        {
             self.close_child(child);
         }
     }
@@ -409,7 +398,6 @@ impl HostState {
                 if attempts.failures > 0 {
                     tracing::info!(%child, failed_attempts = attempts.failures, "reviewer child closed after earlier failures");
                 }
-                self.child_close_completed(&child);
                 return;
             }
             Ok((_, Err(error))) => error,

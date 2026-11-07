@@ -37,7 +37,7 @@ pub(super) enum HostEvent {
     },
     Prepared {
         session_id: String,
-        reply: Option<StartReply>,
+        reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
         prepared: Box<Result<Prepared, StartRefusal>>,
     },
     StateSaved {
@@ -127,14 +127,6 @@ pub(super) enum HostEvent {
         epoch: u64,
         role: String,
         origin: StandingRead,
-    },
-    /// The worker answered a group's request for its own checkout.
-    SnapshotCreated {
-        session_id: String,
-        epoch: u64,
-        repository: std::path::PathBuf,
-        id: String,
-        result: Result<super::snapshot::Created, super::snapshot::SnapshotFailure>,
     },
     QuestionTarget {
         session_id: String,
@@ -241,7 +233,7 @@ pub(super) struct Prepared {
 
 pub(super) struct PendingOpen {
     pub(super) epoch: u64,
-    pub(super) reply: Option<StartReply>,
+    pub(super) reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
     pub(super) prepared: Prepared,
     pub(super) driver: TurnReviewDriver,
     pub(super) requests: Vec<ReviewRequest>,
@@ -277,7 +269,7 @@ pub(super) struct ReviewSlot {
     pub(super) _background: Option<BackgroundHold>,
     pub(super) finishing: bool,
     pub(super) retry_delay: std::time::Duration,
-    pub(super) start_reply: Option<StartReply>,
+    pub(super) start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
     pub(super) pending_outcome: Option<PendingOutcome>,
     pub(super) queued_outcomes: Vec<ReviewerHandback>,
     /// Reviewers that ended while their handback waited in
@@ -285,16 +277,6 @@ pub(super) struct ReviewSlot {
     /// no standing read is made yet; the entry moves to the save of that
     /// handback, which reports the end again if the save fails.
     pub(super) ended_while_queued: BTreeMap<String, String>,
-    /// The group's own checkout of the reviewed commit, once it exists.
-    pub(super) snapshot: Option<std::path::PathBuf>,
-    /// What the group runs once its checkout settles.
-    pub(super) awaiting_snapshot: Option<Vec<ReviewRequest>>,
-    /// Set when the group runs without its own checkout: what the requester
-    /// is told, because the loss of isolation is otherwise invisible to them.
-    pub(super) checkout_note: Option<String>,
-    /// Reviewer children the host has closed for this group. The group's
-    /// checkout stays until their closes complete.
-    pub(super) closing_children: BTreeSet<String>,
 }
 
 /// The outcome being saved: the state to return to if the save fails, and the
@@ -328,9 +310,6 @@ pub(super) struct HostState {
     pub(super) child_closure_owners:
         BTreeMap<tokio::task::Id, (String, super::reviewer_child::CloseAttempts)>,
     pub(super) reviews: BTreeMap<String, ReviewSlot>,
-    /// Checkouts of groups that ended while their reviewers were still being
-    /// closed. Each is removed once those closes complete.
-    pub(super) snapshot_removals: Vec<super::snapshot::DeferredRemoval>,
     /// Sessions whose review is being prepared. Preparation is asynchronous,
     /// so without this an automatic trigger and a manual `/review` racing each
     /// other would both create a review and the second would overwrite the

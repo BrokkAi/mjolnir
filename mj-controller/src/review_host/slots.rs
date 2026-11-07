@@ -60,20 +60,12 @@ impl ReviewSlot {
     }
 }
 
-/// Where a review start learns whether its review was accepted, with a line
-/// for the requester when the review runs with less than it asked for.
-pub(super) type StartReply = oneshot::Sender<Result<Option<String>, StartRefusal>>;
-
-pub(super) fn answer(reply: Option<StartReply>, result: Result<(), StartRefusal>) {
+pub(super) fn answer(
+    reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
+    result: Result<(), StartRefusal>,
+) {
     if let Some(reply) = reply {
-        let _ = reply.send(result.map(|()| None));
-    }
-}
-
-/// Accepts the review, telling the requester `note` along with it.
-pub(super) fn accept(reply: Option<StartReply>, note: Option<String>) {
-    if let Some(reply) = reply {
-        let _ = reply.send(Ok(note));
+        let _ = reply.send(result);
     }
 }
 

@@ -260,19 +260,7 @@ impl TurnReviewDriver {
         }
     }
 
-    /// The reviewer prompt for a reviewer that reads `checkout` instead of the
-    /// captured repository's own worktree. Only a review of one repository has
-    /// a checkout to name.
-    #[must_use]
-    pub fn review_prompt_in(&self, checkout: &std::path::Path) -> String {
-        review_prompt(&self.job_in(Some(checkout)))
-    }
-
     fn job(&self) -> ReviewJob {
-        self.job_in(None)
-    }
-
-    fn job_in(&self, checkout: Option<&std::path::Path>) -> ReviewJob {
         ReviewJob {
             task: self.seed.task.clone(),
             user_messages: self.seed.user_messages.clone(),
@@ -290,11 +278,10 @@ impl TurnReviewDriver {
                             capture_tree: delta.current_tree.clone(),
                             merged_in: delta.merged_in.clone(),
                             unattributed: delta.unattributed.clone(),
-                            checkout: checkout.map(std::path::Path::to_path_buf),
                         })
                 })
                 .collect(),
-            changed_files: delta::changed_files_table_in(&self.deltas, checkout),
+            changed_files: delta::changed_files_table(&self.deltas),
             changed_lines: delta::changed_line_count(&self.deltas),
             declined: self.seed.declined.clone(),
         }
