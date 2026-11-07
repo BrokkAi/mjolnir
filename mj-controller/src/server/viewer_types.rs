@@ -800,24 +800,26 @@ pub struct ViewerMoveRecovery {
 }
 
 impl ViewerMoveRecovery {
+    /// Join only this Move's current public diagnostic. Resume and a new turn
+    /// retire that diagnostic; a later lifecycle error must not replace it.
+    pub(crate) fn with_public_failure(mut self, public_error: Option<&str>) -> Self {
+        self.failure_notice = public_error
+            .filter(|message| {
+                matches!(self.phase.as_str(), "failed" | "cancelled")
+                    && message.starts_with(mj_core::state::MOVE_FAILURE_PREFIX)
+                    && message.ends_with(&format!("reference {}", self.operation_id))
+            })
+            .map(str::to_owned);
+        self
+    }
+
     #[must_use]
     pub fn from_operation(operation: &MoveOperation) -> Option<Self> {
         if matches!(operation.phase, MovePhase::Completed) {
             return None;
         }
         Some(Self {
-            failure_notice: matches!(operation.phase, MovePhase::Failed | MovePhase::Cancelled)
-                .then(|| {
-                    format!(
-                        "Move {}. The daemon log records the reason under reference {}.",
-                        if operation.phase == MovePhase::Cancelled {
-                            "cancelled"
-                        } else {
-                            "failed"
-                        },
-                        operation.operation_id
-                    )
-                }),
+            failure_notice: None,
             oracle: operation.selection.oracle,
             oracle_choice: operation.selection.oracle_choice.clone(),
             operation_id: operation.operation_id.clone(),

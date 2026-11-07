@@ -364,17 +364,15 @@ test('golden_viewer_resume', async ({ context }) => {
   const restored = restoreState.snapshot.sessions.find(row => row.id === 'restored');
   restored.state = 'suspended';
   restored.lifecycle = 'suspended';
-  restored.capabilities = { open: false, prompt: false, resume: false };
-  restored.launch_error = 'A later, unrelated lifecycle error.';
+  restored.capabilities = { open: false, prompt: false, resume: true };
+  restored.launch_error = 'the move did not finish while resuming the destination. Source suspended with a verified checkpoint. Retry Move or resume with the source settings. The daemon log records the reason under reference failed-move';
   restored.move_recovery = {
     operation_id: 'failed-move', phase: 'failed', checkpoint_retained: true,
-    failure_notice: 'Move failed. The daemon log records the reason under reference failed-move.',
-    environment_retained: true,
+    failure_notice: restored.launch_error, environment_retained: false,
   };
   // Hard-won: #1470: Move failures were missing from the conversation after the worker stopped.
   await refresh(restorePage, restoreState);
   await expect(restorePage.locator('#conversation-move-failure')).toBeVisible();
-  await expect(restorePage.locator('#conversation-move-failure')).not.toContainText('unrelated');
   await expect(restorePage.locator('#prompt-form')).toBeHidden();
   await expect(restorePage.locator('#conversation-scroll')).toBeHidden();
   await restorePage.reload();
@@ -386,10 +384,40 @@ test('golden_viewer_resume', async ({ context }) => {
   output.push('=== failed Move remains visible in the conversation without a worker ===');
   output.push(await restorePage.locator('#conversation-move-failure').innerText());
   await expect(restorePage.getByRole('button', { name: 'Retry move', exact: true })).toBeVisible();
-  restored.move_recovery = null;
+
+  // Resume leaves a cancelled Move record but retires its public failure.
+  restored.state = 'running';
+  restored.lifecycle = 'live';
+  restored.has_error = false;
+  restored.capabilities = { open: false, prompt: false, resume: false };
+  restored.move_recovery.phase = 'cancelled';
+  restored.move_recovery.failure_notice = null;
   restored.launch_error = null;
   await refresh(restorePage, restoreState);
+  await expect(restorePage).toHaveURL(/restored$/);
   await expect(restorePage.locator('#conversation-move-failure')).toBeHidden();
+  await expect(restorePage.locator('#conversation-transition-title')).toHaveText('Loading conversation');
+  restored.capabilities = { open: true, prompt: true, resume: false };
+  await refresh(restorePage, restoreState);
+  await expect(restorePage.locator('#conversation-transition')).toBeHidden();
+  await expect(restorePage.locator('#prompt-form')).toBeVisible();
+  await expect(restorePage.locator('#conversation-move-failure')).toBeHidden();
+
+  // A subsequent in-place Move loses its checkpoint; Resume is unavailable.
+  restored.state = 'suspended';
+  restored.lifecycle = 'suspended';
+  restored.capabilities = { open: false, prompt: false, resume: false };
+  restored.launch_error = "the move did not finish. The Move's checkpoint archive is missing, so the Move cannot be retried and Resume cannot restore the session. The environment and checkout in /home/agent/projects/recovery/workspaces/0123456789abcdef0123456789abcdef/checkouts/project are retained; copy out anything you need, then destroy the session. The daemon log records the reason under reference missing-checkpoint-move";
+  restored.move_recovery = {
+    operation_id: 'missing-checkpoint-move', phase: 'failed', checkpoint_retained: false,
+    environment_retained: true, failure_notice: restored.launch_error,
+  };
+  await refresh(restorePage, restoreState);
+  output.push('=== missing checkpoint shows the public checkout recovery instructions ===');
+  output.push(await restorePage.locator('#conversation-move-failure').innerText());
+  await expect(restorePage.locator('#conversation-move-failure')).not.toContainText('Read the reported error below');
+  expect(await restorePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await expect(restorePage.getByRole('button', { name: 'Retry move', exact: true })).toHaveCount(0);
 
   await restorePage.close();
 

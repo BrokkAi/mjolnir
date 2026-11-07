@@ -1098,7 +1098,8 @@ function isLoadingConversationSession(session) {
     && session.operation?.kind !== 'checkpoint'
     && session.lifecycle === 'live'
     && !session.has_error
-    && (conversationMode === 'loading' || conversationMode?.startsWith('transition:')),
+    && (conversationMode === 'loading' || conversationMode?.startsWith('transition:')
+      || conversationMode?.startsWith('move-failure:')),
   );
 }
 
@@ -8240,7 +8241,6 @@ function renderConversationTransition(session) {
     if (notice) {
       moveFailure.append(el('p', 'error', notice));
       const guidance = resumeMoveRecovery(session);
-      if (guidance.explanation) moveFailure.append(el('p', '', guidance.explanation));
       if (guidance.retry) {
         const retry = button('Retry move', 'secondary');
         retry.onclick = () => navigate({ name: 'move', workspaceId: session.workspace_id, sessionId: session.id });

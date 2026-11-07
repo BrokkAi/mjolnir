@@ -195,6 +195,7 @@ fn bare_preflight_config() -> Config {
     config
 }
 
+// Hard-won: #1470: Move notices outlived Resume and lost the public recovery instructions.
 #[test]
 fn move_recovery_projection_exposes_safe_retry_settings_only() {
     let operation = mj_core::state::MoveOperation {
@@ -254,10 +255,34 @@ fn move_recovery_projection_exposes_safe_retry_settings_only() {
     };
     let recovery = ViewerMoveRecovery::from_operation(&operation).unwrap();
     assert_eq!(recovery.phase, "cancelled");
-    assert_eq!(
-        recovery.failure_notice.as_deref(),
-        Some("Move cancelled. The daemon log records the reason under reference move-1.")
-    );
+    for guidance in [
+        "Automatic EC2 cleanup is pending; charges may continue until termination is confirmed.",
+        "The Move's checkpoint archive is missing. The environment and checkout in /work/retained are retained; copy out anything you need, then destroy the session.",
+    ] {
+        let public = format!(
+            "the move did not finish. {guidance} The daemon log records the reason under reference move-1"
+        );
+        let current = recovery.clone().with_public_failure(Some(&public));
+        assert_eq!(current.failure_notice.as_deref(), Some(public.as_str()));
+        let json = serde_json::to_string(&current).unwrap();
+        assert!(!json.contains("private path and token"));
+        assert!(
+            current.with_public_failure(None).failure_notice.is_none(),
+            "successful Resume and new work clear the public failure"
+        );
+    }
+    for unrelated in [
+        "resume failed: the target is gone",
+        "the move did not finish. The daemon log records the reason under reference another-move",
+    ] {
+        assert!(
+            recovery
+                .clone()
+                .with_public_failure(Some(unrelated))
+                .failure_notice
+                .is_none()
+        );
+    }
     assert_eq!(recovery.source_profile_id, "source-profile");
     assert!(recovery.clear_resource_allocation);
     assert_eq!(recovery.source_additional_mounts.len(), 1);

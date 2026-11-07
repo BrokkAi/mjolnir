@@ -125,11 +125,11 @@ controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":
 request: GET /api/v1/wiki/search [""]
 action: POST /api/v1/wiki/archive/restore [{"id":"archived-one","body":{"workspace_id":"test","profile_id":"beta","target_id":"remote"}}]
 === failed Move remains visible in the conversation without a worker ===
-Move failed. The daemon log records the reason under reference failed-move.
-
-The environment and a verified checkpoint are retained. Retry the move; the checkout is kept.
+the move did not finish while resuming the destination. Source suspended with a verified checkpoint. Retry Move or resume with the source settings. The daemon log records the reason under reference failed-move
 
 Retry move
+=== missing checkpoint shows the public checkout recovery instructions ===
+the move did not finish. The Move's checkpoint archive is missing, so the Move cannot be retried and Resume cannot restore the session. The environment and checkout in /home/agent/projects/recovery/workspaces/0123456789abcdef0123456789abcdef/checkouts/project are retained; copy out anything you need, then destroy the session. The daemon log records the reason under reference missing-checkpoint-move
 === bare destination leaves Resume ready without conversion questions (390x844) ===
 Back to sessions
 Suspended test

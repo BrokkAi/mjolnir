@@ -4907,7 +4907,14 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
         let operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();
-        let api = crate::server::ViewerMoveRecovery::from_operation(&operation).unwrap();
+        let api = crate::server::ViewerMoveRecovery::from_operation(&operation)
+            .unwrap()
+            .with_public_failure(Some(&published));
+        assert_eq!(
+            api.failure_notice.as_deref(),
+            Some(published.as_str()),
+            "the stored public recovery instructions must reach the conversation"
+        );
         assert!(
             api.checkpoint_retained,
             "{kill:?}: the guidance promises a retry the API denies"
@@ -5021,7 +5028,14 @@ fn in_place_move_whose_handoff_is_lost_fails_truthfully_into_a_destroyable_state
         let operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();
-        let api = crate::server::ViewerMoveRecovery::from_operation(&operation).unwrap();
+        let api = crate::server::ViewerMoveRecovery::from_operation(&operation)
+            .unwrap()
+            .with_public_failure(Some(&published));
+        assert_eq!(
+            api.failure_notice.as_deref(),
+            Some(published.as_str()),
+            "the stored public recovery instructions must reach the conversation"
+        );
         assert!(!api.checkpoint_retained, "{kill:?}");
         assert!(api.environment_retained, "{kill:?}");
 
