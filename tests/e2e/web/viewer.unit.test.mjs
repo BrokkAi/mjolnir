@@ -924,7 +924,7 @@ test('an unanswered turn offers the prompt that was running', () => {
     null,
   );
   assert.equal(vm.runInContext('unansweredPromptFor', context)(warning, null), null);
-  // Hard-won: c92e6e610: a failed turn Mjolnir started offered an earlier, unrelated request.
+  // Hard-won: 9c2b74a01: a failed turn Mjolnir started offered an earlier, unrelated request.
   const turnPromptText = vm.runInContext('turnPromptText', context);
   const earlier = turnPromptText({ role: 'user', lines: ['rename the module'] }, null);
   assert.equal(earlier, 'rename the module');

@@ -204,7 +204,7 @@ fn quota_resume(relay: &DurableRelay) -> RelayCommand {
 // Hard-won: 3c8973b87: a mailbox wake hit Kimi's quota with no recoverable request after restore.
 #[test]
 fn mailbox_quota_recovery_survives_missing_user_request_and_prior_cancellation() {
-    // Hard-won: c92e6e610: a peer message delivered as a prompt lost the wake's quota identity.
+    // Hard-won: 9c2b74a01: a peer message delivered as a prompt lost the wake's quota identity.
     for (no_user_request, as_prompt) in [(true, false), (false, false), (true, true), (false, true)]
     {
         let root = tempfile::tempdir().unwrap();

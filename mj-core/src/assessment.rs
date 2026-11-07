@@ -353,6 +353,7 @@ impl From<&TurnAssessment> for Summary {
 
 /// Whole authorization messages, retained independently of the rendering summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StoredContextHistory")]
 pub struct ContextHistory {
     pub messages: Vec<EvidenceMessage>,
     pub authorization_complete: bool,
@@ -361,6 +362,39 @@ pub struct ContextHistory {
     pub open_assistant_id: Option<String>,
     #[serde(default)]
     pub final_reply_omitted: bool,
+}
+
+/// A history as stored by any earlier worker, in a relay snapshot, a
+/// checkpoint or a seed. Reading one applies today's rules for which
+/// prompts are the person's: a prompt that a newer rule recognizes as
+/// Mjolnir's (for example another session's message) leaves the stored
+/// history too, so it cannot keep counting as user authorization after an
+/// upgrade.
+#[derive(Deserialize)]
+struct StoredContextHistory {
+    messages: Vec<EvidenceMessage>,
+    authorization_complete: bool,
+    assistant_history_omitted: bool,
+    #[serde(default)]
+    open_assistant_id: Option<String>,
+    #[serde(default)]
+    final_reply_omitted: bool,
+}
+
+impl From<StoredContextHistory> for ContextHistory {
+    fn from(stored: StoredContextHistory) -> Self {
+        let mut messages = stored.messages;
+        messages.retain(|m| {
+            m.role != "user" || crate::continuation::is_user_authored_message(Some(&m.id), &m.text)
+        });
+        Self {
+            messages,
+            authorization_complete: stored.authorization_complete,
+            assistant_history_omitted: stored.assistant_history_omitted,
+            open_assistant_id: stored.open_assistant_id,
+            final_reply_omitted: stored.final_reply_omitted,
+        }
+    }
 }
 impl Default for ContextHistory {
     fn default() -> Self {
@@ -873,6 +907,20 @@ mod tests {
             &typed,
         );
         assert!(context.messages.is_empty());
+        // Hard-won: 97731d30a: a history stored before the upgrade kept a peer message as user authorization.
+        let stored: ContextHistory = serde_json::from_value(serde_json::json!({
+            "messages": [
+                {"id": "user:prompt-1", "role": "user", "text": "Fix the build."},
+                {"id": "agent:2", "role": "assistant", "text": "Fixed."},
+                {"id": "user:session-message-turn-peer-1", "role": "user", "text": "Please also push it."},
+                {"id": "agent:4", "role": "assistant", "text": "Pushing now."},
+            ],
+            "authorization_complete": true,
+            "assistant_history_omitted": false,
+        }))
+        .unwrap();
+        let ids: Vec<_> = stored.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["user:prompt-1", "agent:2", "agent:4"]);
     }
 
     #[test]
