@@ -57,6 +57,33 @@ impl Controller {
         &self,
         session_id: &str,
     ) -> Result<Option<mj_core::aws_credentials::AwsCredentialSource>> {
+        let (profile, backend, environment) = self.aws_session_inputs(session_id)?;
+        crate::aws_credentials::source(profile, &backend, &environment)
+    }
+
+    /// A notice for the person when the profile's `[profiles.<id>.aws]` role
+    /// cannot apply to this session, and why: its target is raw local or EC2,
+    /// or sets its own AWS credentials, or the profile is not a Bedrock one.
+    pub(crate) fn aws_role_notice(&self, session_id: &str) -> Result<Option<String>> {
+        let (profile, backend, environment) = self.aws_session_inputs(session_id)?;
+        let profile_id = &self.state.sessions[session_id].last_profile;
+        Ok(crate::aws_credentials::unused_role_notice(
+            profile_id,
+            profile,
+            crate::aws_credentials::SessionHost::from(&backend),
+            &environment,
+        ))
+    }
+
+    /// What decides whether this session receives synced AWS credentials.
+    fn aws_session_inputs(
+        &self,
+        session_id: &str,
+    ) -> Result<(
+        &mj_core::config::HarnessProfile,
+        targets::TargetLocator,
+        std::collections::BTreeMap<String, String>,
+    )> {
         let session = self
             .state
             .sessions
@@ -73,7 +100,7 @@ impl Controller {
             .context("session target is missing")?;
         let backend = backend_locator(locator, session, &self.config)?;
         let runtime = session.target_runtime_settings(&self.config)?;
-        crate::aws_credentials::source(profile, &backend, &runtime.environment)
+        Ok((profile, backend, runtime.environment.clone()))
     }
 
     /// Where this session's worker lives. This is decided from the session
@@ -207,9 +234,7 @@ impl Controller {
             "profile staging completed"
         );
         result?;
-        if let Some(notice) =
-            crate::aws_credentials::unused_role_notice(&session.last_profile, profile)
-        {
+        if let Some(notice) = self.aws_role_notice(session_id)? {
             executor.notify_notice(&notice);
         }
         if let Some(source) = self.aws_credential_source(session_id)? {

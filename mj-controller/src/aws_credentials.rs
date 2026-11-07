@@ -40,12 +40,6 @@ pub(crate) enum SessionHost {
     Isolated,
 }
 
-impl SessionHost {
-    fn keeps_own_credentials(self) -> bool {
-        matches!(self, Self::RawLocal | Self::Ec2)
-    }
-}
-
 impl From<&TargetLocator> for SessionHost {
     fn from(locator: &TargetLocator) -> Self {
         match locator {
@@ -79,32 +73,90 @@ impl From<&mj_core::config::TargetTemplate> for SessionHost {
     }
 }
 
-/// Whether a session on this profile and host receives AWS credentials from
-/// the controller. One definition, used by launch, the sync, and `mj doctor`.
-/// Explicit credentials in the target's or the profile's environment also stay
-/// with their owner.
+/// Why a session on this profile and host does not receive AWS credentials
+/// from the controller. One definition of the question, used by launch, the
+/// sync and `mj doctor`: `None` means it does. Explicit credentials in the
+/// target's or the profile's environment stay with their owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialsWithheld {
+    /// The profile does not authenticate with the AWS credential chain.
+    NotBedrock,
+    RawLocal,
+    Ec2,
+    /// The target's environment names an AWS profile or credential source.
+    TargetEnvironment,
+    /// The profile's environment names an AWS credential source.
+    ProfileEnvironment,
+}
+
+impl CredentialsWithheld {
+    /// What to say about a `[profiles.<id>.aws]` table that therefore cannot
+    /// apply, in terms of what the session uses instead.
+    pub(crate) fn why_a_role_cannot_apply(self) -> &'static str {
+        match self {
+            Self::NotBedrock => {
+                "the profile does not authenticate with the AWS credential chain (Amazon Bedrock)"
+            }
+            Self::RawLocal => {
+                "raw local sessions read the host's own AWS files directly, so a role cannot limit them"
+            }
+            Self::Ec2 => "EC2 sessions use the instance's own role, which a role here cannot limit",
+            Self::TargetEnvironment => {
+                "the target's environment sets its own AWS profile or credentials, which take precedence"
+            }
+            Self::ProfileEnvironment => {
+                "the profile's environment sets its own AWS credentials, which take precedence"
+            }
+        }
+    }
+}
+
+pub(crate) fn credentials_withheld(
+    profile: &HarnessProfile,
+    host: SessionHost,
+    target_environment: &BTreeMap<String, String>,
+) -> Option<CredentialsWithheld> {
+    if profile.auth_scheme() != AuthScheme::AwsCredentialChain {
+        return Some(CredentialsWithheld::NotBedrock);
+    }
+    match host {
+        SessionHost::RawLocal => return Some(CredentialsWithheld::RawLocal),
+        SessionHost::Ec2 => return Some(CredentialsWithheld::Ec2),
+        SessionHost::Isolated => {}
+    }
+    if has_credential_source(target_environment)
+        || target_environment.contains_key("AWS_PROFILE")
+        || target_environment.contains_key("AWS_DEFAULT_PROFILE")
+    {
+        return Some(CredentialsWithheld::TargetEnvironment);
+    }
+    has_credential_source(profile.environment.resolved())
+        .then_some(CredentialsWithheld::ProfileEnvironment)
+}
+
 pub(crate) fn receives_synced_credentials(
     profile: &HarnessProfile,
     host: SessionHost,
     target_environment: &BTreeMap<String, String>,
 ) -> bool {
-    profile.auth_scheme() == AuthScheme::AwsCredentialChain
-        && !host.keeps_own_credentials()
-        && !has_credential_source(target_environment)
-        && !target_environment.contains_key("AWS_PROFILE")
-        && !target_environment.contains_key("AWS_DEFAULT_PROFILE")
-        && !has_credential_source(profile.environment.resolved())
+    credentials_withheld(profile, host, target_environment).is_none()
 }
 
 /// What to tell the person when a profile has a `[profiles.<id>.aws]` table
-/// but does not authenticate with the AWS credential chain, so the table cannot
-/// apply. The session runs without it rather than being refused.
-pub(crate) fn unused_role_notice(profile_id: &str, profile: &HarnessProfile) -> Option<String> {
-    (profile.aws.is_some() && profile.auth_scheme() != AuthScheme::AwsCredentialChain).then(|| {
-        format!(
-            "[profiles.{profile_id}.aws] has no effect: profile {profile_id} does not authenticate with the AWS credential chain (Amazon Bedrock), so this session runs without role-scoped credentials. Remove the table, or configure Bedrock for the profile."
-        )
-    })
+/// that cannot apply to a session on this target, and why. The session runs
+/// without it rather than being refused.
+pub(crate) fn unused_role_notice(
+    profile_id: &str,
+    profile: &HarnessProfile,
+    host: SessionHost,
+    target_environment: &BTreeMap<String, String>,
+) -> Option<String> {
+    let withheld = credentials_withheld(profile, host, target_environment)?;
+    profile.aws.as_ref()?;
+    Some(format!(
+        "[profiles.{profile_id}.aws] has no effect on this session: {}. It runs without role-scoped credentials.",
+        withheld.why_a_role_cannot_apply()
+    ))
 }
 
 /// Explicit target credentials and EC2 instance roles stay target-owned.
@@ -349,35 +401,77 @@ mod tests {
 mod notice_tests {
     use super::*;
 
-    // Hard-won: 96c0993ac: sessions of a non-Bedrock profile with an `aws` table were refused instead of running with a notice.
-    #[test]
-    fn a_role_table_that_cannot_apply_is_a_notice_not_a_refusal() {
-        let home = tempfile::tempdir().unwrap();
-        let role = mj_core::config::AwsRoleConfig {
+    fn role() -> mj_core::config::AwsRoleConfig {
+        mj_core::config::AwsRoleConfig {
             role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
             session_policy: None,
             session_policy_arns: Vec::new(),
             duration_seconds: None,
             source_identity: false,
-        };
+        }
+    }
+
+    fn bedrock(home: &std::path::Path) -> HarnessProfile {
+        let mut profile = HarnessProfile::new(mj_core::config::HarnessKind::Claude, home);
+        profile
+            .environment
+            .insert("CLAUDE_CODE_USE_BEDROCK".to_owned(), "1".to_owned());
+        profile.aws = Some(role());
+        profile
+    }
+
+    // Hard-won: 96c0993ac: sessions of a non-Bedrock profile with an `aws` table were refused instead of running with a notice.
+    // Hard-won: db9e62ed7: a role on a raw local, EC2 or self-credentialed target was ignored without a word.
+    #[test]
+    fn a_role_that_cannot_apply_is_a_notice_that_names_why_not_a_refusal() {
+        let home = tempfile::tempdir().unwrap();
+        let none = BTreeMap::new();
         let mut plain = HarnessProfile::new(mj_core::config::HarnessKind::Claude, home.path());
-        assert_eq!(unused_role_notice("work", &plain), None);
-        plain.aws = Some(role.clone());
-        let notice = unused_role_notice("work", &plain).unwrap();
+        assert_eq!(
+            unused_role_notice("work", &plain, SessionHost::Isolated, &none),
+            None
+        );
+        plain.aws = Some(role());
+        let notice = unused_role_notice("work", &plain, SessionHost::Isolated, &none).unwrap();
         assert!(
             notice.contains("[profiles.work.aws] has no effect"),
             "{notice}"
         );
-        assert!(
-            notice.contains("runs without role-scoped credentials"),
-            "{notice}"
+        assert!(notice.contains("Amazon Bedrock"), "{notice}");
+
+        // A Bedrock profile: the reason depends on where the session runs.
+        let profile = bedrock(home.path());
+        assert_eq!(
+            unused_role_notice("work", &profile, SessionHost::Isolated, &none),
+            None
         );
-        // On a Bedrock profile the table applies, so there is nothing to say.
-        let mut bedrock = HarnessProfile::new(mj_core::config::HarnessKind::Claude, home.path());
-        bedrock
+        let reason = |host, environment: &BTreeMap<String, String>| {
+            unused_role_notice("work", &profile, host, environment).unwrap()
+        };
+        assert!(
+            reason(SessionHost::RawLocal, &none)
+                .contains("raw local sessions read the host's own AWS files")
+        );
+        assert!(reason(SessionHost::Ec2, &none).contains("instance's own role"));
+        let own_profile = BTreeMap::from([("AWS_PROFILE".to_owned(), "team".to_owned())]);
+        assert!(
+            reason(SessionHost::Isolated, &own_profile)
+                .contains("target's environment sets its own AWS")
+        );
+        let own_keys = BTreeMap::from([("AWS_ACCESS_KEY_ID".to_owned(), "AKIA".to_owned())]);
+        assert!(
+            reason(SessionHost::Isolated, &own_keys)
+                .contains("target's environment sets its own AWS")
+        );
+        // Keys in the profile's own environment take precedence too.
+        let mut with_keys = bedrock(home.path());
+        with_keys
             .environment
-            .insert("CLAUDE_CODE_USE_BEDROCK".to_owned(), "1".to_owned());
-        bedrock.aws = Some(role);
-        assert_eq!(unused_role_notice("work", &bedrock), None);
+            .insert("AWS_ACCESS_KEY_ID".to_owned(), "AKIA".to_owned());
+        assert!(
+            unused_role_notice("work", &with_keys, SessionHost::Isolated, &none)
+                .unwrap()
+                .contains("profile's environment sets its own AWS credentials")
+        );
     }
 }

@@ -975,46 +975,54 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
 /// `[profiles.<id>.aws]` role they receive the controller host's own
 /// credentials; with one, credentials limited to the role, which is tested
 /// here with a real `AssumeRole` call so a broken trust policy or policy
-/// shows up before a session fails to start.
+/// shows up before a session fails to start. A target the role cannot apply
+/// to (raw local, EC2, or one that sets its own AWS credentials) is reported
+/// by itself with the reason, whether or not another target is scoped.
 fn aws_scope_check(
     id: &str,
     profile: &HarnessProfile,
     targets: &BTreeMap<String, TargetTemplate>,
     executor: &impl CommandExecutor,
-) -> Option<DoctorCheck> {
+) -> Vec<DoctorCheck> {
+    use crate::aws_credentials::{CredentialsWithheld, SessionHost, credentials_withheld};
     if !profile.enabled {
-        return None;
+        return Vec::new();
     }
     let check_id = format!("harness.{id}.aws-scope");
     let title = format!("AWS credentials for profile {id}");
     if profile.auth_scheme() != mj_core::config::AuthScheme::AwsCredentialChain {
         // Sessions run, without scoping; they are not refused.
-        return crate::aws_credentials::unused_role_notice(id, profile).map(|notice| {
-            DoctorCheck::warning(
-                check_id,
-                title,
-                notice,
-                format!("Remove `[profiles.{id}.aws]`, or configure Bedrock (the AWS credential chain) for this profile."),
-            )
-        });
+        let Some(role) = &profile.aws else {
+            return Vec::new();
+        };
+        return vec![DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "[profiles.{id}.aws] names {}, but {}, so it has no effect. Sessions run without role-scoped credentials.",
+                role.role_arn,
+                CredentialsWithheld::NotBedrock.why_a_role_cannot_apply()
+            ),
+            format!(
+                "Remove `[profiles.{id}.aws]`, or configure Bedrock (the AWS credential chain) for this profile."
+            ),
+        )];
     }
     // The same question launch and the sync ask, per configured target.
-    let receiving = targets
-        .iter()
-        .filter(|(_, template)| {
-            crate::aws_credentials::receives_synced_credentials(
-                profile,
-                crate::aws_credentials::SessionHost::from(*template),
-                &mj_core::state::TargetRuntimeSettings::from(*template).environment,
-            )
-        })
-        .map(|(target_id, _)| target_id.as_str())
-        .collect::<Vec<_>>();
+    let mut receiving = Vec::new();
+    let mut withheld = Vec::new();
+    for (target_id, template) in targets {
+        let environment = mj_core::state::TargetRuntimeSettings::from(template).environment;
+        match credentials_withheld(profile, SessionHost::from(template), &environment) {
+            None => receiving.push(target_id.as_str()),
+            Some(reason) => withheld.push((target_id.as_str(), reason)),
+        }
+    }
     let Some(role) = &profile.aws else {
         if receiving.is_empty() {
-            return None;
+            return Vec::new();
         }
-        return Some(DoctorCheck::warning(
+        return vec![DoctorCheck::warning(
             check_id,
             title,
             format!(
@@ -1024,31 +1032,39 @@ fn aws_scope_check(
             format!(
                 "Create an IAM role for sessions that the host's AWS login may assume, and set `[profiles.{id}.aws] role_arn = \"arn:aws:iam::<account>:role/<name>\"`. Sessions then receive short-lived credentials limited to that role and to a Bedrock-only session policy."
             ),
-        ));
+        )];
     };
+    let mut checks = withheld
+        .iter()
+        .map(|(target_id, reason)| {
+            DoctorCheck::warning(
+                format!("{check_id}.{target_id}"),
+                format!("AWS credentials for profile {id} on target {target_id}"),
+                format!(
+                    "[profiles.{id}.aws] names {}, but it has no effect on sessions on target {target_id}: {}. Those sessions run with that target's own AWS identity, not role-scoped credentials.",
+                    role.role_arn,
+                    reason.why_a_role_cannot_apply()
+                ),
+                "Run this profile's Bedrock sessions on a container or SSH target without AWS credentials in its environment, or use the target's own identity deliberately and give it only the access sessions need.",
+            )
+        })
+        .collect::<Vec<_>>();
     if receiving.is_empty() {
-        return Some(DoctorCheck::warning(
-            check_id,
-            title,
-            format!(
-                "[profiles.{id}.aws] names {}, but no configured target receives synced AWS credentials, so it has no effect. Raw local sessions read the host's AWS files directly and EC2 sessions use their instance role; neither can be limited this way. Explicit AWS credentials in the profile or target environment also skip it.",
-                role.role_arn
-            ),
-            "Run Bedrock sessions on a container or SSH target without AWS credentials in its environment, or remove the `[profiles.<id>.aws]` table.",
-        ));
+        return checks;
     }
     let source = match crate::aws_credentials::selected_source(profile) {
         Ok(source) => source,
         Err(error) => {
-            return Some(DoctorCheck::fixable(
+            checks.push(DoctorCheck::fixable(
                 check_id,
                 title,
                 format!("The profile's AWS identity could not be selected: {error:#}"),
                 "Fix the profile's Codex configuration or AWS_PROFILE setting.",
             ));
+            return checks;
         }
     };
-    Some(match crate::aws_assume_role::probe(&source, executor) {
+    checks.push(match crate::aws_assume_role::probe(&source, executor) {
         Ok(credentials) => {
             let until = credentials
                 .expires_at_epoch_millis()
@@ -1083,7 +1099,8 @@ fn aws_scope_check(
                 }
             ),
         ),
-    })
+    });
+    checks
 }
 
 /// The readiness of one profile: its home, and whether it can authenticate.

@@ -2073,7 +2073,7 @@ fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
             &local_only,
             &AlwaysFailingExecutor
         )
-        .is_none()
+        .is_empty()
     );
     // A role the host's login can assume.
     let ok = FakeExecutor::new([Ok(output(&granted))]);
@@ -2110,9 +2110,43 @@ fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
     // A role on a profile that only runs raw local sessions has no effect.
     checks.extend(aws_scope_check(
         "bedrock",
-        &profile(Some(role)),
+        &profile(Some(role.clone())),
         &local_only,
         &AlwaysFailingExecutor,
+    ));
+    let mixed_role = role;
+
+    // Hard-won: db9e62ed7: doctor stayed quiet about a role that could not
+    // apply to some targets as long as another target was scoped. Each target
+    // it cannot apply to is reported by itself, with the reason.
+    let mixed: BTreeMap<String, TargetTemplate> = [
+        (
+            "podman".to_owned(),
+            TargetTemplate::LocalPodman {
+                container: container("ghcr.io/example/dev:1"),
+            },
+        ),
+        ("localhost".to_owned(), TargetTemplate::LocalBare),
+        (
+            "own-identity".to_owned(),
+            TargetTemplate::LocalDocker {
+                container: ContainerTemplate {
+                    environment: [("AWS_PROFILE".to_owned(), "team".to_owned())]
+                        .into_iter()
+                        .collect(),
+                    ..container("ghcr.io/example/dev:1")
+                },
+            },
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let granted_again = FakeExecutor::new([Ok(output(&granted))]);
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(mixed_role)),
+        &mixed,
+        &granted_again,
     ));
 
     // A table on a profile that does not use the AWS chain has no effect;

@@ -6283,3 +6283,53 @@ fn refreshing_profile_configuration_clears_every_aws_file_including_the_scope_re
         assert!(script.contains(name), "{name} is not cleared: {script}");
     }
 }
+
+// Hard-won: db9e62ed7: a Bedrock profile's role was silently ignored when the session launched on a raw local target.
+#[test]
+fn launching_where_the_role_cannot_apply_announces_why() {
+    let home = tempfile::tempdir().unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let mut profile = mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path());
+    profile
+        .environment
+        .insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
+    profile.aws = Some(mj_core::config::AwsRoleConfig {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        session_policy: None,
+        session_policy_arns: Vec::new(),
+        duration_seconds: None,
+        source_identity: false,
+    });
+    let mut config = mj_core::config::Config::default();
+    config.profiles.insert("bedrock".into(), profile);
+    config.targets.insert(
+        "localhost".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    let mut session = crate::controller::test_support::checkpoint_test_session(id);
+    session.last_profile = "bedrock".into();
+    session.target_template_id = "localhost".into();
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: format!("/home/me/.local/share/hel/workers/{id}").into(),
+    });
+    let controller = Controller {
+        config,
+        state: mj_core::state::State {
+            sessions: [(id.to_owned(), session)].into_iter().collect(),
+            ..Default::default()
+        },
+    };
+
+    let notice = controller.aws_role_notice(id).unwrap().unwrap();
+
+    assert!(
+        notice.contains("[profiles.bedrock.aws] has no effect on this session"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("raw local sessions read the host's own AWS files"),
+        "{notice}"
+    );
+    // Nothing is minted or synced for a session the role cannot apply to.
+    assert!(controller.aws_credential_source(id).unwrap().is_none());
+}
