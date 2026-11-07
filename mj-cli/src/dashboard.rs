@@ -231,6 +231,8 @@ struct QuitTimings {
     /// `None` when the loop ended without a quit request.
     requested_at: Option<Instant>,
     loop_ended_at: Instant,
+    auto_afk_started_at: Instant,
+    auto_afk_finished_at: Instant,
     saves_started_at: Instant,
     saves_finished_at: Instant,
     returned_at: Instant,
@@ -254,7 +256,9 @@ pub(crate) fn log_quit_timings(runtime_shutdown_started: Instant) {
     tracing::info!(
         total_ms = ms(started_at, exited_at),
         pending_writes_ms = ms(started_at, timings.loop_ended_at),
-        terminal_restore_ms = ms(timings.loop_ended_at, timings.saves_started_at),
+        detach_count_ms = ms(timings.loop_ended_at, timings.auto_afk_started_at),
+        auto_afk_ms = ms(timings.auto_afk_started_at, timings.auto_afk_finished_at),
+        terminal_restore_ms = ms(timings.auto_afk_finished_at, timings.saves_started_at),
         final_saves_ms = ms(timings.saves_started_at, timings.saves_finished_at),
         session_manager_ms = ms(timings.saves_finished_at, timings.returned_at),
         teardown_ms = ms(timings.returned_at, runtime_shutdown_started),
@@ -1165,7 +1169,9 @@ pub(crate) async fn run_dashboard_for_workspace(
         }
         _ => DetachedSessions::Unknown,
     };
+    let auto_afk_started_at = Instant::now();
     context.auto_afk.shutdown().await;
+    let auto_afk_finished_at = Instant::now();
     context.cancel_background_work();
     let quit_detached = context.quit_detached;
     // Hand the terminal back before saying anything on it; the warm chat and
@@ -1222,27 +1228,31 @@ pub(crate) async fn run_dashboard_for_workspace(
             eprintln!("{error:#}");
         }
     }
-    if let Some(shutdown) = context.worker_shutdown.take() {
-        let result = shutdown
+    let session_manager = match context.worker_shutdown.take() {
+        Some(shutdown) => shutdown
             .shutdown()
             .await
-            .context("shut down dashboard session manager");
-        if restart_executable.is_some() {
-            if let Err(error) = result {
-                tracing::warn!(%error, "old terminal session manager failed during upgrade handoff");
-            }
-        } else {
-            result?;
-        }
-    }
-    // The rest of the context drops as this returns; `main` times that.
+            .context("shut down dashboard session manager"),
+        None => Ok(()),
+    };
+    // Recorded before a session manager failure returns, so a failed quit is
+    // timed too. The rest of the context drops as this returns; `main` times
+    // that.
     *QUIT_TIMINGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(QuitTimings {
         requested_at: context.shutdown_requested_at,
         loop_ended_at,
+        auto_afk_started_at,
+        auto_afk_finished_at,
         saves_started_at,
         saves_finished_at,
         returned_at: Instant::now(),
     });
+    if let Err(error) = session_manager {
+        if restart_executable.is_none() {
+            return Err(error);
+        }
+        tracing::warn!(%error, "old terminal session manager failed during upgrade handoff");
+    }
     Ok(
         if let Some((target, resume)) = restart_executable.zip(resume) {
             DashboardExit::Restart {
@@ -1629,6 +1639,8 @@ impl DashboardContext {
         if self.shutdown_requested_at.is_some() {
             return;
         }
+        // Timed from here so saving the drafts below counts toward the quit.
+        let requested_at = Instant::now();
         self.collect_prepared_startup_prompts();
         self.startup_prompts
             .cancel_unadmitted(&mut self.dashboard, &mut self.chats);
@@ -1652,7 +1664,7 @@ impl DashboardContext {
         for session_id in self.chats.keys().cloned().collect::<Vec<_>>() {
             self.record_chat_detach(&session_id);
         }
-        self.shutdown_requested_at = Some(Instant::now());
+        self.shutdown_requested_at = Some(requested_at);
         // Shutdown progress belongs on screen, not behind the splash.
         self.splash = None;
         for (session_id, through) in self.read_receipts.retry_failed() {
