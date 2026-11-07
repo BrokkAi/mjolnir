@@ -51,6 +51,102 @@ pub(in crate::controller) fn worker_liveness_command(
         .purpose("probe Mjolnir worker daemon liveness")
 }
 
+/// Whether a session's worker root holds anything a worker could recover.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::controller) enum WorkerRecovery {
+    /// The root has relay state or a relay journal.
+    Recoverable,
+    /// The root is absent, or exists without relay state or a journal: no
+    /// worker ever got as far as its durable relay there. A checkpoint-only
+    /// worker refuses such a root ("checkpoint recovery requires existing
+    /// relay state"), so there is nothing to synchronize.
+    NothingToRecover,
+    /// The probe itself failed (SSH, Podman, a stopped container, a lookup
+    /// error), so the root may hold state. Callers must treat this as
+    /// recoverable.
+    Unknown,
+}
+
+pub(in crate::controller) fn worker_recovery_command(
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> CommandSpec {
+    // Decided from directory listings, never from the shell's file tests
+    // alone: those are false on any lookup error (a stale NFS handle, a
+    // permission error), so they cannot tell "no such entry" from "could not
+    // look". The root is absent only when its parent's listing works and has
+    // no entry with its name. A root holds nothing to recover only when its
+    // own listing works and has neither the relay state nor the journal. An
+    // entry that exists but is not a usable directory, or a listing that
+    // fails, exits nonzero: Unknown.
+    let path = std::path::Path::new(worker_root);
+    let parent = path
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".to_owned());
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // Entries are matched with `case`, not grep, so only the listings
+    // themselves can fail, and a failing listing exits nonzero.
+    let script = format!(
+        "root={root}; parent={parent}; name={name}; \
+         hel_lists() {{ \
+           while IFS= read -r hel_entry; do \
+             case \"$hel_entry\" in \"$2\"|\"$3\") return 0 ;; esac; \
+           done <<MJ_ENTRIES
+$1
+MJ_ENTRIES
+           return 1; }}; \
+         if [ -d \"$root\" ]; then \
+           entries=$(ls -1A \"$root\") || exit 1; \
+           if hel_lists \"$entries\" {state} {journal}; then \
+             printf 'recoverable\\n'; else printf 'nothing\\n'; fi; \
+         elif entries=$(ls -1A \"$parent\"); then \
+           if hel_lists \"$entries\" \"$name\" \"$name\"; then exit 1; fi; \
+           printf 'nothing\\n'; \
+         else exit 1; fi",
+        root = targets::posix_quote(worker_root),
+        parent = targets::posix_quote(&parent),
+        name = targets::posix_quote(&name),
+        state = targets::posix_quote(mj_core::relay::RELAY_STATE_FILE),
+        journal = targets::posix_quote(mj_core::relay::RELAY_JOURNAL_DIR),
+    );
+    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+        .purpose("probe Mjolnir worker root")
+}
+
+/// Ask the target whether `worker_root` holds anything to recover. Only the
+/// install step creates a child's root and only its cleanup removes it, and
+/// only a worker that reached its durable relay writes relay state there.
+///
+/// A worker that is still starting has not written relay state yet, so an
+/// empty root counts as nothing to recover only when no worker for it is
+/// running afterwards. Liveness is checked after the listing, so a worker that
+/// started in between is seen.
+pub(in crate::controller) fn worker_recovery(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> WorkerRecovery {
+    let answer = |command: CommandSpec| match executor.execute(&command) {
+        Ok(output) if output.status == 0 => {
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        }
+        _ => None,
+    };
+    match answer(worker_recovery_command(locator, worker_root)).as_deref() {
+        Some("recoverable") => WorkerRecovery::Recoverable,
+        Some("nothing") => match answer(worker_liveness_command(locator, worker_root)).as_deref() {
+            Some("dead") => WorkerRecovery::NothingToRecover,
+            Some("alive" | "starting") => WorkerRecovery::Recoverable,
+            _ => WorkerRecovery::Unknown,
+        },
+        _ => WorkerRecovery::Unknown,
+    }
+}
+
 /// Print the worker's exit record, or nothing when it left none. Reads only,
 /// so it works on a target whose disk is full.
 pub(in crate::controller) fn worker_exit_record_command(

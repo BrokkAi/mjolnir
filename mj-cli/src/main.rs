@@ -580,6 +580,7 @@ fn run(cli: Cli) -> Result<()> {
         update_notice,
         cli.no_splash,
     ));
+    let runtime_shutdown_started = std::time::Instant::now();
     if daemon {
         shutdown_daemon_runtime(runtime);
     } else if matches!(
@@ -603,6 +604,7 @@ fn run(cli: Cli) -> Result<()> {
             RUNTIME_SHUTDOWN_GRACE,
         );
     }
+    dashboard::log_quit_timings(runtime_shutdown_started);
     match result? {
         DashboardExit::Restart { target, resume } => resume.restart(&target),
         _ => Ok(()),
