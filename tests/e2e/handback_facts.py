@@ -192,9 +192,11 @@ After spawning, end your turn with a one-line status. Each time a message from M
         else:
             assert sleep_pid in stopped and sleep_pid not in survived, park
             outcome = "stopped"
-        recorded = query("SELECT finish_json, park_json FROM subagent_work_facts WHERE child_session_id=?", [child])
+        recorded = query("SELECT finish_json FROM subagent_work_facts WHERE child_session_id=?", [child])
         assert recorded and json.loads(recorded[0][0])["processes"] == facts["processes"], recorded
-        assert json.loads(recorded[0][1]) == park, recorded
+        # The park's record is its own row, keyed by the finish it followed.
+        parks = query("SELECT park_json FROM subagent_park_facts WHERE child_session_id=?", [child])
+        assert len(parks) == 1 and json.loads(parks[0][0]) == park, parks
         print(f"PASS ({args.harness}): the park {outcome} the detached sleep; report and park message match the process table", flush=True)
     finally:
         if sleep_pid and alive(sleep_pid):

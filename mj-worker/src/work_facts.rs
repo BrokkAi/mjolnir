@@ -200,15 +200,7 @@ pub(crate) fn select_processes(
             detached: *detached,
         })
         .collect();
-    let worker = rows
-        .iter()
-        .find(|row| row.pid == ctx.worker_pid)
-        .map(|row| ProcessIdentity {
-            pid: row.pid,
-            start: describe(row).identity,
-        });
     ProcessFacts {
-        worker,
         unattributed,
         running,
         omitted: running.saturating_sub(u32::try_from(shown.len()).unwrap_or(u32::MAX)),

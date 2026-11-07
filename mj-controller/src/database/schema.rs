@@ -2234,8 +2234,16 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
                  -- A report went out with the working tree still being read: its
                  -- follow-up is owed once the tree is stored.
                  tree_owed INTEGER NOT NULL DEFAULT 0 CHECK(tree_owed IN (0, 1)),
-                 finish_json TEXT CHECK(finish_json IS NULL OR json_valid(finish_json)),
-                 park_json TEXT CHECK(park_json IS NULL OR json_valid(park_json))
+                 finish_json TEXT CHECK(finish_json IS NULL OR json_valid(finish_json))
+             ) STRICT;
+             -- What a park did, keyed by the finish it followed, apart from the
+             -- finish row: a newer finish must not erase a park whose follow-up
+             -- is still owed.
+             CREATE TABLE IF NOT EXISTS subagent_park_facts (
+                 child_session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 finish_ordinal INTEGER NOT NULL,
+                 park_json TEXT NOT NULL CHECK(json_valid(park_json)),
+                 PRIMARY KEY(child_session_id, finish_ordinal)
              ) STRICT;
              UPDATE schema_compatibility SET minimum_compatible_version = 118 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
@@ -3685,7 +3693,9 @@ mod reader_tests {
         let connection = Connection::open(path).unwrap();
         if version < 118 {
             connection
-                .execute_batch("DROP TABLE IF EXISTS subagent_work_facts;")
+                .execute_batch(
+                    "DROP TABLE IF EXISTS subagent_park_facts; DROP TABLE IF EXISTS subagent_work_facts;",
+                )
                 .unwrap();
         }
         if version < 111 {
@@ -4269,8 +4279,15 @@ mod reader_tests {
         state.ensure_supported_by(118).unwrap();
         connection
             .execute(
-                "INSERT INTO subagent_work_facts(child_session_id, finish_ordinal, finish_json, park_json)
-                 VALUES (?1, 9, '{}', NULL)",
+                "INSERT INTO subagent_work_facts(child_session_id, finish_ordinal, finish_json)
+                 VALUES (?1, 9, '{}')",
+                [&record.id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO subagent_park_facts(child_session_id, finish_ordinal, park_json)
+                 VALUES (?1, 9, '{}')",
                 [&record.id],
             )
             .unwrap();
@@ -4278,9 +4295,12 @@ mod reader_tests {
             .execute("DELETE FROM sessions WHERE session_id=?1", [&record.id])
             .unwrap();
         let rows: i64 = connection
-            .query_row("SELECT count(*) FROM subagent_work_facts", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT (SELECT count(*) FROM subagent_work_facts)
+                      + (SELECT count(*) FROM subagent_park_facts)",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(rows, 0, "destroying a session removes its facts");
     }

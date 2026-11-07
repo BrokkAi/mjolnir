@@ -615,7 +615,6 @@ mod tests {
             observed_at_ms: 1,
             processes: mj_core::work_facts::Observed::Known(mj_core::work_facts::ProcessFacts {
                 unattributed: 0,
-                worker: None,
                 running: 1,
                 shown: vec![mj_core::work_facts::RunningProcess {
                     pid: 41301,
@@ -678,7 +677,6 @@ mod tests {
                 park: Box::new(mj_core::work_facts::ParkFacts::unverified(
                     mj_core::work_facts::Observed::Known(mj_core::work_facts::ProcessFacts {
                         unattributed: 0,
-                        worker: None,
                         running: 3,
                         shown: Vec::new(),
                         omitted: 3,

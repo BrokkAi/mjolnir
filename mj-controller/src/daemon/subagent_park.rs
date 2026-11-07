@@ -173,98 +173,21 @@ impl RuntimeState {
 
     /// Check what the park did to the processes it recorded, and tell the
     /// parent. This runs apart from the park, which has returned: asking an
-    /// unreachable target can take the executor's whole timeout, and neither
-    /// the park's idle reservation, the completion that parked the child nor
-    /// the daemon's handoff admission may be held for that. The marker the park
-    /// wrote before its stop is durable, so a daemon that is replaced first has
-    /// the check done by the next one at startup.
+    /// unreachable target can take the executor's whole timeout, and neither the
+    /// park's idle reservation, the completion that parked the child nor the
+    /// daemon's handoff admission may be held for that, and the check is a
+    /// synchronous command that must not run on an async worker. The park's
+    /// record was written before its stop; a daemon that is replaced first has
+    /// that follow-up sent at the next startup from the same record.
     fn spawn_park_settlement(self: &Arc<Self>, child_session_id: String) {
         tokio::spawn(async move {
-            let settled = async {
-                let Some(park) = blocking({
-                    let child_session_id = child_session_id.clone();
-                    move || crate::database::load_unfinished_park(&child_session_id)
-                })
-                .await?
-                else {
-                    return Ok(());
-                };
-                let controller = blocking(Controller::load).await?;
-                let executor = CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);
-                controller
-                    .finish_stopped_park(&child_session_id, park, &executor)
-                    .await
-            }
-            .await;
-            if let Err(error) = settled {
+            let executor = Arc::new(CancellableProcessExecutor::with_timeout(PARK_TIMEOUT));
+            if let Err(error) = finish_stopped_parks_of(child_session_id.clone(), executor).await {
                 tracing::warn!(
                     session_id = %child_session_id,
                     error = format!("{error:#}"),
-                    "could not tell what a park did to the sub-agent's processes; startup will retry"
+                    "could not tell what a park did to the sub-agent's processes"
                 );
-            }
-        });
-    }
-
-    /// Settle the parks that began a stop and did not record an outcome, from
-    /// the snapshot each wrote before its stop (see
-    /// `Controller::settle_unfinished_park`). Each runs as the child's park
-    /// lifecycle, so it is serialized with every other operation on the child,
-    /// and a failure leaves the marker for the next startup.
-    pub(super) fn recover_unfinished_parks(self: &Arc<Self>) {
-        let state = self.clone();
-        tokio::spawn(async move {
-            let parks = match blocking(crate::database::load_unfinished_parks).await {
-                Ok(parks) => parks,
-                Err(error) => {
-                    tracing::warn!(
-                        error = format!("{error:#}"),
-                        "could not read the parks that did not finish"
-                    );
-                    return;
-                }
-            };
-            // Only the children are taken from this read: a child may be
-            // unparked, finish again and be parked again before its turn at the
-            // lifecycle, so the pending park is read again inside it.
-            for (child_session_id, _) in parks {
-                let state = state.clone();
-                tokio::spawn(async move {
-                    // Another operation on the child (a restart that recovery
-                    // is running for the same crash) ends by itself. Settling
-                    // reads the child's record, which that operation may
-                    // change, so it waits its turn, with a growing pause.
-                    let mut pause = Duration::from_millis(250);
-                    let settled = loop {
-                        let attempt = state
-                            .run_lifecycle(
-                                child_session_id.clone(),
-                                LifecycleKind::Park,
-                                move |_state, session_id, _cancelled| {
-                                    settle_unfinished_park_of(session_id)
-                                },
-                            )
-                            .await;
-                        match attempt {
-                            Err(error) if error.is::<SessionLifecycleBusy>() => {
-                                tokio::time::sleep(pause).await;
-                                pause = (pause * 2).min(Duration::from_secs(30));
-                            }
-                            other => break other,
-                        }
-                    };
-                    match settled {
-                        Ok(_) => {
-                            tracing::info!(session_id = %child_session_id, "settled a sub-agent park that did not finish");
-                            state.publish_revision();
-                        }
-                        Err(error) => tracing::warn!(
-                            session_id = %child_session_id,
-                            error = format!("{error:#}"),
-                            "could not settle a sub-agent park that did not finish; it will be retried at the next startup"
-                        ),
-                    }
-                });
             }
         });
     }
@@ -345,100 +268,135 @@ impl RuntimeState {
     }
 }
 
-/// Settle one child's unfinished park, inside its park lifecycle. The pending
-/// park is read here, not taken from the startup read: while this waited its
-/// turn the child may have been unparked, finished again and been parked
-/// again, and a snapshot taken at startup would overwrite that newer outcome.
-async fn settle_unfinished_park_of(session_id: String) -> Result<DaemonLifecycleResult> {
-    let Some(park) = blocking({
-        let session_id = session_id.clone();
-        move || crate::database::load_unfinished_park(&session_id)
-    })
-    .await?
-    else {
-        // Settled, or replaced by a newer park's outcome, in the meantime.
-        return Ok(DaemonLifecycleResult::Done);
-    };
-    let controller = blocking(Controller::load).await?;
-    let executor = CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);
-    controller
-        .settle_unfinished_park(&session_id, park, &executor)
-        .await?;
-    Ok(DaemonLifecycleResult::Done)
+/// Check, for each park of this child whose check is still owed, which of its
+/// processes survived, and record the outcome. Each check is a synchronous
+/// command on the target, so it runs on the blocking pool and the async worker
+/// stays free; nothing here takes a lifecycle or handoff admission.
+async fn finish_stopped_parks_of<E>(child_session_id: String, executor: Arc<E>) -> Result<()>
+where
+    E: crate::targets::CommandExecutor + Send + Sync + 'static,
+{
+    let parks = blocking(crate::database::load_unfinished_parks).await?;
+    let controller = Arc::new(blocking(Controller::load).await?);
+    for (child, ordinal, park) in parks {
+        if child != child_session_id {
+            continue;
+        }
+        let controller = controller.clone();
+        let executor = executor.clone();
+        tokio::task::spawn_blocking(move || {
+            controller.finish_stopped_park(&child, ordinal, park, &*executor)
+        })
+        .await
+        .context("the park check stopped")??;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::controller::test_support::{IsolatedTest, test_name};
+    use crate::targets::{CommandOutput, CommandSpec};
     use mj_core::work_facts::{Observed, ParkFacts, ProcessFacts, ProcessIdentity, RunningProcess};
 
-    #[tokio::test]
-    async fn settling_reads_the_pending_park_inside_the_lifecycle_not_at_startup() {
-        const CHILD: &str = "MJ_TEST_SETTLE_RELOAD";
+    /// A target that answers every command slowly, as an unreachable one does.
+    struct SlowTarget(Duration);
+
+    impl crate::targets::CommandExecutor for SlowTarget {
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+            std::thread::sleep(self.0);
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    fn snapshot() -> Observed<ProcessFacts> {
+        let identity = ProcessIdentity {
+            pid: 4_000_001,
+            start: "boot-that-never-was:1".into(),
+        };
+        Observed::Known(ProcessFacts {
+            unattributed: 0,
+            running: 1,
+            shown: vec![RunningProcess {
+                pid: identity.pid,
+                elapsed_secs: 1,
+                command: "sleep 1".into(),
+                detached: false,
+            }],
+            omitted: 0,
+            identities: vec![identity],
+        })
+    }
+
+    fn parked_child_with_marker(root: &std::path::Path) {
+        use crate::controller::test_support::checkpoint_test_session;
+        crate::database::save_session(&checkpoint_test_session("parent-1")).unwrap();
+        let mut child = checkpoint_test_session("park-check-child");
+        child.state = mj_core::state::SessionState::Parked;
+        child.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: root.join("park-check-child"),
+        });
+        crate::database::save_subagent_session(
+            &child,
+            &serde_json::from_value(serde_json::json!({
+                "child_session_id": "park-check-child", "parent_session_id": "parent-1",
+                "task_name": "audit", "profile_id": "profile", "working_directory": "",
+                "initial_prompt": "audit", "request_key": "task", "created_at": "now"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        crate::database::record_park_started("park-check-child".into(), ParkFacts::started(snapshot()))
+            .unwrap();
+    }
+
+    /// The survivor check is a synchronous command on the target. On a runtime
+    /// with a single thread, a check run on it would starve every other task
+    /// until it returned; run on the blocking pool, others keep going.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_survivor_check_does_not_run_on_an_async_worker() {
+        const CHILD: &str = "MJ_TEST_PARK_CHECK_OFF_RUNTIME";
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
             IsolatedTest::new(test_name(
                 module_path!(),
-                "settling_reads_the_pending_park_inside_the_lifecycle_not_at_startup",
+                "the_survivor_check_does_not_run_on_an_async_worker",
             ))
             .env(CHILD, "1")
-            .env("MJ_INSTANCE", "settle-reload")
+            .env("MJ_INSTANCE", "park-check-off-runtime")
             .isolated_store(root.path())
             .run();
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
-        let workspace = crate::database::create_workspace("settle reload").unwrap();
-        let parent = crate::daemon::tests::runtime_test_session(
-            "parent",
-            &workspace.id,
-            mj_core::state::SessionState::Running,
-        );
-        let child = crate::daemon::tests::runtime_test_session(
-            "child",
-            &workspace.id,
-            mj_core::state::SessionState::Parked,
-        );
-        crate::database::save_session(&parent).unwrap();
-        crate::database::save_subagent_session(
-            &child,
-            &crate::daemon::tests::runtime_test_subagent("child", "parent"),
+        let root = tempfile::tempdir().unwrap();
+        parked_child_with_marker(root.path());
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticker = tokio::spawn({
+            let ticks = ticks.clone();
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        });
+        finish_stopped_parks_of(
+            "park-check-child".into(),
+            Arc::new(SlowTarget(Duration::from_millis(600))),
         )
+        .await
         .unwrap();
-        let identity = ProcessIdentity {
-            pid: 4_000_001,
-            start: "boot-that-never-was:1".into(),
-        };
-        let snapshot = |running: u32| {
-            Observed::Known(ProcessFacts {
-                unattributed: 0,
-                worker: None,
-                running,
-                shown: vec![RunningProcess {
-                    pid: identity.pid,
-                    elapsed_secs: 1,
-                    command: "sleep 1".into(),
-                    detached: false,
-                }],
-                omitted: 0,
-                identities: vec![identity.clone()],
-            })
-        };
-        // The park startup saw...
-        crate::database::record_park_started("child".into(), ParkFacts::started(snapshot(1)))
-            .unwrap();
-        let stale = crate::database::load_unfinished_parks().unwrap();
-        assert_eq!(stale.len(), 1);
-        // ...and the newer park that was recorded before the lifecycle came up.
-        let newer = ParkFacts::settled(snapshot(1), &[identity.pid]);
-        assert_eq!(newer.survived, 1);
-        crate::database::record_park_outcome("child".into(), "child".into(), newer.clone())
-            .unwrap();
-
-        settle_unfinished_park_of("child".into()).await.unwrap();
-
-        let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
-        assert_eq!(recorded["child"].park.as_ref(), Some(&newer));
+        ticker.abort();
+        assert!(
+            ticks.load(std::sync::atomic::Ordering::SeqCst) >= 10,
+            "the check held the async worker while it ran"
+        );
+        assert!(crate::database::load_unfinished_parks().unwrap().is_empty());
     }
 }

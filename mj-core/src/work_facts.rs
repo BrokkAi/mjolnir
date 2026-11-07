@@ -71,12 +71,6 @@ pub struct ProcessFacts {
     /// are work the agent detached, is unknown. They are not in `running`.
     #[serde(default)]
     pub unattributed: u32,
-    /// The worker that observed them. A park records it before its stop: a
-    /// daemon that finds the park unfinished asks whether this process still
-    /// lives, and whether another worker owns the session, to tell a stop that
-    /// ran from one that did not.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker: Option<ProcessIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -586,7 +580,6 @@ mod tests {
         };
         let snapshot = Observed::Known(ProcessFacts {
             unattributed: 0,
-            worker: None,
             running: 2,
             shown: vec![process(10), process(11)],
             omitted: 0,

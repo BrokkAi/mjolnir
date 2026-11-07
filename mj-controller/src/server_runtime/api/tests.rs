@@ -4763,7 +4763,6 @@ fn observed_work() -> mj_core::work_facts::WorkFacts {
         observed_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap() - 5_000,
         processes: Observed::Known(ProcessFacts {
             unattributed: 0,
-            worker: None,
             running: 1,
             shown: vec![RunningProcess {
                 pid: 41301,
@@ -5064,6 +5063,103 @@ async fn an_owed_tree_is_sent_when_it_raced_the_report_or_the_finish_was_superse
     crate::database::record_finish_worktree("child-1".into(), 12, observed_work().worktree)
         .unwrap();
     assert_eq!(working_tree_followups().len(), 2);
+}
+
+/// A daemon that exits owes two follow-ups it will never send itself: the park
+/// whose survivor check was running, and the working tree a report promised.
+/// The next daemon sends both from the store alone: it holds no admission,
+/// takes no lifecycle and asks no target, so the child's recorded state is
+/// untouched, and a repeat of the startup sends nothing more.
+#[tokio::test]
+async fn startup_settles_the_park_and_tree_follow_ups_the_previous_daemon_owed() {
+    if !isolated_parked_test(
+        "startup_settles_the_park_and_tree_follow_ups_the_previous_daemon_owed",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut parked = parent_record("child-1", "helper");
+    parked.state = SessionState::Parked;
+    crate::database::save_lifecycle_session(&parked).unwrap();
+    let known = observed_work();
+    let mut pending = known.clone();
+    pending.worktree = mj_core::work_facts::Observed::Pending;
+    let report: mj_core::mailbox::SubagentFinishedReport =
+        serde_json::from_value(serde_json::json!({
+            "child_session_id": "child-1", "task_name": "audit deps", "state": "completed",
+            "finished": true, "output": "done", "report_dir": null
+        }))
+        .map(|mut report: mj_core::mailbox::SubagentFinishedReport| {
+            report.facts = Some(pending.clone());
+            report
+        })
+        .unwrap();
+    crate::database::record_finish_facts("child-1".into(), 9, pending).unwrap();
+    crate::database::enqueue_subagent_reports(
+        "parent-1".into(),
+        vec![(
+            mj_core::subagent::SubagentFinishIdentity::Turn {
+                start_position: 1,
+                completed_ordinal: 9,
+                state: "completed".into(),
+            },
+            report,
+        )],
+    )
+    .unwrap();
+    // The park's stop ran and the daemon went before the check finished.
+    crate::database::record_park_started(
+        "child-1".into(),
+        mj_core::work_facts::ParkFacts::started(known.processes.clone()),
+    )
+    .unwrap();
+    assert_eq!(crate::database::load_unfinished_parks().unwrap().len(), 1);
+    assert!(working_tree_followups().is_empty());
+
+    crate::database::settle_followups_after_restart().unwrap();
+
+    assert!(crate::database::load_unfinished_parks().unwrap().is_empty());
+    let trees = working_tree_followups();
+    assert_eq!(trees.len(), 1, "{trees:?}");
+    assert!(trees[0].0, "the follow-up wakes the parent");
+    assert!(
+        trees[0]
+            .1
+            .contains("the daemon restarted before the working tree was read"),
+        "{}",
+        trees[0].1
+    );
+    let parks: Vec<String> = crate::database::pending_mailbox_events(20)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.event_json.contains("subagent_parked"))
+        .map(|event| {
+            let parsed: mj_core::mailbox::MailboxEvent =
+                serde_json::from_str(&event.event_json).unwrap();
+            assert!(parsed.wake);
+            mj_core::mailbox::render_mailbox_event(&parsed)
+        })
+        .collect();
+    assert_eq!(parks.len(), 1, "{parks:?}");
+    assert!(
+        parks[0].contains("the daemon restarted during the check"),
+        "{}",
+        parks[0]
+    );
+    assert!(parks[0].contains("pid 41301"), "{}", parks[0]);
+    assert_eq!(
+        crate::database::load_session_state("child-1").unwrap(),
+        Some(SessionState::Parked),
+        "the child's lifecycle is not the follow-ups' to change"
+    );
+
+    let before = crate::database::pending_mailbox_events(20).unwrap().len();
+    crate::database::settle_followups_after_restart().unwrap();
+    assert_eq!(
+        crate::database::pending_mailbox_events(20).unwrap().len(),
+        before
+    );
 }
 
 /// The store answers whether a child accepted a prompt after a finish, which

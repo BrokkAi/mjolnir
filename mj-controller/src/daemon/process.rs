@@ -274,7 +274,15 @@ pub(super) async fn run_daemon_runtime(
         };
         state.resume_retained_cleanups();
         state.resume_startup_cleanups(true);
-        state.recover_unfinished_parks();
+        // Follow-ups the previous daemon owed are settled from the store alone:
+        // no lifecycle, no admission, no target probe. A failure is reported and
+        // does not stop startup.
+        if let Err(error) = blocking(crate::database::settle_followups_after_restart).await {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "could not settle the follow-ups owed by the previous daemon"
+            );
+        }
         tracing::info!(
             moves,
             restarts,

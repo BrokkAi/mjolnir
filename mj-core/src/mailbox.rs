@@ -1088,7 +1088,6 @@ mod tests {
                 observed_at_ms: 1,
                 processes: Observed::Known(ProcessFacts {
                     unattributed: 2,
-                    worker: None,
                     running: 9,
                     shown,
                     omitted: 6,
@@ -1112,7 +1111,6 @@ mod tests {
                 observed_at_ms: 1,
                 processes: Observed::Known(ProcessFacts {
                     unattributed: 0,
-                    worker: None,
                     running: 0,
                     shown: Vec::new(),
                     omitted: 0,
