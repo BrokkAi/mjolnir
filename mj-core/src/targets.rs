@@ -2853,7 +2853,7 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
         | TargetLocator::SshAppleContainer {
             ssh, container_id, ..
         } => {
-            let remote = container_exec(
+            let remote = drained_container_exec(
                 locator.container_engine().expect("remote container"),
                 container_id,
                 args,
@@ -2899,13 +2899,27 @@ pub fn container_exec(
 ) -> CommandSpec {
     let mut command_args = vec!["exec".to_owned(), "-i".to_owned(), container_id.to_owned()];
     command_args.extend(args.into_iter().map(Into::into));
+    CommandSpec::new(engine, command_args)
+}
+
+/// A container exec run on a remote host over SSH, through the output drain
+/// below. Only SSH targets need it: there the drain runs on the remote host
+/// and outlives a cancelled local ssh, whereas a local target's cancellation
+/// kills the whole process group, drain included, and a local controller
+/// (Windows) may have no POSIX shell to run it.
+pub fn drained_container_exec(
+    engine: &str,
+    container_id: &str,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> CommandSpec {
+    let exec = container_exec(engine, container_id, args);
     let mut wrapped = vec![
         "-c".to_owned(),
         CONTAINER_EXEC_DRAIN.to_owned(),
         "exec-drain".to_owned(),
-        engine.to_owned(),
+        exec.program,
     ];
-    wrapped.extend(command_args);
+    wrapped.extend(exec.args);
     CommandSpec::new("sh", wrapped)
 }
 
@@ -2957,7 +2971,8 @@ mod executor_tests {
                 fake.to_str().unwrap(),
                 ["exec", "-i", "ctr", &status.to_string()],
             );
-            let wrapped = container_exec(fake.to_str().unwrap(), "ctr", [status.to_string()]);
+            let wrapped =
+                drained_container_exec(fake.to_str().unwrap(), "ctr", [status.to_string()]);
             let input = vec![b'x'; 204800];
             let expected = ProcessExecutor
                 .execute_with_stdin(&plain, &mut std::io::Cursor::new(&input))
@@ -2999,7 +3014,8 @@ mod executor_tests {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
         let marker = temp.path().join("normal-exit");
-        let wrapped = container_exec(fake.to_str().unwrap(), "ctr", [marker.to_str().unwrap()]);
+        let wrapped =
+            drained_container_exec(fake.to_str().unwrap(), "ctr", [marker.to_str().unwrap()]);
         let mut argv = vec![wrapped.program];
         argv.extend(wrapped.args);
         let line = format!(
