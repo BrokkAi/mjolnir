@@ -120,8 +120,6 @@ pub(super) fn read_table(session_id: &str) -> Result<ProcessTable> {
             pid,
             ppid,
             age_ms: elapsed.saturating_mul(1000),
-            // `etime` is whole seconds.
-            age_granularity_ms: 1000,
             zombie: stat.starts_with('Z'),
             marker,
         });
@@ -143,6 +141,8 @@ pub(super) fn read_table(session_id: &str) -> Result<ProcessTable> {
         rows,
         reader,
         sampled_ms,
+        // `etime` is whole seconds.
+        resolution_ms: 1000,
     })
 }
 

@@ -738,59 +738,37 @@ pub(crate) fn record_park_outcome_expecting(
     Ok(())
 }
 
-/// At startup, settle every follow-up the previous daemon owed, from what the
-/// store holds and nothing else: no target is probed and no lifecycle taken.
-/// A park whose check was running is sent with its pre-stop facts, saying the
-/// check could not be completed; a working tree still being read is stored as
-/// unavailable and sent, since no task of the new daemon is reading it. Recovering a child's
-/// lifecycle is the session recovery's job, not this one's, so a pending park
-/// on a child that is not recorded as parked (its stop failed, or the daemon
-/// stopped during it) is sent as one that could not be confirmed, with the
-/// stored facts and without a word about what became of the processes.
-pub(crate) fn settle_followups_after_restart() -> Result<()> {
-    let parked = mj_core::state::SessionState::Parked.as_str();
-    let state_of = |child: &str| -> Result<Option<String>> {
-        let connection = open_reader(&database_path())?;
-        Ok(connection
-            .query_row(
-                "SELECT state FROM sessions WHERE session_id=?1",
-                [child],
-                |row| row.get(0),
-            )
-            .optional()?)
-    };
-    for (child, ordinal, park) in load_unfinished_parks()? {
-        let name = {
-            let connection = open_reader(&database_path())?;
-            connection
-                .query_row(
-                    "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
-                    [&child],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-                .and_then(|json| {
-                    serde_json::from_str::<mj_core::subagent::SubagentRecord>(&json).ok()
-                })
-                .map(|relation| relation.task_name)
-                .unwrap_or_default()
-        };
-        let settled = if state_of(&child)?.as_deref() == Some(parked) {
-            mj_core::work_facts::ParkFacts::unverified(
-                park.snapshot.clone(),
-                "the daemon restarted during the check",
-            )
-        } else {
-            // Nothing says the stop ran, and the finish report promised a later
-            // message about the listed processes: say that the park could not
-            // be confirmed rather than say nothing.
-            mj_core::work_facts::ParkFacts::unconfirmed(
-                park.snapshot.clone(),
-                "the stop failed or the daemon stopped during it",
-            )
-        };
-        record_park_outcome_expecting(child, ordinal, name, settled, Some(park))?;
+/// A follow-up a previous daemon owed its parent and did not send.
+#[derive(Clone, Debug)]
+pub(crate) enum OwedFollowup {
+    /// A park whose survivor check was running; `park` is its pending marker.
+    Park {
+        child: String,
+        ordinal: u64,
+        park: mj_core::work_facts::ParkFacts,
+    },
+    /// A working tree a report promised that was still being read.
+    Tree { child: String, ordinal: u64 },
+}
+
+impl OwedFollowup {
+    pub(crate) fn child(&self) -> &str {
+        match self {
+            Self::Park { child, .. } | Self::Tree { child, .. } => child,
+        }
     }
+}
+
+/// Every follow-up the previous daemon owed, from what the store holds.
+pub(crate) fn owed_followups() -> Result<Vec<OwedFollowup>> {
+    let mut owed: Vec<OwedFollowup> = load_unfinished_parks()?
+        .into_iter()
+        .map(|(child, ordinal, park)| OwedFollowup::Park {
+            child,
+            ordinal,
+            park,
+        })
+        .collect();
     let finishes: Vec<(String, u64, String)> = {
         let connection = open_reader(&database_path())?;
         let mut statement = connection.prepare(
@@ -804,16 +782,90 @@ pub(crate) fn settle_followups_after_restart() -> Result<()> {
     for (child, ordinal, json) in finishes {
         let facts: mj_core::work_facts::WorkFacts = serde_json::from_str(&json)?;
         if matches!(facts.worktree, mj_core::work_facts::Observed::Pending) {
-            record_finish_worktree(
-                child,
-                ordinal,
-                mj_core::work_facts::Observed::unavailable(
-                    "the daemon restarted before the working tree was read",
-                ),
-            )?;
+            owed.push(OwedFollowup::Tree { child, ordinal });
         }
     }
-    Ok(())
+    Ok(owed)
+}
+
+/// Settle one owed follow-up from what the store holds and nothing else: no
+/// target is probed and no lifecycle taken. A park whose check was running is
+/// sent with its pre-stop facts, saying the check could not be completed; a
+/// working tree still being read is stored as unavailable and sent, since no
+/// task of the new daemon is reading it. Recovering a child's lifecycle is the
+/// session recovery's job, not this one's, so a pending park on a child that is
+/// not recorded as parked (its stop failed, or the daemon stopped during it) is
+/// sent as one that could not be confirmed, with the stored facts and without a
+/// word about what became of the processes. Settling is idempotent, so a failed
+/// attempt can be repeated.
+pub(crate) fn settle_owed_followup(owed: &OwedFollowup) -> Result<()> {
+    match owed {
+        OwedFollowup::Park {
+            child,
+            ordinal,
+            park,
+        } => {
+            let connection = open_reader(&database_path())?;
+            let state: Option<String> = connection
+                .query_row(
+                    "SELECT state FROM sessions WHERE session_id=?1",
+                    [child],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let name = connection
+                .query_row(
+                    "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+                    [child],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|json| {
+                    serde_json::from_str::<mj_core::subagent::SubagentRecord>(&json).ok()
+                })
+                .map(|relation| relation.task_name)
+                .unwrap_or_default();
+            let settled = if state.as_deref() == Some(mj_core::state::SessionState::Parked.as_str())
+            {
+                mj_core::work_facts::ParkFacts::unverified(
+                    park.snapshot.clone(),
+                    "the daemon restarted during the check",
+                )
+            } else {
+                // Nothing says the stop ran, and the finish report promised a
+                // later message about the listed processes: say that the park
+                // could not be confirmed rather than say nothing.
+                mj_core::work_facts::ParkFacts::unconfirmed(
+                    park.snapshot.clone(),
+                    "the stop failed or the daemon stopped during it",
+                )
+            };
+            record_park_outcome_expecting(
+                child.clone(),
+                *ordinal,
+                name,
+                settled,
+                Some(park.clone()),
+            )
+        }
+        OwedFollowup::Tree { child, ordinal } => record_finish_worktree(
+            child.clone(),
+            *ordinal,
+            mj_core::work_facts::Observed::unavailable(
+                "the daemon restarted before the working tree was read",
+            ),
+        ),
+    }
+}
+
+/// At startup, try each follow-up the previous daemon owed, each on its own: a
+/// failure to write one leaves the rest to settle. The ones that failed are
+/// returned with their errors, for the caller to report and retry.
+pub(crate) fn settle_followups_after_restart() -> Result<Vec<(OwedFollowup, anyhow::Error)>> {
+    Ok(owed_followups()?
+        .into_iter()
+        .filter_map(|owed| settle_owed_followup(&owed).err().map(|error| (owed, error)))
+        .collect())
 }
 
 /// The outbox key of a park's follow-up. A park that could not be confirmed and
@@ -1151,6 +1203,98 @@ mod tests {
             Some(newer)
         );
     }
+    /// Startup settles each owed follow-up on its own: one whose write fails
+    /// does not stop the next from settling, is returned with its error for the
+    /// caller to retry, and settles when the retry is made.
+    #[test]
+    fn one_owed_follow_up_that_cannot_be_written_does_not_stop_the_next() {
+        const CHILD: &str = "MJ_TEST_OWED_FOLLOWUPS_PARTIAL";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "one_owed_follow_up_that_cannot_be_written_does_not_stop_the_next",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "owed-followups-partial")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = install_isolated_test_writer();
+        save_session(&crate::controller::test_support::checkpoint_test_session(
+            "parent",
+        ))
+        .unwrap();
+        for name in ["first", "second"] {
+            let mut child = crate::controller::test_support::checkpoint_test_session(name);
+            child.state = mj_core::state::SessionState::Parked;
+            let relation: mj_core::subagent::SubagentRecord =
+                serde_json::from_value(serde_json::json!({
+                    "child_session_id": name, "parent_session_id": "parent", "task_name": name,
+                    "profile_id": "profile", "working_directory": "", "initial_prompt": name,
+                    "request_key": name, "created_at": "now"
+                }))
+                .unwrap();
+            save_subagent_session(&child, &relation).unwrap();
+            let facts = mj_core::work_facts::WorkFacts {
+                observed_at_ms: 1,
+                processes: mj_core::work_facts::Observed::Known(
+                    mj_core::work_facts::ProcessFacts {
+                        unattributed: 0,
+                        running: 1,
+                        shown: vec![mj_core::work_facts::RunningProcess {
+                            pid: 41301,
+                            elapsed_secs: 5,
+                            command: "sleep 600".into(),
+                            detached: true,
+                        }],
+                        omitted: 0,
+                        identities: vec![mj_core::work_facts::ProcessIdentity {
+                            pid: 41301,
+                            start: "boot:1".into(),
+                        }],
+                    },
+                ),
+                worktree: mj_core::work_facts::Observed::unavailable("not needed"),
+            };
+            record_finish_facts(name.into(), 4, facts).unwrap();
+            record_park_started(name.into()).unwrap();
+        }
+        // The first one's park record cannot be written.
+        submit_database_write("inject a failed park write", |connection| {
+            connection.execute_batch(
+                "CREATE TEMP TRIGGER fail_first_park BEFORE UPDATE ON subagent_park_facts
+                 WHEN OLD.child_session_id = 'first'
+                 BEGIN SELECT RAISE(ABORT, 'park write failed'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let failed = settle_followups_after_restart().unwrap();
+
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert_eq!(failed[0].0.child(), "first");
+        assert!(format!("{:#}", failed[0].1).contains("park write failed"));
+        let pending: Vec<String> = load_unfinished_parks()
+            .unwrap()
+            .into_iter()
+            .map(|(child, _, _)| child)
+            .collect();
+        assert_eq!(pending, ["first"], "the second one was settled");
+        assert_eq!(pending_mailbox_events(10).unwrap().len(), 1);
+
+        submit_database_write("clear the failed park write", |connection| {
+            connection.execute_batch("DROP TRIGGER fail_first_park;")?;
+            Ok(())
+        })
+        .unwrap();
+        settle_owed_followup(&failed[0].0).unwrap();
+        assert!(load_unfinished_parks().unwrap().is_empty());
+        assert_eq!(pending_mailbox_events(10).unwrap().len(), 2);
+    }
+
     // Hard-won: #1302: an undelivered old wait owned reports that reconciliation skipped.
     #[test]
     fn retiring_legacy_wait_transfers_reports_atomically() {

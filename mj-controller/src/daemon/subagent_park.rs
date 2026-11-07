@@ -275,6 +275,54 @@ impl RuntimeState {
 const OUTCOME_WRITE_BACKOFF: (Duration, Duration) =
     (Duration::from_millis(250), Duration::from_secs(10));
 
+/// Settle the follow-ups the previous daemon owed (see
+/// [`crate::database::settle_followups_after_restart`]). A follow-up whose write
+/// fails is reported with its child's id and handed to a task that tries again
+/// with a growing wait until it is written, so nothing waits for the next
+/// restart.
+pub(crate) async fn settle_owed_followups_at_startup() {
+    let failed = match blocking(crate::database::settle_followups_after_restart).await {
+        Ok(failed) => failed,
+        Err(error) => {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "could not read the follow-ups owed by the previous daemon; trying again"
+            );
+            tokio::spawn(async {
+                let failed = retry_until_written("read the follow-ups owed", "", || {
+                    crate::database::settle_followups_after_restart()
+                })
+                .await;
+                retry_owed_followups(failed);
+            });
+            return;
+        }
+    };
+    retry_owed_followups(failed);
+}
+
+/// Report each follow-up that could not be settled, and settle it in a task of
+/// its own.
+fn retry_owed_followups(failed: Vec<(crate::database::OwedFollowup, anyhow::Error)>) {
+    for (owed, error) in failed {
+        let child = owed.child().to_owned();
+        tracing::warn!(
+            session_id = %child,
+            error = format!("{error:#}"),
+            "could not settle a follow-up owed by the previous daemon; trying again"
+        );
+        tokio::spawn(async move {
+            let child = owed.child().to_owned();
+            retry_until_written(
+                "settle a follow-up owed by the previous daemon",
+                &child,
+                move || crate::database::settle_owed_followup(&owed),
+            )
+            .await;
+        });
+    }
+}
+
 /// Run `operation` until it succeeds, waiting longer between failures. It ends
 /// when the daemon does (the task is dropped with its runtime).
 async fn retry_until_written<T, F>(what: &str, child: &str, operation: F) -> T

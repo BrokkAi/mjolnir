@@ -285,7 +285,7 @@ async fn run(
                         let state = state.clone();
                         let child_id = child.clone();
                         let task = fact_tasks.spawn(async move {
-                            state.collect_finish_facts(&child_id, ordinal).await
+                            state.collect_finish_facts_once(&child_id, ordinal).await
                         });
                         fact_ids.insert(task.id(), (child, ordinal));
                     }
@@ -813,6 +813,87 @@ mod tests {
             "{:?}",
             finish.processes
         );
+    }
+
+    /// The collection records something for every finish it is asked for. A
+    /// worker that cannot be reached gets facts that say so, with the connect
+    /// error, and the parent is reported again afterwards; two asks for one
+    /// finish share one collection.
+    #[tokio::test]
+    async fn an_unreachable_worker_gets_unavailable_facts_naming_the_connect_error() {
+        const CHILD: &str = "MJ_TEST_DELEGATION_UNREACHABLE_FACTS";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "an_unreachable_worker_gets_unavailable_facts_naming_the_connect_error",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "delegation-unreachable-facts")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("unreachable facts").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let parent = crate::daemon::tests::runtime_test_session(
+            "parent",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        let mut child = crate::daemon::tests::runtime_test_session(
+            "child",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        // Recorded as running with a worker that does not exist.
+        child.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: root.path().join("child"),
+        });
+        crate::database::save_session(&parent).unwrap();
+        crate::database::save_subagent_session(
+            &child,
+            &crate::daemon::tests::runtime_test_subagent("child", "parent"),
+        )
+        .unwrap();
+        let mut held = mj_core::state::State::default();
+        held.sessions.insert(parent.id.clone(), parent);
+        held.sessions.insert(child.id.clone(), child);
+        held.subagents.insert(
+            "child".into(),
+            crate::daemon::tests::runtime_test_subagent("child", "parent").into(),
+        );
+        let state = crate::daemon::tests::test_runtime_state_holding(held);
+
+        state.ensure_finish_facts_collected("child".into(), 9);
+        state.ensure_finish_facts_collected("child".into(), 9);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        let facts = loop {
+            let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
+            if let Some(finish) = recorded.get("child").and_then(|r| r.finish.clone()) {
+                break finish;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "nothing was recorded for the finish"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert!(
+            matches!(
+                &facts.processes,
+                mj_core::work_facts::Observed::Unavailable { reason }
+                    if reason.contains("could not be reached")
+            ),
+            "{:?}",
+            facts.processes
+        );
+        assert!(matches!(
+            facts.worktree,
+            mj_core::work_facts::Observed::Unavailable { .. }
+        ));
+        assert!(state.fact_collections.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -2182,7 +2182,18 @@ impl ParkingExports {
     }
 }
 
+/// The finishes a reconciliation asked to have collected (each test process
+/// runs one test).
+static COLLECTIONS_ASKED_FOR: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+
 impl ExportRuntime for ParkingExports {
+    fn ensure_finish_facts(self: Arc<Self>, session_id: String, completed_ordinal: u64) {
+        COLLECTIONS_ASKED_FOR
+            .lock()
+            .unwrap()
+            .push((session_id, completed_ordinal));
+    }
+
     fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
         Box::pin(load_startup_status(session_id))
     }
@@ -5167,7 +5178,11 @@ async fn startup_settles_the_park_and_tree_follow_ups_the_previous_daemon_owed()
     assert_eq!(crate::database::load_unfinished_parks().unwrap().len(), 2);
     assert!(working_tree_followups().is_empty());
 
-    crate::database::settle_followups_after_restart().unwrap();
+    assert!(
+        crate::database::settle_followups_after_restart()
+            .unwrap()
+            .is_empty()
+    );
 
     assert!(crate::database::load_unfinished_parks().unwrap().is_empty());
     let trees = working_tree_followups();
@@ -5221,7 +5236,11 @@ async fn startup_settles_the_park_and_tree_follow_ups_the_previous_daemon_owed()
     );
 
     let before = crate::database::pending_mailbox_events(20).unwrap().len();
-    crate::database::settle_followups_after_restart().unwrap();
+    assert!(
+        crate::database::settle_followups_after_restart()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         crate::database::pending_mailbox_events(20).unwrap().len(),
         before
@@ -5280,39 +5299,35 @@ async fn a_report_reconcile_never_asks_a_worker_and_waits_for_no_childs_facts() 
     assert!(child.get("facts").is_none(), "{child}");
 }
 
-/// A report never waits on a worker that is not connected: no task can store
-/// facts for it then, and a daemon restarted while the worker was down would
-/// never report the finish. The reconciliation records the facts as
-/// unavailable, with that reason, and sends the report. Facts are written once
-/// per finish, so a collection that was under way cannot replace them.
+/// A report whose facts are not stored is held, and its collection is asked
+/// for, whatever the actor's view of the worker says: that view is also
+/// disconnected before the actor first connects and during a transient
+/// `Unreachable`, while the collection reaches the worker on a connection of its
+/// own. The reconciliation never writes facts, so it cannot discard the real
+/// ones for good.
 #[tokio::test]
-async fn a_report_does_not_wait_for_a_worker_that_is_not_connected() {
-    if !isolated_parked_test("a_report_does_not_wait_for_a_worker_that_is_not_connected") {
+async fn a_report_asks_for_its_facts_to_be_collected_whatever_the_actors_view_says() {
+    if !isolated_parked_test(
+        "a_report_asks_for_its_facts_to_be_collected_whatever_the_actors_view_says",
+    ) {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    let (report, child, _backend) = finish_report_and_listing_of(None, false).await;
-    let report = report.expect("a finished child with no connected worker is still reported");
-    let text = report.facts.as_ref().unwrap().render_lines().join("\n");
+    // The child's actor is not connected.
+    let (report, _child, _backend) = finish_report_and_listing_of(None, false).await;
     assert!(
-        text.contains("the child's worker was not connected when the finish was reported"),
-        "{text}"
+        report.is_none(),
+        "the report goes out when its facts are stored"
     );
-    let listed = child["facts"]["finish"]["lines"].to_string();
-    assert!(listed.contains("was not connected"), "{listed}");
-    // A collection that finishes afterwards does not replace the recorded facts.
-    let stored = crate::database::record_finish_facts("child-1".into(), 9, observed_work())
-        .unwrap()
-        .expect("the same finish answers with what is stored");
-    assert!(
-        stored
-            .render_lines()
-            .join("\n")
-            .contains("was not connected"),
-        "{stored:?}"
+    assert_eq!(
+        COLLECTIONS_ASKED_FOR.lock().unwrap().as_slice(),
+        [("child-1".to_owned(), 9)]
     );
     let recorded = crate::database::load_work_facts(&["child-1".to_owned()]).unwrap();
-    assert_eq!(recorded["child-1"].finish.as_ref(), Some(&stored));
+    assert!(
+        recorded.is_empty(),
+        "the reconciliation wrote facts: {recorded:?}"
+    );
 }
 
 /// Facts only move forward. A late collection for an older finish never

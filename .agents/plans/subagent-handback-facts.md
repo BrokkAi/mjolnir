@@ -307,6 +307,15 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
 - Decision (ninth review, 4): A park follow-up that could not be confirmed is headed "Mjolnir: could not confirm the park of child task ..." and its transcript line has no counts. Golden updated.
   Date/Author: 2026-11-07 / implementing agent, from review.
 
+- Decision (tenth review, 1; REVERSES round 7 A): The collection task is the only writer of finish facts, and the reconcile never writes them. `handle.view().connected` is false before the actor first connects and during a transient `Unreachable`, while the collection's own connection can still reach the worker, so writing "not connected" there discarded the real facts for good (first writer wins). Now a reconcile that finds a finished turn without facts calls `ExportRuntime::ensure_finish_facts` and holds the report. The daemon starts a collection for that (child, ordinal) unless one is running (`RuntimeState.fact_collections`, in memory only; the delegation loop's collection shares it through `collect_finish_facts_once`). The collection does not depend on the actor's view or on an observation with an outcome, always ends by recording something (the worker's answer, or "unavailable" with the connect or request error), and then reports the parent again. Startup needs no special case. Tests: `a_report_asks_for_its_facts_to_be_collected_whatever_the_actors_view_says`, `an_unreachable_worker_gets_unavailable_facts_naming_the_connect_error` (replaces round 7 A's). A reachable worker is not exercised end to end here: the first test shows the reconcile's contract with a disconnected view, the second the collection with no view at all.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (tenth review, 2): `ProcessTable.resolution_ms` states each reader's resolution (macOS `ps` etime: 1000; Linux: the clock tick, at least 10) and the helper rule is one comparison: a descendant is a helper only when its age is at least the harness's age plus the resolution. One that may have started on either side of readiness is reported as work. This replaces the per-row granularity and its "within the same second is a helper" rule. Test `a_process_near_readiness_counts_as_work_at_whole_second_resolution`.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (tenth review, 3): Startup settles each owed follow-up on its own (`OwedFollowup`, `settle_owed_followup`). `settle_followups_after_restart` returns the ones that failed with their errors; the daemon reports each with its child id and settles it in a task of its own with the doubling wait of `retry_until_written`. A failure to read the list is retried the same way. Test `one_owed_follow_up_that_cannot_be_written_does_not_stop_the_next`.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
 
 ## Outcomes & Retrospective
 

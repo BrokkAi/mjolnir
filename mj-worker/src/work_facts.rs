@@ -81,13 +81,8 @@ pub(crate) struct ProcRow {
     pub pid: u32,
     pub ppid: u32,
     /// Milliseconds the process has existed, on the host's monotonic clock,
-    /// rounded down to the platform's resolution.
+    /// rounded down to the table's resolution.
     pub age_ms: i64,
-    /// The resolution of `age_ms`: the true age is somewhere in
-    /// `age_ms..age_ms + age_granularity_ms`. `ps` on macOS reports whole
-    /// seconds, so a process started in the second before the harness was
-    /// configured looks as if it started after it.
-    pub age_granularity_ms: i64,
     pub zombie: bool,
     pub marker: Marker,
 }
@@ -115,6 +110,8 @@ pub(crate) struct ScanContext<'a> {
     pub worker_pid: u32,
     /// Age of the harness's configured session in ms; `None` before it exists.
     pub harness_age_ms: Option<i64>,
+    /// The resolution of the ages in the table (`ProcessTable::resolution_ms`).
+    pub resolution_ms: i64,
     /// Mjolnir's own executable: its commands are never the agent's work.
     pub own_exe: Option<&'a Path>,
     /// The observer's own subprocesses; they and their descendants are never
@@ -169,15 +166,15 @@ pub(crate) fn select_processes(
             continue;
         }
         // A descendant that existed when the harness session was configured is
-        // part of the harness. Before that moment nothing is the agent's.
-        // A process that may have existed then, within the resolution of its age
-        // (the same whole second on macOS), is taken to be a helper: the agent
-        // cannot have started work in the first second of the harness, and a
-        // helper must not be reported as work.
+        // part of the harness. Before that moment nothing is the agent's. A
+        // process is taken to be a helper only when its age puts its start
+        // before readiness by more than the ages' resolution (whole seconds on
+        // macOS): one that may have started on either side of it is reported as
+        // work, so uncertainty shows a process and never hides one.
         if in_tree
             && ctx
                 .harness_age_ms
-                .is_none_or(|age| row.age_ms.saturating_add(row.age_granularity_ms) >= age)
+                .is_none_or(|age| row.age_ms >= age.saturating_add(ctx.resolution_ms))
         {
             continue;
         }
@@ -243,6 +240,10 @@ pub(crate) struct ProcessTable {
     /// harness's age is taken at this instant too: the scan after it can take
     /// as long as it likes without moving the line between a helper and work.
     pub sampled_ms: i64,
+    /// The resolution of the ages in `rows`, in milliseconds: the true age of a
+    /// process is somewhere within it of the age given. `ps` on macOS reports
+    /// whole seconds; Linux gives the clock tick.
+    pub resolution_ms: i64,
 }
 
 fn scan_processes(observer: &WorkObserver) -> Observed<ProcessFacts> {
@@ -279,6 +280,7 @@ fn scan_processes_from(
         rows,
         reader,
         sampled_ms,
+        resolution_ms,
     } = match read_table(&observer.session_id) {
         Ok(table) => table,
         Err(error) => return Observed::unavailable(format!("{error:#}")),
@@ -288,6 +290,7 @@ fn scan_processes_from(
         // The configured moment is wall-clock; ages are monotonic, so convert
         // through the instant the ages were sampled at, not the present.
         harness_age_ms: (ready_ms > 0).then(|| sampled_ms.saturating_sub(ready_ms)),
+        resolution_ms,
         own_exe: own_exe.as_deref(),
         observer_children: &observer_children,
     };
@@ -554,7 +557,6 @@ mod tests {
             pid,
             ppid,
             age_ms,
-            age_granularity_ms: 0,
             zombie: false,
             marker: if marked {
                 Marker::Present
@@ -612,6 +614,7 @@ mod tests {
         ScanContext {
             worker_pid: WORKER,
             harness_age_ms: Some(700_000),
+            resolution_ms: 0,
             own_exe: Some(own),
             observer_children: &NO_CHILDREN,
         }
@@ -853,7 +856,6 @@ mod tests {
             pid,
             ppid: worker,
             age_ms,
-            age_granularity_ms: 0,
             zombie: false,
             marker: Marker::Absent,
         };
@@ -870,6 +872,7 @@ mod tests {
                     identity: format!("boot:{}", row.pid),
                 }),
                 sampled_ms,
+                resolution_ms: 0,
             })
         });
         let Observed::Known(processes) = facts else {
@@ -1031,37 +1034,52 @@ mod tests {
         assert!(reported.is_empty(), "{reported:?}");
     }
     // `ps etime` is whole seconds while the harness's readiness age is in
-    // milliseconds: a helper that started a few hundred milliseconds before
-    // readiness reads as a second younger than it is and, compared in
-    // milliseconds, looked like work the agent started.
+    // milliseconds, so a process that started near readiness reads younger or
+    // older than it is. Uncertainty reports the process: one that started within
+    // the resolution of readiness counts as the agent's work, and only one that
+    // started clearly before it is a helper.
     #[test]
-    fn a_process_in_the_same_second_as_readiness_is_a_helper_at_whole_second_resolution() {
-        let mut rows = busy_table();
-        // Readiness was 700.2 s ago. A helper that started 700.9 s ago shows as
-        // 700 s (whole seconds); the agent's work started well after.
-        let coarse = |pid: u32, ppid: u32, age_ms: i64| ProcRow {
-            age_granularity_ms: 1000,
-            ..row(pid, ppid, age_ms, false)
+    fn a_process_near_readiness_counts_as_work_at_whole_second_resolution() {
+        let worker = 4_000_000;
+        let observer = WorkObserver {
+            session_id: "whole-second-ages".into(),
+            worker_pid: worker,
+            directory: PathBuf::from("/nonexistent"),
+            git: "/nonexistent/git-must-not-run".into(),
+            harness_ready_ms: Arc::new(AtomicI64::new(0)),
+            children: ObserverChildren::default(),
         };
-        rows.push(coarse(500, 105, 700_000));
-        rows.push(coarse(501, 105, 695_000));
-        let mut ctx = context(Path::new("/bin/hel"));
-        ctx.harness_age_ms = Some(700_200);
-        let facts = select_processes(&rows, &ctx, describe);
-        let ids: Vec<u32> = facts
-            .identities
-            .iter()
-            .map(|identity| identity.pid)
-            .collect();
-        assert!(
-            !ids.contains(&500),
-            "a same-second process was reported as work: {ids:?}"
-        );
-        assert!(ids.contains(&501), "{ids:?}");
-        // At millisecond resolution the same readings would have put it in.
-        let same_second = rows.len() - 2;
-        rows[same_second].age_granularity_ms = 0;
-        let facts = select_processes(&rows, &ctx, describe);
-        assert!(facts.identities.iter().any(|identity| identity.pid == 500));
+        let sampled_ms = mj_core::clock::epoch_millis();
+        observer
+            .harness_ready_ms
+            .store(sampled_ms - 10_000, Ordering::Release);
+        let row = |pid: u32, age_ms: i64| ProcRow {
+            pid,
+            ppid: worker,
+            age_ms,
+            zombie: false,
+            marker: Marker::Absent,
+        };
+        let facts = scan_processes_from(&observer, |_| {
+            Ok(ProcessTable {
+                // Readiness was 10 s ago. 11 started 3 s before it, 12 started
+                // 0.5 s after it (9.5 s old, shown as 9 s), 13 started 0.3 s
+                // before it (10.3 s old, shown as 10 s).
+                rows: vec![row(11, 13_000), row(12, 9_000), row(13, 10_000)],
+                reader: ProcessReader::new(|row| Described {
+                    command: format!("process {}", row.pid),
+                    exe: None,
+                    identity: format!("boot:{}", row.pid),
+                }),
+                sampled_ms,
+                resolution_ms: 1_000,
+            })
+        });
+        let Observed::Known(processes) = facts else {
+            panic!("{facts:?}");
+        };
+        let mut pids: Vec<u32> = processes.shown.iter().map(|process| process.pid).collect();
+        pids.sort_unstable();
+        assert_eq!(pids, [12, 13], "{processes:?}");
     }
 }

@@ -275,14 +275,10 @@ pub(super) async fn run_daemon_runtime(
         state.resume_retained_cleanups();
         state.resume_startup_cleanups(true);
         // Follow-ups the previous daemon owed are settled from the store alone:
-        // no lifecycle, no admission, no target probe. A failure is reported and
-        // does not stop startup.
-        if let Err(error) = blocking(crate::database::settle_followups_after_restart).await {
-            tracing::warn!(
-                error = format!("{error:#}"),
-                "could not settle the follow-ups owed by the previous daemon"
-            );
-        }
+        // no lifecycle, no admission, no target probe. Each is settled on its own;
+        // one that cannot be written is reported with its child and settled
+        // during this daemon's lifetime, and does not stop startup.
+        crate::daemon::settle_owed_followups_at_startup().await;
         tracing::info!(
             moves,
             restarts,

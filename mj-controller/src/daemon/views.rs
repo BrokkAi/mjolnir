@@ -344,6 +344,93 @@ impl RuntimeState {
         self.session_manager.session(session_id.to_owned()).await
     }
 
+    /// [`Self::collect_finish_facts`], shared: a caller that asks while a
+    /// collection of the same finish runs waits for it and reads its result.
+    pub(super) async fn collect_finish_facts_once(
+        &self,
+        child_id: &str,
+        ordinal: u64,
+    ) -> Result<()> {
+        let key = (child_id.to_owned(), ordinal);
+        let cell = self
+            .fact_collections
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fact collections lock poisoned"))?
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        let result = cell
+            .get_or_init(|| async {
+                self.collect_finish_facts(child_id, ordinal)
+                    .await
+                    .map_err(|error| format!("{error:#}"))
+            })
+            .await
+            .clone();
+        if let Ok(mut collections) = self.fact_collections.lock()
+            && collections
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &cell))
+        {
+            collections.remove(&key);
+        }
+        result.map_err(|error| anyhow::anyhow!(error))
+    }
+
+    /// Make sure the facts of the finish that completed turn `ordinal` are being
+    /// collected, and report the child's parent again when they are stored. The
+    /// collection always ends by recording something: what the worker said, or
+    /// that it could not be asked, with the connect or request error. It does not
+    /// depend on the actor's view of the worker or on any observation of an
+    /// outcome, so a worker that never reconnects still gets its answer. Called
+    /// by the report's reconciliation, which holds the report until then and
+    /// never writes facts itself.
+    pub(crate) fn ensure_finish_facts_collected(self: &Arc<Self>, child_id: String, ordinal: u64) {
+        let running = self
+            .fact_collections
+            .lock()
+            .is_ok_and(|collections| collections.contains_key(&(child_id.clone(), ordinal)));
+        if running {
+            return;
+        }
+        let state = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = state.collect_finish_facts_once(&child_id, ordinal).await {
+                tracing::warn!(
+                    child_session_id = %child_id,
+                    error = format!("{error:#}"),
+                    "could not collect a finished child's work facts"
+                );
+                return;
+            }
+            let parent = blocking({
+                let child_id = child_id.clone();
+                move || crate::database::load_subagent(&child_id)
+            })
+            .await;
+            match parent {
+                Ok(Some(relation)) => {
+                    if let Err(error) = state
+                        .reconcile_parent_reports(&relation.parent_session_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            parent_session_id = %relation.parent_session_id,
+                            error = format!("{error:#}"),
+                            "could not report a finished child after its work facts were stored"
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    child_session_id = %child_id,
+                    error = format!("{error:#}"),
+                    "could not find the parent of a finished child"
+                ),
+            }
+        });
+    }
+
     /// Collect and store, once, what the child's worker observed for the
     /// finish that completed turn `ordinal`, as far as it is observed at once:
     /// the processes. The working tree is stored as pending; a Git read has no

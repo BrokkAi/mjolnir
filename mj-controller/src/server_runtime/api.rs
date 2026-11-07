@@ -156,6 +156,12 @@ pub trait ExportRuntime: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent close is unavailable") })
     }
 
+    /// Make sure the facts of the finish that completed turn `ordinal` are being
+    /// collected. A report whose facts are not stored waits for the collection,
+    /// which stores something and reports the parent again. A backend without a
+    /// daemon collects nothing.
+    fn ensure_finish_facts(self: Arc<Self>, _session_id: String, _completed_ordinal: u64) {}
+
     /// Whether a park of this child is still running. A backend without a
     /// daemon parks nothing.
     fn subagent_park_running(&self, _session_id: &str) -> bool {
@@ -278,6 +284,10 @@ impl ExportRuntime for RuntimeState {
 
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         self.with_config(|config| config.subagents.clone())
+    }
+
+    fn ensure_finish_facts(self: Arc<Self>, session_id: String, completed_ordinal: u64) {
+        RuntimeState::ensure_finish_facts_collected(&self, session_id, completed_ordinal);
     }
 
     fn queue_startup(
@@ -1743,41 +1753,16 @@ impl ApiBackend {
                     .get(&id)
                     .filter(|recorded| recorded.finish_ordinal == Some(completed_ordinal))
                     .and_then(|recorded| recorded.finish.clone());
-                let facts = match recorded {
-                    Some(facts) => facts,
-                    None => {
-                        let connected = self
-                            .session_handle(id.clone())
-                            .await?
-                            .is_some_and(|handle| handle.view().connected);
-                        if connected {
-                            // Not a dead end: the child's own task stores the
-                            // facts and reconciles again.
-                            tracing::debug!(
-                                child_session_id = %id,
-                                completed_ordinal,
-                                "a finished child's report waits for its work facts to be stored"
-                            );
-                            continue;
-                        }
-                        let child_id = id.clone();
-                        let stored = blocking("record unavailable work facts", move || {
-                            crate::database::record_finish_facts(
-                                child_id,
-                                completed_ordinal,
-                                mj_core::work_facts::WorkFacts::unavailable(
-                                    "the child's worker was not connected when the finish was reported",
-                                ),
-                            )
-                        })
-                        .await?;
-                        // A newer finish is already stored: this identity is
-                        // behind it, and the pass that follows reports that one.
-                        let Some(facts) = stored else {
-                            continue;
-                        };
-                        facts
-                    }
+                let Some(facts) = recorded else {
+                    // Held, and not for ever: the collection records something
+                    // for this finish (what the worker said, or why it could not
+                    // be asked) and reports this parent again. It does not wait
+                    // on the actor's view of the worker, which is also
+                    // disconnected before the actor first connects.
+                    self.exports
+                        .clone()
+                        .ensure_finish_facts(id.clone(), completed_ordinal);
+                    continue;
                 };
                 work_facts.insert(id, facts);
             }

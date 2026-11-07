@@ -10017,7 +10017,7 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
     ));
 }
 
-fn test_runtime_state_holding(state: mj_core::state::State) -> Arc<RuntimeState> {
+pub(super) fn test_runtime_state_holding(state: mj_core::state::State) -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(

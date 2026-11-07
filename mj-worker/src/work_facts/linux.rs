@@ -107,7 +107,6 @@ pub(super) fn read_table(session_id: &str) -> Result<ProcessTable> {
             pid,
             ppid: stat.ppid,
             age_ms: uptime.saturating_sub(start_ms).max(0),
-            age_granularity_ms: 0,
             zombie: stat.zombie,
             marker: session_marker(pid, &wanted),
         });
@@ -119,6 +118,9 @@ pub(super) fn read_table(session_id: &str) -> Result<ProcessTable> {
         rows,
         reader,
         sampled_ms,
+        // A start is a count of clock ticks, and `/proc/uptime` has its own
+        // hundredths of a second.
+        resolution_ms: (1000 / i64::try_from(hz).unwrap_or(100)).max(10),
     })
 }
 
