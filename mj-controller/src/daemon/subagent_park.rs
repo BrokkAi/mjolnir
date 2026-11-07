@@ -268,27 +268,88 @@ impl RuntimeState {
     }
 }
 
+/// How long a failed write of a park's outcome waits before it is tried again,
+/// doubling from the first value to the last. The writes fail on a database
+/// error that has no known duration, so the delay only has to keep the retry
+/// from spinning; the daemon's next startup settles whatever is still owed.
+const OUTCOME_WRITE_BACKOFF: (Duration, Duration) =
+    (Duration::from_millis(250), Duration::from_secs(10));
+
+/// Run `operation` until it succeeds, waiting longer between failures. It ends
+/// when the daemon does (the task is dropped with its runtime).
+async fn retry_until_written<T, F>(what: &str, child: &str, operation: F) -> T
+where
+    F: FnMut() -> Result<T> + Send + Clone + 'static,
+    T: Send + 'static,
+{
+    let mut delay = OUTCOME_WRITE_BACKOFF.0;
+    loop {
+        let attempt = operation.clone();
+        match tokio::task::spawn_blocking(attempt).await {
+            Ok(Ok(value)) => return value,
+            Ok(Err(error)) => tracing::warn!(
+                session_id = %child,
+                error = format!("{error:#}"),
+                retry_in = ?delay,
+                "could not {what}; trying again"
+            ),
+            Err(error) => tracing::warn!(
+                session_id = %child,
+                %error,
+                retry_in = ?delay,
+                "stopped while trying to {what}; trying again"
+            ),
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(OUTCOME_WRITE_BACKOFF.1);
+    }
+}
+
 /// Check, for each park of this child whose check is still owed, which of its
 /// processes survived, and record the outcome. Each check is a synchronous
 /// command on the target, so it runs on the blocking pool and the async worker
-/// stays free; nothing here takes a lifecycle or handoff admission.
+/// stays free; nothing here takes a lifecycle or handoff admission. A check
+/// that cannot be made is itself the outcome (see
+/// [`Controller::finish_stopped_park`]), and only the write is retried.
 async fn finish_stopped_parks_of<E>(child_session_id: String, executor: Arc<E>) -> Result<()>
 where
     E: crate::targets::CommandExecutor + Send + Sync + 'static,
 {
-    let parks = blocking(crate::database::load_unfinished_parks).await?;
-    let controller = Arc::new(blocking(Controller::load).await?);
+    let wanted = child_session_id.clone();
+    let parks = retry_until_written("read the parks that are owed a check", &wanted, || {
+        crate::database::load_unfinished_parks()
+    })
+    .await;
     for (child, ordinal, park) in parks {
         if child != child_session_id {
             continue;
         }
-        let controller = controller.clone();
         let executor = executor.clone();
-        tokio::task::spawn_blocking(move || {
-            controller.finish_stopped_park(&child, ordinal, park, &*executor)
+        retry_until_written("record what a park did", &child.clone(), move || {
+            match Controller::load() {
+                Ok(controller) => {
+                    controller.finish_stopped_park(&child, ordinal, park.clone(), &*executor)
+                }
+                // No controller means no target to ask: the park could not be
+                // confirmed, and the parent is told so.
+                Err(error) => {
+                    let name = crate::database::load_subagent(&child)?
+                        .map(|relation| relation.task_name)
+                        .unwrap_or_default();
+                    crate::database::record_park_outcome_expecting(
+                        child.clone(),
+                        ordinal,
+                        name,
+                        mj_core::work_facts::ParkFacts::unconfirmed(
+                            park.snapshot.clone(),
+                            format!("the controller could not be loaded: {error:#}"),
+                        ),
+                        Some(park.clone()),
+                    )
+                }
+            }
         })
-        .await
-        .context("the park check stopped")??;
+        .await;
     }
     Ok(())
 }
@@ -356,6 +417,29 @@ mod tests {
             ParkFacts::started(snapshot()),
         )
         .unwrap();
+    }
+
+    /// A write that fails is tried again, with a longer wait each time, until it
+    /// succeeds; nothing ends with only a log line.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_outcome_write_is_tried_again_with_growing_waits_until_it_succeeds() {
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::<tokio::time::Instant>::new()));
+        let written = retry_until_written("write", "child", {
+            let attempts = attempts.clone();
+            move || {
+                let mut attempts = attempts.lock().unwrap();
+                attempts.push(tokio::time::Instant::now());
+                if attempts.len() < 4 {
+                    anyhow::bail!("the database is busy");
+                }
+                Ok("written")
+            }
+        })
+        .await;
+        assert_eq!(written, "written");
+        let attempts = attempts.lock().unwrap();
+        let waits: Vec<_> = attempts.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert!(waits.windows(2).all(|pair| pair[1] > pair[0]), "{waits:?}");
     }
 
     /// The survivor check is a synchronous command on the target. On a runtime

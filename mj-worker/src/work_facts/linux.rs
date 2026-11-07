@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 
-use super::{Described, Marker, ProcRow, ProcessReader};
+use super::{Described, Marker, ProcRow, ProcessReader, ProcessTable};
 
 /// Fields of `/proc/<pid>/stat` that follow the command name.
 struct Stat {
@@ -76,9 +76,12 @@ pub(super) fn session_marker(pid: u32, wanted: &[u8]) -> Marker {
 }
 
 /// Every process the scan may consider, and the reader for the survivors.
-pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReader)> {
+pub(super) fn read_table(session_id: &str) -> Result<ProcessTable> {
     let hz = ticks_per_second()?;
+    // One instant for every age: the process ages are measured against this
+    // uptime, and the harness's age against the wall clock read beside it.
     let uptime = uptime_ms()?;
+    let sampled_ms = mj_core::clock::epoch_millis();
     let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .context("read the boot identity")?
         .trim()
@@ -112,7 +115,11 @@ pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReade
     // The start tick is read again for survivors only, so the identity matches
     // the one `PROCESS_BIRTH_SCRIPT` prints for the same process.
     let reader = ProcessReader::new(move |row| describe(row.pid, &boot_id));
-    Ok((rows, reader))
+    Ok(ProcessTable {
+        rows,
+        reader,
+        sampled_ms,
+    })
 }
 
 fn describe(pid: u32, boot_id: &str) -> Described {

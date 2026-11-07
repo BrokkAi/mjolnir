@@ -1701,8 +1701,12 @@ impl ApiBackend {
         // Facts are never asked of a worker here: this runs for every parent in
         // the mailbox sweep, and one slow worker must not hold up any other
         // report. The child's own completion task collects them once per
-        // finish and stores them; a finish it has not stored yet is left for
-        // the pass that follows its storing.
+        // finish and stores them, so a connected worker's report follows its
+        // storing. A report never waits on a worker that is not connected: no
+        // task can store facts for it then, possibly ever (a daemon restarted
+        // while the worker was down), so the facts are recorded as unavailable
+        // and the report goes out. The write is once per finish: a collection
+        // that was under way cannot overwrite it, nor it the collection.
         let ids = ready
             .iter()
             .map(|child| child.relation.child_session_id.clone())
@@ -1716,16 +1720,44 @@ impl ApiBackend {
         for child in ready {
             let id = child.relation.child_session_id.clone();
             if child.finished && child.relation.kind != mj_core::subagent::SubagentKind::Oracle {
-                match &child.identity {
+                // Whether to ask the worker follows from there being a
+                // completed turn, not from the kind of identity: a finished
+                // child whose last message delivery failed is asked like any
+                // other finish.
+                let completed = match &child.identity {
                     Some(mj_core::subagent::SubagentFinishIdentity::Turn {
                         completed_ordinal,
                         ..
-                    }) => {
-                        let recorded = stored
-                            .get(&id)
-                            .filter(|recorded| recorded.finish_ordinal == Some(*completed_ordinal))
-                            .and_then(|recorded| recorded.finish.clone());
-                        let Some(facts) = recorded else {
+                    }) => Some(*completed_ordinal),
+                    Some(mj_core::subagent::SubagentFinishIdentity::Terminal {
+                        last_completed_ordinal,
+                        ..
+                    }) => *last_completed_ordinal,
+                    None => None,
+                };
+                let Some(completed_ordinal) = completed else {
+                    // No completed turn: no completion task asks its worker.
+                    work_facts.insert(
+                        id,
+                        mj_core::work_facts::WorkFacts::unavailable(
+                            "the child ended without a completed turn, so its worker was not asked",
+                        ),
+                    );
+                    reportable.push(child);
+                    continue;
+                };
+                let recorded = stored
+                    .get(&id)
+                    .filter(|recorded| recorded.finish_ordinal == Some(completed_ordinal))
+                    .and_then(|recorded| recorded.finish.clone());
+                let facts = match recorded {
+                    Some(facts) => facts,
+                    None => {
+                        let connected = self
+                            .session_handle(id.clone())
+                            .await?
+                            .is_some_and(|handle| handle.view().connected);
+                        if connected {
                             // Not a dead end: the child's own task stores the
                             // facts and reconciles again.
                             tracing::debug!(
@@ -1734,20 +1766,21 @@ impl ApiBackend {
                                 "a finished child's report waits for its work facts to be stored"
                             );
                             continue;
-                        };
-                        work_facts.insert(id, facts);
+                        }
+                        let child_id = id.clone();
+                        blocking("record unavailable work facts", move || {
+                            crate::database::record_finish_facts(
+                                child_id,
+                                completed_ordinal,
+                                mj_core::work_facts::WorkFacts::unavailable(
+                                    "the child's worker was not connected when the finish was reported",
+                                ),
+                            )
+                        })
+                        .await?
                     }
-                    // Not the end of a turn (a start that failed, a child that
-                    // was closed): no completion task asks its worker.
-                    _ => {
-                        work_facts.insert(
-                            id,
-                            mj_core::work_facts::WorkFacts::unavailable(
-                                "the child ended without a completed turn, so its worker was not asked",
-                            ),
-                        );
-                    }
-                }
+                };
+                work_facts.insert(id, facts);
             }
             reportable.push(child);
         }

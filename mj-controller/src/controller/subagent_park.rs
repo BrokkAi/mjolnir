@@ -255,7 +255,7 @@ impl Controller {
                 // report promised a later message about the listed processes:
                 // the parent is told the park could not be confirmed, once, by
                 // the park's own record.
-                if let (Some(ordinal), Some(snapshot)) = (started, &before_stop) {
+                if let (Some((ordinal, marker)), Some(snapshot)) = (started, &before_stop) {
                     let unconfirmed = ParkFacts::unconfirmed(
                         snapshot.clone(),
                         format!("the stop of the worker failed: {error:#}"),
@@ -265,7 +265,7 @@ impl Controller {
                         ordinal,
                         session.message_name(),
                         unconfirmed,
-                        Some(ParkFacts::started(snapshot.clone())),
+                        Some(marker),
                     ) {
                         tracing::warn!(
                             session_id,
@@ -319,6 +319,12 @@ impl Controller {
     /// child's state is not consulted (it may have been started again already);
     /// the outcome is written only to the park's own record and only while it
     /// is still the pending one, so it never overwrites another's.
+    ///
+    /// A failure to observe settles the park rather than leaving it pending:
+    /// a target that cannot be resolved is a park that could not be confirmed,
+    /// and a check that could not run is one whose processes could not be
+    /// checked, each with its error as the reason. Only a failure to write the
+    /// outcome is returned, for the caller to retry.
     pub fn finish_stopped_park(
         &self,
         session_id: &str,
@@ -329,10 +335,13 @@ impl Controller {
         let Some(session) = self.state.sessions.get(session_id) else {
             return crate::database::discard_unfinished_park(session_id.to_owned(), ordinal);
         };
-        let (backend, _) = self.worker_placement(session_id)?;
-        // A check that could not run is itself the outcome: the parent is told
-        // that what happened to the processes could not be checked, and why.
-        let settled = check_survivors(executor, &backend, park.snapshot.clone());
+        let settled = match self.worker_placement(session_id) {
+            Ok((backend, _)) => check_survivors(executor, &backend, park.snapshot.clone()),
+            Err(error) => ParkFacts::unconfirmed(
+                park.snapshot.clone(),
+                format!("the child's target could not be resolved: {error:#}"),
+            ),
+        };
         crate::database::record_park_outcome_expecting(
             session_id.to_owned(),
             ordinal,
@@ -1580,10 +1589,12 @@ mod tests {
         crate::database::save_lifecycle_session(&record).unwrap();
         let facts = facts_with_two_processes();
         crate::database::record_finish_facts(LATCH_RELAY_SESSION.into(), 9, facts.clone()).unwrap();
-        let park = ParkFacts::started(facts.processes);
-        let ordinal =
-            crate::database::record_park_started(LATCH_RELAY_SESSION.into(), park.clone()).unwrap();
-        (root, ordinal, park)
+        let (ordinal, marker) = crate::database::record_park_started(
+            LATCH_RELAY_SESSION.into(),
+            ParkFacts::started(facts.processes),
+        )
+        .unwrap();
+        (root, ordinal, marker)
     }
 
     fn settling(checks: &[&'static str]) -> SettlingTarget {
@@ -1621,8 +1632,11 @@ mod tests {
             omitted: 0,
             identities: vec![identity(5002), identity(5003)],
         });
-        let park = ParkFacts::started(snapshot);
-        crate::database::record_park_started(LATCH_RELAY_SESSION.into(), park.clone()).unwrap();
+        let (_, park) = crate::database::record_park_started(
+            LATCH_RELAY_SESSION.into(),
+            ParkFacts::started(snapshot),
+        )
+        .unwrap();
         loaded_controller()
             .finish_stopped_park(LATCH_RELAY_SESSION, ordinal, park, &settling(&[""]))
             .unwrap();
@@ -1657,9 +1671,14 @@ mod tests {
         crate::database::record_park_outcome(
             LATCH_RELAY_SESSION.into(),
             "map the parser".into(),
-            newer.clone(),
+            newer,
         )
         .unwrap();
+        let newer = crate::database::load_work_facts(&[LATCH_RELAY_SESSION.to_owned()]).unwrap()
+            [LATCH_RELAY_SESSION]
+            .park
+            .clone()
+            .unwrap();
         let events_before = crate::database::pending_mailbox_events(10).unwrap().len();
         loaded_controller()
             .finish_stopped_park(LATCH_RELAY_SESSION, ordinal, stale, &settling(&[""]))
@@ -1718,6 +1737,113 @@ mod tests {
         assert!(recorded[LATCH_RELAY_SESSION].park.is_none());
     }
 
+    /// A park's follow-up is about the finish it followed. When the child
+    /// finishes again while the park's check is running, the later finish
+    /// replaces the finish facts, yet the follow-up still accounts for the
+    /// processes the earlier finish listed (here, one that had exited before
+    /// the park began) and still keeps that finish's promise.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_later_finish_does_not_change_what_an_earlier_park_reports() {
+        if !isolated("a_later_finish_does_not_change_what_an_earlier_park_reports") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let (_root, _ordinal, _both) = child_with_marker();
+        // The park saw only 5002; 5001, which the finish listed, was gone.
+        let listed = facts_with_two_processes();
+        let Observed::Known(listed_processes) = &listed.processes else {
+            unreachable!()
+        };
+        let mut at_park = listed_processes.clone();
+        at_park.identities.remove(0);
+        at_park.shown.remove(0);
+        at_park.running = 1;
+        let (ordinal, park) = crate::database::record_park_started(
+            LATCH_RELAY_SESSION.into(),
+            ParkFacts::started(Observed::Known(at_park)),
+        )
+        .unwrap();
+        assert_eq!((park.promised, park.exited_before), (true, 1));
+        // Finished again, listing nothing, before the check returned.
+        let mut later = listed;
+        later.processes = Observed::Known(ProcessFacts {
+            unattributed: 0,
+            running: 0,
+            shown: Vec::new(),
+            omitted: 0,
+            identities: Vec::new(),
+        });
+        crate::database::record_finish_facts(LATCH_RELAY_SESSION.into(), ordinal + 1, later)
+            .unwrap();
+
+        loaded_controller()
+            .finish_stopped_park(LATCH_RELAY_SESSION, ordinal, park, &settling(&[""]))
+            .unwrap();
+
+        let events = crate::database::pending_mailbox_events(10).unwrap();
+        let parked: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_json.contains("subagent_parked"))
+            .collect();
+        assert_eq!(parked.len(), 1, "{events:?}");
+        let event: mj_core::mailbox::MailboxEvent =
+            serde_json::from_str(&parked[0].event_json).unwrap();
+        let text = mj_core::mailbox::render_mailbox_event(&event);
+        assert!(
+            text.contains(
+                "1 process the finish report listed had already exited before the park began"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("pid 5001"), "{text}");
+        assert!(text.contains("no longer running after the park"), "{text}");
+    }
+
+    /// A check that cannot even resolve the child's target settles the park as
+    /// one that could not be confirmed, with the error as the reason, instead of
+    /// leaving it pending until the next daemon start.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_park_whose_target_cannot_be_resolved_settles_as_not_confirmed() {
+        if !isolated("a_park_whose_target_cannot_be_resolved_settles_as_not_confirmed") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let (_root, ordinal, park) = child_with_marker();
+        // The child has no target, so `worker_placement` fails.
+        let mut record = loaded_controller().state.sessions[LATCH_RELAY_SESSION].clone();
+        record.target = None;
+        crate::database::save_lifecycle_session(&record).unwrap();
+
+        loaded_controller()
+            .finish_stopped_park(LATCH_RELAY_SESSION, ordinal, park, &settling(&[]))
+            .unwrap();
+
+        assert!(crate::database::load_unfinished_parks().unwrap().is_empty());
+        let recorded = crate::database::load_work_facts(&[LATCH_RELAY_SESSION.to_owned()]).unwrap();
+        let park = recorded[LATCH_RELAY_SESSION].park.as_ref().unwrap();
+        assert!(!park.pending);
+        assert!(
+            park.unconfirmed
+                .as_deref()
+                .is_some_and(|reason| reason.contains("session target is missing")),
+            "{park:?}"
+        );
+        let events = crate::database::pending_mailbox_events(10).unwrap();
+        let parked: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_json.contains("subagent_parked"))
+            .collect();
+        assert_eq!(parked.len(), 1, "{events:?}");
+        let event: mj_core::mailbox::MailboxEvent =
+            serde_json::from_str(&parked[0].event_json).unwrap();
+        let text = mj_core::mailbox::render_mailbox_event(&event);
+        assert!(
+            text.contains("Mjolnir could not confirm the park of this child"),
+            "{text}"
+        );
+        assert!(text.contains("session target is missing"), "{text}");
+    }
+
     /// The finish report promised a later message about the processes it
     /// listed. A park that could not observe them still keeps that promise, and
     /// a finish that listed none promised nothing.
@@ -1729,8 +1855,26 @@ mod tests {
         let _writer = crate::database::install_isolated_test_writer();
         let root = tempfile::tempdir().unwrap();
         register_child(root.path());
-        let unobserved =
-            || ParkFacts::settled(Observed::unavailable("the worker could not be asked"), &[]);
+        let unobserved = || Observed::unavailable("the worker could not be asked");
+        let park = |ordinal_of_finish: u64, facts: mj_core::work_facts::WorkFacts| {
+            crate::database::record_finish_facts(
+                LATCH_RELAY_SESSION.into(),
+                ordinal_of_finish,
+                facts,
+            )
+            .unwrap();
+            crate::database::record_park_started(
+                LATCH_RELAY_SESSION.into(),
+                ParkFacts::started(unobserved()),
+            )
+            .unwrap();
+            crate::database::record_park_outcome(
+                LATCH_RELAY_SESSION.into(),
+                "map the parser".into(),
+                ParkFacts::settled(unobserved(), &[]),
+            )
+            .unwrap();
+        };
         // A finish that listed nothing promised nothing.
         let mut quiet = facts_with_two_processes();
         quiet.processes = Observed::Known(ProcessFacts {
@@ -1740,31 +1884,14 @@ mod tests {
             omitted: 0,
             identities: Vec::new(),
         });
-        crate::database::record_finish_facts(LATCH_RELAY_SESSION.into(), 9, quiet).unwrap();
-        crate::database::record_park_outcome(
-            LATCH_RELAY_SESSION.into(),
-            "map the parser".into(),
-            unobserved(),
-        )
-        .unwrap();
+        park(9, quiet);
         assert!(
             crate::database::pending_mailbox_events(10)
                 .unwrap()
                 .is_empty()
         );
         // One that listed running processes did.
-        crate::database::record_finish_facts(
-            LATCH_RELAY_SESSION.into(),
-            9,
-            facts_with_two_processes(),
-        )
-        .unwrap();
-        crate::database::record_park_outcome(
-            LATCH_RELAY_SESSION.into(),
-            "map the parser".into(),
-            unobserved(),
-        )
-        .unwrap();
+        park(10, facts_with_two_processes());
         let events = crate::database::pending_mailbox_events(10).unwrap();
         assert_eq!(events.len(), 1, "{events:?}");
         let event: mj_core::mailbox::MailboxEvent =

@@ -235,7 +235,37 @@ mod linux;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod macos;
 
+/// What a platform reader returns for one scan.
+pub(crate) struct ProcessTable {
+    pub rows: Vec<ProcRow>,
+    pub reader: ProcessReader,
+    /// The wall-clock instant the ages in `rows` were measured at. The
+    /// harness's age is taken at this instant too: the scan after it can take
+    /// as long as it likes without moving the line between a helper and work.
+    pub sampled_ms: i64,
+}
+
 fn scan_processes(observer: &WorkObserver) -> Observed<ProcessFacts> {
+    scan_processes_from(observer, |session_id| {
+        #[cfg(target_os = "linux")]
+        let table = linux::read_table(session_id);
+        #[cfg(target_os = "macos")]
+        let table = macos::read_table(session_id);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let table: anyhow::Result<ProcessTable> = {
+            let _ = session_id;
+            Err(anyhow::anyhow!(
+                "this platform does not expose process environments"
+            ))
+        };
+        table
+    })
+}
+
+fn scan_processes_from(
+    observer: &WorkObserver,
+    read_table: impl FnOnce(&str) -> anyhow::Result<ProcessTable>,
+) -> Observed<ProcessFacts> {
     // Held for the whole scan: a Git read that starts meanwhile waits to be
     // recorded, and one already running is in the registry.
     let observer_children = observer.children.0.blocking_lock();
@@ -245,24 +275,19 @@ fn scan_processes(observer: &WorkObserver) -> Observed<ProcessFacts> {
         PathBuf::from(text.strip_suffix(" (deleted)").unwrap_or(&text))
     });
     let ready_ms = observer.harness_ready_ms.load(Ordering::Acquire);
-    #[cfg(target_os = "linux")]
-    let table = linux::read_table(&observer.session_id);
-    #[cfg(target_os = "macos")]
-    let table = macos::read_table(&observer.session_id);
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let table: anyhow::Result<(Vec<ProcRow>, ProcessReader)> = Err(anyhow::anyhow!(
-        "this platform does not expose process environments"
-    ));
-    let (rows, reader) = match table {
+    let ProcessTable {
+        rows,
+        reader,
+        sampled_ms,
+    } = match read_table(&observer.session_id) {
         Ok(table) => table,
         Err(error) => return Observed::unavailable(format!("{error:#}")),
     };
-    let now_ms = mj_core::clock::epoch_millis();
     let ctx = ScanContext {
         worker_pid: observer.worker_pid,
         // The configured moment is wall-clock; ages are monotonic, so convert
-        // through the present.
-        harness_age_ms: (ready_ms > 0).then(|| now_ms.saturating_sub(ready_ms)),
+        // through the instant the ages were sampled at, not the present.
+        harness_age_ms: (ready_ms > 0).then(|| sampled_ms.saturating_sub(ready_ms)),
         own_exe: own_exe.as_deref(),
         observer_children: &observer_children,
     };
@@ -793,6 +818,55 @@ mod tests {
         assert_eq!(reported, 0, "{processes:?}");
         // The Git read ran, and failed, and says so; it is not an empty tree.
         assert!(facts.worktree.known().is_none(), "{:?}", facts.worktree);
+    }
+
+    /// Process ages and the harness's age are measured at one instant. A helper
+    /// that started just before the harness was configured stays a helper
+    /// however long the rest of the scan takes; the slow scan used to age the
+    /// harness past the helper and report it as the agent's work.
+    #[test]
+    fn a_slow_scan_does_not_turn_a_helper_into_the_agents_work() {
+        let worker = 4_000_000;
+        let observer = WorkObserver {
+            session_id: "one-sampling-instant".into(),
+            worker_pid: worker,
+            directory: PathBuf::from("/nonexistent"),
+            git: "/nonexistent/git-must-not-run".into(),
+            harness_ready_ms: Arc::new(AtomicI64::new(0)),
+            children: ObserverChildren::default(),
+        };
+        let sampled_ms = mj_core::clock::epoch_millis();
+        observer
+            .harness_ready_ms
+            .store(sampled_ms - 1_000, Ordering::Release);
+        let row = |pid: u32, age_ms: i64| ProcRow {
+            pid,
+            ppid: worker,
+            age_ms,
+            age_granularity_ms: 0,
+            zombie: false,
+            marker: Marker::Absent,
+        };
+        let facts = scan_processes_from(&observer, |_| {
+            // 11 started 50 ms before the harness was configured, 12 after.
+            let rows = vec![row(11, 1_050), row(12, 500)];
+            // The rest of the scan: reading what the survivors are.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Ok(ProcessTable {
+                rows,
+                reader: ProcessReader::new(|row| Described {
+                    command: format!("process {}", row.pid),
+                    exe: None,
+                    identity: format!("boot:{}", row.pid),
+                }),
+                sampled_ms,
+            })
+        });
+        let Observed::Known(processes) = facts else {
+            panic!("{facts:?}");
+        };
+        let pids: Vec<u32> = processes.shown.iter().map(|process| process.pid).collect();
+        assert_eq!(pids, [12], "{processes:?}");
     }
 
     #[tokio::test]

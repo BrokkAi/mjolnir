@@ -824,6 +824,24 @@ fn ready_view(model: &str) -> ManagedSessionView {
 
 struct FakeControl(FakeSession);
 
+/// A control that knows the parent and, when its worker is connected, the child.
+struct ParentAndChildControl(Vec<FakeSession>);
+
+impl SessionControlBackend for ParentAndChildControl {
+    fn session(&self, session_id: String) -> BoxFuture<'_, Result<SessionHandle>> {
+        let found = self
+            .0
+            .iter()
+            .find(|session| session.session_id == session_id)
+            .cloned();
+        Box::pin(async move {
+            Ok(SessionHandle::new(
+                found.ok_or_else(|| anyhow::anyhow!("unknown session"))?,
+            ))
+        })
+    }
+}
+
 impl SessionControlBackend for FakeControl {
     fn session(&self, session_id: String) -> BoxFuture<'_, Result<SessionHandle>> {
         let session = self.0.clone();
@@ -4805,6 +4823,18 @@ async fn finish_report_and_listing(
     serde_json::Value,
     Arc<ApiBackend>,
 ) {
+    finish_report_and_listing_of(facts, true).await
+}
+
+/// [`finish_report_and_listing`] with the child's worker connected or not.
+async fn finish_report_and_listing_of(
+    facts: Option<mj_core::work_facts::WorkFacts>,
+    worker_connected: bool,
+) -> (
+    Option<mj_core::mailbox::SubagentFinishedReport>,
+    serde_json::Value,
+    Arc<ApiBackend>,
+) {
     store_parent_and_child("child-1");
     let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
     conversation.applied_event_ordinal = 9;
@@ -4817,7 +4847,26 @@ async fn finish_report_and_listing(
     let finish_ordinal = turn.completed_ordinal;
     conversation.last_turn_outcome = Some(turn);
     crate::database::save_materialized_session(&conversation).unwrap();
-    let (backend, _exports) = report_backend(active_parent_view("working"));
+    let exports = ParkingExports::new(SessionState::Parked, None);
+    let mut sessions = vec![FakeSession {
+        session_id: "parent-1".into(),
+        accepted_ordinal: 30,
+        submitted: mpsc::unbounded_channel().0,
+        view: Some(active_parent_view("working")),
+    }];
+    if worker_connected {
+        sessions.push(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 9,
+            submitted: mpsc::unbounded_channel().0,
+            view: Some(ready_view("model")),
+        });
+    }
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(ParentAndChildControl(sessions)),
+        running_states(),
+        exports,
+    ));
     if let Some(facts) = facts {
         crate::database::record_finish_facts("child-1".into(), finish_ordinal, facts).unwrap();
     }
@@ -5221,9 +5270,9 @@ async fn the_store_tells_a_prompt_accepted_after_a_finish_from_the_finish_itself
     assert!(!crate::database::accepted_work_since("child-1", 12).unwrap());
 }
 
-/// Reconciling reports never asks a worker. A finish whose completion task has
-/// not stored its facts yet is left for the pass after it does, and nothing
-/// else waits for it: this test has no worker to ask at all.
+/// Reconciling reports never asks a worker. A finish whose connected worker's
+/// completion task has not stored its facts yet is left for the pass after it
+/// does, and nothing else waits for it: this test has no worker to ask at all.
 #[tokio::test]
 async fn a_report_reconcile_never_asks_a_worker_and_waits_for_no_childs_facts() {
     if !isolated_parked_test("a_report_reconcile_never_asks_a_worker_and_waits_for_no_childs_facts")
@@ -5237,6 +5286,104 @@ async fn a_report_reconcile_never_asks_a_worker_and_waits_for_no_childs_facts() 
         "a finish with no stored facts was reported before its completion task stored them"
     );
     assert!(child.get("facts").is_none(), "{child}");
+}
+
+/// A report never waits on a worker that is not connected: no task can store
+/// facts for it then, and a daemon restarted while the worker was down would
+/// never report the finish. The reconciliation records the facts as
+/// unavailable, with that reason, and sends the report. Facts are written once
+/// per finish, so a collection that was under way cannot replace them.
+#[tokio::test]
+async fn a_report_does_not_wait_for_a_worker_that_is_not_connected() {
+    if !isolated_parked_test("a_report_does_not_wait_for_a_worker_that_is_not_connected") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (report, child, _backend) = finish_report_and_listing_of(None, false).await;
+    let report = report.expect("a finished child with no connected worker is still reported");
+    let text = report.facts.as_ref().unwrap().render_lines().join("\n");
+    assert!(
+        text.contains("the child's worker was not connected when the finish was reported"),
+        "{text}"
+    );
+    let listed = child["facts"]["finish"]["lines"].to_string();
+    assert!(listed.contains("was not connected"), "{listed}");
+    // A collection that finishes afterwards does not replace the recorded facts.
+    let stored =
+        crate::database::record_finish_facts("child-1".into(), 9, observed_work()).unwrap();
+    assert!(
+        stored
+            .render_lines()
+            .join("\n")
+            .contains("was not connected"),
+        "{stored:?}"
+    );
+    let recorded = crate::database::load_work_facts(&["child-1".to_owned()]).unwrap();
+    assert_eq!(recorded["child-1"].finish.as_ref(), Some(&stored));
+}
+
+/// Whether to use a finish's recorded facts follows from its completed turn,
+/// not from the kind of finish identity. A finished child whose last message
+/// delivery failed has a terminal identity, and its report still carries the
+/// facts recorded for its completed turn instead of saying its worker was not
+/// asked.
+#[tokio::test]
+async fn a_finished_child_whose_last_delivery_failed_is_reported_with_its_recorded_facts() {
+    if !isolated_parked_test(
+        "a_finished_child_whose_last_delivery_failed_is_reported_with_its_recorded_facts",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 9;
+    conversation.applied_event_digest = format!("{:064x}", 9);
+    let mut turn = finished_turn("task");
+    turn.outcome = mj_core::state::TurnOutcomeKind::Rejected {
+        message: "ACP prompt returned no session updates".into(),
+        reason: None,
+    };
+    conversation.last_turn_outcome = Some(turn);
+    crate::database::save_materialized_session(&conversation).unwrap();
+    crate::database::record_finish_facts("child-1".into(), 9, observed_work()).unwrap();
+    // The parent's newest message to the child failed to deliver.
+    let mut parent = active_parent_view("working");
+    let snapshot = parent.snapshot.as_mut().unwrap();
+    snapshot
+        .subagent_completions
+        .push(mj_core::subagent::SubagentCompletion::from(
+            &mj_core::subagent::SubagentToolResult {
+                request_id: "m1".into(),
+                completed_at_ms: 2,
+                is_error: true,
+                message: serde_json::json!({
+                    "child_session_id": "child-1", "created_at_ms": 1,
+                    "status": "failed", "error": "the child's session was gone",
+                })
+                .to_string(),
+            },
+        ));
+    let (backend, _exports) = report_backend(parent);
+
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+
+    let relation = crate::database::load_subagent("child-1").unwrap().unwrap();
+    assert!(
+        matches!(
+            relation.reported_finish,
+            Some(mj_core::subagent::SubagentFinishIdentity::Terminal { .. })
+        ),
+        "the failed delivery gave the finish a terminal identity: {:?}",
+        relation.reported_finish
+    );
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&events[0].event_json).unwrap();
+    let text = mj_core::mailbox::render_mailbox_event(&event);
+    assert!(text.contains("pid 41301"), "{text}");
+    assert!(!text.contains("without a completed turn"), "{text}");
 }
 
 /// A restart that fails leaves the child parked, so the parent can try

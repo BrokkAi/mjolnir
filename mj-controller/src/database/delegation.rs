@@ -299,15 +299,32 @@ pub(crate) fn load_work_facts(children: &[String]) -> Result<BTreeMap<String, St
 }
 
 /// Record what the child's worker observed for the finish that completed turn
-/// `ordinal`. A park that followed an earlier finish is kept, keyed by that
-/// finish, until it is settled.
+/// `ordinal`, and return the facts that are stored for it. The facts of a
+/// finish are written once, on the writer thread: when the delegation loop and
+/// the report's reconciliation both reach a finish, whichever is first decides
+/// and the other reads its answer, so neither overwrites the other. A park that
+/// followed an earlier finish is kept, keyed by that finish, until it is
+/// settled.
 pub(crate) fn record_finish_facts(
     child: String,
     ordinal: u64,
     facts: mj_core::work_facts::WorkFacts,
-) -> Result<()> {
-    let enqueued = submit_database_write("record finish facts", move |connection| {
+) -> Result<mj_core::work_facts::WorkFacts> {
+    let (stored, enqueued) = submit_database_write("record finish facts", move |connection| {
         let transaction = connection.transaction()?;
+        let existing: Option<(Option<u64>, Option<String>)> = transaction
+            .query_row(
+                "SELECT finish_ordinal, finish_json FROM subagent_work_facts
+                 WHERE child_session_id=?1",
+                [&child],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((Some(at), Some(json))) = existing
+            && at == ordinal
+        {
+            return Ok((serde_json::from_str(&json)?, false));
+        }
         // A finish whose report owed its parent a working tree that was never
         // read is superseded by this one: the parent is told so, once, instead
         // of waiting for a tree that will not come.
@@ -331,12 +348,12 @@ pub(crate) fn record_finish_facts(
             params![child, ordinal],
         )?;
         transaction.commit()?;
-        Ok(owed)
+        Ok((facts, owed))
     })?;
     if enqueued {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
     }
-    Ok(())
+    Ok(stored)
 }
 
 /// Enqueue the follow-up of an earlier finish's pending working tree as
@@ -503,15 +520,37 @@ pub(crate) fn record_finish_worktree(
 
 /// Write the pre-stop snapshot of a park with its unfinished marker, before
 /// the irreversible stop. It is keyed by the finish the park follows (0 for a
-/// child never reported), which is returned: the park's own record, which a
-/// later finish does not clear and a settlement alone writes.
+/// child never reported): the park's own record, which a later finish does not
+/// clear and a settlement alone writes. The marker carries what the park needs
+/// of that finish, which a later finish replaces: whether its report promised a
+/// message, and which processes it listed that had already exited. The finish's
+/// ordinal and the marker as stored are returned.
 pub(crate) fn record_park_started(
     child: String,
     park: mj_core::work_facts::ParkFacts,
-) -> Result<u64> {
+) -> Result<(u64, mj_core::work_facts::ParkFacts)> {
     submit_database_write("record park start", move |connection| {
         let transaction = connection.transaction()?;
         let ordinal = current_finish_ordinal(&transaction, &child)?;
+        let finish: Option<mj_core::work_facts::WorkFacts> = transaction
+            .query_row(
+                "SELECT finish_json FROM subagent_work_facts WHERE child_session_id=?1",
+                [&child],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(|text| serde_json::from_str(&text))
+            .transpose()?;
+        let mut park = park;
+        if let Some(finish) = &finish {
+            park.promised = finish
+                .running_processes()
+                .is_some_and(|running| running > 0);
+            if let Some(listed) = finish.processes.known() {
+                park = park.with_finish(listed);
+            }
+        }
         transaction.execute(
             "INSERT INTO subagent_park_facts(child_session_id, finish_ordinal, park_json)
              VALUES (?1, ?2, ?3)
@@ -519,7 +558,7 @@ pub(crate) fn record_park_started(
             params![child, ordinal, serde_json::to_string(&park)?],
         )?;
         transaction.commit()?;
-        Ok(ordinal)
+        Ok((ordinal, park))
     })
 }
 
@@ -593,8 +632,11 @@ pub(crate) fn record_park_outcome(
 /// Record the outcome of the park that followed the finish at `ordinal`. With
 /// `expected`, the park's own marker, it is written only if that marker is still
 /// the pending park of that finish, so a settlement that ran long never
-/// overwrites a record it does not own. The event's key names the parent, the
-/// child and the finish, so a repeat cannot tell the parent twice.
+/// overwrites a record it does not own. The outcome carries what the marker
+/// recorded of that finish, so a finish recorded since changes nothing about
+/// it. The event's key names the parent, the child and the finish, so a repeat
+/// cannot tell the parent twice. A child whose record is gone has nobody to
+/// tell: nothing is written, and that is not an error.
 pub(crate) fn record_park_outcome_expecting(
     child: String,
     ordinal: u64,
@@ -604,57 +646,35 @@ pub(crate) fn record_park_outcome_expecting(
 ) -> Result<()> {
     let enqueued = submit_database_write("record park outcome", move |connection| {
         let transaction = connection.transaction()?;
-        if let Some(expected) = &expected {
-            let current: Option<String> = transaction
-                .query_row(
-                    "SELECT park_json FROM subagent_park_facts
-                     WHERE child_session_id=?1 AND finish_ordinal=?2",
-                    params![child, ordinal],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let still_pending = current
-                .map(|text| serde_json::from_str::<mj_core::work_facts::ParkFacts>(&text))
-                .transpose()?
-                .is_some_and(|current| current == *expected);
-            if !still_pending {
-                return Ok(false);
-            }
-        }
-        let stored: String = transaction.query_row(
-            "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
-            [&child],
-            |row| row.get(0),
-        )?;
-        let relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&stored)?;
-        // The finish report told the parent a later message would say what
-        // happened to each process it listed; that promise holds even when the
-        // park could not observe them. Only the finish this park followed can
-        // be compared with it: a newer finish has replaced those facts.
-        let finish_json: Option<String> =
-            if current_finish_ordinal(&transaction, &child)? == ordinal {
-                transaction
-                    .query_row(
-                        "SELECT finish_json FROM subagent_work_facts WHERE child_session_id=?1",
-                        [&child],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .flatten()
-            } else {
-                None
-            };
-        let finish = finish_json
-            .map(|text| serde_json::from_str::<mj_core::work_facts::WorkFacts>(&text))
+        let current: Option<String> = transaction
+            .query_row(
+                "SELECT park_json FROM subagent_park_facts
+                 WHERE child_session_id=?1 AND finish_ordinal=?2",
+                params![child, ordinal],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let marker = current
+            .map(|text| serde_json::from_str::<mj_core::work_facts::ParkFacts>(&text))
             .transpose()?;
-        let promised = finish
-            .as_ref()
-            .and_then(|facts| facts.running_processes())
-            .is_some_and(|running| running > 0);
-        // Each process the finish report listed gets an account: running
-        // before the park and after it, or already gone before it.
-        let park = match finish.as_ref().and_then(|facts| facts.processes.known()) {
-            Some(listed) => park.with_finish(listed),
+        if let Some(expected) = &expected
+            && marker.as_ref() != Some(expected)
+        {
+            return Ok(false);
+        }
+        let stored: Option<String> = transaction
+            .query_row(
+                "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+                [&child],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(stored) = stored else {
+            return Ok(false);
+        };
+        let relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&stored)?;
+        let park = match &marker {
+            Some(marker) => park.settling(marker),
             None => park,
         };
         transaction.execute(
@@ -664,7 +684,7 @@ pub(crate) fn record_park_outcome_expecting(
             params![child, ordinal, serde_json::to_string(&park)?],
         )?;
         let mut enqueued = false;
-        if park.is_news(promised) {
+        if park.is_news() {
             let key = subagent_parked_key(&relation, ordinal)?;
             let already_enqueued: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",

@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, bail};
 use std::process::Command;
 
-use super::{Described, Marker, ProcRow, ProcessReader};
+use super::{Described, Marker, ProcRow, ProcessReader, ProcessTable};
 
 /// `[[dd-]hh:]mm:ss` as `ps -o etime` prints it.
 pub(super) fn parse_elapsed_secs(text: &str) -> Option<i64> {
@@ -67,7 +67,7 @@ pub(super) fn classify_marker(
     }
 }
 
-pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReader)> {
+pub(super) fn read_table(session_id: &str) -> Result<ProcessTable> {
     let wanted = format!("MJ_SESSION_ID={session_id}");
     let environment_lines: std::collections::BTreeMap<u32, String> =
         ps(&["-axwwE", "-o", "pid=,command="])?
@@ -80,6 +80,9 @@ pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReade
             })
             .collect();
     let me = unsafe { libc::geteuid() };
+    // `etime` is measured when this `ps` runs; the harness's age is taken at
+    // the same instant.
+    let sampled_ms = mj_core::clock::epoch_millis();
     let listing = ps(LISTING)?;
     let mut rows = Vec::new();
     let mut commands = std::collections::BTreeMap::new();
@@ -136,7 +139,11 @@ pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReade
             identity: mj_core::subprocess::process_birth_identity(row.pid).unwrap_or_default(),
         }
     });
-    Ok((rows, reader))
+    Ok(ProcessTable {
+        rows,
+        reader,
+        sampled_ms,
+    })
 }
 
 #[cfg(test)]

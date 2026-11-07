@@ -149,6 +149,12 @@ pub struct ParkFacts {
     /// afterwards, so the counts mean nothing then either.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unconfirmed: Option<String>,
+    /// The finish this park follows listed running processes, so its report told
+    /// the parent that a later message would say what happened to each. Recorded
+    /// when the park begins, from that finish's own facts: a later finish
+    /// replaces them while the park's check is still running.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub promised: bool,
     /// The part of `snapshot.shown` that was no longer running after the stop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gone_shown: Vec<RunningProcess>,
@@ -177,6 +183,7 @@ impl ParkFacts {
             survived: 0,
             unverified: None,
             unconfirmed: None,
+            promised: false,
             gone_shown: Vec::new(),
             survived_shown: Vec::new(),
             exited_before: 0,
@@ -239,6 +246,16 @@ impl ParkFacts {
         self
     }
 
+    /// This outcome as the settlement of `marker`, the park as it was recorded
+    /// when it began: the account of the finish it followed travels with it.
+    #[must_use]
+    pub fn settling(mut self, marker: &ParkFacts) -> Self {
+        self.promised = marker.promised;
+        self.exited_before = marker.exited_before;
+        self.exited_before_shown = marker.exited_before_shown.clone();
+        self
+    }
+
     /// A park whose check after the stop could not run.
     pub fn unverified(snapshot: Observed<ProcessFacts>, reason: impl Into<String>) -> Self {
         let mut park = Self::settled(snapshot, &[]);
@@ -271,9 +288,9 @@ impl ParkFacts {
     /// listed running processes (`promised`), which told the parent a later
     /// message would say what happened to each, even if the park could not
     /// observe them.
-    pub fn is_news(&self, promised: bool) -> bool {
+    pub fn is_news(&self) -> bool {
         !self.pending
-            && (promised
+            && (self.promised
                 || self.gone > 0
                 || self.survived > 0
                 || self.exited_before > 0

@@ -395,7 +395,10 @@ impl RuntimeState {
             Err(reason) => mj_core::work_facts::WorkFacts::unavailable(reason),
         };
         let child_id = child_id.to_owned();
-        blocking(move || crate::database::record_finish_facts(child_id, ordinal, facts)).await
+        // Stored once: facts a report's reconciliation recorded first stand.
+        blocking(move || crate::database::record_finish_facts(child_id, ordinal, facts))
+            .await
+            .map(|_| ())
     }
 
     /// Read the working tree of the finish that completed turn `ordinal`, which
