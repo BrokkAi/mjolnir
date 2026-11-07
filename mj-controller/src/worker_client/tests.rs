@@ -2832,8 +2832,7 @@ async fn the_aws_install_waits_for_its_sessions_login_step_instead_of_being_skip
                 None,
                 &target,
                 &steps,
-                None,
-                false,
+                credential_sync::AwsCycleOptions::default(),
             )
             .await
         }
@@ -2923,8 +2922,7 @@ async fn a_session_that_is_no_longer_current_is_not_minted_for() {
         None,
         &target,
         &Default::default(),
-        None,
-        false,
+        credential_sync::AwsCycleOptions::default(),
     )
     .await;
     let outcomes = result;
@@ -3412,6 +3410,181 @@ async fn a_trigger_whose_renewal_is_stopped_reports_the_outcome_as_unknown() {
         .collect::<Vec<_>>()
         .join("; ");
     assert!(failure.contains("is unknown"), "{answered:?}");
+}
+
+// The unscoped export resolves its source as the scoped mint does: the AWS
+// profile the harness's configuration selects is read when the export runs.
+// Exporting the environment's profile instead would stage another identity.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_unscoped_export_runs_as_the_profile_the_provider_configuration_selects() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let codex_home = tempfile::tempdir().unwrap();
+    let config = codex_home.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "model_provider = \"amazon-bedrock-runtime\"\n[model_providers.amazon-bedrock-runtime.aws]\nprofile = \"team\"\n",
+    )
+    .unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = scratch.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let aws = bin.join("aws");
+    let args = scratch.path().join("export-args");
+    std::fs::write(
+        &aws,
+        "#!/bin/sh\n/bin/echo \"$@\" > \"$MJ_AWS_ARGS\"\nexec /bin/cat \"$MJ_AWS_EXPORT_FIXTURE\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let export = scratch.path().join("export.json");
+    std::fs::write(
+        &export,
+        serde_json::to_vec(&serde_json::json!({
+            "Version": 1, "AccessKeyId": "key", "SecretAccessKey": "secret",
+            "SessionToken": "token", "Expiration": "2099-01-01T00:00:00Z",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let received = scratch.path().join("received");
+    let mut target = codex_sync_target(home.path(), "remote", "2026-09-25T20:00:00Z", &received);
+    target.skips_login_file_sync = true;
+    target.aws_credentials = Some(mj_core::aws_credentials::AwsCredentialSource {
+        environment: BTreeMap::from([
+            ("PATH".into(), bin.to_string_lossy().into_owned()),
+            ("AWS_PROFILE".into(), "bedrock".into()),
+            (
+                "MJ_AWS_EXPORT_FIXTURE".into(),
+                export.to_string_lossy().into_owned(),
+            ),
+            ("MJ_AWS_ARGS".into(), args.to_string_lossy().into_owned()),
+        ]),
+        role: None,
+        selection: Some(mj_core::aws_credentials::AwsProfileSelection {
+            home: codex_home.path().to_path_buf(),
+            overlay: None,
+        }),
+    });
+
+    let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    assert!(outcomes[0].step_failures.is_empty(), "{outcomes:?}");
+    let exported_as = std::fs::read_to_string(&args).unwrap();
+    assert!(exported_as.contains("--profile team"), "{exported_as}");
+    let staged: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&received).unwrap()).unwrap();
+    assert_eq!(staged["Profile"], "team");
+
+    // The file cannot be read this time: nothing is exported, the error is
+    // reported, and what the session holds is not overwritten.
+    std::fs::write(&config, "model_provider = [unterminated").unwrap();
+    std::fs::write(
+        &export,
+        serde_json::to_vec(&serde_json::json!({
+            "Version": 1, "AccessKeyId": "key-2", "SecretAccessKey": "secret-2",
+            "SessionToken": "token", "Expiration": "2099-01-01T00:00:00Z",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
+    let failure = outcomes[0].failure_text().unwrap();
+    assert!(
+        failure.contains("could not be determined") && failure.contains("TOML parse error"),
+        "{failure}"
+    );
+    let still: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&received).unwrap()).unwrap();
+    assert_eq!(still["AccessKeyId"], "key");
+}
+
+// A mint that has to call AWS can take as long as it takes, so credentials that
+// do not match a newly configured role are withdrawn before it starts, not
+// after it returns, and the step says the replacement is pending.
+#[cfg(unix)]
+#[tokio::test]
+async fn obsolete_credentials_are_withdrawn_before_a_stuck_mint_and_the_step_says_so() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let (started, release) = (
+        scratch.path().join("sts-started"),
+        scratch.path().join("sts-release"),
+    );
+    std::fs::write(
+        cli.join("aws"),
+        format!(
+            "#!/bin/sh\n/usr/bin/touch {started}\nwhile [ ! -e {release} ] && [ -d {dir} ]; do /bin/sleep 0.05; done\nexec /bin/cat {output}\n",
+            started = started.display(),
+            release = release.display(),
+            dir = scratch.path().display(),
+            output = scratch.path().join("granted.json").display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(cli.join("aws"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _release_on_exit = ReleaseOnDrop(release.clone());
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    // A running session holding the host's own credentials, from before the
+    // role was configured.
+    std::fs::write(root.join("aws"), br#"{"Version":1,"AccessKeyId":"AKIA"}"#).unwrap();
+    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "obsolete", None);
+    super::credential_sync::SESSIONS_ARE_CURRENT.with(|current| current.set(true));
+    let (results, mut results_rx) = mpsc::unbounded_channel();
+    let env = credential_sync::RenewalEnv {
+        relays: SessionRelays::Direct,
+        gate: None,
+        runtime: None,
+        steps: Default::default(),
+        installs: Default::default(),
+        results,
+        retry: Duration::from_millis(100),
+    };
+    let (_wakes, wake_rx) = mpsc::unbounded_channel();
+    let renewal = tokio::spawn(credential_sync::renew_session_aws(env, target, wake_rx));
+
+    // The credentials are withdrawn and the step says why, while STS has not
+    // answered (the mint is still waiting on it).
+    let interim = tokio::time::timeout(Duration::from_secs(20), results_rx.recv())
+        .await
+        .expect("the withdrawal was reported before the mint returned")
+        .unwrap();
+    assert!(!root.join("aws").exists(), "obsolete credentials were kept");
+    assert!(!release.exists(), "the mint had been released");
+    assert!(interim.partial);
+    let outcome = &interim.outcomes[0];
+    assert_eq!(
+        outcome.outcome,
+        Ok(vec![CredentialSyncAction::AwsCredentialsRemoved])
+    );
+    let failure = outcome.failure_text().unwrap();
+    assert!(
+        failure.contains("withdrawn") && failure.contains("until AssumeRole returns"),
+        "{failure}"
+    );
+
+    // The mint returns: the new credentials are installed and the failure ends.
+    std::fs::write(&release, "").unwrap();
+    let done = loop {
+        let result = tokio::time::timeout(Duration::from_secs(20), results_rx.recv())
+            .await
+            .expect("the cycle ended")
+            .unwrap();
+        if result.failures().next().is_none() {
+            break result;
+        }
+    };
+    assert!(done.pushed_to("obsolete"), "{done:?}");
+    assert!(root.join("aws").exists());
+    renewal.abort();
 }
 
 // When the controller cannot read the profile's Codex configuration it cannot
