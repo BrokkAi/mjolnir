@@ -1597,6 +1597,8 @@ pub fn apply_session_update_to_entries(
                     status: plan_status(&entry.status),
                 })
                 .collect();
+            // Turn order, not authorship: a plan made after any prompt,
+            // including one Mjolnir submitted, belongs below that prompt.
             let latest_user_seq = entries
                 .iter()
                 .rev()

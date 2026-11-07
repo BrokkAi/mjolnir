@@ -7,6 +7,11 @@ from reliability_lab import ScenarioFailure
 # The composer's top border starts with its microphone chip; the pane has no
 # other title to find it by.
 COMPOSER_BORDER = "╭  mic"
+# The setting menus are drawn above the composer with the setting as title.
+MODEL_MENU = "╭ model"
+EFFORT_MENU = "╭ effort"
+# The question form's single action button, which also sends the last answer.
+ANSWER_BUTTON = "Answer & Next"
 
 
 def run_chat_controls(lab, tmux, evidence, session_id):
@@ -68,27 +73,29 @@ def run_chat_controls(lab, tmux, evidence, session_id):
     tmux.send_key("C-u")
     tmux.send_text("/model")
     tmux.send_key("Enter")
-    tmux.wait_for("Choose a model")
+    # The picker is a menu above the composer, titled with the setting; typing
+    # filters its rows and the title shows the filter.
+    tmux.wait_for(MODEL_MENU, "model menu opened")
     tmux.send_text("wide")
     tmux.wait_for("Wide fixture")
-    tmux.send_key("Tab")
     tmux.send_key("Enter")
-    tmux.wait_until(lambda: "Choose a model" not in tmux.capture(), "model selection applied")
+    tmux.wait_until(lambda: MODEL_MENU not in tmux.capture(), "model selection applied")
     log_path = lab.runtime_root / "fake-acp.log"
-    def selected_wide():
+    def config_set(value):
         messages = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
-        return any(message.get("method") == "session/set_config_option" and message.get("params", {}).get("value") == "wide" for message in messages)
-    tmux.wait_until(selected_wide, "real model action received by fake ACP")
-    record("chat-model-selection", "click Prompt; /model; type wide; Tab; Enter", "model selection sent to ACP")
+        return any(message.get("method") == "session/set_config_option" and message.get("params", {}).get("value") == value for message in messages)
+    tmux.wait_until(lambda: config_set("wide"), "real model action received by fake ACP")
+    record("chat-model-selection", "click Prompt; /model; type wide; Enter", "model selection sent to ACP")
 
     focus_prompt()
     tmux.send_text("/effort")
     tmux.send_key("Enter")
-    tmux.wait_for("Choose a effort")
+    tmux.wait_for(EFFORT_MENU, "effort menu opened")
+    # One click on a row applies it; the menu has no Apply button.
     click_text("High")
-    click_text("Apply")
-    tmux.wait_until(lambda: "Choose a effort" not in tmux.capture(), "effort picker closed by mouse Apply")
-    record("chat-effort-mouse", "/effort; SGR click High; SGR click Apply", "picker selection and Apply work by mouse")
+    tmux.wait_until(lambda: EFFORT_MENU not in tmux.capture(), "effort menu closed by the click")
+    tmux.wait_until(lambda: config_set("high"), "effort action received by fake ACP")
+    record("chat-effort-mouse", "/effort; SGR click High", "one click on a menu row applies it")
 
     status, _ = lab.request("POST", "/api/actions", {"action": "prompt", "session_id": session_id, "text": "live component form"})
     if status != 202:
@@ -101,26 +108,35 @@ def run_chat_controls(lab, tmux, evidence, session_id):
     tmux.send_raw("\x1b[200~live 資料 answer\x1b[201~")
     tmux.wait_for("answer")
     record("chat-elicitation-field", "SGR click Label; bracketed Unicode paste", "question field accepts Unicode paste")
-    tmux.send_key("Tab")
+    # The form asks one question at a time. Enter answers the current one and
+    # moves to the next; the action button is labelled for that.
+    tmux.send_key("Enter")
     tmux.wait_for("Enabled")
     tmux.send_key("Space")
-    tmux.send_key("Tab")
+    tmux.send_key("Enter")
     tmux.wait_for("Second")
-    # Mouse-select a standard option, then submit through the real action button.
+    # Mouse-select a standard option, then answer it.
     click_text("Second")
-    screen = tmux.wait_for("Submit")
-    x, y = locate_text(screen, "Submit", last=True)
+    tmux.send_key("Enter")
+    tmux.wait_for("Several")
+    # The last question is optional. Press its action button, drag away and
+    # release: nothing is answered and the question stays open.
+    screen = tmux.wait_for(ANSWER_BUTTON)
+    x, y = locate_text(screen, ANSWER_BUTTON, last=True)
     tmux.mouse_drag_outside(x, y)
     time.sleep(0.15)
     tmux.wait_for("Component form")
-    record("chat-elicitation-outside-release", "Submit down; drag outside; release", "question remains open")
-    click_text("Submit")
+    record("chat-elicitation-outside-release", "Answer & Next down; drag outside; release", "question remains open")
+    # A real click leaves one question unanswered, which asks before sending.
+    click_text(ANSWER_BUTTON)
+    tmux.wait_for("unanswered question")
+    click_text(ANSWER_BUTTON)
     tmux.wait_for("component form response:")
-    record("chat-elicitation-submit", "SGR click Submit", "question response received by ACP")
+    record("chat-elicitation-submit", "SGR click Answer & Next twice", "question response received by ACP")
 
     status, _ = lab.request("POST", "/api/actions", {"action": "prompt", "session_id": session_id, "text": "live component plan"})
     if status != 202:
         raise ScenarioFailure(f"plan prompt returned {status}")
     click_text("Keep planning")
-    click_text("Submit")
+    click_text(ANSWER_BUTTON)
     tmux.wait_for("component plan response:")

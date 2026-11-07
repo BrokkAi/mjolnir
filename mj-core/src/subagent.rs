@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::continuation::GeneratedPrompt;
 use serde::{Deserialize, Serialize};
 
 /// A session's delegation policy, optionally overriding global task choices.
@@ -1036,11 +1037,6 @@ impl std::str::FromStr for SubagentMcpRole {
     }
 }
 
-/// Command id prefix of the one prompt that reminds a child to hand back its
-/// report. A turn whose command id carries it is that reminder, which is how
-/// [`report_state`] tells it from the task it follows up.
-pub const HANDBACK_REMINDER_PREFIX: &str = "handback-reminder";
-
 /// The reminder itself, sent as an ordinary prompt so the child's transcript
 /// shows it. A turn can end before the task is done (a harness failure, a
 /// question in plain text), so the reminder must not order a child that has
@@ -1138,12 +1134,13 @@ fn bounded_report_with_recovery(text: &str, recovery: &str) -> (String, bool) {
     )
 }
 
-/// Whether a command id names a handback reminder.
+/// Whether a command id names the prompt that reminds a child to hand back its
+/// report, which is how [`report_state`] tells it from the task it follows up.
 #[must_use]
 pub fn is_handback_reminder(command_id: &str) -> bool {
-    command_id
-        .strip_prefix(HANDBACK_REMINDER_PREFIX)
-        .is_some_and(|rest| rest.starts_with('-'))
+    GeneratedPrompt::HandbackReminder
+        .suffix(command_id)
+        .is_some()
 }
 
 /// The command id of the handback reminder for the turn that finished at
@@ -1151,16 +1148,15 @@ pub fn is_handback_reminder(command_id: &str) -> bool {
 /// once per turn, and [`reminded_turn_ordinal`] reads it back.
 #[must_use]
 pub fn handback_reminder_command_id(completed_ordinal: u64) -> String {
-    format!("{HANDBACK_REMINDER_PREFIX}-{completed_ordinal}")
+    GeneratedPrompt::HandbackReminder.command_id(completed_ordinal)
 }
 
 /// The ordinal at which the reminded turn finished, when `command_id` names a
 /// handback reminder.
 #[must_use]
 pub fn reminded_turn_ordinal(command_id: &str) -> Option<u64> {
-    command_id
-        .strip_prefix(HANDBACK_REMINDER_PREFIX)?
-        .strip_prefix('-')?
+    GeneratedPrompt::HandbackReminder
+        .suffix(command_id)?
         .parse()
         .ok()
 }

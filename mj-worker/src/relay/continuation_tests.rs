@@ -156,6 +156,14 @@ fn generated_prompts_neither_renew_allowance_nor_grant_authorization() {
     completed(&mut relay, "auto-continue-first");
     submit_relay(&mut relay, "review-forward-123", prompt("Fix this finding"));
     completed(&mut relay, "review-forward-123");
+    // Hard-won: 8b08e8bc1: handback reminders and peer-session messages counted as user authorization
+    for id in [
+        mj_core::subagent::handback_reminder_command_id(7),
+        mj_core::continuation::GeneratedPrompt::SessionMessageTurn.command_id("peer-1"),
+    ] {
+        submit_relay(&mut relay, &id, prompt("Please also update the docs"));
+        completed(&mut relay, &id);
+    }
     assert_eq!(relay.snapshot.continuation.attempts, 1);
     assert_eq!(
         relay.snapshot.continuation.user_command_id.as_deref(),
@@ -196,7 +204,9 @@ fn quota_resume(relay: &DurableRelay) -> RelayCommand {
 // Hard-won: 3c8973b87: a mailbox wake hit Kimi's quota with no recoverable request after restore.
 #[test]
 fn mailbox_quota_recovery_survives_missing_user_request_and_prior_cancellation() {
-    for no_user_request in [true, false] {
+    // Hard-won: 9c2b74a01: a peer message delivered as a prompt lost the wake's quota identity.
+    for (no_user_request, as_prompt) in [(true, false), (false, false), (true, true), (false, true)]
+    {
         let root = tempfile::tempdir().unwrap();
         let mut relay = open(root.path());
         if !no_user_request {
@@ -215,27 +225,38 @@ fn mailbox_quota_recovery_survives_missing_user_request_and_prior_cancellation()
             .record_command_completed("cancel-old-work", RelayCommandOutcome::Cancelled)
             .unwrap();
         assert!(relay.snapshot.continuation.quota_suppressed);
-        let event = mj_core::mailbox::MailboxEvent {
-            key: "merged-pr".into(),
-            source: "github".into(),
-            wake: true,
-            created_at_ms: 1,
-            body: mj_core::mailbox::MailboxEventBody::PlainText {
-                text: "Your PR was merged.".into(),
-            },
+        let wake_id = if as_prompt {
+            // Workers without mailbox delivery get the message as a prompt.
+            let id =
+                mj_core::continuation::GeneratedPrompt::SessionMessageTurn.command_id("peer-1");
+            submit_relay(&mut relay, &id, prompt("Your PR was merged."));
+            let claimed = relay.claim_pending_commands(true).unwrap();
+            assert_eq!(claimed.len(), 1);
+            assert_eq!(claimed[0].command_id, id);
+            id
+        } else {
+            let event = mj_core::mailbox::MailboxEvent {
+                key: "merged-pr".into(),
+                source: "github".into(),
+                wake: true,
+                created_at_ms: 1,
+                body: mj_core::mailbox::MailboxEventBody::PlainText {
+                    text: "Your PR was merged.".into(),
+                },
+            };
+            submit_relay(
+                &mut relay,
+                "deliver-merge",
+                RelayCommand::DeliverMailboxEvent { event },
+            );
+            let claimed = relay.claim_pending_commands(true).unwrap();
+            assert_eq!(claimed.len(), 1);
+            assert!(matches!(
+                claimed[0].command,
+                RelayCommand::MailboxWake { .. }
+            ));
+            claimed[0].command_id.clone()
         };
-        submit_relay(
-            &mut relay,
-            "deliver-merge",
-            RelayCommand::DeliverMailboxEvent { event },
-        );
-        let claimed = relay.claim_pending_commands(true).unwrap();
-        assert_eq!(claimed.len(), 1);
-        let wake_id = claimed[0].command_id.clone();
-        assert!(matches!(
-            claimed[0].command,
-            RelayCommand::MailboxWake { .. }
-        ));
         relay
             .record_command_completed(
                 &wake_id,
