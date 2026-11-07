@@ -1154,16 +1154,18 @@ impl ProfileCatalog {
                 // The re-probe failed: the entry keeps its pre-edit copy and
                 // the identity stays stale. Re-arm the retry window so the
                 // next pass waits it out instead of re-probing the identity
-                // every poll, keeping the digest the retry is about so a
-                // fresh edit can bypass the window. The window is cleared by
-                // the home watch when it observes every served entry
-                // settled, never by a probe.
+                // every poll. The window retries one digest — the state the
+                // failed probe was correcting — so a pass whose current
+                // digest differs is a fresh edit and bypasses it. The window
+                // is cleared by the home watch when it observes every served
+                // entry settled, never by a probe.
                 match inner.home_edit_retry_after.get_mut(&key.0) {
                     Some((after, _)) => *after = Instant::now() + self.home_edit_retry_wait(),
                     None => {
+                        let armed = inner.home_settled.get(&key).copied();
                         inner.home_edit_retry_after.insert(
                             key.0.clone(),
-                            (Instant::now() + self.home_edit_retry_wait(), None),
+                            (Instant::now() + self.home_edit_retry_wait(), armed),
                         );
                     }
                 }
@@ -3104,6 +3106,51 @@ mod tests {
             calls.load(Ordering::SeqCst),
             5,
             "a fresh edit bypasses the earlier failure's retry window"
+        );
+    }
+
+    // Hard-won: #1337 review: a failure outside a watch launch (the routine
+    // expiry refresh) armed the window against every digest, so a fresh
+    // edit waited out the window too.
+    #[tokio::test]
+    async fn a_fresh_edit_bypasses_the_window_of_an_unrelated_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_home_model(root, "solo", "solo-first");
+        let calls = calls();
+        let failing = Arc::new(AtomicBool::new(false));
+        let (config, homes) = homes_config(root, &[("solo", HarnessKind::Codex)]);
+        let flaky = flaky_home_model_probe(homes, calls.clone(), failing.clone());
+        let mut catalog = ProfileCatalog::build(
+            CancellationToken::new(),
+            flaky.clone(),
+            Arc::new(move |id, _| flaky(id)),
+        );
+        Arc::get_mut(&mut catalog).unwrap().home_edit_retry_wait = Duration::from_secs(60);
+        catalog.sync_now(&config).await;
+        catalog.watch_homes();
+
+        // A routine expiry refresh fails once, arming the window against
+        // the state the probe was correcting.
+        failing.store(true, Ordering::SeqCst);
+        catalog.refresh(|_, _| true);
+        while !catalog.lock().refreshing.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "the expiry refresh re-probed every served entry and failed"
+        );
+
+        // The failure's window is about the old digest; a fresh edit is a
+        // new digest and re-probes on the next pass, inside the window.
+        write_home_model(root, "solo", "solo-second");
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            5,
+            "a fresh edit bypasses the window armed by an unrelated failure"
         );
     }
 
