@@ -2084,11 +2084,19 @@ fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
         &ok,
     ));
     let probe = ok.commands.borrow();
+    // Hard-won: cf6c771c4: a probe named `mj-doctor` was refused by trust policies that allow only `mj-<32 hex>`.
+    let name = probe[0]
+        .args
+        .windows(2)
+        .find(|args| args[0] == "--role-session-name")
+        .map(|args| args[1].clone())
+        .unwrap();
     assert!(
-        probe[0]
-            .args
-            .windows(2)
-            .any(|args| args == ["--role-session-name", "mj-doctor"])
+        name.strip_prefix("mj-").is_some_and(|id| id.len() == 32
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+        "{name}"
     );
     drop(probe);
     // A role the host's login cannot assume.

@@ -144,6 +144,15 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - Decision (review fixes): per-session mints in a sync pass run concurrently (`join_all` over blocking tasks, no new cap); the cache key includes the credential source's whole environment; one `SessionHost` value, built from a locator or from a target template with exhaustive matches, decides whether a host keeps its own AWS credentials; the cache's sweep keeps any cell another caller holds and also runs at the start of every credential sync pass.
   Date/Author: 2026-11-07 / Claude, from review.
 
+- Decision (second review): `ensure_imdsv2` treats the requirement as met only when `HttpTokens` is `required` and `MetadataOptions.State` is `applied`. EC2 reports a new value with state `pending` before it is in effect (the recorded run-instances and modify responses both show it), so a `pending` state is polled with doubling pauses, starting at the SSH-readiness retry delay, until it changes. Any state other than `applied` or `pending` fails at once. The wait is bounded by the deadline the launch already uses for a new instance (`AWS_SSH_READY_TIMEOUT`) and ends on cancellation; the last pause is cut to the time left.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (second review): the credential sync reconciles each role-scoped session as its own mint completes (all mints start together on blocking threads and are consumed through a `FuturesUnordered`), so a slow or failing mint never delays another session's install. The per-session body moved to `reconcile_target`.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (second review): `mj doctor` probes with a role session name (and `SourceIdentity`, if the profile sets it) of the real shape, `mj-` plus 32 random lowercase hex digits, and its output says it is a probe. A trust policy that allows only the documented shape then no longer refuses the probe.
+  Date/Author: 2026-11-07 / Claude, from review.
+
 ## Outcomes & Retrospective
 
 Implemented through Milestone 6 on 2026-11-07. A Bedrock profile with `[profiles.<id>.aws] role_arn = ...` now gives each container or SSH session credentials assumed for it alone (role session name `mj-<session id>`), narrowed by a session policy, renewed after half their lifetime through the existing credential sync, with no relay or database change. A refused role fails the launch with AWS's error line and a remedy, or fails the running session's sync outcome while the worker keeps what it has; nothing falls back to the unscoped export. Profiles without a role behave as before, and `mj doctor` warns about them and probes a configured role with a real throwaway AssumeRole. Every EC2 launch (ordinary and Move) requires IMDSv2, verified in the launch response, and doctor warns about a launch template that allows IMDSv1.
@@ -343,3 +352,5 @@ Revision note (2026-11-07): recorded the user's acceptance of the five decisions
 Revision note (2026-11-07, later): Milestones 1 to 6 implemented; Progress, Decision Log and Outcomes updated with the implementation decisions, deferred items and test results. Reason: implementation complete.
 
 Revision note (2026-11-07, review): seven review findings fixed (Move replay, in-place IMDSv2 enforcement on every adoption path, concurrent mints, cache key, single host predicate, sweep race, sweep from the sync pass). Reason: review of the first implementation.
+
+Revision note (2026-11-07, second review): applied-state wait for IMDSv2, per-session reconcile as mints complete, doctor probe identity of the real shape. Reason: second review.

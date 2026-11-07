@@ -300,10 +300,20 @@ pub(super) async fn reconcile_profile_guarded(
     } else {
         HostSlopcopLogin::Unknown
     };
+    // Each role-scoped session's mint is an independent AWS call that can take
+    // seconds. They all start now and run together, and each session is
+    // reconciled as its own mint completes, so one slow or failing call never
+    // delays another session's install. The cache also drops expired
+    // credentials here, so a stopped session's secrets do not outlive them.
+    crate::aws_assume_role::ScopedAwsCredentials::shared().sweep_expired();
+    let mut minting = futures::stream::FuturesUnordered::new();
+    for (index, target) in targets.iter().enumerate() {
+        if let Some(mint) = start_scoped_mint(target) {
+            minting.push(async move { (index, mint.await) });
+        }
+    }
     // Without a role, every session of the profile receives the same export,
-    // so it is taken once per pass. With a role, each session receives
-    // credentials of its own (the session id is the role session name), so
-    // they are minted per session.
+    // so it is taken once per pass.
     let unscoped_aws_credentials = match targets.iter().find_map(|target| {
         target
             .aws_credentials
@@ -324,27 +334,6 @@ pub(super) async fn reconcile_profile_guarded(
         }
         None => Ok(None),
     };
-    // Each role-scoped session's mint is an independent AWS call that can take
-    // seconds, so they run together: one slow call must not eat the refresh
-    // window of the sessions queued behind it. The cache also drops expired
-    // credentials here, so a stopped session's secrets do not outlive them.
-    crate::aws_assume_role::ScopedAwsCredentials::shared().sweep_expired();
-    let scoped_aws_credentials =
-        futures::future::join_all(targets.iter().map(scoped_aws_credentials)).await;
-    let aws_credentials = targets
-        .iter()
-        .zip(scoped_aws_credentials)
-        .map(|(target, scoped)| match (&target.aws_credentials, scoped) {
-            (None, _) => Ok(None),
-            (Some(source), scoped) if source.role.is_some() => {
-                scoped.map_err(|error| format!("{error:#}"))
-            }
-            (Some(_), _) => match &unscoped_aws_credentials {
-                Ok(credentials) => Ok(credentials.clone()),
-                Err(error) => Err(format!("{error:#}")),
-            },
-        })
-        .collect::<Vec<Result<Option<mj_core::aws_credentials::AwsCredentials>, String>>>();
     // Targets share a profile but can differ in host CLI access. Collect off
     // scheduler threads once per wire format, then derive both scoped trees.
     let skills = Arc::new(
@@ -354,11 +343,56 @@ pub(super) async fn reconcile_profile_guarded(
                 CanonicalSkills::failed(&format!("skills collection task stopped: {error}"))
             }),
     );
+    let pass_context = PassContext {
+        relays,
+        gate,
+        runtime,
+        skills: &skills,
+        slopcop_login: &slopcop_login,
+        triggered_by,
+    };
+    // What each session's AWS credentials turned out to be, as they arrive.
+    let mut aws_credentials = targets
+        .iter()
+        .map(|target| match &target.aws_credentials {
+            None => Some(Ok(None)),
+            Some(source) if source.role.is_some() => None,
+            Some(_) => Some(match &unscoped_aws_credentials {
+                Ok(credentials) => Ok(credentials.clone()),
+                Err(error) => Err(format!("{error:#}")),
+            }),
+        })
+        .collect::<Vec<Option<AwsCredentialsResult>>>();
     let mut outcomes = BTreeMap::<String, CredentialSyncOutcome>::new();
     for pass in 0..2 {
         let mut pulled = false;
-        for (index, target) in targets.iter().enumerate() {
-            let aws_credentials = match &aws_credentials[index] {
+        // The first pass takes sessions in the order their credentials are
+        // ready; the second sees every result.
+        let mut ready = (0..targets.len())
+            .filter(|index| aws_credentials[*index].is_some())
+            .collect::<std::collections::VecDeque<_>>();
+        loop {
+            let index = match ready.pop_front() {
+                Some(index) => index,
+                None => {
+                    let Some((index, minted)) = futures::StreamExt::next(&mut minting).await else {
+                        break;
+                    };
+                    aws_credentials[index] = Some(
+                        minted
+                            .context("AWS role assumption task stopped")
+                            .and_then(|result| result)
+                            .map(Some)
+                            .map_err(|error| format!("{error:#}")),
+                    );
+                    index
+                }
+            };
+            let target = &targets[index];
+            let aws = match aws_credentials[index]
+                .as_ref()
+                .expect("credentials arrived")
+            {
                 Ok(credentials) => credentials.as_ref(),
                 Err(error) => {
                     outcomes.insert(
@@ -371,114 +405,7 @@ pub(super) async fn reconcile_profile_guarded(
                     continue;
                 }
             };
-            let result = match gate {
-                Some(gate) => gate
-                    .run_background(&target.session_id, async {
-                        let current = if let Some(runtime) = runtime {
-                            runtime.credential_target_is_current(target)?
-                        } else {
-                            let candidate = target.clone();
-                            tokio::task::spawn_blocking(move || {
-                                // Read only: cancellation may leave this blocking
-                                // read finishing after admission has been released.
-                                let controller = crate::controller::Controller {
-                                    config: mj_core::config::Config::load()?,
-                                    state: crate::database::load_state()?,
-                                };
-                                Ok::<_, anyhow::Error>(
-                                    crate::pollers::credential_sync_target_is_current(
-                                        controller, &candidate,
-                                    ),
-                                )
-                            })
-                            .await
-                            .context("reload credential sync target")??
-                        };
-                        if !current {
-                            return Ok(None);
-                        }
-                        let github_token = if target.sync_github_token {
-                            crate::controller::github_token_for_session(
-                                target.session_id.clone(),
-                                target.github.clone(),
-                            )
-                            .await?
-                        } else {
-                            None
-                        };
-                        reconcile_session(
-                            relays,
-                            target,
-                            &skills,
-                            github_token.as_deref(),
-                            aws_credentials,
-                            &slopcop_login,
-                        )
-                        .await
-                    })
-                    .await
-                    .unwrap_or_else(|| Ok(None)),
-                None => {
-                    let github_token = if target.sync_github_token {
-                        crate::controller::github_token_for_session(
-                            target.session_id.clone(),
-                            target.github.clone(),
-                        )
-                        .await
-                    } else {
-                        Ok(None)
-                    };
-                    match github_token {
-                        Ok(github_token) => {
-                            reconcile_session(
-                                relays,
-                                target,
-                                &skills,
-                                github_token.as_deref(),
-                                aws_credentials,
-                                &slopcop_login,
-                            )
-                            .await
-                        }
-                        Err(error) => Err(error),
-                    }
-                }
-            };
-            match result {
-                // Deferral is not a successful credential check: in particular
-                // it must not mark an authentication-triggered login refused.
-                Ok(None) => {}
-                Ok(Some(actions))
-                    if actions.is_empty()
-                        && (triggered_by != Some(target.session_id.as_str())
-                            || outcomes.contains_key(&target.session_id)) => {}
-                Ok(Some(actions)) => {
-                    pulled |= actions.contains(&CredentialSyncAction::Pulled);
-                    outcomes.insert(
-                        target.session_id.clone(),
-                        CredentialSyncOutcome {
-                            session_id: target.session_id.clone(),
-                            outcome: Ok(actions),
-                        },
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        session_id = %target.session_id,
-                        profile_id = %target.profile_id,
-                        pass = pass + 1,
-                        error = %error,
-                        "credential synchronization failed for relay session"
-                    );
-                    outcomes.insert(
-                        target.session_id.clone(),
-                        CredentialSyncOutcome {
-                            session_id: target.session_id.clone(),
-                            outcome: Err(format!("{error:#}")),
-                        },
-                    );
-                }
-            }
+            reconcile_target(&pass_context, target, aws, pass, &mut outcomes, &mut pulled).await;
         }
         if !pulled || pass == 1 {
             break;
@@ -487,33 +414,165 @@ pub(super) async fn reconcile_profile_guarded(
     outcomes.into_values().collect()
 }
 
-/// The scoped AWS credentials of a session whose profile names a role, from
-/// the shared cache or a new `AssumeRole`. `None` for a session without a
-/// role, which shares the profile's unscoped export. A failure is this
-/// session's failed outcome: the worker keeps the credentials it has, and no
-/// path falls back to the unscoped export.
-async fn scoped_aws_credentials(
+type AwsCredentialsResult = Result<Option<mj_core::aws_credentials::AwsCredentials>, String>;
+
+/// What one reconcile pass shares between its sessions.
+struct PassContext<'a> {
+    relays: &'a SessionRelays,
+    gate: Option<&'a Arc<crate::recovery_gate::RecoveryGate>>,
+    runtime: Option<&'a Arc<crate::daemon::RuntimeState>>,
+    skills: &'a Arc<CanonicalSkills>,
+    slopcop_login: &'a HostSlopcopLogin,
+    triggered_by: Option<&'a str>,
+}
+
+/// One session's reconciliation in one pass, recorded in `outcomes`.
+async fn reconcile_target(
+    context: &PassContext<'_>,
     target: &CredentialSyncTarget,
-) -> Result<Option<mj_core::aws_credentials::AwsCredentials>> {
-    let Some(source) = target
+    aws_credentials: Option<&mj_core::aws_credentials::AwsCredentials>,
+    pass: usize,
+    outcomes: &mut BTreeMap<String, CredentialSyncOutcome>,
+    pulled: &mut bool,
+) {
+    let PassContext {
+        relays,
+        gate,
+        runtime,
+        skills,
+        slopcop_login,
+        triggered_by,
+    } = context;
+    let result = match *gate {
+        Some(gate) => gate
+            .run_background(&target.session_id, async {
+                let current = if let Some(runtime) = *runtime {
+                    runtime.credential_target_is_current(target)?
+                } else {
+                    let candidate = target.clone();
+                    tokio::task::spawn_blocking(move || {
+                        // Read only: cancellation may leave this blocking
+                        // read finishing after admission has been released.
+                        let controller = crate::controller::Controller {
+                            config: mj_core::config::Config::load()?,
+                            state: crate::database::load_state()?,
+                        };
+                        Ok::<_, anyhow::Error>(crate::pollers::credential_sync_target_is_current(
+                            controller, &candidate,
+                        ))
+                    })
+                    .await
+                    .context("reload credential sync target")??
+                };
+                if !current {
+                    return Ok(None);
+                }
+                let github_token = if target.sync_github_token {
+                    crate::controller::github_token_for_session(
+                        target.session_id.clone(),
+                        target.github.clone(),
+                    )
+                    .await?
+                } else {
+                    None
+                };
+                reconcile_session(
+                    relays,
+                    target,
+                    skills,
+                    github_token.as_deref(),
+                    aws_credentials,
+                    slopcop_login,
+                )
+                .await
+            })
+            .await
+            .unwrap_or_else(|| Ok(None)),
+        None => {
+            let github_token = if target.sync_github_token {
+                crate::controller::github_token_for_session(
+                    target.session_id.clone(),
+                    target.github.clone(),
+                )
+                .await
+            } else {
+                Ok(None)
+            };
+            match github_token {
+                Ok(github_token) => {
+                    reconcile_session(
+                        relays,
+                        target,
+                        skills,
+                        github_token.as_deref(),
+                        aws_credentials,
+                        slopcop_login,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            }
+        }
+    };
+    match result {
+        // Deferral is not a successful credential check: in particular
+        // it must not mark an authentication-triggered login refused.
+        Ok(None) => {}
+        Ok(Some(actions))
+            if actions.is_empty()
+                && (*triggered_by != Some(target.session_id.as_str())
+                    || outcomes.contains_key(&target.session_id)) => {}
+        Ok(Some(actions)) => {
+            *pulled |= actions.contains(&CredentialSyncAction::Pulled);
+            outcomes.insert(
+                target.session_id.clone(),
+                CredentialSyncOutcome {
+                    session_id: target.session_id.clone(),
+                    outcome: Ok(actions),
+                },
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                session_id = %target.session_id,
+                profile_id = %target.profile_id,
+                pass = pass + 1,
+                error = %error,
+                "credential synchronization failed for relay session"
+            );
+            outcomes.insert(
+                target.session_id.clone(),
+                CredentialSyncOutcome {
+                    session_id: target.session_id.clone(),
+                    outcome: Err(format!("{error:#}")),
+                },
+            );
+        }
+    }
+}
+
+/// Start the AWS role assumption for a session whose profile names a role,
+/// from the shared cache or a new `AssumeRole`; it runs on a blocking thread
+/// from the moment this returns. `None` for a session without a role, which
+/// shares the profile's unscoped export. A failure is this session's failed
+/// outcome: the worker keeps the credentials it has, and no path falls back to
+/// the unscoped export.
+fn start_scoped_mint(
+    target: &CredentialSyncTarget,
+) -> Option<tokio::task::JoinHandle<Result<mj_core::aws_credentials::AwsCredentials>>> {
+    let source = target
         .aws_credentials
         .clone()
-        .filter(|source| source.role.is_some())
-    else {
-        return Ok(None);
-    };
+        .filter(|source| source.role.is_some())?;
     let (profile_id, session_id) = (target.profile_id.clone(), target.session_id.clone());
-    tokio::task::spawn_blocking(move || {
+    Some(tokio::task::spawn_blocking(move || {
         crate::aws_assume_role::ScopedAwsCredentials::shared().credentials_for(
             &profile_id,
             &session_id,
             &source,
             &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
         )
-    })
-    .await
-    .context("AWS role assumption task stopped")?
-    .map(Some)
+    }))
 }
 
 /// The skills tree this session should converge to: the profile's own skills

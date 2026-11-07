@@ -1050,7 +1050,7 @@ fn aws_scope_check(
                 check_id,
                 title,
                 format!(
-                    "The host's AWS login assumed {} for a throwaway session (mj-doctor); sessions on {} receive credentials limited to it.{until}",
+                    "The host's AWS login assumed {} for a probe session that exists only for this check, named like a real session (mj-<32 hex digits>); sessions on {} receive credentials limited to it.{until}",
                     role.role_arn,
                     receiving.join(", ")
                 ),

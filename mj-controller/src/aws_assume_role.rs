@@ -287,7 +287,10 @@ fn assume_role_failure(stderr: &[u8], status: i32) -> String {
 }
 
 /// One real `AssumeRole`, for `mj doctor`: the same command a session's mint
-/// runs, under a throwaway role session name, bypassing the cache.
+/// runs, bypassing the cache. The role session name (and `SourceIdentity`,
+/// when the profile sets it) has the shape of a real session's, `mj-` and 32
+/// random lowercase hex digits, because a trust policy may allow only that
+/// shape and a doctor probe must not be refused for looking different.
 pub(crate) fn probe(
     source: &AwsCredentialSource,
     executor: &impl CommandExecutor,
@@ -297,7 +300,8 @@ pub(crate) fn probe(
         .as_ref()
         .context("no AWS role is configured for this profile")?;
     let host_profile = selected_profile(source);
-    let command = assume_role_command(role, host_profile, "mj-doctor", &source.environment);
+    let name = session_name(&mj_core::state::new_session_id()?);
+    let command = assume_role_command(role, host_profile, &name, &source.environment);
     mint(&command, host_profile, executor)
 }
 

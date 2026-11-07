@@ -1797,6 +1797,90 @@ async fn role_scoped_mints_for_one_profile_run_together() {
     );
 }
 
+// Hard-won: cf6c771c4: every session of a profile waited for the slowest AssumeRole call before any received its credentials.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fast_session_is_installed_while_a_slow_one_is_still_minting() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let bin = scratch.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    // The stand-in AWS CLI answers at once, except for a session that names a
+    // file to wait for: its call finishes only after that file exists, and
+    // fails after its own bound otherwise.
+    let aws = bin.join("aws");
+    std::fs::write(
+        &aws,
+        "#!/bin/sh\n\
+         tries=0\n\
+         while [ -n \"$MJ_AWS_WAIT_FOR\" ] && [ ! -e \"$MJ_AWS_WAIT_FOR\" ]; do\n\
+           tries=$((tries + 1)); [ $tries -gt 200 ] && exit 3; /bin/sleep 0.05\n\
+         done\n\
+         exec /bin/cat \"$MJ_AWS_ASSUME_FIXTURE\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&aws, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/aws-sts-assume-role.json"
+    ))
+    .unwrap();
+    recorded["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
+    let fixture = scratch.path().join("assumed.json");
+    std::fs::write(&fixture, serde_json::to_vec(&recorded).unwrap()).unwrap();
+    let fast_received = scratch.path().join("fast-received");
+    let target = |session: &str, received: &std::path::Path, wait_for: Option<&std::path::Path>| {
+        let mut target = codex_sync_target(home.path(), session, "2026-09-25T20:00:00Z", received);
+        target.skips_login_file_sync = true;
+        let mut environment = BTreeMap::from([
+            ("PATH".into(), bin.to_string_lossy().into_owned()),
+            ("AWS_PROFILE".into(), "bedrock".into()),
+            (
+                "MJ_AWS_ASSUME_FIXTURE".into(),
+                fixture.to_string_lossy().into_owned(),
+            ),
+        ]);
+        if let Some(path) = wait_for {
+            environment.insert(
+                "MJ_AWS_WAIT_FOR".into(),
+                path.to_string_lossy().into_owned(),
+            );
+        }
+        target.aws_credentials = Some(mj_core::aws_credentials::AwsCredentialSource {
+            environment,
+            role: Some(mj_core::config::AwsRoleConfig {
+                role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+                session_policy: None,
+                session_policy_arns: Vec::new(),
+                duration_seconds: None,
+                source_identity: false,
+            }),
+        });
+        target
+    };
+    // The slow session is first in the list: a pass that waited for it, or
+    // took sessions in list order, would never install the fast one first.
+    let targets = [
+        target(
+            "slow-session",
+            &scratch.path().join("slow-received"),
+            Some(&fast_received),
+        ),
+        target("fast-session", &fast_received, None),
+    ];
+
+    let outcomes = reconcile_profile(&targets, None).await;
+
+    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| outcome.outcome == Ok(vec![CredentialSyncAction::Pushed])),
+        "{outcomes:?}"
+    );
+}
+
 /// #1160: a sync that a session's auth failure asked for says whether it
 /// reached that session, even when the session's login already matched the
 /// profile's. That match is what shows the profile's own login is the one the
