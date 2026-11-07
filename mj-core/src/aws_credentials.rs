@@ -61,6 +61,49 @@ impl AwsCredentials {
         Ok(credentials)
     }
 
+    /// Credentials from `aws sts assume-role --output json`, whose output
+    /// nests the same four fields under `Credentials`.
+    pub fn from_assume_role(profile: &str, bytes: &[u8]) -> Result<Self> {
+        ensure!(
+            bytes.len() <= crate::credentials::MAX_CREDENTIAL_BYTES,
+            "AWS assume-role output is too large"
+        );
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct Output {
+            credentials: Issued,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct Issued {
+            access_key_id: String,
+            secret_access_key: String,
+            session_token: String,
+            expiration: String,
+        }
+        // Serde's detailed errors can include an offending secret value.
+        let output: Output = serde_json::from_slice(bytes)
+            .map_err(|_| anyhow::anyhow!("AWS assume-role output is not the expected JSON"))?;
+        let credentials = Self {
+            version: 1,
+            access_key_id: output.credentials.access_key_id,
+            secret_access_key: output.credentials.secret_access_key,
+            session_token: Some(output.credentials.session_token),
+            expiration: Some(output.credentials.expiration),
+            profile: profile.to_owned(),
+        };
+        credentials.validate()?;
+        Ok(credentials)
+    }
+
+    /// When these credentials stop working, in milliseconds since the Unix
+    /// epoch. `None` for credentials that do not expire.
+    pub fn expires_at_epoch_millis(&self) -> Option<i64> {
+        chrono::DateTime::parse_from_rfc3339(self.expiration.as_deref()?)
+            .ok()
+            .map(|expiry| expiry.timestamp_millis())
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         ensure!(
             bytes.len() <= crate::credentials::MAX_CREDENTIAL_BYTES,
