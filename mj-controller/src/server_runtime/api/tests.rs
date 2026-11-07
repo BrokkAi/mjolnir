@@ -5158,20 +5158,12 @@ async fn startup_settles_the_park_and_tree_follow_ups_the_previous_daemon_owed()
     )
     .unwrap();
     // The park's stop ran and the daemon went before the check finished.
-    crate::database::record_park_started(
-        "child-1".into(),
-        mj_core::work_facts::ParkFacts::started(known.processes.clone()),
-    )
-    .unwrap();
+    crate::database::record_park_started("child-1".into()).unwrap();
     // A second child's park began, and the daemon went before the stop was
     // known to have run: the child is still recorded as running.
     store_parent_and_child("child-2");
     crate::database::record_finish_facts("child-2".into(), 4, known.clone()).unwrap();
-    crate::database::record_park_started(
-        "child-2".into(),
-        mj_core::work_facts::ParkFacts::started(known.processes.clone()),
-    )
-    .unwrap();
+    crate::database::record_park_started("child-2".into()).unwrap();
     assert_eq!(crate::database::load_unfinished_parks().unwrap().len(), 2);
     assert!(working_tree_followups().is_empty());
 
@@ -5309,8 +5301,9 @@ async fn a_report_does_not_wait_for_a_worker_that_is_not_connected() {
     let listed = child["facts"]["finish"]["lines"].to_string();
     assert!(listed.contains("was not connected"), "{listed}");
     // A collection that finishes afterwards does not replace the recorded facts.
-    let stored =
-        crate::database::record_finish_facts("child-1".into(), 9, observed_work()).unwrap();
+    let stored = crate::database::record_finish_facts("child-1".into(), 9, observed_work())
+        .unwrap()
+        .expect("the same finish answers with what is stored");
     assert!(
         stored
             .render_lines()
@@ -5320,6 +5313,63 @@ async fn a_report_does_not_wait_for_a_worker_that_is_not_connected() {
     );
     let recorded = crate::database::load_work_facts(&["child-1".to_owned()]).unwrap();
     assert_eq!(recorded["child-1"].finish.as_ref(), Some(&stored));
+}
+
+/// Facts only move forward. A late collection for an older finish never
+/// replaces a newer finish's facts, and the follow-up the newer finish's report
+/// owes is kept for when its tree is read.
+#[tokio::test]
+async fn an_older_collection_never_replaces_a_newer_finishs_facts() {
+    if !isolated_parked_test("an_older_collection_never_replaces_a_newer_finishs_facts") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let known = observed_work();
+    let mut pending = known.clone();
+    pending.worktree = mj_core::work_facts::Observed::Pending;
+    assert!(
+        crate::database::record_finish_facts("child-1".into(), 10, pending.clone())
+            .unwrap()
+            .is_some()
+    );
+    let mut report: mj_core::mailbox::SubagentFinishedReport =
+        serde_json::from_value(serde_json::json!({
+            "child_session_id": "child-1", "task_name": "audit deps", "state": "completed",
+            "finished": true, "output": "done", "report_dir": null
+        }))
+        .unwrap();
+    report.facts = Some(pending.clone());
+    crate::database::enqueue_subagent_reports(
+        "parent-1".into(),
+        vec![(
+            mj_core::subagent::SubagentFinishIdentity::Turn {
+                start_position: 1,
+                completed_ordinal: 10,
+                state: "completed".into(),
+            },
+            report,
+        )],
+    )
+    .unwrap();
+
+    // The collection of the finish before it comes back late.
+    let late = crate::database::record_finish_facts("child-1".into(), 9, known.clone()).unwrap();
+    assert!(late.is_none(), "{late:?}");
+    let recorded = crate::database::load_work_facts(&["child-1".to_owned()]).unwrap();
+    assert_eq!(recorded["child-1"].finish_ordinal, Some(10));
+    assert_eq!(recorded["child-1"].finish.as_ref(), Some(&pending));
+    assert!(working_tree_followups().is_empty());
+
+    // The newer finish's tree is still owed, once, as itself.
+    crate::database::record_finish_worktree("child-1".into(), 10, known.worktree.clone()).unwrap();
+    let followups = working_tree_followups();
+    assert_eq!(followups.len(), 1, "{followups:?}");
+    assert!(
+        !followups[0].1.contains("began new work"),
+        "{}",
+        followups[0].1
+    );
 }
 
 /// Whether to use a finish's recorded facts follows from its completed turn,
@@ -5346,7 +5396,13 @@ async fn a_finished_child_whose_last_delivery_failed_is_reported_with_its_record
     };
     conversation.last_turn_outcome = Some(turn);
     crate::database::save_materialized_session(&conversation).unwrap();
-    crate::database::record_finish_facts("child-1".into(), 9, observed_work()).unwrap();
+    // The working tree was still being read when the report went out.
+    let mut pending = observed_work();
+    let tree = std::mem::replace(
+        &mut pending.worktree,
+        mj_core::work_facts::Observed::Pending,
+    );
+    crate::database::record_finish_facts("child-1".into(), 9, pending).unwrap();
     // The parent's newest message to the child failed to deliver.
     let mut parent = active_parent_view("working");
     let snapshot = parent.snapshot.as_mut().unwrap();
@@ -5384,6 +5440,10 @@ async fn a_finished_child_whose_last_delivery_failed_is_reported_with_its_record
     let text = mj_core::mailbox::render_mailbox_event(&event);
     assert!(text.contains("pid 41301"), "{text}");
     assert!(!text.contains("without a completed turn"), "{text}");
+    // The tree is owed to this finish too, and arrives once it is read.
+    assert!(working_tree_followups().is_empty());
+    crate::database::record_finish_worktree("child-1".into(), 9, tree).unwrap();
+    assert_eq!(working_tree_followups().len(), 1);
 }
 
 /// A restart that fails leaves the child parked, so the parent can try

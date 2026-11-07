@@ -1724,17 +1724,10 @@ impl ApiBackend {
                 // completed turn, not from the kind of identity: a finished
                 // child whose last message delivery failed is asked like any
                 // other finish.
-                let completed = match &child.identity {
-                    Some(mj_core::subagent::SubagentFinishIdentity::Turn {
-                        completed_ordinal,
-                        ..
-                    }) => Some(*completed_ordinal),
-                    Some(mj_core::subagent::SubagentFinishIdentity::Terminal {
-                        last_completed_ordinal,
-                        ..
-                    }) => *last_completed_ordinal,
-                    None => None,
-                };
+                let completed = child
+                    .identity
+                    .as_ref()
+                    .and_then(|identity| identity.completed_ordinal());
                 let Some(completed_ordinal) = completed else {
                     // No completed turn: no completion task asks its worker.
                     work_facts.insert(
@@ -1768,7 +1761,7 @@ impl ApiBackend {
                             continue;
                         }
                         let child_id = id.clone();
-                        blocking("record unavailable work facts", move || {
+                        let stored = blocking("record unavailable work facts", move || {
                             crate::database::record_finish_facts(
                                 child_id,
                                 completed_ordinal,
@@ -1777,7 +1770,13 @@ impl ApiBackend {
                                 ),
                             )
                         })
-                        .await?
+                        .await?;
+                        // A newer finish is already stored: this identity is
+                        // behind it, and the pass that follows reports that one.
+                        let Some(facts) = stored else {
+                            continue;
+                        };
+                        facts
                     }
                 };
                 work_facts.insert(id, facts);

@@ -341,11 +341,21 @@ async fn read_worktree(
     if let Some(head) = &mut facts.head {
         // A subject that cannot be read leaves the commit id, which is the
         // fact; an empty subject is not an error.
+        // Of the commit `status` reported, not of whatever HEAD is by now: a
+        // commit made between the two reads would otherwise give the id of one
+        // commit the subject of another.
         if let Ok(subject) = run_git(
             children,
             git,
             directory,
-            &["log", "-1", "--format=%s", "--no-show-signature"],
+            &[
+                "log",
+                "-1",
+                "--format=%s",
+                "--no-show-signature",
+                &head.sha,
+                "--",
+            ],
         )
         .await
         {

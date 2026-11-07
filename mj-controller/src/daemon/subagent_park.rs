@@ -359,7 +359,7 @@ mod tests {
     use super::*;
     use crate::controller::test_support::{IsolatedTest, test_name};
     use crate::targets::{CommandOutput, CommandSpec};
-    use mj_core::work_facts::{Observed, ParkFacts, ProcessFacts, ProcessIdentity, RunningProcess};
+    use mj_core::work_facts::{Observed, ProcessFacts, ProcessIdentity, RunningProcess};
 
     /// A target that answers every command slowly, as an unreachable one does.
     struct SlowTarget(Duration);
@@ -412,11 +412,17 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        crate::database::record_park_started(
+        crate::database::record_finish_facts(
             "park-check-child".into(),
-            ParkFacts::started(snapshot()),
+            3,
+            mj_core::work_facts::WorkFacts {
+                observed_at_ms: 1,
+                processes: snapshot(),
+                worktree: Observed::unavailable("not needed here"),
+            },
         )
         .unwrap();
+        crate::database::record_park_started("park-check-child".into()).unwrap();
     }
 
     /// A write that fails is tried again, with a longer wait each time, until it

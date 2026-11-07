@@ -344,6 +344,24 @@ pub enum SubagentFinishIdentity {
     },
 }
 
+impl SubagentFinishIdentity {
+    /// The ordinal of the turn this finish completed, whatever the kind of
+    /// identity: a terminal one carries the last completed turn, and has none
+    /// for a child that never completed a turn. The one place that says which
+    /// turn a finish's recorded facts belong to.
+    pub fn completed_ordinal(&self) -> Option<u64> {
+        match self {
+            Self::Turn {
+                completed_ordinal, ..
+            } => Some(*completed_ordinal),
+            Self::Terminal {
+                last_completed_ordinal,
+                ..
+            } => *last_completed_ordinal,
+        }
+    }
+}
+
 fn deserialize_terminal_last_completed_ordinal<'de, D>(
     deserializer: D,
 ) -> Result<Option<u64>, D::Error>

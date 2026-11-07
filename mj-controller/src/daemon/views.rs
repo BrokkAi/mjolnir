@@ -375,7 +375,14 @@ impl RuntimeState {
         {
             return Ok(());
         }
-        let facts = match self.connect_to_worker(child_id).await {
+        self.collect_finish_facts_from(child_id, ordinal, self.scan_finish_processes(child_id))
+            .await
+    }
+
+    /// Ask the child's worker for its processes, for a finish's facts. The
+    /// working tree is left pending.
+    async fn scan_finish_processes(&self, child_id: &str) -> mj_core::work_facts::WorkFacts {
+        match self.connect_to_worker(child_id).await {
             Ok(mut client) => {
                 let processes = client
                     .work_facts(true, false)
@@ -393,9 +400,30 @@ impl RuntimeState {
                 }
             }
             Err(reason) => mj_core::work_facts::WorkFacts::unavailable(reason),
-        };
+        }
+    }
+
+    /// [`Self::collect_finish_facts`] with the question to the worker given.
+    /// The answer is stored only as what it is: if the child accepted a newer
+    /// prompt while the question was in flight, the processes may be that work's
+    /// and not the finish's, so they are stored as unavailable, with that reason.
+    pub(super) async fn collect_finish_facts_from(
+        &self,
+        child_id: &str,
+        ordinal: u64,
+        scan: impl std::future::Future<Output = mj_core::work_facts::WorkFacts>,
+    ) -> Result<()> {
+        let mut facts = scan.await;
+        if matches!(facts.processes, mj_core::work_facts::Observed::Known(_))
+            && !self.observation_is_about_finish(child_id, ordinal).await?
+        {
+            facts.processes = mj_core::work_facts::Observed::unavailable(
+                "the child started new work before its processes were read",
+            );
+        }
         let child_id = child_id.to_owned();
-        // Stored once: facts a report's reconciliation recorded first stand.
+        // Stored once, and only forward: facts a report's reconciliation
+        // recorded first stand.
         blocking(move || crate::database::record_finish_facts(child_id, ordinal, facts))
             .await
             .map(|_| ())
@@ -449,7 +477,7 @@ impl RuntimeState {
         // What a tree describes is the finish it was asked for: if the child
         // accepted a newer prompt, it is not that.
         let worktree = if matches!(read, mj_core::work_facts::Observed::Known(_))
-            && self.accepted_work_since(child_id, ordinal).await?
+            && !self.observation_is_about_finish(child_id, ordinal).await?
         {
             mj_core::work_facts::Observed::unavailable(
                 "the child started new work before its working tree was read",
@@ -461,8 +489,15 @@ impl RuntimeState {
         blocking(move || crate::database::record_finish_worktree(child_id, ordinal, worktree)).await
     }
 
-    /// Whether the child accepted a prompt after the finish that completed turn
-    /// `ordinal`, from the store and from the live session, which can be ahead.
+    /// Whether an observation of the child taken after the finish that completed
+    /// turn `ordinal` is still about that finish: the child has accepted no
+    /// newer prompt, in the store or in the live session, which can be ahead.
+    /// The one answer for the processes and the working tree, so they cannot
+    /// disagree about it.
+    async fn observation_is_about_finish(&self, child_id: &str, ordinal: u64) -> Result<bool> {
+        Ok(!self.accepted_work_since(child_id, ordinal).await?)
+    }
+
     async fn accepted_work_since(&self, child_id: &str, ordinal: u64) -> Result<bool> {
         let stored = blocking({
             let child_id = child_id.to_owned();

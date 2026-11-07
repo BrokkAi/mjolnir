@@ -219,11 +219,7 @@ pub(crate) fn enqueue_subagent_reports(
             // its parent that tree. The mark is written with the report, in this
             // transaction; if the tree was stored between the report's building
             // and now, the follow-up is due at once.
-            if tree_pending
-                && let mj_core::subagent::SubagentFinishIdentity::Turn {
-                    completed_ordinal, ..
-                } = &identity
-            {
+            if tree_pending && let Some(completed_ordinal) = identity.completed_ordinal() {
                 transaction.execute(
                     "UPDATE subagent_work_facts SET tree_owed=1
                      WHERE child_session_id=?1 AND finish_ordinal=?2",
@@ -299,17 +295,18 @@ pub(crate) fn load_work_facts(children: &[String]) -> Result<BTreeMap<String, St
 }
 
 /// Record what the child's worker observed for the finish that completed turn
-/// `ordinal`, and return the facts that are stored for it. The facts of a
-/// finish are written once, on the writer thread: when the delegation loop and
-/// the report's reconciliation both reach a finish, whichever is first decides
-/// and the other reads its answer, so neither overwrites the other. A park that
-/// followed an earlier finish is kept, keyed by that finish, until it is
-/// settled.
+/// `ordinal`, and return the facts that are stored for it. Facts only move
+/// forward, decided on the writer thread: they are written when no stored
+/// finish has an ordinal at or after this one. When the delegation loop and the
+/// report's reconciliation both reach a finish, whichever is first decides and
+/// the other reads its answer; and a late collection for an older finish never
+/// replaces a newer one's, so its answer is `None`. A park that followed an
+/// earlier finish is kept, keyed by that finish, until it is settled.
 pub(crate) fn record_finish_facts(
     child: String,
     ordinal: u64,
     facts: mj_core::work_facts::WorkFacts,
-) -> Result<mj_core::work_facts::WorkFacts> {
+) -> Result<Option<mj_core::work_facts::WorkFacts>> {
     let (stored, enqueued) = submit_database_write("record finish facts", move |connection| {
         let transaction = connection.transaction()?;
         let existing: Option<(Option<u64>, Option<String>)> = transaction
@@ -321,9 +318,12 @@ pub(crate) fn record_finish_facts(
             )
             .optional()?;
         if let Some((Some(at), Some(json))) = existing
-            && at == ordinal
+            && at >= ordinal
         {
-            return Ok((serde_json::from_str(&json)?, false));
+            let stored = (at == ordinal)
+                .then(|| serde_json::from_str(&json))
+                .transpose()?;
+            return Ok((stored, false));
         }
         // A finish whose report owed its parent a working tree that was never
         // read is superseded by this one: the parent is told so, once, instead
@@ -348,7 +348,7 @@ pub(crate) fn record_finish_facts(
             params![child, ordinal],
         )?;
         transaction.commit()?;
-        Ok((facts, owed))
+        Ok((Some(facts), owed))
     })?;
     if enqueued {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
@@ -518,17 +518,15 @@ pub(crate) fn record_finish_worktree(
     Ok(())
 }
 
-/// Write the pre-stop snapshot of a park with its unfinished marker, before
-/// the irreversible stop. It is keyed by the finish the park follows (0 for a
-/// child never reported): the park's own record, which a later finish does not
-/// clear and a settlement alone writes. The marker carries what the park needs
-/// of that finish, which a later finish replaces: whether its report promised a
-/// message, and which processes it listed that had already exited. The finish's
-/// ordinal and the marker as stored are returned.
-pub(crate) fn record_park_started(
-    child: String,
-    park: mj_core::work_facts::ParkFacts,
-) -> Result<(u64, mj_core::work_facts::ParkFacts)> {
+/// Write a park's record with its unfinished marker, before the irreversible
+/// stop. It is keyed by the finish the park follows (0 for a child never
+/// reported), and its processes are the ones that finish listed, read in the
+/// same transaction: the park does not scan the child itself, so nothing is
+/// held for it, and a later finish cannot change what this park is about. The
+/// record is the park's own, which a later finish does not clear and a
+/// settlement alone writes. The finish's ordinal and the marker as stored are
+/// returned.
+pub(crate) fn record_park_started(child: String) -> Result<(u64, mj_core::work_facts::ParkFacts)> {
     submit_database_write("record park start", move |connection| {
         let transaction = connection.transaction()?;
         let ordinal = current_finish_ordinal(&transaction, &child)?;
@@ -542,15 +540,10 @@ pub(crate) fn record_park_started(
             .flatten()
             .map(|text| serde_json::from_str(&text))
             .transpose()?;
-        let mut park = park;
-        if let Some(finish) = &finish {
-            park.promised = finish
-                .running_processes()
-                .is_some_and(|running| running > 0);
-            if let Some(listed) = finish.processes.known() {
-                park = park.with_finish(listed);
-            }
-        }
+        let park = mj_core::work_facts::ParkFacts::started(match finish {
+            Some(finish) => finish.processes,
+            None => mj_core::work_facts::Observed::unavailable("no finish had been reported"),
+        });
         transaction.execute(
             "INSERT INTO subagent_park_facts(child_session_id, finish_ordinal, park_json)
              VALUES (?1, ?2, ?3)
@@ -673,10 +666,6 @@ pub(crate) fn record_park_outcome_expecting(
             return Ok(false);
         };
         let relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&stored)?;
-        let park = match &marker {
-            Some(marker) => park.settling(marker),
-            None => park,
-        };
         transaction.execute(
             "INSERT INTO subagent_park_facts(child_session_id, finish_ordinal, park_json)
              VALUES (?1, ?2, ?3)

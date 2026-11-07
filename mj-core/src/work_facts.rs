@@ -121,9 +121,11 @@ pub struct ChangedPath {
     pub path: String,
 }
 
-/// What a park did to the processes the child's agent had left running. It is
-/// recorded in one write with the park and its notification, so it exists only
-/// for a park whose stop script ran to its check.
+/// What a park found of the processes the finish report listed. The park does
+/// not look at the child's processes itself (it holds the child's idle
+/// reservation, and a scan of them would hold it too): its record takes the
+/// list from the finish it follows, and the check after the stop says which of
+/// them still run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParkFacts {
     /// The stop was begun and its outcome is not recorded. The counts mean
@@ -131,7 +133,7 @@ pub struct ParkFacts {
     /// that died between the stop and its record finds at startup.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pending: bool,
-    /// The processes seen just before the stop script ran.
+    /// The processes the finish report listed, which the check asks about.
     pub snapshot: Observed<ProcessFacts>,
     /// Processes no longer running at the check after the stop; zero when
     /// `unverified`. The park may have stopped them or they may have exited
@@ -149,27 +151,12 @@ pub struct ParkFacts {
     /// afterwards, so the counts mean nothing then either.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unconfirmed: Option<String>,
-    /// The finish this park follows listed running processes, so its report told
-    /// the parent that a later message would say what happened to each. Recorded
-    /// when the park begins, from that finish's own facts: a later finish
-    /// replaces them while the park's check is still running.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub promised: bool,
     /// The part of `snapshot.shown` that was no longer running after the stop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gone_shown: Vec<RunningProcess>,
     /// The part of `snapshot.shown` that still ran after the stop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub survived_shown: Vec<RunningProcess>,
-    /// Processes the finish report listed that were not running when the park
-    /// began: they exited before it. The finish report promised the parent an
-    /// account of each process it listed, and a process that is in no
-    /// snapshot would otherwise go unaccounted for.
-    #[serde(default)]
-    pub exited_before: u32,
-    /// The listed ones among them that the finish report showed.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub exited_before_shown: Vec<RunningProcess>,
 }
 
 impl ParkFacts {
@@ -183,11 +170,8 @@ impl ParkFacts {
             survived: 0,
             unverified: None,
             unconfirmed: None,
-            promised: false,
             gone_shown: Vec::new(),
             survived_shown: Vec::new(),
-            exited_before: 0,
-            exited_before_shown: Vec::new(),
         };
         if let Observed::Known(processes) = &park.snapshot {
             let alive = |pid: u32| survivors.contains(&pid);
@@ -221,41 +205,6 @@ impl ParkFacts {
         park
     }
 
-    /// Account for the processes the finish report listed against the ones this
-    /// park saw: those not in its pre-stop snapshot had exited before the park.
-    /// A park whose snapshot is unavailable cannot say, and records nothing.
-    #[must_use]
-    pub fn with_finish(mut self, finish: &ProcessFacts) -> Self {
-        let Observed::Known(snapshot) = &self.snapshot else {
-            return self;
-        };
-        let seen = |identity: &ProcessIdentity| snapshot.identities.contains(identity);
-        let exited: Vec<u32> = finish
-            .identities
-            .iter()
-            .filter(|identity| !seen(identity))
-            .map(|identity| identity.pid)
-            .collect();
-        self.exited_before = u32::try_from(exited.len()).unwrap_or(u32::MAX);
-        self.exited_before_shown = finish
-            .shown
-            .iter()
-            .filter(|process| exited.contains(&process.pid))
-            .cloned()
-            .collect();
-        self
-    }
-
-    /// This outcome as the settlement of `marker`, the park as it was recorded
-    /// when it began: the account of the finish it followed travels with it.
-    #[must_use]
-    pub fn settling(mut self, marker: &ParkFacts) -> Self {
-        self.promised = marker.promised;
-        self.exited_before = marker.exited_before;
-        self.exited_before_shown = marker.exited_before_shown.clone();
-        self
-    }
-
     /// A park whose check after the stop could not run.
     pub fn unverified(snapshot: Observed<ProcessFacts>, reason: impl Into<String>) -> Self {
         let mut park = Self::settled(snapshot, &[]);
@@ -282,18 +231,14 @@ impl ParkFacts {
             .map_or(0, |processes| processes.running)
     }
 
-    /// Whether the parent hears of this park. It does when processes were no
-    /// longer running afterwards, one survived, or what happened to running
-    /// processes could not be checked; and always when the finish report
-    /// listed running processes (`promised`), which told the parent a later
-    /// message would say what happened to each, even if the park could not
-    /// observe them.
+    /// Whether the parent hears of this park: when some of the processes the
+    /// finish report listed were no longer running afterwards, or survived, or
+    /// when what happened to them could not be checked. The finish report told
+    /// the parent that a later message would say what happened to each.
     pub fn is_news(&self) -> bool {
         !self.pending
-            && (self.promised
-                || self.gone > 0
+            && (self.gone > 0
                 || self.survived > 0
-                || self.exited_before > 0
                 || ((self.unverified.is_some() || self.unconfirmed.is_some())
                     && self.observed_running() > 0))
     }
@@ -312,13 +257,13 @@ impl ParkFacts {
         }
         match (&self.snapshot, &self.unverified) {
             (Observed::Unavailable { reason }, _) => lines.push(format!(
-                "Park: the processes could not be observed before the stop ({reason})"
+                "Park: the finish report could not list the processes ({reason})"
             )),
             (Observed::Pending, _) => {
-                lines.push("Park: the processes were not read before the stop".into());
+                lines.push("Park: the finish report did not list the processes".into());
             }
             (Observed::Known(processes), _) if processes.running == 0 => {
-                lines.push("Park: no processes were running".into());
+                lines.push("Park: the finish report listed no running processes".into());
             }
             (Observed::Known(processes), Some(reason)) => lines.push(format!(
                 "Park: what happened to {} processes could not be checked ({reason})",
@@ -337,12 +282,6 @@ impl ParkFacts {
             &self.survived_shown,
             self.survived,
         ));
-        if self.exited_before > 0 {
-            lines.push(format!(
-                "  {} listed in the finish report had exited before the park",
-                self.exited_before
-            ));
-        }
         lines
     }
 
@@ -366,45 +305,18 @@ impl ParkFacts {
             }
             return lines;
         }
-        match (&self.snapshot, &self.unverified) {
-            (Observed::Pending, _) => {
-                lines.push(
-                    "The processes listed in the finish report were not read when the park began. Parking stops the harness and the processes under it; a detached process may keep running, so check on them yourself if they matter."
-                        .into(),
-                );
-                return lines;
-            }
-            (Observed::Unavailable { reason }, _) => {
-                lines.push(format!(
-                    "The processes listed in the finish report could not be checked when the park began: {reason}. Parking stops the harness and the processes under it; a detached process may keep running, so check on them yourself if they matter."
-                ));
-                return lines;
-            }
-            (Observed::Known(processes), _) if processes.running == 0 => {
-                lines.push(
-                    "None of the processes listed in the finish report was still running when the park began; they had exited before it:"
-                        .into(),
-                );
-                lines.extend(process_lines(
-                    None,
-                    &self.exited_before_shown,
-                    self.exited_before,
-                ));
-                return lines;
-            }
-            (Observed::Known(processes), Some(reason)) => {
-                lines.push(format!(
-                    "The park ran, but what happened to the {} processes the child's agent had left running could not be checked: {reason}.",
-                    processes.running
-                ));
-                lines.extend(
-                    processes
-                        .shown
-                        .iter()
-                        .map(|process| format!("  {}", render_process(process))),
-                );
-            }
-            (Observed::Known(_), None) => {}
+        // Only a park of listed running processes is sent (`is_news`).
+        if let (Observed::Known(processes), Some(reason)) = (&self.snapshot, &self.unverified) {
+            lines.push(format!(
+                "The park ran, but what happened to the {} processes the child's agent had left running could not be checked: {reason}.",
+                processes.running
+            ));
+            lines.extend(
+                processes
+                    .shown
+                    .iter()
+                    .map(|process| format!("  {}", render_process(process))),
+            );
         }
         if self.gone > 0 {
             lines.push(format!(
@@ -426,18 +338,6 @@ impl ParkFacts {
                 if self.survived == 1 { "is" } else { "are" }
             ));
             lines.extend(process_lines(None, &self.survived_shown, self.survived));
-        }
-        if self.exited_before > 0 {
-            lines.push(format!(
-                "{} {} the finish report listed had already exited before the park began:",
-                self.exited_before,
-                plural(self.exited_before)
-            ));
-            lines.extend(process_lines(
-                None,
-                &self.exited_before_shown,
-                self.exited_before,
-            ));
         }
         lines
     }

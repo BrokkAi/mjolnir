@@ -277,6 +277,24 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
 - Decision (seventh review, E): Whether to use a finish's recorded facts follows from its completed turn, taken from the identity's `completed_ordinal` or a terminal identity's `last_completed_ordinal`. A finished child whose last message delivery failed is therefore asked (reported with recorded facts, or waited for, or marked not connected) like any other finish; only a child with no completed turn says its worker was not asked. Test `a_finished_child_whose_last_delivery_failed_is_reported_with_its_recorded_facts`.
   Date/Author: 2026-11-07 / implementing agent, from review.
 
+- Decision (eighth review, 1; SUPERSEDES the pre-stop snapshot in every earlier park entry, and the round-7 C "promised" and exited-before account): The park no longer scans the child's processes. The scan ran under the idle reservation and the completion's handoff admission for up to the relay's 15 s request deadline, on observation alone. The park's record (`record_park_started(child)`) takes its process list from the finish it follows, read in the same writer-thread transaction, and the survivor check after the stop, outside admission, says which of them still run. The follow-up says which of the finish's processes are no longer running and which survived, and does not say the park stopped them (without the scan a kill cannot be told from an exit). Removed: `IdleWorkspaceLease::process_facts`, `ParkFacts.promised`, `exited_before(_shown)`, `with_finish`, `settling`, the "no process was running when the park began" and unavailable-snapshot messages (a park is sent only for listed running processes, which `is_news` now says by itself). `ParkFacts` lost fields; the stored shape stays readable (serde ignores nothing it needs). Test `a_park_records_what_it_stopped_and_spared_and_tells_the_parent_once` asserts the stand-in worker received no request.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (eighth review, 2): Finish facts only move forward. `record_finish_facts` writes when no stored finish has an ordinal at or after this one, on the writer thread, and answers `None` when a newer finish is stored (the reconcile then leaves that identity for the pass that reports the newer one). Test `an_older_collection_never_replaces_a_newer_finishs_facts` (the owed follow-up of the newer finish is kept).
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (eighth review, 3): `SubagentFinishIdentity::completed_ordinal()` is the one answer to which turn a finish completed, for both identity kinds; the reconcile gate and the tree-owed mark in `enqueue_subagent_reports` both call it. A terminal identity with a completed turn now owes and receives the tree follow-up. The round-7 E test was extended to a pending tree delivered after the read.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (eighth review, 4): `observation_is_about_finish` is the one predicate (no newer prompt accepted, from the store and the live session) for both the process scan (`collect_finish_facts_from`) and the working tree. A scan that was in flight when a prompt was accepted is stored as unavailable, "the child started new work before its processes were read". Test `processes_read_after_a_newer_prompt_was_accepted_are_not_the_finishs`.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (eighth review, 5): The commit subject is read with `git log -1 --format=%s <sha from status> --`, not on HEAD. The existing golden-like worktree test covers the subject; no race test (the window is between two Git processes).
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (eighth review, 6): When the lifecycle write fails after a successful stop, the park is settled at once as "could not be confirmed" with the error (`report_unconfirmed_park`, the helper the failed-stop path uses), so no marker stays pending until a restart. No dedicated test: the writer-thread failure cannot be injected from outside the database module, and the helper is covered by the failed-stop test.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
 
 ## Outcomes & Retrospective
 

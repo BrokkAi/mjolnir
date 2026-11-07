@@ -711,6 +711,110 @@ mod tests {
         ));
     }
 
+    /// A prompt accepted while a finish's process scan is in flight makes the
+    /// scan unfit for that finish: it may show the new work's processes. It is
+    /// stored as unavailable, with that reason, by the same predicate the working
+    /// tree uses; with no newer prompt the scan stands.
+    #[tokio::test]
+    async fn processes_read_after_a_newer_prompt_was_accepted_are_not_the_finishs() {
+        const CHILD: &str = "MJ_TEST_DELEGATION_PROCESS_SCAN_RACE";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "processes_read_after_a_newer_prompt_was_accepted_are_not_the_finishs",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "delegation-process-scan-race")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        use mj_core::work_facts::{Observed, ProcessFacts, ProcessIdentity, RunningProcess};
+        let _writer = crate::database::install_isolated_test_writer();
+        let workspace = crate::database::create_workspace("process scan race").unwrap();
+        let parent = crate::daemon::tests::runtime_test_session(
+            "parent",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        let child = crate::daemon::tests::runtime_test_session(
+            "child",
+            &workspace.id,
+            mj_core::state::SessionState::Running,
+        );
+        crate::database::save_session(&parent).unwrap();
+        crate::database::save_subagent_session(
+            &child,
+            &crate::daemon::tests::runtime_test_subagent("child", "parent"),
+        )
+        .unwrap();
+        let scan = || mj_core::work_facts::WorkFacts {
+            observed_at_ms: 1,
+            processes: Observed::Known(ProcessFacts {
+                unattributed: 0,
+                running: 1,
+                shown: vec![RunningProcess {
+                    pid: 41301,
+                    elapsed_secs: 5,
+                    command: "cargo build".into(),
+                    detached: false,
+                }],
+                omitted: 0,
+                identities: vec![ProcessIdentity {
+                    pid: 41301,
+                    start: "boot:1".into(),
+                }],
+            }),
+            worktree: Observed::Pending,
+        };
+        let state = crate::daemon::tests::test_runtime_state();
+        // Nothing newer was accepted: the scan stands.
+        state
+            .collect_finish_facts_from("child", 9, async { scan() })
+            .await
+            .unwrap();
+        let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
+        assert!(matches!(
+            recorded["child"].finish.as_ref().unwrap().processes,
+            Observed::Known(_)
+        ));
+
+        // The parent's next prompt is accepted while the scan of the next
+        // finish is in flight.
+        state
+            .collect_finish_facts_from("child", 10, async {
+                let mut conversation = mj_core::state::MaterializedSession::empty("child");
+                conversation.applied_event_ordinal = 12;
+                conversation.applied_event_digest = format!("{:064x}", 12);
+                conversation
+                    .queued_prompts
+                    .push(mj_core::state::MaterializedQueuedPrompt {
+                        command_id: "next".into(),
+                        kind: Default::default(),
+                        content: Vec::new(),
+                        queued_at_ms: 2,
+                        accepted_ordinal: Some(12),
+                    });
+                crate::database::save_materialized_session(&conversation).unwrap();
+                scan()
+            })
+            .await
+            .unwrap();
+        let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
+        let finish = recorded["child"].finish.as_ref().unwrap();
+        assert_eq!(recorded["child"].finish_ordinal, Some(10));
+        assert!(
+            matches!(
+                &finish.processes,
+                Observed::Unavailable { reason }
+                    if reason.contains("started new work before its processes were read")
+            ),
+            "{:?}",
+            finish.processes
+        );
+    }
+
     #[tokio::test]
     async fn a_tree_task_that_panics_stores_the_tree_as_unavailable() {
         const CHILD: &str = "MJ_TEST_DELEGATION_TREE_PANIC";

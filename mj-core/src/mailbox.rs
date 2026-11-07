@@ -999,7 +999,7 @@ mod tests {
             let Observed::Known(processes) = busy.processes else {
                 unreachable!()
             };
-            // The detached rustc survived; the other eight stopped.
+            // The detached rustc survived; the other eight were no longer running.
             let survivors = [41301];
             ParkFacts::settled(Observed::Known(processes), &survivors)
         }
@@ -1009,20 +1009,6 @@ mod tests {
                 worktree: Observed::Pending,
                 ..busy()
             }
-        }
-
-        pub fn park_with_an_earlier_exit() -> ParkFacts {
-            let busy = busy();
-            let Observed::Known(listed) = busy.processes else {
-                unreachable!()
-            };
-            // At the park only the second and third listed processes still ran.
-            let mut at_park = listed.clone();
-            at_park.identities = listed.identities[1..3].to_vec();
-            at_park.shown = listed.shown[1..3].to_vec();
-            at_park.running = 2;
-            at_park.omitted = 0;
-            ParkFacts::settled(Observed::Known(at_park), &[41301]).with_finish(&listed)
         }
 
         pub fn park_unverified() -> ParkFacts {
@@ -1299,17 +1285,6 @@ mod tests {
                 child_name: None,
                 worktree: Box::new(fact_fixture::busy().worktree),
             }),
-            // A process the finish listed had exited before the park began.
-            parked("child-9", "Build docs", fact_fixture::park_with_an_earlier_exit()),
-            // The finish listed processes, and the park could not observe them.
-            parked(
-                "child-8",
-                "Parse docs",
-                crate::work_facts::ParkFacts::settled(
-                    crate::work_facts::Observed::unavailable("the worker could not be asked"),
-                    &[],
-                ),
-            ),
             event(MailboxEventBody::NewGithubItem {
                 kind: GithubItemKind::PullRequest,
                 number: 4623,

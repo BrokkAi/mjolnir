@@ -85,16 +85,6 @@ impl IdleWorkspaceLease {
         self.lease.connection_mut().protocol_version()
     }
 
-    /// What the reserved worker's agent left running, asked on the lease's own
-    /// connection so the answer is the state the stop will act on. Processes
-    /// only: the lease holds the idle reservation and the admitted completion,
-    /// so a Git read of a large working tree has no place in it.
-    pub(in crate::controller) async fn process_facts(
-        &mut self,
-    ) -> Result<mj_core::work_facts::WorkFacts> {
-        self.lease.connection_mut().work_facts(true, false).await
-    }
-
     pub(in crate::controller) async fn verify_for_upgrade(&mut self) -> Result<bool> {
         let mut snapshot = self.lease.connection_mut().sync().await?;
         if !checkpoint_barrier_is_ready(&snapshot, &self.command_id) {
