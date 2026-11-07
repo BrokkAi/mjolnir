@@ -214,6 +214,39 @@ pub fn without_crashed_mark(name: &str) -> (std::borrow::Cow<'_, str>, bool) {
     }
 }
 
+/// What a managed log file's name says. This is the one reader of the
+/// `mj-<kind>-<time>-<pid>[.crashed].log` shape; log retention and the
+/// previous-daemon report both read names through it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogName {
+    /// The process kind label (`daemon`, `tui`, `cli`), or `None` for the
+    /// older `mj-<time>-<pid>.log` names, which carried no kind.
+    pub kind: Option<String>,
+    pub started: String,
+    /// `None` when the pid field does not parse.
+    pub pid: Option<u32>,
+    pub crashed: bool,
+}
+
+/// Parse a managed log file name in either format, with or without the
+/// crashed mark, or `None` when `name` is not one.
+pub fn parse_log_name(name: &str) -> Option<LogName> {
+    let (name, crashed) = without_crashed_mark(name);
+    let stem = name.strip_prefix("mj-")?.strip_suffix(".log")?;
+    let parts: Vec<&str> = stem.split('-').collect();
+    let (kind, started, pid) = match parts.as_slice() {
+        [kind, started, pid] => (Some((*kind).to_owned()), *started, *pid),
+        [started, pid] => (None, *started, *pid),
+        _ => return None,
+    };
+    Some(LogName {
+        kind,
+        started: started.to_owned(),
+        pid: pid.parse().ok(),
+        crashed,
+    })
+}
+
 /// The start time and process of a daemon-kind log, read from its file name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonLogName {
@@ -225,13 +258,12 @@ pub struct DaemonLogName {
 /// Parse `mj-daemon-<time>-<pid>.log`, with or without the crashed mark. The
 /// `mj node` process that serves a daemon writes the same kind of log.
 pub fn parse_daemon_log_name(name: &str) -> Option<DaemonLogName> {
-    let (name, crashed) = without_crashed_mark(name);
-    let stem = name.strip_prefix("mj-daemon-")?.strip_suffix(".log")?;
-    let (started, pid) = stem.split_once('-')?;
+    let name = parse_log_name(name)?;
+    (name.kind.as_deref() == Some("daemon")).then_some(())?;
     Some(DaemonLogName {
-        started: started.to_owned(),
-        pid: pid.parse().ok()?,
-        crashed,
+        started: name.started,
+        pid: name.pid?,
+        crashed: name.crashed,
     })
 }
 
