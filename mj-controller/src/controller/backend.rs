@@ -569,7 +569,17 @@ pub(crate) fn local_engine_readiness(
     let result = match kind {
         "local-podman" => targets::verify_local_podman(executor).map(|_| ()),
         "local-docker" => targets::verify_local_docker(executor).map(|_| ()),
-        "apple-container" => targets::ensure_apple_container_runtime(executor).map(|_| ()),
+        // Observe only: opening the launch options must not start a service
+        // the user may have stopped. Starting stays with daemon startup and
+        // the launch preflight.
+        "apple-container" => {
+            targets::apple_container_runtime_status(executor).and_then(|status| match status {
+                targets::AppleContainerStatus::Running => Ok(()),
+                targets::AppleContainerStatus::Stopped { status, detail } => {
+                    anyhow::bail!("container system status exited with status {status}: {detail}")
+                }
+            })
+        }
         _ => return None,
     };
     Some(match result {
