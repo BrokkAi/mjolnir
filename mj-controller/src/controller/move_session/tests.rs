@@ -3557,6 +3557,7 @@ fn in_place_move_reopens_gate_after_lost_admission_close_reply() {
 /// A Native source has no parent tools, but its worker still has a request
 /// queue (`ask_oracle`, `request_review`), so an in-place Move closes it first.
 #[cfg(unix)]
+// Hard-won: #1470: the child-stop hook could stop daemon-side children after the quota check.
 #[test]
 fn in_place_move_drains_the_queue_of_a_native_source() {
     let name = test_name("in_place_move_drains_the_queue_of_a_native_source");
@@ -3589,13 +3590,16 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
     source.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
     crate::database::save_session(source).unwrap();
     let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
-    run_in_place_move(
-        &mut controller,
-        &mut operation,
-        &worker_root,
-        &RecordingProcessExecutor::default(),
-    )
-    .unwrap();
+    operation.quota_stop_reason = Some("weekly quota exhausted".into());
+    operation.quota_continuation = Some(mj_core::state::QuotaMoveContinuation::Prompt);
+    operation.queue = ResumeQueueDisposition::Start;
+    let executor = RecordingProcessExecutor::default();
+    run_in_place_move(&mut controller, &mut operation, &worker_root, &executor).unwrap();
+    assert_eq!(
+        executor.move_stop_calls(),
+        0,
+        "an automatic Move must never invoke the hook that re-reads and stops children"
+    );
 
     let queue: serde_json::Value =
         serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();

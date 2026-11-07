@@ -12,6 +12,9 @@ use sha2::{Digest, Sha256};
 use super::lifecycle::SourceTargetDisposition;
 use super::{Controller, SessionResumeOptions, now};
 
+/// Static Move safety refusals that may be written to the worker's quota journal.
+pub(crate) const QUOTA_MOVE_SAFETY_REFUSAL: &str = "quota_move_safety";
+
 /// Execution and retained queue admission are phases of one ownership record.
 #[derive(Clone, Copy)]
 enum MoveOwnership {
@@ -1424,10 +1427,11 @@ impl Controller {
         );
         // Preserve the warning the person accepted, including old workers
         // whose child admission cannot be drained before interruption.
-        ensure!(
-            !checked.stops_subagents || prepared.stops_subagents,
-            "sub-agents appeared after preparation; prepare and confirm Move again before stopping them"
-        );
+        if checked.stops_subagents && !prepared.stops_subagents {
+            return Err(mj_core::refusal::Refusal::precondition(
+                "sub-agents appeared after preparation; prepare and confirm Move again before stopping them"
+            ).with_code(QUOTA_MOVE_SAFETY_REFUSAL).into());
+        }
         checked.stops_subagents = prepared.stops_subagents;
         let queue = request.queue.unwrap_or(ResumeQueueDisposition::Discard);
         let source = self.state.sessions[&id].clone();
@@ -2281,7 +2285,13 @@ impl Controller {
                             }
                             bail!("{error}; close or finish those children before moving to this harness");
                         }
-                        if let Err(error) = executor.before_move_source_stop().await {
+                        // An automatic Move owns no child stop. In particular,
+                        // daemon-side children registered after the empty check
+                        // must survive; never re-read and stop them in the hook.
+                        let stop_confirmed = operation.quota_stop_reason.is_none()
+                            && operation.accepted_preparation.as_ref()
+                                .is_none_or(|accepted| accepted.stops_subagents);
+                        if stop_confirmed && let Err(error) = executor.before_move_source_stop().await {
                             if source_has_request_queue {
                                 source_relay
                                     .reopen_subagent_mutations(&id)

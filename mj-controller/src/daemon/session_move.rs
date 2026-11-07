@@ -3,8 +3,65 @@
 use super::*;
 use mj_core::state::MoveOperation;
 
-/// Only this static safety refusal is intended for the worker's quota journal.
-pub(super) const QUOTA_MOVE_SAFETY_REFUSAL: &str = "quota_move_safety";
+pub(super) fn public_quota_failure(error: &anyhow::Error, reference: &str) -> String {
+    // General configuration refusals can contain parser source lines. Only
+    // the Move safety check's explicit code certifies journal-safe text.
+    Refusal::of(error)
+        .filter(|refusal| {
+            refusal.code() == Some(crate::controller::move_session::QUOTA_MOVE_SAFETY_REFUSAL)
+        })
+        .map(|refusal| refusal.message().to_owned())
+        .unwrap_or_else(|| format!("details are in the daemon log under reference {reference}"))
+}
+
+pub(super) fn quota_move_failure_notice(
+    result: &Result<MoveOutcome>,
+    session: &str,
+    reference: &str,
+    destination: &str,
+) -> Option<String> {
+    let (detail, recovery) = match result {
+        Ok(outcome) if outcome.outcome == "completed" => return None,
+        Ok(outcome) => {
+            tracing::warn!(session, reference, outcome=%outcome.outcome, error=?outcome.error,
+                "quota profile Move did not complete");
+            let error = anyhow::Error::msg(
+                outcome
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| format!("Move {}", outcome.outcome)),
+            );
+            (
+                public_quota_failure(&error, reference),
+                outcome.recovery.as_deref(),
+            )
+        }
+        Err(error) => {
+            tracing::warn!(session, reference, error=%format!("{error:#}"), "quota profile Move failed");
+            (public_quota_failure(error, reference), None)
+        }
+    };
+    Some(format!(
+        "The automatic switch to profile {destination} after the quota stop failed: {detail}.{}",
+        recovery.map(|text| format!(" {text}")).unwrap_or_default()
+    ))
+}
+
+pub(super) async fn record_quota_move_failure(
+    control: &SessionManagerControl,
+    session: &str,
+    operation: &str,
+    text: String,
+) -> Result<()> {
+    let handle = control.session(session.to_owned()).await?;
+    handle
+        .submit(
+            format!("quota-move-failure-{operation}"),
+            RelayCommand::RecordNotice { text },
+        )
+        .await?;
+    Ok(())
+}
 
 pub(super) fn load_controller_for_resume(request: &ResumeSessionRequest) -> Result<Controller> {
     let mut controller = Controller::load()?;
@@ -217,7 +274,7 @@ impl RuntimeState {
                 "Cannot switch profiles automatically: {}",
                 blockers.join("; ")
             ))
-            .with_code(QUOTA_MOVE_SAFETY_REFUSAL)
+            .with_code(crate::controller::move_session::QUOTA_MOVE_SAFETY_REFUSAL)
             .into());
         }
         Ok(MoveSessionRequest {
@@ -235,58 +292,20 @@ impl RuntimeState {
     ) -> Result<()> {
         let session_id = request.preparation.selection.session_id.clone();
         let operation_id = request.preparation.operation_id.clone();
-        let source_profile = request.preparation.source_profile_id.clone();
-        let destination_profile = request
-            .preparation
-            .selection
-            .profile_id
-            .clone()
-            .unwrap_or_default();
         let capacity = self.reserve_container_capacity_for_move(&request).await?;
         let result =
             self.admit_move_session(request, capacity, None, Some((reason, continuation)))?;
         let state = self.clone();
         tokio::spawn(async move {
             let channel = result.clone();
-            // The error, and what the Move record says to do next when it has one.
-            let failure = match Self::wait_lifecycle_result(result).await {
-                Ok(DaemonLifecycleResult::Move(outcome)) if outcome.outcome == "completed" => None,
-                Ok(DaemonLifecycleResult::Move(outcome)) => {
-                    tracing::warn!(%session_id, %operation_id, outcome = %outcome.outcome,
-                        error = ?outcome.error, "quota profile Move did not complete");
-                    Some((
-                        outcome
-                            .error
-                            .unwrap_or_else(|| format!("Move {}", outcome.outcome)),
-                        outcome.recovery,
-                    ))
-                }
-                Ok(_) => {
-                    tracing::error!(%session_id, %operation_id,
-                        "quota profile Move returned an unrelated lifecycle result");
-                    Some(("Move returned an unrelated lifecycle result".into(), None))
-                }
+            match Self::wait_lifecycle_result(result).await {
+                Ok(DaemonLifecycleResult::Move(_)) => {}
+                Ok(_) => tracing::error!(%session_id, %operation_id,
+                    "quota Move returned an unrelated lifecycle result"),
                 Err(error) => {
-                    tracing::warn!(%session_id, %operation_id, error = %format!("{error:#}"),
-                    "quota profile Move failed");
-                    Some((format!("{error:#}"), None))
+                    tracing::warn!(%session_id, %operation_id, error=%format!("{error:#}"),
+                    "quota Move lifecycle failed")
                 }
-            };
-            if let Some((error, recovery)) = failure {
-                let current_profile = state
-                    .owner()
-                    .controller()
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .map(|session| session.last_profile.clone())
-                    .unwrap_or(source_profile);
-                // A Move that stopped the source leaves no worker to retry the
-                // quota stop; the recovery text is how the user gets it back.
-                let next = recovery.map(|text| format!(" {text}")).unwrap_or_default();
-                state.push_notice(&session_id, format!(
-                    "The automatic switch to profile {destination_profile} after the quota stop failed: {error}. The session is on profile {current_profile}.{next}"
-                ));
             }
             state.remove_completed_lifecycle(&channel);
         });
@@ -322,6 +341,12 @@ impl RuntimeState {
             &quota_move,
         ))?;
         let session_id = selection.session_id.clone();
+        let quota_failure = quota_move.as_ref().map(|_| {
+            (
+                operation_id.clone(),
+                selection.profile_id.clone().unwrap_or_default(),
+            )
+        });
         let result = self.admit_lifecycle(
             session_id.clone(),
             LifecycleKind::Move,
@@ -348,14 +373,26 @@ impl RuntimeState {
                                 .await
                         },
                     )
-                    .await
-                    .map(DaemonLifecycleResult::Move);
+                    .await;
+                // Report before completing the admitted lifecycle, including
+                // refusals that happen before any Move record can be saved.
+                if let Some((operation, destination)) = quota_failure
+                    && let Some(text) = quota_move_failure_notice(&result, &session_id, &operation, &destination)
+                {
+                    state.push_notice(&session_id, text.clone());
+                    if let Err(error) = record_quota_move_failure(
+                        &state.session_manager, &session_id, &operation, text,
+                    ).await {
+                        tracing::warn!(%session_id, %operation, error=%format!("{error:#}"),
+                            "could not record quota Move failure in the conversation; the daemon log retains its reference");
+                    }
+                }
                 if result.is_err() {
                     state
                         .tell_live_parent_about_stopped_subagents(&session_id)
                         .await;
                 }
-                result
+                result.map(DaemonLifecycleResult::Move)
             },
         )?;
         self.set_lifecycle_resume_destination(

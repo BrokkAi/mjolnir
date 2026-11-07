@@ -351,17 +351,6 @@ pub(super) async fn prepare(
     Ok(Plan::Wait(fallback))
 }
 
-fn public_failure(error: &anyhow::Error, reference: &str) -> String {
-    // General configuration refusals can contain parser source lines. Only
-    // the quota safety check's explicit code certifies journal-safe text.
-    mj_core::refusal::Refusal::of(error)
-        .filter(|refusal| {
-            refusal.code() == Some(crate::daemon::session_move::QUOTA_MOVE_SAFETY_REFUSAL)
-        })
-        .map(|refusal| refusal.message().to_owned())
-        .unwrap_or_else(|| format!("details are in the daemon log under reference {reference}"))
-}
-
 pub(super) fn preparation_refused(
     notice: &mut String,
     session: &str,
@@ -374,7 +363,7 @@ pub(super) fn preparation_refused(
         notice,
         &format!(
             " Automatic Move to profile {profile} was refused: {}.",
-            public_failure(error, reference)
+            crate::daemon::session_move::public_quota_failure(error, reference)
         ),
     );
 }
@@ -491,7 +480,7 @@ pub(super) async fn schedule(
             append_bounded(
                 &mut fallback.notice,
                 &format!(" Could not start the Move to profile {destination}: {}.",
-                    public_failure(&error, &reference)),
+                    crate::daemon::session_move::public_quota_failure(&error, &reference)),
             );
             handle
                 .submit(

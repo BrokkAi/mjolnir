@@ -1553,6 +1553,9 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
         "preparation-private",
         "preparation-marked-private",
         "preparation-safe",
+        "late-refused",
+        "late-private",
+        "late-outcome",
     ] {
         let moves = !matches!(
             case,
@@ -1607,6 +1610,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                 })
             },
         };
+        let failure_control = environment.control.clone();
         let mut blocked = view("one", true);
         if case == "goal" {
             let snapshot = blocked.snapshot.as_mut().unwrap();
@@ -1632,7 +1636,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             let error = if case == "preparation-safe" {
                 private_quota_move_error().context(mj_core::refusal::Refusal::precondition(
                     "Cannot switch profiles automatically: existing sub-agents would be stopped",
-                ).with_code(crate::daemon::session_move::QUOTA_MOVE_SAFETY_REFUSAL))
+                ).with_code(crate::controller::move_session::QUOTA_MOVE_SAFETY_REFUSAL))
             } else if case == "preparation-marked-private" {
                 let error = private_quota_move_error();
                 let message = format!("{error:#}");
@@ -1745,6 +1749,78 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             reply.send(Ok(())).unwrap();
         }
         task.await.unwrap().unwrap();
+        if matches!(case, "late-refused" | "late-private" | "late-outcome") {
+            // No Move record exists for preflight errors. The worker must
+            // receive the failure after its earlier "Switching" notice.
+            let outcome: Result<mj_core::state::MoveOutcome> = if case == "late-refused" {
+                Err(private_quota_move_error().context(
+                    mj_core::refusal::Refusal::precondition(
+                        "sub-agents appeared after preparation; prepare and confirm Move again",
+                    )
+                    .with_code(crate::controller::move_session::QUOTA_MOVE_SAFETY_REFUSAL),
+                ))
+            } else if case == "late-outcome" {
+                Ok(mj_core::state::MoveOutcome {
+                    operation_id: "quota-move-test".into(),
+                    session_id: "one".into(),
+                    profile_id: "destination".into(),
+                    target_template_id: "local".into(),
+                    outcome: "failed".into(),
+                    error: Some(format!("{:#}", private_quota_move_error())),
+                    recovery: Some(
+                        "Source retained and still running. Retry Move when ready.".into(),
+                    ),
+                })
+            } else {
+                Err(private_quota_move_error())
+            };
+            let text = crate::daemon::session_move::quota_move_failure_notice(
+                &outcome,
+                "one",
+                "quota-move-test",
+                "destination",
+            )
+            .expect("a failed Move reports a conversation notice");
+            let recording = tokio::spawn(async move {
+                crate::daemon::session_move::record_quota_move_failure(
+                    &failure_control,
+                    "one",
+                    "quota-move-test",
+                    text,
+                )
+                .await
+            });
+            let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let RemoteSessionRequest::Submit { command, reply, .. } = request else {
+                panic!("expected durable failure notice")
+            };
+            let wire = serde_json::to_string(&command).unwrap();
+            for private in ["quota-secret-canary", "/private/profile", "secret-ssh-host"] {
+                assert!(
+                    !wire.contains(private),
+                    "{case} leaked {private} in its asynchronous failure notice"
+                );
+            }
+            let RelayCommand::RecordNotice { text } = command else {
+                panic!("a failed switch must be recorded in the conversation")
+            };
+            assert!(
+                text.contains("automatic switch to profile destination") && text.contains("failed")
+            );
+            if case == "late-refused" {
+                assert!(text.contains("sub-agents appeared after preparation"));
+            } else {
+                assert!(text.contains("quota-move-test"));
+            }
+            if case == "late-outcome" {
+                assert!(text.contains("Source retained and still running"));
+            }
+            reply.send(Ok(8)).unwrap();
+            recording.await.unwrap().unwrap();
+        }
         assert_eq!(calls.load(Ordering::SeqCst), usize::from(moves));
         assert!(!matches!(
             tokio::time::timeout(Duration::from_millis(150), remote.requests.recv()).await,
