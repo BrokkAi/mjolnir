@@ -66,9 +66,21 @@ pub(in crate::controller) fn worker_root_presence_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> CommandSpec {
+    // Absent only when the parent directory can be searched and listed and
+    // nothing, not even a dangling link, has the root's name. A test that fails
+    // on a permission error says nothing, so it exits nonzero: Unknown.
+    let parent = std::path::Path::new(worker_root)
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".to_owned());
     let script = format!(
-        "if [ -d {} ]; then printf 'present\\n'; else printf 'absent\\n'; fi",
-        targets::posix_quote(worker_root)
+        "root={root}; parent={parent}; \
+         if [ -d \"$root\" ]; then printf 'present\\n'; \
+         elif [ -d \"$parent\" ] && [ -x \"$parent\" ] && [ -r \"$parent\" ] \
+              && [ ! -e \"$root\" ] && [ ! -L \"$root\" ]; then printf 'absent\\n'; \
+         else exit 1; fi",
+        root = targets::posix_quote(worker_root),
+        parent = targets::posix_quote(&parent),
     );
     targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
         .purpose("probe Mjolnir worker root")
