@@ -35,6 +35,14 @@ pub(crate) async fn resolve(
         .get(handle.session_id())
         .context("review session is missing")?;
     ensure!(!session.archived, "this session is archived");
+    let choice = controller
+        .state
+        .effective_review(handle.session_id())
+        .map_err(|session| {
+            anyhow::anyhow!(
+                "the review settings of session {session} cannot be resolved: its parent is missing or the parent chain repeats"
+            )
+        })?;
     let (mut choices, autoconfigured) =
         configured_choices(settings.clone(), &controller.config, &cancelled, &backend).await?;
     if autoconfigured
@@ -43,7 +51,7 @@ pub(crate) async fn resolve(
             model,
             effort,
             ..
-        }) = session.review.as_ref()
+        }) = choice
     {
         choices =
             apply_legacy_override(&choices, *count, model.as_ref(), effort.as_ref(), &settings);

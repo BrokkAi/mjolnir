@@ -428,9 +428,28 @@ pub fn resolve_subagent_mcp_role(
 }
 
 impl WorkerLaunchConfig {
-    pub fn review_gate(&self) -> bool {
+    /// Whether this session is offered the `mj-review` tools. The controller
+    /// writes `review_trigger` as push only for sessions that may request
+    /// review: top-level sessions and ordinary sub-agents, never reviewers or
+    /// the oracle. This is the one owner of that fact.
+    pub fn review_tools(&self) -> bool {
+        offers_review_tools(self.review_trigger, self.harness)
+    }
+
+    /// Whether launch must prepare review state in the workspace: the session
+    /// start pin for every session offered the review tools, and the push gate
+    /// (or a notice that this harness cannot enforce one) for a primary.
+    pub fn prepares_review(&self) -> bool {
         self.review_trigger == crate::config::ReviewTrigger::Push
-            && self.harness.supports_review_gate()
+            && self.reviewer_launch.is_none()
+            && (self.review_tools() || (!self.is_managed_subagent() && !self.handback_tool))
+    }
+
+    /// Whether pushes from this session are held to review: the pre-push
+    /// hook, `MJ_REVIEW_GATE` and the session-start pin. Only top-level
+    /// sessions are gated; a sub-agent gets the tools without the gate.
+    pub fn review_gate(&self) -> bool {
+        self.review_tools()
             && !self.is_managed_subagent()
             && !self.handback_tool
             && self.reviewer_launch.is_none()
@@ -623,6 +642,16 @@ impl ProfileConfig {
     }
 }
 
+/// Whether a session with this review trigger on this harness is offered the
+/// mj-review tools. Launch and the daemon's completion checks share this one
+/// rule.
+pub fn offers_review_tools(
+    trigger: crate::config::ReviewTrigger,
+    harness: crate::config::HarnessKind,
+) -> bool {
+    trigger == crate::config::ReviewTrigger::Push && harness.supports_review_gate()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,7 +732,9 @@ mod tests {
                 launch
                     .environment
                     .insert(SESSION_MANAGED_SUBAGENT_ENV.into(), "1".into());
+                // A sub-agent is offered the review tools but never gated.
                 assert!(!launch.review_gate());
+                assert_eq!(launch.review_tools(), expected);
                 assert_eq!(
                     launch.subagent_mcp_role(),
                     Some(crate::subagent::SubagentMcpRole::FetchOnly)

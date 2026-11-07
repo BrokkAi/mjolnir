@@ -1102,6 +1102,7 @@ mod tests {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,
+            aws: None,
             codex_profile: None,
             ..mj_core::config::HarnessProfile::new(kind, PathBuf::from(home))
         };
@@ -1319,6 +1320,7 @@ mod tests {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
+                aws: None,
                 codex_profile: None,
                 ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, home)
             },

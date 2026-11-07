@@ -121,6 +121,13 @@ impl Controller {
         if matches!(destination.state, PreparedDestinationState::LaunchPending) {
             executor.notify_notice("Creating EC2 destination");
             let output = executor.execute(
+                // Exactly the request as it was recorded, and accepted if the
+                // acknowledgement was lost: the same client token with other
+                // parameters is refused as IdempotentParameterMismatch and
+                // would orphan the accepted instance. A record from before
+                // IMDSv2 was requested holds no metadata option; the
+                // requirement is enforced on the instance instead
+                // (`ec2_locator_after_launch`).
                 &CommandSpec::new("aws", destination.launch_args.clone())
                     .purpose("launch EC2 Move destination")
                     .stage(ProvisionStage::Provisioning),
@@ -292,6 +299,7 @@ impl Controller {
         &mut self,
         id: &str,
         github_token: Option<&str>,
+        executor: &impl CommandExecutor,
     ) -> Result<Option<targets::CommandPlan>> {
         let Some(mut operation) = crate::database::load_move_operation(id)? else {
             return Ok(None);
@@ -308,6 +316,19 @@ impl Controller {
             .clone();
         let runtime = destination.runtime.clone();
         let backend = prepared_backend(&target, &runtime, id)?;
+        // One rule for every instance Mjolnir adopts: a destination an older
+        // daemon recorded as checked never had IMDSv2 required, so it is
+        // required here too. The check is idempotent and costs one describe
+        // when the instance already requires it.
+        if let targets::TargetLocator::AwsEc2 {
+            profile,
+            region,
+            instance_id,
+            ..
+        } = &backend
+        {
+            super::super::backend::ensure_imdsv2(profile, region, instance_id, executor)?;
+        }
         let bundle = self
             .move_destination_bundle(id)?
             .context("prepared EC2 Move bundle missing")?;

@@ -231,7 +231,9 @@ impl ViewerSnapshot {
                     })
                     .unwrap_or_default();
                 let start = session.start_selection();
-                let review = config.review.for_session(session.review.as_ref());
+                let review = config
+                    .review
+                    .for_session(state.effective_review_or_off(&session.id));
                 ViewerSession {
                     oracle: session.oracle,
                     oracle_choice: session.oracle_choice.clone(),
