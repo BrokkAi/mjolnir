@@ -3004,6 +3004,7 @@ fn bare_move_preparation_normalizes_an_empty_resource_reset() {
 }
 
 #[cfg(unix)]
+// Hard-won: #1470: native delegation without managed children blocked automatic quota Moves.
 #[test]
 fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
     let name = test_name("roleless_in_place_move_refuses_live_children_but_allows_parked_children");
@@ -3024,6 +3025,23 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         subtle: None,
     });
     crate::database::save_session(parent).unwrap();
+    let mut empty_selection =
+        in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE).selection;
+    empty_selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let empty = runtime
+        .block_on(
+            fixture
+                .controller
+                .prepare_move_session_controlled(empty_selection.clone(), &ProcessExecutor),
+        )
+        .unwrap();
+    assert!(empty.in_place);
+    assert!(!empty.stops_subagents);
+
     let mut child = fixture.controller.state.sessions[parent_id].clone();
     child.id = "live-child".into();
     child.state = SessionState::Running;
@@ -3062,10 +3080,6 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
     let mut selection =
         in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE).selection;
     selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
     let error = runtime
         .block_on(
             fixture
@@ -3096,6 +3110,68 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
     assert!(
         prepared.stops_subagents,
         "a destination without parent tools stops the parked children"
+    );
+
+    fixture
+        .controller
+        .state
+        .subagents
+        .get_mut("live-child")
+        .unwrap()
+        .kind = mj_core::subagent::SubagentKind::Oracle;
+    let oracle = runtime
+        .block_on(
+            fixture
+                .controller
+                .prepare_move_session_controlled(empty_selection.clone(), &ProcessExecutor),
+        )
+        .unwrap();
+    assert!(oracle.stops_subagents, "parked oracles are stopped too");
+    fixture
+        .controller
+        .state
+        .sessions
+        .get_mut("live-child")
+        .unwrap()
+        .state = SessionState::Stopped;
+    let stopped = runtime
+        .block_on(
+            fixture
+                .controller
+                .prepare_move_session_controlled(empty_selection, &ProcessExecutor),
+        )
+        .unwrap();
+    assert!(!stopped.stops_subagents);
+    let late_child = fixture
+        .controller
+        .state
+        .sessions
+        .get_mut("live-child")
+        .unwrap();
+    late_child.state = SessionState::Parked;
+    crate::database::save_session(late_child).unwrap();
+    // A child admitted after the empty preview is checked under the drained
+    // worker queue before an automatic Move can run the child-stop hook.
+    let mut automatic = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    automatic.selection = empty.selection;
+    automatic.configuration_fingerprint = fixture
+        .controller
+        .move_configuration_fingerprint(&automatic.selection)
+        .unwrap();
+    automatic.quota_stop_reason = Some("weekly quota exhausted".into());
+    let executor = RecordingProcessExecutor::default();
+    let error = run_in_place_move(
+        &mut fixture.controller,
+        &mut automatic,
+        &fixture.worker_root,
+        &executor,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("automatic quota Move would stop existing sub-agents"));
+    assert_eq!(executor.move_stop_calls(), 0);
+    assert_eq!(
+        fixture.controller.state.sessions[parent_id].state,
+        SessionState::Running
     );
 }
 

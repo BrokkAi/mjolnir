@@ -1535,7 +1535,7 @@ fn active_child_session_ids_skips_children_that_already_stopped() {
     .map(|subagent| (subagent.child_session_id.clone(), subagent.into()))
     .collect();
 
-    let children = active_child_session_ids(&state, &parent.id);
+    let children = state.active_child_session_ids(&parent.id);
 
     assert_eq!(children, vec!["running-child".to_owned()]);
 }

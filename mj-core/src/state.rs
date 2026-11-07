@@ -2680,6 +2680,22 @@ pub fn live_session_ids(
 }
 
 impl State {
+    /// Managed children that a parent suspend or Move stop hook must end,
+    /// including parked children and oracles.
+    #[must_use]
+    pub fn active_child_session_ids(&self, parent_session_id: &str) -> Vec<String> {
+        self.subagents
+            .values()
+            .filter(|child| child.parent_session_id == parent_session_id)
+            .filter(|child| {
+                self.sessions
+                    .get(&child.child_session_id)
+                    .is_some_and(|session| session.state.is_active())
+            })
+            .map(|child| child.child_session_id.clone())
+            .collect()
+    }
+
     /// Whether a sub-agent of `parent_session_id` still has a target. A
     /// child's worker, parked or live, runs in its parent's container, so
     /// recreating that container would end it.

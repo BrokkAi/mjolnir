@@ -141,6 +141,7 @@ impl RuntimeState {
         } else {
             None
         };
+        let selection_session_id = selection.session_id.clone();
         let mut preparation = blocking(move || {
             let controller = Controller::load()?;
             mj_core::runtime::block_on(
@@ -156,7 +157,13 @@ impl RuntimeState {
         if let Some(snapshot) = snapshot {
             // An in-place Move stops the children itself when the source
             // worker is too old to drain their requests.
-            preparation.stops_subagents |= preparation.in_place
+            preparation.stops_subagents |= !self
+                .owner()
+                .controller()
+                .state
+                .active_child_session_ids(&selection_session_id)
+                .is_empty()
+                && preparation.in_place
                 && source_has_parent_role
                 && snapshot
                     .operational
@@ -191,13 +198,32 @@ impl RuntimeState {
                 subagents: None,
             })
             .await?;
+        let blockers: Vec<_> = [
+            (!preparation.in_place, "the environment would change"),
+            (
+                preparation.cross_harness,
+                "the native conversation cannot be kept",
+            ),
+            (
+                preparation.active,
+                "the session has active work or its worker is unavailable",
+            ),
+            (
+                preparation.stops_subagents,
+                "existing sub-agents would be stopped",
+            ),
+            (
+                preparation.conversion.is_some(),
+                "the workspace requires conversion",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(blocked, reason)| blocked.then_some(reason))
+        .collect();
         ensure!(
-            preparation.in_place
-                && !preparation.cross_harness
-                && !preparation.active
-                && !preparation.stops_subagents
-                && preparation.conversion.is_none(),
-            "Cannot switch profiles automatically: the Move must keep the environment and native conversation, interrupt no active work, stop no sub-agents, and require no conversion"
+            blockers.is_empty(),
+            "Cannot switch profiles automatically: {}",
+            blockers.join("; ")
         );
         Ok(MoveSessionRequest {
             preparation,

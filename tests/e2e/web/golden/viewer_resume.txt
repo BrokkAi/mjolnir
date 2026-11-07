@@ -124,6 +124,12 @@ Not Found
 controls: [{"id":"resume-search","text":null,"value":"","disabled":false},{"id":null,"text":"Suspended testlocal · alphaJan 1, 1970","value":"","disabled":false},{"id":null,"text":"Archived pomegranate workmjolnir · /tmp/project · 3 messagesSep 17the single word is hello","value":"","disabled":false},{"id":"resume-detail-back","text":"Back to sessions","value":"","disabled":false},{"id":null,"text":"Choose profilealphabeta","value":"beta","disabled":false},{"id":null,"text":"Choose targetlocalremote","value":"remote","disabled":false},{"id":null,"text":"Restore","value":"","disabled":false}]
 request: GET /api/v1/wiki/search [""]
 action: POST /api/v1/wiki/archive/restore [{"id":"archived-one","body":{"workspace_id":"test","profile_id":"beta","target_id":"remote"}}]
+=== failed Move remains visible in the conversation without a worker ===
+Move failed: The move did not finish while resuming the destination. The daemon log records the reason under reference failed-move.
+
+The environment and a verified checkpoint are retained. Retry the move; the checkout is kept.
+
+Retry move
 === bare destination leaves Resume ready without conversion questions (390x844) ===
 Back to sessions
 Suspended test

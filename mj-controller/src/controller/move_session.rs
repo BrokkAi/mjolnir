@@ -1338,7 +1338,8 @@ impl Controller {
             workspace,
             source_unavailable: false,
             in_place,
-            stops_subagents: should_stop_move_subagents(in_place, destination_has_parent_role),
+            stops_subagents: should_stop_move_subagents(in_place, destination_has_parent_role)
+                && !self.state.active_child_session_ids(&source.id).is_empty(),
             conversion,
             selection,
             source_profile_id: source.last_profile.clone(),
@@ -2234,6 +2235,8 @@ impl Controller {
                         match source_relay.drain_subagent_mutations(&id, executor).await? {
                             SubagentMutationDrain::Drained => {}
                             SubagentMutationDrain::UnsupportedWorkerProtocol(version) => {
+                                ensure!(operation.quota_stop_reason.is_none(),
+                                    "automatic quota Move requires a worker that can drain sub-agent requests; source relay protocol is {version}");
                                 executor.notify_notice(&format!(
                                     "The source worker uses relay protocol {version}; protocol 32 is required to safely drain sub-agent requests, so stopping sub-agents before this in-place Move"
                                 ));
@@ -2246,9 +2249,17 @@ impl Controller {
                         && !stopped_subagents_for_legacy_worker
                     {
                         let current = crate::database::load_state()?;
-                        if let Some(error) =
-                            roleless_move_children_error(&live_move_children(&current, &id))
+                        // The drained request queue owns the child set now. A child
+                        // admitted after preparation must never be stopped by an
+                        // automatic quota Move.
+                        let error = if operation.quota_stop_reason.is_some()
+                            && !current.active_child_session_ids(&id).is_empty()
                         {
+                            Some("automatic quota Move would stop existing sub-agents".into())
+                        } else {
+                            roleless_move_children_error(&live_move_children(&current, &id))
+                        };
+                        if let Some(error) = error {
                             if source_has_request_queue {
                                 source_relay
                                     .reopen_subagent_mutations(&id)

@@ -8214,6 +8214,21 @@ function syncConversationMode(session) {
 }
 
 function renderConversationTransition(session) {
+  const moveFailure = document.querySelector('#conversation-move-failure');
+  const recovery = session?.move_recovery;
+  const failedMove = ['failed', 'cancelled'].includes(recovery?.phase);
+  moveFailure.hidden = !failedMove;
+  moveFailure.replaceChildren();
+  if (failedMove) {
+    moveFailure.append(el('p', 'error', `${recovery.phase === 'cancelled' ? 'Move cancelled' : 'Move failed'}: ${session.launch_error || `The daemon log records the reason under reference ${recovery.operation_id}.`}`));
+    const guidance = resumeMoveRecovery(session);
+    if (guidance.explanation) moveFailure.append(el('p', '', guidance.explanation));
+    if (guidance.retry) {
+      const retry = button('Retry move', 'secondary');
+      retry.onclick = () => navigate({ name: 'move', workspaceId: session.workspace_id, sessionId: session.id });
+      moveFailure.append(retry);
+    }
+  }
   const transition = isTransitioningSession(session);
   const loading = !transition && isLoadingConversationSession(session);
   const unavailable = transition || loading;

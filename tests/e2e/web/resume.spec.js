@@ -360,6 +360,26 @@ test('golden_viewer_resume', async ({ context }) => {
   await expect(restorePage).toHaveURL(/restored/);
   await expect(restorePage.locator('#conversation-title')).toHaveText('restored');
   await captureResumeState(output, restorePage, 'restored archive opens as a new conversation', restoreState);
+
+  // Hard-won: #1470: Move failures were missing from the conversation after the worker stopped.
+  const restored = restoreState.snapshot.sessions.find(row => row.id === 'restored');
+  restored.state = 'suspended';
+  restored.lifecycle = 'suspended';
+  restored.launch_error = 'The move did not finish while resuming the destination. The daemon log records the reason under reference failed-move.';
+  restored.move_recovery = {
+    operation_id: 'failed-move', phase: 'failed', checkpoint_retained: true,
+    environment_retained: true,
+  };
+  await refresh(restorePage, restoreState);
+  await expect(restorePage.locator('#conversation-move-failure')).toBeVisible();
+  output.push('=== failed Move remains visible in the conversation without a worker ===');
+  output.push(await restorePage.locator('#conversation-move-failure').innerText());
+  await expect(restorePage.getByRole('button', { name: 'Retry move', exact: true })).toBeVisible();
+  restored.move_recovery = null;
+  restored.launch_error = null;
+  await refresh(restorePage, restoreState);
+  await expect(restorePage.locator('#conversation-move-failure')).toBeHidden();
+
   await restorePage.close();
 
   const barePage = await context.newPage();

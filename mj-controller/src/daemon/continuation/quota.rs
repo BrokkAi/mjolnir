@@ -307,6 +307,7 @@ pub(super) async fn prepare(
                 ),
                 None => format!("the quota for profile {source} has no known reset time"),
             };
+            let mut refused = false;
             for candidate in
                 destinations(&config, &source, harness, &model, candidates, now_ms / 1000)?
             {
@@ -326,13 +327,26 @@ pub(super) async fn prepare(
                         });
                     }
                     Err(error) => {
-                        tracing::info!(session=id, profile=%candidate.profile_id, error=%format!("{error:#}"), "quota Move preparation refused")
+                        tracing::info!(session=id, profile=%candidate.profile_id, error=%format!("{error:#}"), "quota Move preparation refused");
+                        refused = true;
+                        append_bounded(
+                            &mut fallback.notice,
+                            &format!(
+                                " Automatic Move to profile {} was refused: {error:#}.",
+                                candidate.profile_id
+                            ),
+                        );
                     }
                 }
             }
-            fallback.notice.push_str(&format!(
-                " No other enabled profile of this harness with quota or paid credits left can take over this session with model {model}."
-            ));
+            if !refused {
+                append_bounded(
+                    &mut fallback.notice,
+                    &format!(
+                        " No other enabled profile of this harness with quota or paid credits left can take over this session with model {model}."
+                    ),
+                );
+            }
         }
     }
     Ok(Plan::Wait(fallback))
