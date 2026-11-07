@@ -69,6 +69,7 @@ pub mod test_hooks;
 pub mod text;
 pub mod transcript;
 pub mod usage;
+pub mod work_facts;
 pub mod worker_build;
 pub mod worker_launch;
 pub mod worker_protocol;

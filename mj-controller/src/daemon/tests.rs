@@ -1284,19 +1284,23 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
     assert!(crate::upgrade::activity("late operation").is_err());
 }
 
-struct TestRemoteManager {
+pub(super) struct TestRemoteManager {
     control: SessionManagerControl,
     requests: RemoteSessionRequests,
-    publisher: RemoteSessionPublisher,
+    pub(super) publisher: RemoteSessionPublisher,
     _shutdown: SessionManagerShutdown,
     _targets: tokio::sync::watch::Sender<Vec<RelaySessionTarget>>,
 }
 
 impl TestRemoteManager {
     async fn new() -> Self {
+        Self::for_session("session-1").await
+    }
+
+    /// A manager whose one session is `session_id`.
+    pub(super) async fn for_session(session_id: &str) -> Self {
         let channels =
             crate::session_manager::spawn_remote_session_manager().expect("remote manager");
-        let session_id = "session-1";
         channels.targets.send_replace(vec![RelaySessionTarget {
             session_id: session_id.to_owned(),
             spec: CommandSpec::new("true", Vec::<String>::new()),
@@ -1324,7 +1328,7 @@ impl TestRemoteManager {
     }
 }
 
-fn test_runtime_state_with_manager(manager: &TestRemoteManager) -> Arc<RuntimeState> {
+pub(super) fn test_runtime_state_with_manager(manager: &TestRemoteManager) -> Arc<RuntimeState> {
     let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
         manager.control.clone(),
@@ -3629,7 +3633,7 @@ async fn a_create_stalled_in_one_stage_fails_its_start_and_names_the_stage() {
 /// A background image download belongs to the daemon, not to a session, so
 /// whichever workspace the person is looking at shows it.
 /// A view of `session-1` whose harness is ready for its first prompt.
-fn ready_startup_view() -> ManagedSessionView {
+pub(super) fn ready_startup_view() -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let operational = mj_core::relay::RelayOperationalState {
         assessment: None,
@@ -7111,6 +7115,7 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
             }));
     }
     conversation.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        work_facts: None,
         answered_through: None,
         diagnostic: None,
         usage: None,
@@ -9580,6 +9585,7 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
         .record_command_completed(
             &prompt_id,
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
                 diagnostic: None,
@@ -10022,7 +10028,7 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
     ));
 }
 
-fn test_runtime_state_holding(state: mj_core::state::State) -> Arc<RuntimeState> {
+pub(super) fn test_runtime_state_holding(state: mj_core::state::State) -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(

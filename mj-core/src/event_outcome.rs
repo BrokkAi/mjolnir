@@ -281,6 +281,7 @@ mod tests {
     #[test]
     fn provider_failure_and_unknown_stop_retain_different_evidence() {
         let mut turn = MaterializedTurnOutcome {
+            work_facts: None,
             answered_through: None,
             command_id: "opaque".into(),
             accepted_ordinal: Some(1),

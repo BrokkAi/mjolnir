@@ -100,6 +100,8 @@ struct HarnessPreparationSetup {
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
     resume_session: Option<String>,
     native_session_may_have_history: bool,
+    /// What a sub-agent's worker observes at the end of each turn.
+    capture: Option<crate::work_facts::WorkObserver>,
 }
 
 #[derive(Clone)]
@@ -394,6 +396,7 @@ fn start_bridge(
     relay: Arc<Mutex<DurableRelay>>,
     dispatch_wakes: mpsc::Receiver<()>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
+    capture: Option<crate::work_facts::WorkObserver>,
     runtime: tokio::runtime::Handle,
     cancel: CancellationToken,
 ) -> Result<StartedBridgeTasks> {
@@ -440,6 +443,7 @@ fn start_bridge(
         commands_tx,
         user_shells,
         kimi_task_home.map(KimiTaskMonitor::new),
+        capture,
     )));
     if cancel.is_cancelled() {
         bail!("preparation cancelled while starting the relay coordinator");
@@ -847,6 +851,20 @@ pub async fn run_daemon_owned(
         durable_relay.record_observation(RelayObservation::SessionRestarted)?;
     }
 
+    // Only a managed sub-agent that is not a reviewer observes its agent's work
+    // when a turn ends (`SESSION_MANAGED_SUBAGENT_ENV`, set by the controller for
+    // every sub-agent, and no `reviewer_launch`): an ordinary session has no
+    // parent to report to, and a reviewer's verdict names no working tree.
+    let capture = (config.is_managed_subagent() && config.reviewer_launch.is_none()).then(|| {
+        crate::work_facts::WorkObserver {
+            session_id: config.session_id.clone(),
+            worker_pid: std::process::id(),
+            directory: config.cwd.clone(),
+            git: "git".into(),
+            harness_ready_ms: durable_relay.harness_ready_clock(),
+            children: Default::default(),
+        }
+    });
     let relay = Arc::new(Mutex::new(durable_relay));
     // Client tasks are detached, so a durable failure they cannot recover
     // from has to travel back here to stop the daemon.
@@ -957,6 +975,7 @@ pub async fn run_daemon_owned(
         kimi_task_home,
         resume_session,
         native_session_may_have_history,
+        capture,
     };
     let prep_status = preparation_tx.clone();
     let prep_cancel = preparation_cancel.clone();
@@ -1403,6 +1422,7 @@ async fn prepare_and_start_harness(
         kimi_task_home,
         resume_session,
         native_session_may_have_history,
+        capture,
     } = setup;
     let managed_subagent = config.is_managed_subagent();
     let review_tools = config.review_tools();
@@ -1823,6 +1843,7 @@ async fn prepare_and_start_harness(
             relay,
             dispatch_wakes,
             kimi_task_home,
+            capture,
             bridge_runtime,
             bridge_cancel,
         )
@@ -2686,6 +2707,7 @@ mod preparation_tests {
             dispatch_wakes,
             commands,
             shells,
+            None,
             None,
             None,
         ));

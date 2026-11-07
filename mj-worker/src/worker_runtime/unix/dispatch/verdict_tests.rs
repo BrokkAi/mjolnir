@@ -188,6 +188,7 @@ async fn completed_turn_response(
             user_shells,
             None,
             Some(client),
+            None,
         )
         .with_subscriber(subscriber),
     );

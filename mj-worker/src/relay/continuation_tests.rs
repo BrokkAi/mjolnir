@@ -7,6 +7,7 @@ fn completed(relay: &mut DurableRelay, id: &str) {
         .record_command_completed(
             id,
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
                 diagnostic: None,
@@ -261,6 +262,7 @@ fn mailbox_quota_recovery_survives_missing_user_request_and_prior_cancellation()
             .record_command_completed(
                 &wake_id,
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     stop_reason: mj_core::diagnostic::QUOTA_STOP_REASON.into(),
                     usage: None,
                     diagnostic: Some(mj_core::diagnostic::TurnDiagnostic {
@@ -493,6 +495,7 @@ fn a_start_inside_our_prompt_is_not_a_turn_of_its_own() {
         .record_command_completed(
             "user-request",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
                 diagnostic: None,

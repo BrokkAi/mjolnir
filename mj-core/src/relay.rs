@@ -117,7 +117,12 @@ pub const RELAY_SUBAGENT_REPORT_STATE_PROTOCOL: u32 = 54;
 /// scope reply also names the AWS profile the session was staged with, which
 /// the controller keeps using for the session's life.
 pub const RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL: u32 = 55;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL;
+/// 56 adds the observed facts of a sub-agent's finished turn (its processes and
+/// working tree, captured by its worker before the outcome is published) to the
+/// prompt outcome record, and the finish-report facts that carry them. Older
+/// readers ignore the field; older workers get the report as text.
+pub const RELAY_FINISH_FACTS_PROTOCOL: u32 = 56;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_FINISH_FACTS_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

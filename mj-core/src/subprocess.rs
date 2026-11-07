@@ -104,6 +104,19 @@ pub async fn run_bounded(
     max_bytes: usize,
     timeout: std::time::Duration,
 ) -> Result<Output> {
+    run_bounded_observed(command, max_bytes, timeout, |_| {}).await
+}
+
+/// [`run_bounded`] that tells `spawned` the child's process ID as soon as it
+/// exists, before anything is read from it. A caller that must know which
+/// processes it started (to tell them from the work it observes) records the ID
+/// there.
+pub async fn run_bounded_observed(
+    command: &mut tokio::process::Command,
+    max_bytes: usize,
+    timeout: std::time::Duration,
+    spawned: impl FnOnce(Option<u32>),
+) -> Result<Output> {
     use tokio::io::AsyncReadExt;
     command
         .stdin(Stdio::null())
@@ -113,6 +126,7 @@ pub async fn run_bounded(
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command.spawn().context("start bounded subprocess")?;
+    spawned(child.id());
     let group = ProcessGroupGuard::new(child.id());
     // Bytes go to buffers owned here, so output read while draining survives
     // the reader being dropped at the drain deadline.

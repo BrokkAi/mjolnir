@@ -1318,6 +1318,7 @@ fn latch_relay_child_serves_stdio() {
                         .record_command_completed(
                             &claimed.command_id,
                             RelayCommandOutcome::Prompt {
+                                work_facts: None,
                                 diagnostic: None,
                                 stop_reason: "end_turn".into(),
                                 usage: None,
@@ -1349,6 +1350,7 @@ fn latch_relay_child_serves_stdio() {
                         .record_command_completed(
                             &prompt_id,
                             RelayCommandOutcome::Prompt {
+                                work_facts: None,
                                 diagnostic: None,
                                 stop_reason: "cancelled".into(),
                                 usage: None,

@@ -2387,6 +2387,7 @@ enabled = false
                 .record_command_completed(
                     "original-turn",
                     mj_core::relay::RelayCommandOutcome::Prompt {
+                        work_facts: None,
                         stop_reason: "end_turn".into(),
                         usage: None,
                         diagnostic: None,

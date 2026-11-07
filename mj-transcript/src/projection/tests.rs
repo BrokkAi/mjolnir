@@ -1308,6 +1308,7 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
             command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "EndTurn".into(),
                 usage: None,
@@ -1611,6 +1612,7 @@ fn queued_prompts_keep_their_own_acceptance_ordinals_through_their_turns() {
                 command: None,
                 command_id: command_id.into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "EndTurn".into(),
                     usage: None,
@@ -1849,6 +1851,7 @@ fn a_turn_that_settles_under_an_in_flight_prompt_keeps_the_session_running() {
             command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -1882,6 +1885,7 @@ fn finishing_an_acp_prompt_preserves_a_later_native_goal_stream() {
             command: None,
             command_id: "initial-prompt".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -1957,6 +1961,7 @@ fn cancelling_a_codex_native_tail_preserves_the_prompt_outcome() {
             command: None,
             command_id: "prompt".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -2058,6 +2063,7 @@ fn a_plan_from_a_harness_turn_does_not_overwrite_the_previous_turns_plan() {
             command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -2153,6 +2159,7 @@ fn a_cancelled_turn_ends_with_an_interrupted_row() {
                 command: None,
                 command_id: "prompt".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     stop_reason: stop_reason.into(),
                     usage: None,
                     diagnostic: None,
@@ -2350,6 +2357,7 @@ fn streamed_chunks_are_one_unread_logical_agent_message() {
             command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -2495,6 +2503,7 @@ fn backward_relay_clock_never_regresses_transcript_change_times() {
             command: None,
             command_id: "prompt-1".into(),
             outcome: RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
