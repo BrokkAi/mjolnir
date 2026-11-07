@@ -1275,6 +1275,13 @@ impl ApiBackend {
                 .await?
                 .filter(|record| record.handback_tool)
                 .context("handback is only for a Mjolnir sub-agent that was given the tool")?;
+                // Refusing here means no report exists to release before the
+                // child has read and addressed its verdict.
+                ensure!(
+                    record.kind != mj_core::subagent::SubagentKind::Worker
+                        || !self.exports.child_awaits_review(child_id.clone()).await,
+                    "your review has no verdict yet; wait for it, address it, then hand back"
+                );
                 let maximum = match record.kind {
                     mj_core::subagent::SubagentKind::Worker
                     | mj_core::subagent::SubagentKind::Oracle => {
@@ -1685,8 +1692,8 @@ impl ApiBackend {
                 && child.identity.as_ref().is_some_and(|identity| {
                     child.relation.reported_finish.as_ref() != Some(identity)
                 })
-                // A child whose review is open is still pending, whatever
-                // handback it recorded: the parent hears after the verdict.
+                // A child whose review is open is still pending: it may end
+                // turns while it waits, and handback refuses until the verdict.
                 && !self
                     .exports
                     .child_awaits_review(child.relation.child_session_id.clone())
