@@ -93,8 +93,11 @@ struct Ec2 {
     refuse_launch: AtomicBool,
     fail_boot: AtomicBool,
     fail_cleanup: AtomicBool,
-    /// Launch responses report an instance that allows IMDSv1.
+    /// The instance allows IMDSv1 until `modify-instance-metadata-options`
+    /// succeeds.
     imds_optional: AtomicBool,
+    /// `modify-instance-metadata-options` fails.
+    fail_imds_enforcement: AtomicBool,
     low_disk: AtomicBool,
     handoff: AtomicBool,
     resumable: AtomicBool,
@@ -148,13 +151,8 @@ impl CommandExecutor for Ec2 {
                 if self.lose_ack.swap(false, Ordering::SeqCst) {
                     bail!("launch accepted; acknowledgement lost");
                 }
-                let tokens = if self.imds_optional.load(Ordering::SeqCst) {
-                    "optional"
-                } else {
-                    "required"
-                };
                 stdout = format!(
-                    r#"{{"Instances":[{{"InstanceId":"{INSTANCE}","MetadataOptions":{{"HttpTokens":"{tokens}"}}}}]}}"#
+                    r#"{{"Instances":[{{"InstanceId":"{INSTANCE}","MetadataOptions":{{"HttpTokens":"required"}}}}]}}"#
                 )
                 .into_bytes();
             }
@@ -175,6 +173,36 @@ impl CommandExecutor for Ec2 {
                 if self.fail_boot.load(Ordering::SeqCst) {
                     bail!("boot failed");
                 }
+            }
+            "check EC2 instance metadata options" => {
+                // The shape `describe-instances --query ...MetadataOptions`
+                // printed in the recorded run (aws-run-instances-imdsv2.json).
+                let mut options: serde_json::Value = serde_json::from_str(include_str!(
+                    "../../../../tests/fixtures/aws-run-instances-imdsv2.json"
+                ))
+                .unwrap();
+                let mut options = options["Instances"][0]["MetadataOptions"].take();
+                if self.imds_optional.load(Ordering::SeqCst) {
+                    options["HttpTokens"] = "optional".into();
+                }
+                stdout = serde_json::to_vec(&options).unwrap();
+            }
+            "require IMDSv2 on EC2 instance" => {
+                assert_eq!(argument(&command.args, "--instance-id")?, INSTANCE);
+                assert_eq!(argument(&command.args, "--http-tokens")?, "required");
+                if self.fail_imds_enforcement.load(Ordering::SeqCst) {
+                    return Ok(targets::CommandOutput {
+                        status: 254,
+                        stdout: Vec::new(),
+                        stderr: b"UnauthorizedOperation".to_vec(),
+                    });
+                }
+                self.imds_optional.store(false, Ordering::SeqCst);
+                // Expected shape from the AWS CLI reference; not live-verified.
+                stdout = include_bytes!(
+                    "../../../../tests/fixtures/aws-modify-instance-metadata-options.json"
+                )
+                .to_vec();
             }
             "resolve EC2 session address" => stdout = b"127.0.0.1\n".to_vec(),
             "check prepared EC2 Move staging and workspace space" => {
@@ -742,15 +770,9 @@ fn a_first_ec2_launch_refusal_releases_an_attempt_without_cleanup() {
     );
 }
 
-#[test]
-fn a_launch_prepared_before_imdsv2_was_required_gets_the_flag_when_it_runs() {
-    if !isolated("a_launch_prepared_before_imdsv2_was_required_gets_the_flag_when_it_runs") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let (controller, mut operation) = fixture();
+fn pending_launch_recorded_by_an_older_daemon(token: &str) -> PreparedMoveDestination {
     // The arguments an older daemon stored: no metadata options.
-    operation.prepared_destination = Some(PreparedMoveDestination {
+    PreparedMoveDestination {
         launch_args: [
             "--profile",
             "test",
@@ -758,21 +780,37 @@ fn a_launch_prepared_before_imdsv2_was_required_gets_the_flag_when_it_runs() {
             "us-east-1",
             "ec2",
             "run-instances",
-        ]
-        .into_iter()
-        .chain([
             "--client-token",
-            "a-token-stored-by-an-older-daemon",
+            token,
             "--output",
             "json",
-        ])
+        ]
+        .into_iter()
         .map(str::to_owned)
         .collect(),
         runtime: TargetRuntimeSettings::from(&ec2_target()),
         state: PreparedDestinationState::LaunchPending,
-    });
+    }
+}
+
+// Hard-won: 7e7806ea8: adding HttpTokens to a retried launch changed the parameters of an accepted client token, which EC2 refuses, orphaning the instance.
+#[test]
+fn an_older_pending_launch_is_replayed_exactly_and_imdsv2_is_enforced_on_the_instance() {
+    if !isolated(
+        "an_older_pending_launch_is_replayed_exactly_and_imdsv2_is_enforced_on_the_instance",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (controller, mut operation) = fixture();
+    let recorded = pending_launch_recorded_by_an_older_daemon("a-token-stored-by-an-older-daemon");
+    operation.prepared_destination = Some(recorded.clone());
     crate::database::save_move_operation(&operation).unwrap();
-    let cloud = Ec2::default();
+    let cloud = Ec2 {
+        // The accepted instance is a launch without the option.
+        imds_optional: AtomicBool::new(true),
+        ..Default::default()
+    };
     controller
         .prepare_ec2_move_destination(&mut operation, &cloud)
         .unwrap();
@@ -781,37 +819,91 @@ fn a_launch_prepared_before_imdsv2_was_required_gets_the_flag_when_it_runs() {
         .iter()
         .find(|command| command.purpose == "launch EC2 Move destination")
         .unwrap();
-    assert_eq!(
-        argument(&launch.args, "--metadata-options").unwrap(),
-        "HttpTokens=required"
+    assert_eq!(launch.args, recorded.launch_args, "replayed as recorded");
+    let purposes = commands
+        .iter()
+        .map(|command| command.purpose.as_str())
+        .collect::<Vec<_>>();
+    let position = |purpose: &str| purposes.iter().position(|p| *p == purpose).unwrap();
+    // Changed in place, after the instance runs and before anything uses it.
+    assert!(
+        position("wait for EC2 session instance to run")
+            < position("require IMDSv2 on EC2 instance")
     );
+    assert!(position("require IMDSv2 on EC2 instance") < position("resolve EC2 session address"));
+    assert!(!purposes.contains(&"terminate exact EC2 session instance"));
 }
 
+// Hard-won: 7e7806ea8: a destination persisted as Created before any check booted without an IMDS check.
 #[test]
-fn an_instance_that_allows_imdsv1_is_terminated_and_the_source_is_retained() {
-    if !isolated("an_instance_that_allows_imdsv1_is_terminated_and_the_source_is_retained") {
+fn a_created_destination_found_after_a_crash_is_checked_before_it_boots() {
+    if !isolated("a_created_destination_found_after_a_crash_is_checked_before_it_boots") {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
     let (controller, mut operation) = fixture();
+    let mut created = pending_launch_recorded_by_an_older_daemon("token");
+    created.state = PreparedDestinationState::Created {
+        instance_id: INSTANCE.into(),
+    };
+    operation.prepared_destination = Some(created);
+    crate::database::save_move_operation(&operation).unwrap();
     let cloud = Ec2 {
         imds_optional: AtomicBool::new(true),
+        ..Default::default()
+    };
+    controller
+        .prepare_ec2_move_destination(&mut operation, &cloud)
+        .unwrap();
+    let commands = cloud.commands.lock().unwrap();
+    assert!(
+        !commands
+            .iter()
+            .any(|command| command.purpose == "launch EC2 Move destination"),
+        "an instance that already exists is not launched again"
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|command| command.purpose == "require IMDSv2 on EC2 instance")
+    );
+    assert!(matches!(
+        operation.prepared_destination.unwrap().state,
+        PreparedDestinationState::Checked { .. }
+    ));
+}
+
+// Hard-won: 7e7806ea8: an instance that cannot be made to require IMDSv2 must fail the Move visibly and be cleaned up.
+#[test]
+fn a_destination_that_cannot_require_imdsv2_fails_the_move_and_is_terminated() {
+    if !isolated("a_destination_that_cannot_require_imdsv2_fails_the_move_and_is_terminated") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (mut controller, mut operation) = fixture();
+    let cloud = Ec2 {
+        imds_optional: AtomicBool::new(true),
+        fail_imds_enforcement: AtomicBool::new(true),
         ..Default::default()
     };
     let error = controller
         .prepare_ec2_move_destination(&mut operation, &cloud)
         .unwrap_err();
-    assert!(format!("{error:#}").contains("does not require IMDSv2"));
-    let commands = cloud.commands.lock().unwrap();
     assert!(
-        commands
+        format!("{error:#}").contains("could not require IMDSv2"),
+        "{error:#}"
+    );
+    let result = controller
+        .finish_move_result(&mut operation, Err(error), &cloud)
+        .unwrap();
+    assert_eq!(result.outcome, "failed");
+    assert!(
+        cloud
+            .commands
+            .lock()
+            .unwrap()
             .iter()
             .any(|command| command.purpose == "terminate exact EC2 session instance")
-    );
-    assert!(
-        !commands
-            .iter()
-            .any(|command| command.purpose == "wait for EC2 session instance to run")
     );
     assert!(matches!(
         operation.prepared_destination.unwrap().state,

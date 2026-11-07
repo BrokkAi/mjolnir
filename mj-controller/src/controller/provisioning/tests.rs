@@ -1880,32 +1880,171 @@ fn limits_a_rootless_podman_host_cannot_enforce_are_dropped_and_reported() {
     assert!(args.contains(&"--memory=8589934592".to_owned()), "{args:?}");
 }
 
-/// Answers the EC2 launch with a recorded-shape `run-instances` response whose
-/// instance allows IMDSv1, and records every command.
-struct WeakImdsLaunch {
+/// Plays EC2 for the IMDS checks: the instance allows IMDSv1 until
+/// `modify-instance-metadata-options` succeeds, and every command is recorded.
+struct Imds {
+    optional: std::sync::atomic::AtomicBool,
+    modify_fails: bool,
+    modify_has_no_effect: bool,
     commands: Mutex<Vec<Vec<String>>>,
 }
 
-impl CommandExecutor for WeakImdsLaunch {
+impl Imds {
+    fn new(optional: bool) -> Self {
+        Self {
+            optional: std::sync::atomic::AtomicBool::new(optional),
+            modify_fails: false,
+            modify_has_no_effect: false,
+            commands: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn purposes_run(&self) -> Vec<String> {
+        self.commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|argv| {
+                [
+                    "describe-instances",
+                    "modify-instance-metadata-options",
+                    "terminate-instances",
+                ]
+                .into_iter()
+                .find(|verb| argv.iter().any(|arg| arg == verb))
+                .map(str::to_owned)
+            })
+            .collect()
+    }
+}
+
+impl CommandExecutor for Imds {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        use std::sync::atomic::Ordering::SeqCst;
         let mut argv = vec![command.program.clone()];
         argv.extend(command.args.clone());
         self.commands.lock().unwrap().push(argv);
-        Ok(CommandOutput {
+        let ok = |stdout: Vec<u8>| CommandOutput {
             status: 0,
-            stdout: if command.creates_target {
-                br#"{"Instances":[{"InstanceId":"i-0123456789abcdef0","MetadataOptions":{"HttpTokens":"optional"}}]}"#
-                    .to_vec()
-            } else {
-                Vec::new()
-            },
+            stdout,
             stderr: Vec::new(),
+        };
+        Ok(match command.purpose.as_str() {
+            "check EC2 instance metadata options" => {
+                // The MetadataOptions object of the recorded describe/run output.
+                let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
+                    "../../../tests/fixtures/aws-run-instances-imdsv2.json"
+                ))
+                .unwrap();
+                let mut options = recorded["Instances"][0]["MetadataOptions"].take();
+                if self.optional.load(SeqCst) {
+                    options["HttpTokens"] = "optional".into();
+                }
+                ok(serde_json::to_vec(&options).unwrap())
+            }
+            "require IMDSv2 on EC2 instance" if self.modify_fails => CommandOutput {
+                status: 254,
+                stdout: Vec::new(),
+                stderr: b"UnauthorizedOperation".to_vec(),
+            },
+            "require IMDSv2 on EC2 instance" => {
+                if !self.modify_has_no_effect {
+                    self.optional.store(false, SeqCst);
+                }
+                // Expected shape from the AWS CLI reference; not live-verified.
+                ok(include_bytes!(
+                    "../../../tests/fixtures/aws-modify-instance-metadata-options.json"
+                )
+                .to_vec())
+            }
+            "launch EC2 session instance" => {
+                ok(br#"{"Instances":[{"InstanceId":"i-0123456789abcdef0"}]}"#.to_vec())
+            }
+            _ => ok(Vec::new()),
         })
     }
 }
 
+// Hard-won: 7e7806ea8: an accepted instance that allows IMDSv1 must be changed in place, not trusted or terminated.
 #[test]
-fn an_ec2_instance_that_allows_imdsv1_is_terminated_instead_of_used() {
+fn an_instance_that_allows_imdsv1_is_changed_in_place_and_verified_again() {
+    let executor = Imds::new(true);
+    crate::controller::backend::ensure_imdsv2(
+        "default",
+        "us-east-1",
+        "i-0123456789abcdef0",
+        &executor,
+    )
+    .unwrap();
+    assert_eq!(
+        executor.purposes_run(),
+        [
+            "describe-instances",
+            "modify-instance-metadata-options",
+            "describe-instances"
+        ]
+    );
+    let commands = executor.commands.lock().unwrap();
+    assert!(
+        commands[1]
+            .windows(2)
+            .any(|a| a == ["--http-tokens", "required"])
+    );
+    assert!(
+        commands[1]
+            .windows(2)
+            .any(|a| a == ["--instance-id", "i-0123456789abcdef0"])
+    );
+    drop(commands);
+
+    // One that already requires IMDSv2 is left alone.
+    let compliant = Imds::new(false);
+    crate::controller::backend::ensure_imdsv2(
+        "default",
+        "us-east-1",
+        "i-0123456789abcdef0",
+        &compliant,
+    )
+    .unwrap();
+    assert_eq!(compliant.purposes_run(), ["describe-instances"]);
+}
+
+// Hard-won: 7e7806ea8: an instance that cannot be made to require IMDSv2 must never be reported as ready.
+#[test]
+fn an_instance_that_cannot_be_made_to_require_imdsv2_is_an_error() {
+    let mut refused = Imds::new(true);
+    refused.modify_fails = true;
+    let error = crate::controller::backend::ensure_imdsv2(
+        "default",
+        "us-east-1",
+        "i-0123456789abcdef0",
+        &refused,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("could not require IMDSv2"),
+        "{error:#}"
+    );
+
+    // A change AWS accepted but the instance does not show is not trusted.
+    let mut ineffective = Imds::new(true);
+    ineffective.modify_has_no_effect = true;
+    let error = crate::controller::backend::ensure_imdsv2(
+        "default",
+        "us-east-1",
+        "i-0123456789abcdef0",
+        &ineffective,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("still reports HttpTokens optional"),
+        "{error:#}"
+    );
+}
+
+// Hard-won: 7e7806ea8: a launch whose instance could not be secured must fail provisioning and remove the instance.
+#[test]
+fn a_launch_whose_instance_cannot_require_imdsv2_is_terminated() {
     let ssh = SshTarget {
         destination: "ubuntu@example.test".into(),
         ssh_args: Vec::new(),
@@ -1930,9 +2069,8 @@ fn an_ec2_instance_that_allows_imdsv1_is_terminated_instead_of_used() {
     };
     let plan =
         targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None).unwrap();
-    let executor = WeakImdsLaunch {
-        commands: Mutex::new(Vec::new()),
-    };
+    let mut executor = Imds::new(true);
+    executor.modify_fails = true;
     let name = targets::resource_name(PROVISIONED_SESSION).unwrap();
 
     let error = provision_target_creation_named(
@@ -1956,21 +2094,20 @@ fn an_ec2_instance_that_allows_imdsv1_is_terminated_instead_of_used() {
     .unwrap_err();
 
     assert!(
-        format!("{error:#}").contains("does not require IMDSv2"),
+        format!("{error:#}").contains("could not require IMDSv2"),
         "{error:#}"
     );
-    let commands = executor.commands.lock().unwrap();
+    let launch = executor.commands.lock().unwrap();
     assert!(
-        commands
-            .iter()
-            .any(|argv| argv.iter().any(|a| a == "terminate-instances")
-                && argv.iter().any(|a| a == "i-0123456789abcdef0")),
-        "{commands:?}"
+        launch.iter().any(|argv| argv
+            .windows(2)
+            .any(|a| a == ["--metadata-options", "HttpTokens=required"])),
+        "the launch asks for IMDSv2 itself"
     );
+    drop(launch);
     assert!(
-        !commands
-            .iter()
-            .any(|argv| argv.iter().any(|a| a == "instance-running")),
-        "the instance must not be waited on or used: {commands:?}"
+        executor
+            .purposes_run()
+            .contains(&"terminate-instances".to_owned())
     );
 }

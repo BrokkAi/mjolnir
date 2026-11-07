@@ -1294,9 +1294,6 @@ pub(super) fn locator_after_provision_named(
             let output = first_output.context("AWS launch produced no output")?;
             let json: serde_json::Value = serde_json::from_slice(&output.stdout)
                 .context("parse aws ec2 run-instances response")?;
-            // The error is the discover failure that makes provisioning
-            // terminate the instance it just created.
-            targets::require_imdsv2(&json)?;
             let instance_id = json
                 .pointer("/Instances/0/InstanceId")
                 .and_then(serde_json::Value::as_str)
@@ -1305,6 +1302,86 @@ pub(super) fn locator_after_provision_named(
             return ec2_locator_after_launch(canonical, instance_id, executor);
         }
     })
+}
+
+/// Make the instance require IMDSv2, the token-based form of the instance
+/// metadata service, which plain HTTP GETs (such as a server-side request
+/// forgery) cannot use. One rule for every instance Mjolnir adopts: a fresh
+/// launch, a Move destination recorded by an older daemon that never asked
+/// for it, or a `Created` destination found again after a crash. An instance
+/// that allows IMDSv1 is changed in place, because it was accepted and may
+/// already hold work; only a failure to change it fails the launch, and the
+/// caller's cleanup then removes the instance.
+pub(super) fn ensure_imdsv2(
+    profile: &str,
+    region: &str,
+    instance_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    let global = |tail: &[&str]| -> Vec<String> {
+        ["--profile", profile, "--region", region, "ec2"]
+            .into_iter()
+            .chain(tail.iter().copied())
+            .map(str::to_owned)
+            .collect()
+    };
+    let http_tokens = || -> Result<String> {
+        let output = execute_checked(
+            executor,
+            CommandSpec::new(
+                "aws",
+                global(&[
+                    "describe-instances",
+                    "--instance-ids",
+                    instance_id,
+                    "--query",
+                    "Reservations[0].Instances[0].MetadataOptions",
+                    "--output",
+                    "json",
+                ]),
+            )
+            .purpose("check EC2 instance metadata options")
+            .stage(ProvisionStage::Booting),
+        )?;
+        let options: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .context("parse EC2 instance metadata options")?;
+        Ok(options
+            .get("HttpTokens")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("missing")
+            .to_owned())
+    };
+    if http_tokens()? == "required" {
+        return Ok(());
+    }
+    execute_checked(
+        executor,
+        CommandSpec::new(
+            "aws",
+            global(&[
+                "modify-instance-metadata-options",
+                "--instance-id",
+                instance_id,
+                "--http-tokens",
+                "required",
+                "--output",
+                "json",
+            ]),
+        )
+        .purpose("require IMDSv2 on EC2 instance")
+        .stage(ProvisionStage::Booting),
+    )
+    .with_context(|| {
+        format!(
+            "EC2 instance {instance_id} allows IMDSv1 and Mjolnir could not require IMDSv2 on it; the instance profile's credentials would be readable with a plain HTTP GET"
+        )
+    })?;
+    let after = http_tokens()?;
+    ensure!(
+        after == "required",
+        "EC2 instance {instance_id} still reports HttpTokens {after} after Mjolnir required IMDSv2 on it"
+    );
+    Ok(())
 }
 
 /// Resolve a created instance. Callers persist its ID before these long waits.
@@ -1345,6 +1422,8 @@ pub(super) fn ec2_locator_after_launch(
         .purpose("wait for EC2 session instance to run")
         .stage(ProvisionStage::Booting),
     )?;
+    // Before anything uses the instance, whichever path adopted it.
+    ensure_imdsv2(&profile, region, &instance_id, executor)?;
     let field = match address_source {
         AwsAddressSource::PublicDns => "PublicDnsName",
         AwsAddressSource::PublicIp => "PublicIpAddress",

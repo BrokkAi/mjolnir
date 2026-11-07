@@ -5251,22 +5251,3 @@ pub(crate) fn unwrapped_remote_line(remote: &str) -> &str {
         .strip_prefix(prefix.as_str())
         .unwrap_or_else(|| panic!("{remote:?} does not run under the macOS system PATH"))
 }
-
-#[test]
-fn require_imdsv2_accepts_the_recorded_launch_response_and_refuses_weaker_ones() {
-    let recorded: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/aws-run-instances-imdsv2.json"
-    ))
-    .unwrap();
-    require_imdsv2(&recorded).unwrap();
-    let mut optional = recorded.clone();
-    optional["Instances"][0]["MetadataOptions"]["HttpTokens"] = "optional".into();
-    let error = require_imdsv2(&optional).unwrap_err().to_string();
-    assert!(error.contains("i-0123456789abcdef0") && error.contains("optional"));
-    let mut missing = recorded;
-    missing["Instances"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("MetadataOptions");
-    assert!(require_imdsv2(&missing).is_err());
-}

@@ -21,10 +21,13 @@ The instance metadata service (IMDS) at `169.254.169.254` hands out the instance
 profile's credentials to code running on the instance. IMDSv2 requires a session
 token obtained with an HTTP `PUT` first, which blocks simple request-forgery
 reads that IMDSv1 allows. Mjolnir sets this on every instance it launches,
-including Move destinations, whatever the launch template says. It then reads
-`MetadataOptions.HttpTokens` from the `run-instances` response; if the instance
-does not report `required`, Mjolnir terminates it and fails the launch with
-the reason. Code in a session on an EC2 machine can therefore read the instance
+including Move destinations, whatever the launch template says. Before it uses
+any instance it adopts (just launched, a Move destination recorded by an older
+Mjolnir version, or one found again after a restart) it reads the instance's
+`MetadataOptions.HttpTokens`. An instance that allows IMDSv1 is changed in place
+with `aws ec2 modify-instance-metadata-options --http-tokens required` and read
+back; only if that fails does the launch fail, with the reason, and the instance
+is removed. Code in a session on an EC2 machine can therefore read the instance
 profile's credentials only with IMDSv2 tokens. Scope the instance profile's
 role to what sessions need; Mjolnir does not create or limit it.
 
@@ -151,6 +154,8 @@ the AWS identity needs these EC2 actions:
 - `ec2:DescribeInstances` — used by the instance-running waiter, address lookup,
   and recovery scan.
 - `ec2:TerminateInstances`
+- `ec2:ModifyInstanceMetadataOptions` — used only when an instance allows
+  IMDSv1 despite the launch request.
 
 `mj doctor` additionally calls `ec2:DescribeLaunchTemplates`. Setup, doctor,
 and session preflight also call `sts:GetCallerIdentity`; AWS does not require an
