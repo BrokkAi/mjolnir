@@ -75,6 +75,21 @@ impl AwsRoleConfig {
         Ok(())
     }
 
+    /// A fingerprint of what narrows the role: the effective inline policy and
+    /// the managed policy ARNs, in a fixed order.
+    pub fn session_policy_fingerprint(&self) -> String {
+        let mut arns = self.session_policy_arns.clone();
+        arns.sort();
+        crate::credentials::credential_fingerprint(
+            format!(
+                "{}\n{}",
+                self.effective_session_policy().unwrap_or_default(),
+                arns.join("\n")
+            )
+            .as_bytes(),
+        )
+    }
+
     /// The inline session policy to send, or `None` when only managed
     /// policies narrow the role.
     pub fn effective_session_policy(&self) -> Option<&str> {

@@ -11,6 +11,14 @@ pub const CONFIG_FILE: &str = "aws-config";
 pub const EMPTY_CREDENTIALS_FILE: &str = "aws-empty-credentials";
 /// Beside the secret: which role and session Mjolnir issued it for.
 pub const SCOPE_FILE: &str = "aws-scope.json";
+/// Every file the AWS credential provider keeps in a session's home. One list,
+/// for staging, refresh and removal alike.
+pub const FILES: [&str; 4] = [
+    SHARED_CREDENTIALS_FILE,
+    CONFIG_FILE,
+    EMPTY_CREDENTIALS_FILE,
+    SCOPE_FILE,
+];
 
 /// Which credentials Mjolnir issued, for what, until when. The worker keeps it
 /// beside the secret, so a controller that has lost its memory (a restart) can
@@ -20,6 +28,10 @@ pub struct AwsCredentialScope {
     pub role_arn: String,
     /// The STS role session name, `mj-<session id>`.
     pub role_session_name: String,
+    /// Fingerprint of the effective session policy the credentials were
+    /// issued under. A narrower policy configured since makes them broader
+    /// than configured.
+    pub session_policy_fingerprint: String,
     pub expires_at_epoch_millis: i64,
 }
 
@@ -122,13 +134,19 @@ impl AwsCredentials {
 
     /// These credentials, recorded as issued by Mjolnir for `role_arn` and
     /// the STS session `role_session_name`.
-    pub fn issued_for(mut self, role_arn: &str, role_session_name: &str) -> Result<Self> {
+    pub fn issued_for(
+        mut self,
+        role_arn: &str,
+        role_session_name: &str,
+        session_policy_fingerprint: &str,
+    ) -> Result<Self> {
         let expires_at_epoch_millis = self
             .expires_at_epoch_millis()
             .context("issued AWS credentials have no expiration")?;
         self.scope = Some(AwsCredentialScope {
             role_arn: role_arn.to_owned(),
             role_session_name: role_session_name.to_owned(),
+            session_policy_fingerprint: session_policy_fingerprint.to_owned(),
             expires_at_epoch_millis,
         });
         Ok(self)
