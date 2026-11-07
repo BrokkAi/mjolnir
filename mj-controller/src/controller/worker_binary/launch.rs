@@ -255,6 +255,12 @@ impl Controller {
         if let Some(source) = self.aws_credential_source(session_id)? {
             let credentials = crate::aws_assume_role::obtain(session_id, &source, executor)?;
             credentials.install(&profile_stage, Path::new(&target_profile_home))?;
+            // The selection is recorded by the step that stages it, so the
+            // two cannot disagree. A re-stage (resume, Move, repair) is a new
+            // selection and replaces the record. The sync uses this record,
+            // never the session's own AWS configuration, which the session can
+            // edit.
+            crate::database::set_session_aws_profile(session_id, credentials.profile())?;
         }
         stage_claude_keychain_login(
             profile,

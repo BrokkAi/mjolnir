@@ -202,6 +202,12 @@ impl AwsCredentials {
         self.scope.as_ref()
     }
 
+    /// The AWS profile these credentials are installed under: the section name
+    /// in the session's AWS configuration.
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
     /// Attach a scope read from the wire.
     pub fn with_scope(mut self, scope: Option<AwsCredentialScope>) -> Self {
         self.scope = scope;
@@ -333,25 +339,6 @@ fn remove_if_present(path: &Path) -> Result<()> {
     }
 }
 
-/// The AWS profile this session was staged with: the section name in its AWS
-/// configuration. It is written when the session is staged and rewritten by
-/// every install, and withdrawing credentials leaves it, so it names the
-/// session's selection for its whole life. `None` when nothing was staged.
-pub fn staged_profile(home: &Path) -> Result<Option<String>> {
-    let text = match std::fs::read_to_string(home.join(CONFIG_FILE)) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("read session AWS configuration"),
-    };
-    Ok(text.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("[profile ")
-            .and_then(|rest| rest.strip_suffix(']'))
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned)
-    }))
-}
-
 /// The scope Mjolnir recorded for the credentials in `home`, when the record
 /// describes the secret that is there now.
 pub fn scope(home: &Path) -> Result<Option<AwsCredentialScope>> {
@@ -381,6 +368,20 @@ pub fn snapshot(bytes: &[u8]) -> crate::credentials::CredentialSnapshot {
 }
 
 pub fn state(home: &Path) -> Result<crate::credentials::CredentialSnapshot> {
+    state_for_user(home, user_home().as_deref())
+}
+
+/// The home directory of the user this process runs as, which a relative
+/// profile path in the session's AWS configuration is relative to.
+fn user_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+/// [`state`] for a user whose home directory is `user_home`.
+pub fn state_for_user(
+    home: &Path,
+    user_home: Option<&Path>,
+) -> Result<crate::credentials::CredentialSnapshot> {
     let absent = crate::credentials::CredentialSnapshot::absent;
     let bytes = match std::fs::read(home.join(SHARED_CREDENTIALS_FILE)) {
         Ok(bytes) => bytes,
@@ -392,21 +393,167 @@ pub fn state(home: &Path) -> Result<crate::credentials::CredentialSnapshot> {
     // Matching JSON alone does not make the provider usable. Worker upgrades
     // can introduce these launch paths without restaging the profile. Invalid
     // or expired JSON must likewise allow reconciliation to replace it.
-    let Ok(configuration) =
-        AwsCredentials::decode(&bytes).and_then(|credentials| credentials.configuration(home))
-    else {
+    let Ok(credentials) = AwsCredentials::decode(&bytes) else {
         return Ok(absent());
     };
-    for (name, expected) in [
-        (CONFIG_FILE, configuration),
-        (EMPTY_CREDENTIALS_FILE, Vec::new()),
-    ] {
-        match std::fs::read(home.join(name)) {
-            Ok(actual) if actual == expected => {}
-            Ok(_) => return Ok(absent()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(absent()),
-            Err(error) => return Err(error).with_context(|| format!("read session AWS {name}")),
-        }
+    let read = |name: &str| match std::fs::read(home.join(name)) {
+        Ok(actual) => Ok(Some(actual)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read session AWS {name}")),
+    };
+    let Some(configuration) = read(CONFIG_FILE)? else {
+        return Ok(absent());
+    };
+    if !configuration_names(
+        &configuration,
+        credentials.profile(),
+        &home.join(SHARED_CREDENTIALS_FILE),
+        user_home,
+    ) {
+        return Ok(absent());
+    }
+    if !read(EMPTY_CREDENTIALS_FILE)?.is_some_and(|empty| empty.is_empty()) {
+        return Ok(absent());
     }
     Ok(snapshot(&bytes))
+}
+
+/// Whether the AWS configuration `actual` is the one for `profile` and the
+/// secret at `secret`. Launch writes the secret's path as the target will see
+/// it, which for an SSH worker is relative to the user's home, while the
+/// worker has resolved its own home to an absolute path: the two spellings of
+/// one path are equal, so this resolves a relative one against `user_home` and
+/// compares the paths, not their text. This is the one place the configured
+/// path is compared.
+fn configuration_names(
+    actual: &[u8],
+    profile: &str,
+    secret: &Path,
+    user_home: Option<&Path>,
+) -> bool {
+    let Ok(actual) = std::str::from_utf8(actual) else {
+        return false;
+    };
+    let mut lines = actual.lines();
+    let (Some(header), Some(command), None) = (lines.next(), lines.next(), lines.next()) else {
+        return false;
+    };
+    if header != format!("[profile {profile}]") {
+        return false;
+    }
+    let Some(configured) = command
+        .strip_prefix("credential_process = ")
+        .and_then(configured_secret_path)
+    else {
+        return false;
+    };
+    let configured = Path::new(&configured);
+    let resolved = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        match user_home {
+            Some(user_home) => user_home.join(configured),
+            None => return false,
+        }
+    };
+    same_path(&resolved, secret)
+}
+
+/// The path in a `credential_process` command written by
+/// [`AwsCredentials::configuration`]: `cat '<absolute path>'`, or for a path
+/// relative to the user's home, `sh -c 'exec cat "$HOME"/'<path>''`.
+fn configured_secret_path(command: &str) -> Option<String> {
+    let unquote = |text: &str| {
+        text.strip_prefix('\'')
+            .and_then(|text| text.strip_suffix('\''))
+            .map(|text| text.replace("'\\''", "'"))
+    };
+    if let Some(path) = command.strip_prefix("cat ") {
+        return unquote(path);
+    }
+    let script = unquote(command.strip_prefix("sh -c ")?)?;
+    unquote(script.strip_prefix("exec cat \"$HOME\"/")?)
+}
+
+/// Two spellings of one path: equal once symlinks are resolved where the files
+/// exist, and otherwise equal component by component.
+fn same_path(left: &Path, right: &Path) -> bool {
+    let resolved = |path: &Path| {
+        std::fs::canonicalize(path)
+            .unwrap_or_else(|_| path.components().collect::<std::path::PathBuf>())
+    };
+    resolved(left) == resolved(right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn credentials() -> AwsCredentials {
+        AwsCredentials::from_export(
+            "bedrock",
+            &serde_json::to_vec(&serde_json::json!({
+                "Version": 1, "AccessKeyId": "key", "SecretAccessKey": "secret",
+                "SessionToken": "token", "Expiration": "2099-01-01T00:00:00Z",
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    // Launch writes an SSH worker's profile path relative to the user's home;
+    // the worker has resolved its own home to an absolute path before it
+    // compares. Those are two spellings of one path, so valid credentials are
+    // present, not absent: reading them as absent would have the next sync
+    // withdraw them.
+    #[test]
+    fn a_relative_launch_path_and_an_absolute_worker_home_name_the_same_secret() {
+        let user_home = tempfile::tempdir().unwrap();
+        let relative = Path::new(".local/share/hel/workers/s/profile");
+        let home = user_home.path().join(relative);
+        std::fs::create_dir_all(&home).unwrap();
+
+        credentials().install(&home, relative).unwrap();
+        assert!(
+            std::fs::read_to_string(home.join(CONFIG_FILE))
+                .unwrap()
+                .contains("\"$HOME\""),
+            "launch wrote the relative spelling"
+        );
+        assert!(
+            state_for_user(&home, Some(user_home.path()))
+                .unwrap()
+                .present
+        );
+
+        // The absolute spelling (a local worker) is the same secret too.
+        credentials().install(&home, &home).unwrap();
+        assert!(state_for_user(&home, None).unwrap().present);
+
+        // A configuration naming another secret, or a relative one that cannot
+        // be resolved, is not this session's.
+        credentials()
+            .install(&home, Path::new(".local/share/hel/workers/other/profile"))
+            .unwrap();
+        assert!(
+            !state_for_user(&home, Some(user_home.path()))
+                .unwrap()
+                .present
+        );
+        credentials().install(&home, relative).unwrap();
+        assert!(!state_for_user(&home, None).unwrap().present);
+        // Nor is a configuration for another profile.
+        std::fs::write(
+            home.join(CONFIG_FILE),
+            std::fs::read_to_string(home.join(CONFIG_FILE))
+                .unwrap()
+                .replace("[profile bedrock]", "[profile other]"),
+        )
+        .unwrap();
+        assert!(
+            !state_for_user(&home, Some(user_home.path()))
+                .unwrap()
+                .present
+        );
+    }
 }

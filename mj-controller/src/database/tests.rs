@@ -33,6 +33,39 @@ fn invalid_project_locations_are_refused_before_database_admission() {
     }
 }
 
+// The selection is the controller's record of what it staged: a re-stage is a
+// new selection and replaces it; the backfill for a session staged before the
+// record existed never does; the record goes with its session, whichever daemon
+// destroys it; and no record exists for a session that does not.
+#[test]
+fn a_sessions_aws_selection_follows_staging_and_the_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    live_sessions(&database, &[("session-1", "bundle-1")]);
+    let connection = open(&database).unwrap();
+    let write = |session: &str, profile: &str, replace: bool| {
+        session_aws_selection::write_session_aws_profile(&connection, session, profile, replace)
+    };
+
+    assert_eq!(write("session-1", "legacy", false).unwrap(), "legacy");
+    assert_eq!(
+        write("session-1", "resolved-later", false).unwrap(),
+        "legacy",
+        "a backfill never replaces a selection"
+    );
+    assert_eq!(write("session-1", "restaged", true).unwrap(), "restaged");
+    assert!(write("session-1", "", true).is_err());
+    assert!(write("no-such-session", "ghost", true).is_err());
+
+    delete_session_from(&database, "session-1").unwrap();
+    let remaining: i64 = connection
+        .query_row("SELECT count(*) FROM session_aws_selections", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(remaining, 0, "the selection outlived its session");
+}
+
 #[test]
 fn a_bounded_prompt_search_reports_that_it_stopped_early() {
     // Without the flag a caller cannot tell ten matches from the first ten of

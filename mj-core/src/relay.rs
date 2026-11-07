@@ -113,9 +113,7 @@ pub const RELAY_SUBAGENT_REPORT_STATE_PROTOCOL: u32 = 54;
 /// 55 adds RemoveAwsCredentials and AwsCredentialsScope, and a scope on
 /// InstallAwsCredentials: the controller withdraws a session's AWS credentials
 /// when the profile requires role-scoped credentials and none can be issued,
-/// and recognises credentials it issued from what the worker recorded. The
-/// scope reply also names the AWS profile the session was staged with, which
-/// the controller keeps using for the session's life.
+/// and recognises credentials it issued from what the worker recorded.
 pub const RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL: u32 = 55;
 pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL;
 /// Connection-only worker CPU measurements.

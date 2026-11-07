@@ -916,7 +916,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         let reported =
             delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsScope).await;
         assert!(
-            matches!(&reported, RelayResponsePayload::AwsCredentialsScope { scope, .. } if *scope == expected),
+            matches!(&reported, RelayResponsePayload::AwsCredentialsScope { scope } if *scope == expected),
             "{key}: {reported:?}"
         );
     }
@@ -944,7 +944,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsScope).await;
     assert!(matches!(
         reported,
-        RelayResponsePayload::AwsCredentialsScope { scope: None, .. }
+        RelayResponsePayload::AwsCredentialsScope { scope: None }
     ));
 
     // Withdrawing the credentials deletes the secret file, reports them absent
@@ -967,18 +967,6 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         again,
         RelayResponsePayload::CredentialState { present: false, .. }
     ));
-    // The profile the session was staged with outlives the credentials: the
-    // controller asks the worker for it, and the worker still knows.
-    let staged =
-        delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsScope).await;
-    assert!(
-        matches!(
-            &staged,
-            RelayResponsePayload::AwsCredentialsScope { scope: None, profile: Some(profile) }
-                if profile == "bedrock"
-        ),
-        "{staged:?}"
-    );
 
     // The host's slopcop login takes the same connection-only route.
     let login =
