@@ -962,12 +962,118 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
     config
         .profiles
         .iter()
-        .map(|(id, profile)| {
+        .flat_map(|(id, profile)| {
             let mut check = harness_profile_check(id, profile, executor);
             check.detail = format!("{} {}", profile_summary(profile), check.detail);
-            check
+            let scope = aws_scope_check(id, profile, &config.targets, executor);
+            std::iter::once(check).chain(scope)
         })
         .collect()
+}
+
+/// What AWS credentials a Bedrock profile's sessions receive. Without a
+/// `[profiles.<id>.aws]` role they receive the controller host's own
+/// credentials; with one, credentials limited to the role, which is tested
+/// here with a real `AssumeRole` call so a broken trust policy or policy
+/// shows up before a session fails to start.
+fn aws_scope_check(
+    id: &str,
+    profile: &HarnessProfile,
+    targets: &BTreeMap<String, TargetTemplate>,
+    executor: &impl CommandExecutor,
+) -> Option<DoctorCheck> {
+    if !profile.enabled || profile.auth_scheme() != mj_core::config::AuthScheme::AwsCredentialChain
+    {
+        return None;
+    }
+    let check_id = format!("harness.{id}.aws-scope");
+    let title = format!("AWS credentials for profile {id}");
+    // The same question launch and the sync ask, per configured target.
+    let receiving = targets
+        .iter()
+        .filter(|(_, template)| {
+            crate::aws_credentials::receives_synced_credentials(
+                profile,
+                crate::aws_credentials::template_keeps_own_credentials(template),
+                &mj_core::state::TargetRuntimeSettings::from(*template).environment,
+            )
+        })
+        .map(|(target_id, _)| target_id.as_str())
+        .collect::<Vec<_>>();
+    let Some(role) = &profile.aws else {
+        if receiving.is_empty() {
+            return None;
+        }
+        return Some(DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "Sessions on {} receive the controller host's own AWS credentials, unscoped: anything running in a session can use everything those credentials allow.",
+                receiving.join(", ")
+            ),
+            format!(
+                "Create an IAM role for sessions that the host's AWS login may assume, and set `[profiles.{id}.aws] role_arn = \"arn:aws:iam::<account>:role/<name>\"`. Sessions then receive short-lived credentials limited to that role and to a Bedrock-only session policy."
+            ),
+        ));
+    };
+    if receiving.is_empty() {
+        return Some(DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "[profiles.{id}.aws] names {}, but no configured target receives synced AWS credentials, so it has no effect. Raw local sessions read the host's AWS files directly and EC2 sessions use their instance role; neither can be limited this way. Explicit AWS credentials in the profile or target environment also skip it.",
+                role.role_arn
+            ),
+            "Run Bedrock sessions on a container or SSH target without AWS credentials in its environment, or remove the `[profiles.<id>.aws]` table.",
+        ));
+    }
+    let source = match crate::aws_credentials::selected_source(profile) {
+        Ok(source) => source,
+        Err(error) => {
+            return Some(DoctorCheck::fixable(
+                check_id,
+                title,
+                format!("The profile's AWS identity could not be selected: {error:#}"),
+                "Fix the profile's Codex configuration or AWS_PROFILE setting.",
+            ));
+        }
+    };
+    Some(match crate::aws_assume_role::probe(&source, executor) {
+        Ok(credentials) => {
+            let until = credentials
+                .expires_at_epoch_millis()
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map_or_else(String::new, |at| {
+                    format!(" Those credentials last until {at}.")
+                });
+            DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "The host's AWS login assumed {} for a throwaway session (mj-doctor); sessions on {} receive credentials limited to it.{until}",
+                    role.role_arn,
+                    receiving.join(", ")
+                ),
+            )
+        }
+        Err(error) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!("{error:#}"),
+            format!(
+                "Make the controller's AWS login (profile {}) able to assume the role: allow sts:AssumeRole on it, and name the login in the role's trust policy{}. Sessions on this profile are refused until then, or remove `[profiles.{id}.aws]` to give sessions your AWS credentials unscoped.",
+                source
+                    .environment
+                    .get("AWS_PROFILE")
+                    .map_or("default", String::as_str),
+                if role.source_identity {
+                    " with sts:SetSourceIdentity allowed (source_identity is on)"
+                } else {
+                    ""
+                }
+            ),
+        ),
+    })
 }
 
 /// The readiness of one profile: its home, and whether it can authenticate.

@@ -264,6 +264,21 @@ fn assume_role_failure(stderr: &[u8], status: i32) -> String {
     format!("the AWS CLI exited with status {status} (its output is not shown)")
 }
 
+/// One real `AssumeRole`, for `mj doctor`: the same command a session's mint
+/// runs, under a throwaway role session name, bypassing the cache.
+pub(crate) fn probe(
+    source: &AwsCredentialSource,
+    executor: &impl CommandExecutor,
+) -> Result<AwsCredentials> {
+    let role = source
+        .role
+        .as_ref()
+        .context("no AWS role is configured for this profile")?;
+    let host_profile = selected_profile(source);
+    let command = assume_role_command(role, host_profile, "mj-doctor", &source.environment);
+    mint(&command, host_profile, executor)
+}
+
 /// The unscoped export for a profile without a role, the scoped mint for one
 /// with a role. Launch calls this; the credential sync calls the same two
 /// functions, because it exports once per profile and mints once per session.

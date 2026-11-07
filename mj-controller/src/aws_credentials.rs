@@ -73,6 +73,14 @@ pub(crate) fn source(
     ) {
         return Ok(None);
     }
+    selected_source(profile).map(Some)
+}
+
+/// The environment the AWS CLI runs in to resolve this profile's identity on
+/// the controller host: the profile's own environment with the AWS profile
+/// it selects. Callers have already decided that the profile receives synced
+/// credentials.
+pub(crate) fn selected_source(profile: &HarnessProfile) -> Result<AwsCredentialSource> {
     let environment = profile.environment.resolved();
     let mut environment = environment.clone();
     let selected = environment
@@ -104,10 +112,10 @@ pub(crate) fn source(
             environment.insert("AWS_PROFILE".into(), selected.into());
         }
     }
-    Ok(Some(AwsCredentialSource {
+    Ok(AwsCredentialSource {
         environment,
         role: profile.aws.clone(),
-    }))
+    })
 }
 
 pub(crate) fn export(

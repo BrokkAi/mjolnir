@@ -2016,3 +2016,102 @@ fn the_default_local_target_gets_a_github_check() {
         ["github.local-bare.localhost"]
     );
 }
+
+#[test]
+fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = |role: Option<mj_core::config::AwsRoleConfig>| HarnessProfile {
+        environment: [
+            ("CLAUDE_CODE_USE_BEDROCK".to_owned(), "1".to_owned()),
+            ("AWS_PROFILE".to_owned(), "work".to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+        aws: role,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
+    };
+    let role = mj_core::config::AwsRoleConfig {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        session_policy: None,
+        session_policy_arns: Vec::new(),
+        duration_seconds: None,
+        source_identity: false,
+    };
+    let containers: BTreeMap<String, TargetTemplate> = [(
+        "podman".to_owned(),
+        TargetTemplate::LocalPodman {
+            container: container("ghcr.io/example/dev:1"),
+        },
+    )]
+    .into_iter()
+    .collect();
+    let local_only: BTreeMap<String, TargetTemplate> =
+        [("localhost".to_owned(), TargetTemplate::LocalBare)]
+            .into_iter()
+            .collect();
+    let recorded = include_str!("../../tests/fixtures/aws-sts-assume-role.json");
+    let granted = {
+        let mut output: serde_json::Value = serde_json::from_str(recorded).unwrap();
+        output["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
+        serde_json::to_vec(&output).unwrap()
+    };
+    let denied = include_str!("../../tests/fixtures/aws-sts-assume-role-access-denied.txt");
+
+    let mut checks = Vec::new();
+    // No role: sessions on the container target get the host's credentials.
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(None),
+        &containers,
+        &AlwaysFailingExecutor,
+    ));
+    // No role, but only raw local sessions, which read the host's files anyway.
+    assert!(
+        aws_scope_check(
+            "bedrock",
+            &profile(None),
+            &local_only,
+            &AlwaysFailingExecutor
+        )
+        .is_none()
+    );
+    // A role the host's login can assume.
+    let ok = FakeExecutor::new([Ok(output(&granted))]);
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(role.clone())),
+        &containers,
+        &ok,
+    ));
+    let probe = ok.commands.borrow();
+    assert!(
+        probe[0]
+            .args
+            .windows(2)
+            .any(|args| args == ["--role-session-name", "mj-doctor"])
+    );
+    drop(probe);
+    // A role the host's login cannot assume.
+    let refused = FakeExecutor::new([Ok(failed(denied))]);
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(role.clone())),
+        &containers,
+        &refused,
+    ));
+    // A role on a profile that only runs raw local sessions has no effect.
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(role)),
+        &local_only,
+        &AlwaysFailingExecutor,
+    ));
+
+    let mut rendered = Vec::new();
+    render_human(&checks, &mut rendered).expect("render doctor checks");
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "doctor-aws-scope-checks",
+        &String::from_utf8(rendered).unwrap(),
+    );
+}
