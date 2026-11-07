@@ -71,9 +71,11 @@ impl HostState {
                 start_reply: None,
                 pending_outcome: None,
                 queued_outcomes: Vec::new(),
+                snapshot: None,
+                awaiting_snapshot: None,
             },
         );
-        self.run(&session_id, requests);
+        self.start_group(&session_id, requests);
         Ok(())
     }
 }

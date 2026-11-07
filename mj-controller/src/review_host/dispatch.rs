@@ -117,6 +117,13 @@ impl HostState {
                     self.run(&session_id, requests);
                 }
             }
+            HostEvent::SnapshotCreated {
+                session_id,
+                epoch,
+                repository,
+                id,
+                result,
+            } => self.snapshot_created(session_id, epoch, repository, id, result),
             HostEvent::ReviewerOutcomeSaved {
                 session_id,
                 epoch,
@@ -307,7 +314,7 @@ impl HostState {
                     "dropping the review of a session that no longer exists"
                 );
                 self.close_reviewer_child(&session_id);
-                self.reviews.remove(&session_id);
+                self.release_group(&session_id);
                 self.publish(&session_id);
             }
             ReviewStep::Delta(result) => {

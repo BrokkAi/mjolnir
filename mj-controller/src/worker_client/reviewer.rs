@@ -95,6 +95,35 @@ impl RelayClient {
         }
     }
 
+    /// Create or remove a push review's checkout of one repository. Returns the
+    /// checkout's path (`None` after a removal) and every review snapshot id
+    /// the repository holds afterwards.
+    pub async fn review_snapshot(
+        &mut self,
+        role: Option<&str>,
+        repository: std::path::PathBuf,
+        operation: mj_core::relay::SnapshotOperation,
+    ) -> Result<(Option<std::path::PathBuf>, Vec<String>)> {
+        let request = self.reviewer_request(
+            role,
+            ReviewerRequest::Snapshot {
+                repository,
+                operation,
+            },
+        )?;
+        anyhow::ensure!(
+            request.supported_at(self.protocol_version),
+            "the session's worker predates review snapshots; restart the session"
+        );
+        match self
+            .call_with_timeout(request, REVIEW_CAPTURE_TIMEOUT)
+            .await?
+        {
+            RelayResponsePayload::ReviewSnapshots { path, present } => Ok((path, present)),
+            _ => bail!("relay returned an unexpected review snapshot response"),
+        }
+    }
+
     /// Wraps a reviewer action, refusing it on a worker too old to know what a
     /// reviewer is rather than sending a method it would reject as unknown.
     pub(super) fn reviewer_request(

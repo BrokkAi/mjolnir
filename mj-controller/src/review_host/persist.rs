@@ -202,6 +202,8 @@ impl HostState {
                         start_reply: pending.reply,
                         pending_outcome: None,
                         queued_outcomes: Vec::new(),
+                        snapshot: None,
+                        awaiting_snapshot: None,
                     },
                 );
                 if let Some(slot) = self.reviews.get_mut(&session_id)
@@ -209,7 +211,7 @@ impl HostState {
                 {
                     answer(slot.start_reply.take(), Ok(()));
                 }
-                self.run(&session_id, pending.requests);
+                self.start_group(&session_id, pending.requests);
             }
             PersistenceCompletion::Close => {
                 self.closing.remove(&session_id);
@@ -237,7 +239,7 @@ impl HostState {
                         }
                     })
                     .unwrap_or_default();
-                self.reviews.remove(&session_id);
+                self.release_group(&session_id);
                 if let Some(notice) = notice {
                     self.record_notice(&session_id, notice);
                 }

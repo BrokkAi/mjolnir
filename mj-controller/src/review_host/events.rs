@@ -99,6 +99,14 @@ pub(super) enum HostEvent {
         session_id: String,
         epoch: u64,
     },
+    /// The worker answered a group's request for its own checkout.
+    SnapshotCreated {
+        session_id: String,
+        epoch: u64,
+        repository: std::path::PathBuf,
+        id: String,
+        result: Result<(std::path::PathBuf, Vec<String>), super::snapshot::SnapshotFailure>,
+    },
     QuestionTarget {
         session_id: String,
         child_session_id: String,
@@ -220,6 +228,10 @@ pub(super) struct ReviewSlot {
     pub(super) start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
     pub(super) pending_outcome: Option<TurnReviewState>,
     pub(super) queued_outcomes: Vec<ReviewerHandback>,
+    /// The group's own checkout of the reviewed commit, once it exists.
+    pub(super) snapshot: Option<std::path::PathBuf>,
+    /// What the group runs once its checkout settles.
+    pub(super) awaiting_snapshot: Option<Vec<ReviewRequest>>,
 }
 
 pub(super) struct HostState {

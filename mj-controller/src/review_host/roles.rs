@@ -50,7 +50,7 @@ impl HostState {
                     ) {
                         tracing::warn!(session_id, %error, "could not queue review close persistence");
                         self.closing.remove(session_id);
-                        self.reviews.remove(session_id);
+                        self.release_group(session_id);
                     }
                 }
             }

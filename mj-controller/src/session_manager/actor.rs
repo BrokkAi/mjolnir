@@ -1447,6 +1447,13 @@ pub(super) async fn drive_reviewer(
                 changed,
             }
         }
+        ReviewerAction::Snapshot {
+            repository,
+            operation,
+        } => {
+            let (path, present) = client.review_snapshot(role, repository, operation).await?;
+            ReviewerOutcome::Snapshots { path, present }
+        }
     })
 }
 
