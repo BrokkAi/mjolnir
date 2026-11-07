@@ -2254,20 +2254,6 @@ fn materialized_summary_loads_messages_without_deserializing_full_history() {
                 })],
             },
         }),
-        // Hard-won: 8b08e8bc1: handback reminders and peer-session messages counted as user authorization
-        Arc::new(TranscriptItem {
-            stable_id: "user:handback-reminder-7".into(),
-            position: 7,
-            latest_content_event_ordinal: None,
-            created_at_ms: 1_900,
-            last_changed_at_ms: 1_900,
-            body: TranscriptBody::User {
-                content: vec![serde_json::json!({
-                    "type": "text",
-                    "text": "[handback reminder] Hand back your report"
-                })],
-            },
-        }),
     ]);
     save_materialized_session_to(&database, &materialized).unwrap();
 

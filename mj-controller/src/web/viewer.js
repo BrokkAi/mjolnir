@@ -8118,13 +8118,22 @@ function paintEntry(node, entry, unansweredPrompt) {
 
 /// The prompt an unanswered-turn row offers to put back, or null.
 ///
-/// The text comes from the newest row the person wrote before the warning
-/// (rows the server marks `generated` are Mjolnir's own prompts).
+/// The text comes from the newest user row before the warning, which is the
+/// prompt that turn was running. When Mjolnir submitted that prompt (the
+/// server marks the row `generated`), there is nothing of the person's to put
+/// back, and an earlier request would be unrelated work.
 function unansweredPromptFor(entry, lastUserText) {
   if (entry.role === 'user') return null;
   const text = (entry.lines || []).join('\n');
   if (!text.includes(PROMPT_UNANSWERED_MARKER)) return null;
   return lastUserText || null;
+}
+
+/// The prompt text a later warning in this turn may offer back. A user row
+/// starts the turn; Mjolnir's own prompts (`generated`) leave nothing to offer.
+function turnPromptText(entry, previous) {
+  if (entry.role !== 'user') return previous;
+  return entry.generated ? null : (entry.lines || []).join('\n');
 }
 
 function renderEntries(entries, replace) {
@@ -8137,7 +8146,7 @@ function renderEntries(entries, replace) {
   let appended = false;
   let lastUserText = null;
   for (const entry of entries) {
-    if (entry.role === 'user' && !entry.generated) lastUserText = (entry.lines || []).join('\n');
+    lastUserText = turnPromptText(entry, lastUserText);
     const unansweredPrompt = unansweredPromptFor(entry, lastUserText);
     const identity = entry.stable_id || entry.id;
     let node = entryNodes.get(identity);

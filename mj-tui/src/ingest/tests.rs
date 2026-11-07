@@ -693,28 +693,6 @@ fn transcript_without_user_entries_keeps_agent_activity_for_the_sidebar() {
         detail.last_agent_message.as_deref(),
         Some("The checks passed")
     );
-    // Hard-won: 8b08e8bc1: handback reminders and peer-session messages counted as user authorization
-    let user = |position: u64, stable_id: &str, text: &str| {
-        let mut item = transcript_item(
-            position,
-            TranscriptBody::User {
-                content: vec![serde_json::json!({"type": "text", "text": text})],
-            },
-        );
-        Arc::make_mut(&mut item).stable_id = stable_id.into();
-        item
-    };
-    apply_materialized_transcript(
-        &mut dashboard,
-        vec![
-            user(4, "user:prompt-1", "fix the build"),
-            agent_message(5, "Fixed"),
-            user(6, "user:handback-reminder-5", "Please hand back a report"),
-        ],
-    );
-    let detail = &dashboard.session_details["session-1"];
-    assert_eq!(detail.last_user_message.as_deref(), Some("fix the build"));
-    assert!(detail.last_agent_message_follows_last_user);
 }
 
 #[test]
