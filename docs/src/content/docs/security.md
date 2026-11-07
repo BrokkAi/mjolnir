@@ -140,17 +140,13 @@ the dashboard, the cookie-authenticated web viewer settings, or the file
 itself.
 
 Sessions in containers and on remote targets are not given the `api-token`
-file. An agent there can still copy it with the `fetch` tool if Mjolnir's data
-directory lies inside a directory `fetch` can read on a local session's target:
-that session's workspace, its sub-agent reports, or its temporary directory.
-The default data directory is outside all of them; one placed under `/tmp`
-through `MJ_DATA_DIR` is not, and an agent that copies the token and can reach
-the daemon's API gains everything listed above. Container and remote sessions
-get GitHub access only from the credentials Mjolnir syncs to them, described
-under
-[Credential synchronization and exclusion](#credential-synchronization-and-exclusion).
-That is the whole difference: a container or remote target does not keep an
-agent away from other sessions' files and conversations.
+file, but do not rely on that as a boundary. The `fetch` tool can copy any file
+inside another local session's workspace, sub-agent reports, or temporary
+directory, and Mjolnir's data directory can lie inside one of them: for
+example when a bare local session works in your home directory, or when
+`MJ_DATA_DIR` points under `/tmp`. An agent that copies the token and can reach
+the daemon's API gains everything listed above. Treat every agent you run, in
+any runtime, as trusted with your sessions and with what the token allows.
 
 ## Profile staging is allowlisted
 
