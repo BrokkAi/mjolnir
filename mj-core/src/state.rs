@@ -2046,6 +2046,25 @@ impl SessionRecord {
         )
     }
 
+    /// How this session's harness realizes its target's execution policy:
+    /// the policy recorded when its target was selected, so a later change
+    /// to the target template does not move it, and the profile's Muse
+    /// auto-review choice. `None` when the policy cannot be resolved or the
+    /// harness keeps its own configuration.
+    pub fn execution_enforcement(
+        &self,
+        config: &Config,
+    ) -> Option<crate::config::ExecutionEnforcement> {
+        let policy = self.target_runtime_settings(config).ok()?.execution_policy;
+        let muse_auto_review = config
+            .profiles
+            .get(&self.last_profile)
+            .and_then(|profile| profile.muse_auto_review)
+            .unwrap_or(false);
+        self.harness_kind
+            .resolve_execution_enforcement(policy, muse_auto_review)
+    }
+
     /// The target access settings this session's commands use: the ones
     /// recorded when its target was selected, with the machine's current ssh
     /// options while they still reach the same host, user, and port, or the

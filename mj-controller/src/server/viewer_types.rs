@@ -340,19 +340,7 @@ impl ViewerSnapshot {
                     is_idle: false,
                     activity_state: None,
                     question_message: None,
-                    execution_enforcement: config
-                        .targets
-                        .get(&session.target_template_id)
-                        .and_then(|target| {
-                            session.harness_kind.resolve_execution_enforcement(
-                                target.execution_policy(),
-                                config
-                                    .profiles
-                                    .get(&session.last_profile)
-                                    .and_then(|profile| profile.muse_auto_review)
-                                    .unwrap_or(false),
-                            )
-                        }),
+                    execution_enforcement: session.execution_enforcement(config),
                     policy_config_keys: Vec::new(),
                     config_options: Vec::new(),
                     plan_mode_active: None,

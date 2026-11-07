@@ -177,19 +177,8 @@ impl RuntimeStateOwner {
         let mut runtime = RuntimeSessionView::from_managed(session_id.clone(), view);
         if let Some(record) = self.controller.state.sessions.get(&session_id) {
             let config = &self.controller.config;
-            runtime.policy_config_keys = config
-                .targets
-                .get(&record.target_template_id)
-                .and_then(|target| {
-                    record.harness_kind.resolve_execution_enforcement(
-                        target.execution_policy(),
-                        config
-                            .profiles
-                            .get(&record.last_profile)
-                            .and_then(|profile| profile.muse_auto_review)
-                            .unwrap_or(false),
-                    )
-                })
+            runtime.policy_config_keys = record
+                .execution_enforcement(config)
                 .zip(runtime.operational.as_ref())
                 .map(|(enforcement, state)| enforcement.owned_config_keys(&state.config_options))
                 .unwrap_or_default();

@@ -248,10 +248,14 @@ impl ChatState {
     }
 
     pub(super) fn config_key_user_settable(&self, key: &str) -> bool {
+        // `/config mode` reaches whichever selector `mode` resolves to.
+        let resolved =
+            mj_core::acp::find_session_config_option(self.acp_surface.config_options(), key)
+                .map_or_else(|| key.to_owned(), |option| option.id.to_string());
         !self
             .policy_config_keys
             .iter()
-            .any(|policy_key| policy_key == key)
+            .any(|policy_key| *policy_key == resolved || policy_key == key)
     }
 
     pub(super) fn policy_config_notice(&self) -> &'static str {
@@ -755,6 +759,19 @@ mod tests {
         assert!(chat.notice().is_some_and(
             |notice| notice.contains("permission policy sets this") && notice.contains("/plan")
         ));
+
+        // Hard-won: 2d6176f: `/config mode` reached a policy selector named otherwise
+        let mut interaction = mode_option("default", &["default", "plan"]);
+        interaction.id = "interaction_mode".into();
+        interaction = interaction.category(SessionConfigOptionCategory::Mode);
+        chat.set_config_options(&[interaction]);
+        chat.set_policy_config_keys(&["interaction_mode".into()]);
+        chat.set_input("/config mode plan".into());
+        assert_eq!(chat.submit_input(), ChatAction::None);
+        assert!(
+            chat.notice()
+                .is_some_and(|notice| notice.contains("permission policy sets this"))
+        );
     }
 
     #[test]
