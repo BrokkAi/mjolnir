@@ -315,46 +315,25 @@ impl RuntimeState {
         self.session_manager.session(session_id.to_owned()).await
     }
 
-    /// What the session's agent left running and what its working tree holds,
-    /// as its worker observes them. Only a running session has a worker to
-    /// ask; a stopped one says what state it is in.
-    ///
-    /// A lifecycle operation of the session (an idle checkpoint right after
-    /// its turn, for one) holds the actor's connection for a while and ends
-    /// by itself, so the request waits for it, asking again with a growing
-    /// pause. Each attempt checks again that the session still runs, which is
-    /// what ends the wait when the session does.
-    pub async fn session_work_facts(
-        &self,
-        session_id: &str,
-    ) -> Result<mj_core::work_facts::WorkFacts> {
-        let mut pause = Duration::from_millis(25);
-        loop {
-            let record = self.session_record(session_id).context("unknown session")?;
-            ensure!(
-                record.state == SessionState::Running && record.target.is_some(),
-                "the session is {}, so its worker is stopped",
-                record.state.as_str()
-            );
-            let handle = self.session_manager.session(session_id.to_owned()).await?;
-            match handle.work_facts().await {
-                Err(error)
-                    if crate::session_manager::RelayJobDeferred::is_lifecycle_hold(&error) =>
-                {
-                    tokio::time::sleep(pause).await;
-                    pause = (pause * 2).min(Duration::from_secs(1));
-                }
-                observed => return observed,
-            }
-        }
-    }
-
     /// Collect and store, once, what the child's worker observed for the
-    /// finish that completed turn `ordinal`. The child's own completion task
-    /// runs this: the report is enqueued only after, from the stored value, so
-    /// no other child's or parent's report waits on this child's worker. A
-    /// worker that cannot be asked is stored as unknown, with the reason.
+    /// finish that completed turn `ordinal`. The child's own task runs this,
+    /// apart from the bounded completion pool: the report is enqueued only
+    /// after, from the stored value, so no other child's or parent's report
+    /// waits on this child's worker. Nothing here times out: a worker that
+    /// cannot be asked is stored as unknown, with the reason, and a slow Git
+    /// read is waited for, by this child's task alone.
     pub(super) async fn collect_finish_facts(&self, child_id: &str, ordinal: u64) -> Result<()> {
+        let relation = blocking({
+            let child_id = child_id.to_owned();
+            move || crate::database::load_subagent(&child_id)
+        })
+        .await?;
+        // Only a worker's own finish carries facts; an oracle's answer and a
+        // reviewer's verdict name no working tree.
+        if relation.is_none_or(|relation| relation.kind != mj_core::subagent::SubagentKind::Worker)
+        {
+            return Ok(());
+        }
         let recorded = blocking({
             let child_id = child_id.to_owned();
             move || crate::database::load_work_facts(&[child_id])
@@ -366,16 +345,69 @@ impl RuntimeState {
         {
             return Ok(());
         }
-        let facts = self
-            .session_work_facts(child_id)
-            .await
-            .unwrap_or_else(|error| {
-                mj_core::work_facts::WorkFacts::unavailable(format!(
-                    "the worker could not be reached: {error:#}"
-                ))
-            });
+        let facts = self.observe_finish_work(child_id).await;
         let child_id = child_id.to_owned();
         blocking(move || crate::database::record_finish_facts(child_id, ordinal, facts)).await
+    }
+
+    /// Ask the child's worker what its agent left running, then what its
+    /// working tree holds, on a relay connection opened for this question: the
+    /// session's own connection belongs to its actor, which must stay free for
+    /// input, stop and lifecycle operations, and a Git read has no fixed
+    /// duration. The two parts are separate requests, so a Git read that fails
+    /// or goes on never loses the processes.
+    async fn observe_finish_work(&self, child_id: &str) -> mj_core::work_facts::WorkFacts {
+        let unreachable = |error: anyhow::Error| {
+            mj_core::work_facts::WorkFacts::unavailable(format!(
+                "the worker could not be reached: {error:#}"
+            ))
+        };
+        match self.session_record(child_id) {
+            Some(record) if record.state == SessionState::Running && record.target.is_some() => {}
+            Some(record) => {
+                return mj_core::work_facts::WorkFacts::unavailable(format!(
+                    "the session is {}, so its worker is stopped",
+                    record.state.as_str()
+                ));
+            }
+            None => return mj_core::work_facts::WorkFacts::unavailable("the session is gone"),
+        }
+        let spec = match blocking({
+            let child_id = child_id.to_owned();
+            move || Controller::load()?.reconnect_command(&child_id)
+        })
+        .await
+        {
+            Ok(spec) => spec,
+            Err(error) => return unreachable(error),
+        };
+        let mut client = match crate::worker_client::RelayClient::connect(&spec, child_id).await {
+            Ok(client) => client,
+            Err(error) => return unreachable(error),
+        };
+        let processes = client
+            .work_facts(true, false)
+            .await
+            .map(|facts| facts.processes)
+            .unwrap_or_else(|error| {
+                mj_core::work_facts::Observed::unavailable(format!(
+                    "the worker could not be asked for its processes: {error:#}"
+                ))
+            });
+        let worktree = client
+            .work_facts_unbounded(false, true)
+            .await
+            .map(|facts| facts.worktree)
+            .unwrap_or_else(|error| {
+                mj_core::work_facts::Observed::unavailable(format!(
+                    "the worker could not be asked for its working tree: {error:#}"
+                ))
+            });
+        mj_core::work_facts::WorkFacts {
+            observed_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0),
+            processes,
+            worktree,
+        }
     }
 
     /// Checkpoint a session now and publish the result, the way the daemon's

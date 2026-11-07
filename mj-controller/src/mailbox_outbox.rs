@@ -613,7 +613,7 @@ mod tests {
         report.facts = Some(mj_core::work_facts::WorkFacts {
             observed_at_ms: 1,
             processes: mj_core::work_facts::Observed::Known(mj_core::work_facts::ProcessFacts {
-                worker: None,
+                unattributed: 0,
                 running: 1,
                 shown: vec![mj_core::work_facts::RunningProcess {
                     pid: 41301,
@@ -675,7 +675,7 @@ mod tests {
                 child_name: None,
                 park: Box::new(mj_core::work_facts::ParkFacts::unverified(
                     mj_core::work_facts::Observed::Known(mj_core::work_facts::ProcessFacts {
-                        worker: None,
+                        unattributed: 0,
                         running: 3,
                         shown: Vec::new(),
                         omitted: 3,

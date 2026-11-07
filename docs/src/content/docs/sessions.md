@@ -209,8 +209,10 @@ and its parent has been told, Mjolnir parks it:
   processes the agent left running and what its working tree holds, and
   records both. The report the parent receives lists them as Mjolnir's
   observation, ahead of the child's own text; after the park, `list_agents`
-  shows what the park stopped and what survived, and the parent gets one more
-  message when the park stopped or spared a process.
+  shows which of those processes were no longer running after the park and
+  which survived (it cannot tell a process the park stopped from one that
+  exited on its own), and the parent gets one more message when the finish
+  report listed running processes or the park found any gone or surviving.
 - Its conversation, its report, and the files on its target stay. Its row
   shows the idle symbol and reads "Parked". The report message the parent
   receives and `list_agents` show it as finished, with `"parked": true`.

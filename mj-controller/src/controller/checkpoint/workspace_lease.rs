@@ -92,7 +92,7 @@ impl IdleWorkspaceLease {
     pub(in crate::controller) async fn process_facts(
         &mut self,
     ) -> Result<mj_core::work_facts::WorkFacts> {
-        self.lease.connection_mut().work_facts(false).await
+        self.lease.connection_mut().work_facts(true, false).await
     }
 
     pub(in crate::controller) async fn verify_for_upgrade(&mut self) -> Result<bool> {

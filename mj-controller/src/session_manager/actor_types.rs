@@ -81,13 +81,6 @@ impl RelayJobDeferred {
     pub fn marks(error: &anyhow::Error) -> bool {
         error.downcast_ref::<Self>().is_some()
     }
-
-    /// Whether `error` is the deferral that a lifecycle operation causes.
-    pub fn is_lifecycle_hold(error: &anyhow::Error) -> bool {
-        error
-            .downcast_ref::<Self>()
-            .is_some_and(|deferred| deferred.0 == Self::LIFECYCLE_HOLD)
-    }
 }
 
 impl ActorCommand {

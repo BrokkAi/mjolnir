@@ -243,14 +243,40 @@ impl Controller {
                 )
                 .context("record the park before stopping the sub-agent's worker")?;
             }
-            stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
-                .context("stop the sub-agent's worker")?;
+            if let Err(error) =
+                stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
+            {
+                // The child stays running (a worker the stop did reach is
+                // restarted in place), so the marker describes a park that did
+                // not happen: drop it, or a later startup would settle it.
+                if before_stop.is_some()
+                    && let Err(discard) =
+                        crate::database::discard_unfinished_park(session_id.to_owned())
+                {
+                    tracing::warn!(
+                        session_id,
+                        error = format!("{discard:#}"),
+                        "could not drop the marker of a park whose stop failed"
+                    );
+                }
+                return Err(error.context("stop the sub-agent's worker"));
+            }
+            let mut record = session.clone();
+            record.state = if failure.is_some() {
+                SessionState::Error
+            } else {
+                SessionState::Parked
+            };
+            record.last_error = failure.map(str::to_owned);
+            record.updated_at = super::now();
+            crate::database::save_lifecycle_session(&record)
+                .context("record the stopped sub-agent")?;
+            // The record says parked before the outcome is written, so a marker
+            // that startup finds with no outcome belongs to a child that was
+            // parked: only then is the stop proven to have run. A failure to
+            // write the outcome must not undo the park; the marker stays.
             if let Some(before_stop) = before_stop {
                 let park = check_survivors(executor, &backend, before_stop);
-                // One write records the park's facts and, when they are news,
-                // the parent's message. The worker is already stopped, so a
-                // failure here must not undo the park; the marker stays, and
-                // startup settles it.
                 if let Err(error) = crate::database::record_park_outcome(
                     session_id.to_owned(),
                     session.message_name(),
@@ -263,16 +289,6 @@ impl Controller {
                     );
                 }
             }
-            let mut record = session.clone();
-            record.state = if failure.is_some() {
-                SessionState::Error
-            } else {
-                SessionState::Parked
-            };
-            record.last_error = failure.map(str::to_owned);
-            record.updated_at = super::now();
-            crate::database::save_lifecycle_session(&record)
-                .context("record the stopped sub-agent")?;
             let released = tokio::time::timeout(PARK_RELEASE_TIMEOUT, async {
                 while manager.session(session_id.to_owned()).await.is_ok() {
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -292,11 +308,12 @@ impl Controller {
     }
 
     /// Settle a park whose stop was begun and whose outcome was not recorded,
-    /// because the daemon died between them. The worker that was parked is
-    /// asked about first: if it still lives the stop never ran and the marker is
-    /// dropped; if it is gone, the stop ran, and the processes seen before it
-    /// are checked as an ordinary park checks them. A target that cannot be
-    /// reached leaves the marker for the next startup.
+    /// because the daemon died after saving the child as parked. Only a child
+    /// whose record says parked proves that the stop ran; any other state means
+    /// the stop failed or the child was started again (its worker may be a new
+    /// one), so the marker is dropped without a message. The processes seen
+    /// before the stop are then checked as an ordinary park checks them. A
+    /// target that cannot be reached leaves the marker for the next startup.
     pub async fn settle_unfinished_park(
         &self,
         session_id: &str,
@@ -306,26 +323,18 @@ impl Controller {
         let Some(session) = self.state.sessions.get(session_id) else {
             return crate::database::discard_unfinished_park(session_id.to_owned());
         };
-        let known = match &park.snapshot {
-            Observed::Known(processes) => {
-                processes.worker.clone().map(|worker| (processes, worker))
-            }
-            Observed::Unavailable { .. } => None,
-        };
-        // A snapshot that was never observed, or that names no worker, says
-        // nothing about a stop, so there is nothing to settle.
-        let Some((processes, worker)) = known else {
-            return crate::database::discard_unfinished_park(session_id.to_owned());
-        };
-        let (backend, _) = self.worker_placement(session_id)?;
-        let mut identities = vec![worker.clone()];
-        identities.extend(processes.identities.iter().cloned());
-        let survivors = surviving_pids(executor, &backend, &identities)
-            .context("check the processes of a park that did not finish")?;
-        if survivors.contains(&worker.pid) {
+        if session.state != SessionState::Parked {
             return crate::database::discard_unfinished_park(session_id.to_owned());
         }
-        let settled = ParkFacts::settled(park.snapshot.clone(), &survivors);
+        let (backend, _) = self.worker_placement(session_id)?;
+        let settled = match &park.snapshot {
+            Observed::Known(processes) => {
+                let survivors = surviving_pids(executor, &backend, &processes.identities)
+                    .context("check the processes of a park that did not finish")?;
+                ParkFacts::settled(park.snapshot.clone(), &survivors)
+            }
+            Observed::Unavailable { .. } => ParkFacts::settled(park.snapshot.clone(), &[]),
+        };
         crate::database::record_park_outcome(session_id.to_owned(), session.message_name(), settled)
     }
 
@@ -1147,10 +1156,7 @@ mod tests {
         WorkFacts {
             observed_at_ms: 1,
             processes: Observed::Known(ProcessFacts {
-                worker: Some(ProcessIdentity {
-                    pid: 4999,
-                    start: "boot:4999".into(),
-                }),
+                unattributed: 0,
                 running: 2,
                 shown: vec![
                     process(5001, "cargo nextest run", false),
@@ -1270,8 +1276,8 @@ mod tests {
             .park
             .as_ref()
             .expect("park facts recorded");
-        assert_eq!((park.stopped, park.survived), (1, 1));
-        assert_eq!(park.stopped_shown[0].pid, 5001);
+        assert_eq!((park.gone, park.survived), (1, 1));
+        assert_eq!(park.gone_shown[0].pid, 5001);
         assert_eq!(park.survived_shown[0].pid, 5002);
 
         let events = crate::database::pending_mailbox_events(10).unwrap();
@@ -1280,7 +1286,12 @@ mod tests {
             serde_json::from_str(&events[0].event_json).unwrap();
         assert!(event.wake);
         let text = mj_core::mailbox::render_mailbox_event(&event);
-        assert!(text.contains("Parking stopped 1 process"), "{text}");
+        assert!(
+            text.contains(
+                "1 process the child's agent had left running was no longer running after the park"
+            ),
+            "{text}"
+        );
         assert!(
             text.contains("pid 5001, up 4m30s: cargo nextest run"),
             "{text}"
@@ -1312,62 +1323,46 @@ mod tests {
         shutdown.shutdown().await.unwrap();
     }
 
-    /// A park the daemon began and did not finish is settled from what it
-    /// wrote before the stop, with real processes and the real check script:
-    /// the worker that was parked is gone, so the stop ran, and what survived
-    /// is exactly the process that still lives.
-    // Hard-won: a430ee620: a daemon that died between the stop and the park's
-    // record left the parent never told, with nothing to settle it from.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_unfinished_park_is_settled_after_a_restart_from_its_snapshot() {
-        if !isolated("an_unfinished_park_is_settled_after_a_restart_from_its_snapshot") {
-            return;
-        }
-        let _writer = crate::database::install_isolated_test_writer();
+    /// Record the stand-in child as parked or running, with real processes
+    /// standing in for what it left: one that is gone and one that survives. The
+    /// snapshot a park wrote before its stop is stored with its unfinished marker.
+    fn child_with_unfinished_park(
+        state: SessionState,
+    ) -> (std::process::Child, ParkFacts, tempfile::TempDir) {
         let root = tempfile::tempdir().unwrap();
         register_child(root.path());
-        let spawn = |seconds: &str| {
+        let mut record = loaded_controller().state.sessions[LATCH_RELAY_SESSION].clone();
+        record.state = state;
+        crate::database::save_lifecycle_session(&record).unwrap();
+        let spawn = || {
             std::process::Command::new("sleep")
-                .arg(seconds)
+                .arg("60")
                 .spawn()
                 .expect("start a stand-in process")
         };
-        // The old worker and one process it left have exited; another survived.
-        let mut old_worker = spawn("60");
-        let mut stopped = spawn("60");
-        let mut survivor = spawn("60");
+        let (mut gone, survivor) = (spawn(), spawn());
         let identity = |child: &std::process::Child| ProcessIdentity {
             pid: child.id(),
             start: mj_core::subprocess::process_birth_identity(child.id()).unwrap(),
         };
-        let (worker, stopped_identity, survivor_identity) = (
-            identity(&old_worker),
-            identity(&stopped),
-            identity(&survivor),
-        );
-        old_worker.kill().unwrap();
-        old_worker.wait().unwrap();
-        stopped.kill().unwrap();
-        stopped.wait().unwrap();
+        let (gone_identity, survivor_identity) = (identity(&gone), identity(&survivor));
+        gone.kill().unwrap();
+        gone.wait().unwrap();
+        let process = |identity: &ProcessIdentity, command: &str, detached: bool| RunningProcess {
+            pid: identity.pid,
+            elapsed_secs: 5,
+            command: command.into(),
+            detached,
+        };
         let snapshot = Observed::Known(ProcessFacts {
-            worker: Some(worker),
+            unattributed: 0,
             running: 2,
             shown: vec![
-                RunningProcess {
-                    pid: stopped_identity.pid,
-                    elapsed_secs: 5,
-                    command: "cargo build".into(),
-                    detached: false,
-                },
-                RunningProcess {
-                    pid: survivor_identity.pid,
-                    elapsed_secs: 5,
-                    command: "sleep 60".into(),
-                    detached: true,
-                },
+                process(&gone_identity, "cargo build", false),
+                process(&survivor_identity, "sleep 60", true),
             ],
             omitted: 0,
-            identities: vec![stopped_identity, survivor_identity.clone()],
+            identities: vec![gone_identity, survivor_identity],
         });
         crate::database::record_park_started(
             LATCH_RELAY_SESSION.into(),
@@ -1376,13 +1371,26 @@ mod tests {
         .unwrap();
         let unfinished = crate::database::load_unfinished_parks().unwrap();
         assert_eq!(unfinished.len(), 1);
+        (survivor, unfinished[0].1.clone(), root)
+    }
 
+    /// A park the daemon began and did not finish is settled from what it
+    /// wrote before the stop, with real processes and the real check script:
+    /// the child's record says parked, so the stop ran, and what survived is
+    /// exactly the process that still lives. The check sees only that the
+    /// other process is gone, so the message does not claim the park stopped it.
+    // Hard-won: a430ee620: a daemon that died between the stop and the park's
+    // record left the parent never told, with nothing to settle it from.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unfinished_park_is_settled_after_a_restart_from_its_snapshot() {
+        if !isolated("an_unfinished_park_is_settled_after_a_restart_from_its_snapshot") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let (mut survivor, park, _root) = child_with_unfinished_park(SessionState::Parked);
+        let survivor_pid = survivor.id();
         let result = loaded_controller()
-            .settle_unfinished_park(
-                LATCH_RELAY_SESSION,
-                unfinished[0].1.clone(),
-                &crate::targets::ProcessExecutor,
-            )
+            .settle_unfinished_park(LATCH_RELAY_SESSION, park, &crate::targets::ProcessExecutor)
             .await;
         survivor.kill().unwrap();
         survivor.wait().unwrap();
@@ -1392,53 +1400,36 @@ mod tests {
         let recorded = crate::database::load_work_facts(&[LATCH_RELAY_SESSION.to_owned()]).unwrap();
         let park = recorded[LATCH_RELAY_SESSION].park.as_ref().unwrap();
         assert!(!park.pending);
-        assert_eq!((park.stopped, park.survived), (1, 1));
-        assert_eq!(park.survived_shown[0].pid, survivor_identity.pid);
+        assert_eq!((park.gone, park.survived), (1, 1));
+        assert_eq!(park.survived_shown[0].pid, survivor_pid);
         let events = crate::database::pending_mailbox_events(10).unwrap();
         assert_eq!(events.len(), 1, "{events:?}");
-        assert!(events[0].event_json.contains("subagent_parked"));
+        let event: mj_core::mailbox::MailboxEvent =
+            serde_json::from_str(&events[0].event_json).unwrap();
+        let text = mj_core::mailbox::render_mailbox_event(&event);
+        assert!(text.contains("no longer running after the park"), "{text}");
+        assert!(!text.contains("Parking stopped"), "{text}");
     }
 
-    /// The same marker, when the parked worker still lives, records that the
-    /// stop never ran: nothing is reported, and the marker is dropped.
+    /// The same marker on a child whose record says running was not a park that
+    /// happened: its stop failed, or it was started again, possibly on a new
+    /// worker. Its old processes being gone proves nothing, so no message is
+    /// sent and the marker is dropped.
+    // Hard-won: a195a62bc: startup treated a gone worker as proof the park ran,
+    // so a stop that failed after the worker died, and an actor that restarted
+    // the worker, produced a false "parked" message.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_unfinished_park_whose_worker_still_lives_never_stopped_anything() {
-        if !isolated("an_unfinished_park_whose_worker_still_lives_never_stopped_anything") {
+    async fn an_unfinished_park_of_a_child_that_is_running_again_sends_nothing() {
+        if !isolated("an_unfinished_park_of_a_child_that_is_running_again_sends_nothing") {
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
-        let root = tempfile::tempdir().unwrap();
-        register_child(root.path());
-        let mut worker = std::process::Command::new("sleep")
-            .arg("60")
-            .spawn()
-            .expect("start a stand-in worker");
-        let identity = ProcessIdentity {
-            pid: worker.id(),
-            start: mj_core::subprocess::process_birth_identity(worker.id()).unwrap(),
-        };
-        let snapshot = Observed::Known(ProcessFacts {
-            worker: Some(identity.clone()),
-            running: 1,
-            shown: Vec::new(),
-            omitted: 1,
-            identities: vec![identity],
-        });
-        crate::database::record_park_started(
-            LATCH_RELAY_SESSION.into(),
-            ParkFacts::started(snapshot),
-        )
-        .unwrap();
-        let unfinished = crate::database::load_unfinished_parks().unwrap();
+        let (mut survivor, park, _root) = child_with_unfinished_park(SessionState::Running);
         let result = loaded_controller()
-            .settle_unfinished_park(
-                LATCH_RELAY_SESSION,
-                unfinished[0].1.clone(),
-                &crate::targets::ProcessExecutor,
-            )
+            .settle_unfinished_park(LATCH_RELAY_SESSION, park, &crate::targets::ProcessExecutor)
             .await;
-        worker.kill().unwrap();
-        worker.wait().unwrap();
+        survivor.kill().unwrap();
+        survivor.wait().unwrap();
         result.unwrap();
         assert!(crate::database::load_unfinished_parks().unwrap().is_empty());
         let recorded = crate::database::load_work_facts(&[LATCH_RELAY_SESSION.to_owned()]).unwrap();
@@ -1447,6 +1438,70 @@ mod tests {
             crate::database::pending_mailbox_events(10)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// The finish report promised a later message about the processes it
+    /// listed. A park that could not observe them still keeps that promise, and
+    /// a finish that listed none promised nothing.
+    // Hard-won: a195a62bc: a park whose pre-stop snapshot was unavailable sent
+    // nothing, although the finish report had said a later message would say what
+    // happened to the processes it listed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_park_that_could_not_observe_keeps_the_promise_the_finish_report_made() {
+        if !isolated("a_park_that_could_not_observe_keeps_the_promise_the_finish_report_made") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        register_child(root.path());
+        let unobserved =
+            || ParkFacts::settled(Observed::unavailable("the worker could not be asked"), &[]);
+        // A finish that listed nothing promised nothing.
+        let mut quiet = facts_with_two_processes();
+        quiet.processes = Observed::Known(ProcessFacts {
+            unattributed: 0,
+            running: 0,
+            shown: Vec::new(),
+            omitted: 0,
+            identities: Vec::new(),
+        });
+        crate::database::record_finish_facts(LATCH_RELAY_SESSION.into(), 9, quiet).unwrap();
+        crate::database::record_park_outcome(
+            LATCH_RELAY_SESSION.into(),
+            "map the parser".into(),
+            unobserved(),
+        )
+        .unwrap();
+        assert!(
+            crate::database::pending_mailbox_events(10)
+                .unwrap()
+                .is_empty()
+        );
+        // One that listed running processes did.
+        crate::database::record_finish_facts(
+            LATCH_RELAY_SESSION.into(),
+            9,
+            facts_with_two_processes(),
+        )
+        .unwrap();
+        crate::database::record_park_outcome(
+            LATCH_RELAY_SESSION.into(),
+            "map the parser".into(),
+            unobserved(),
+        )
+        .unwrap();
+        let events = crate::database::pending_mailbox_events(10).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let event: mj_core::mailbox::MailboxEvent =
+            serde_json::from_str(&events[0].event_json).unwrap();
+        assert!(event.wake);
+        let text = mj_core::mailbox::render_mailbox_event(&event);
+        assert!(
+            text.contains(
+                "could not be checked when the park began: the worker could not be asked"
+            ),
+            "{text}"
         );
     }
 

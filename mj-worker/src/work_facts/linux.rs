@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 
-use super::{Described, ProcRow, ProcessReader};
+use super::{Described, Marker, ProcRow, ProcessReader};
 
 /// Fields of `/proc/<pid>/stat` that follow the command name.
 struct Stat {
@@ -45,12 +45,34 @@ fn uptime_ms() -> Result<i64> {
     Ok((seconds * 1000.0) as i64)
 }
 
-fn has_session_marker(pid: u32, wanted: &[u8]) -> bool {
-    std::fs::read(format!("/proc/{pid}/environ")).is_ok_and(|environ| {
-        environ
-            .split(|byte| *byte == 0)
-            .any(|entry| entry == wanted)
-    })
+/// Whether `pid`'s environment carries `wanted`. A refused read is not the same
+/// as an absent marker: for a process of this user it means the marker cannot be
+/// checked, which the scan reports instead of treating the process as foreign.
+pub(super) fn session_marker(pid: u32, wanted: &[u8]) -> Marker {
+    match std::fs::read(format!("/proc/{pid}/environ")) {
+        Ok(environ) => {
+            if environ
+                .split(|byte| *byte == 0)
+                .any(|entry| entry == wanted)
+            {
+                Marker::Present
+            } else {
+                Marker::Absent
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            use std::os::unix::fs::MetadataExt;
+            let ours = std::fs::metadata(format!("/proc/{pid}"))
+                .is_ok_and(|metadata| metadata.uid() == unsafe { libc::geteuid() });
+            if ours {
+                Marker::Unreadable
+            } else {
+                Marker::Absent
+            }
+        }
+        // The process exited, or has no environment to read.
+        Err(_) => Marker::Absent,
+    }
 }
 
 /// Every process the scan may consider, and the reader for the survivors.
@@ -83,7 +105,7 @@ pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReade
             ppid: stat.ppid,
             age_ms: uptime.saturating_sub(start_ms).max(0),
             zombie: stat.zombie,
-            marked: has_session_marker(pid, &wanted),
+            marker: session_marker(pid, &wanted),
         });
     }
     // The start tick is read again for survivors only, so the identity matches

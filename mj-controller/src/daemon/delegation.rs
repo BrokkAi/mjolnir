@@ -27,6 +27,46 @@ const COMPLETION_FAILURE_CAP: Duration = Duration::from_secs(300);
 /// A busy child is polled more often: it is working, not failing.
 const COMPLETION_BUSY_CAP: Duration = Duration::from_secs(30);
 
+/// The most completions that run at once. Reviewers, oracles and workers share
+/// it, so nothing that waits on a worker may hold one of its slots.
+const COMPLETION_POOL: usize = 32;
+
+#[derive(Debug, PartialEq, Eq)]
+enum CompletionStep {
+    /// Ask the child's worker what it left, in a task of its own.
+    CollectFacts(String, u64),
+    /// Report the finish and park: runs in the bounded pool, briefly.
+    Complete(String, u64),
+}
+
+/// What to start next for the finished children, each with the turn that
+/// completed. A child whose facts for that turn are not stored yet collects
+/// them first, with no limit on how many do so at once; only a child whose
+/// facts are stored takes a pool slot, so children waiting on their workers can
+/// never occupy the slots other completions need. `skip` says which children
+/// are already settled, running or waiting out a retry.
+fn completion_steps(
+    finished: &[(String, u64)],
+    skip: impl Fn(&str, u64) -> bool,
+    facts_done: &BTreeMap<String, u64>,
+    running_completions: usize,
+) -> Vec<CompletionStep> {
+    let mut steps = Vec::new();
+    let mut free = COMPLETION_POOL.saturating_sub(running_completions);
+    for (child, ordinal) in finished {
+        if skip(child, *ordinal) {
+            continue;
+        }
+        if facts_done.get(child) != Some(ordinal) {
+            steps.push(CompletionStep::CollectFacts(child.clone(), *ordinal));
+        } else if free > 0 {
+            free -= 1;
+            steps.push(CompletionStep::Complete(child.clone(), *ordinal));
+        }
+    }
+    steps
+}
+
 /// When one child outcome's completion may run again, and how it has been
 /// going. Settling the child forgets it; a later outcome starts afresh.
 struct CompletionRetry {
@@ -115,6 +155,14 @@ async fn run(
     let mut observations = BTreeMap::<String, DelegationObservation>::new();
     let mut completions = tokio::task::JoinSet::new();
     let mut completion_ids = BTreeMap::<tokio::task::Id, (String, u64)>::new();
+    // What each finished child's worker observed is collected by a task of its
+    // own per child, outside the bounded completion pool: a child waiting on its
+    // worker (an idle checkpoint, a slow Git read) must not hold one of the
+    // completion slots every other child, reviewer and oracle needs. The
+    // completion that follows a child's facts runs in the pool, briefly.
+    let mut fact_tasks = tokio::task::JoinSet::new();
+    let mut fact_ids = BTreeMap::<tokio::task::Id, (String, u64)>::new();
+    let mut facts_done = BTreeMap::<String, u64>::new();
     let mut noticed = BTreeMap::<String, u64>::new();
     let mut retry = BTreeMap::<String, CompletionRetry>::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -171,34 +219,58 @@ async fn run(
                 });
                 identities.insert(task.id(), id);
             }
-            for (child, observation) in &observations {
-                if completion_ids.len() >= 32 {
-                    break;
+            let finished = observations
+                .iter()
+                .filter_map(|(child, observation)| {
+                    Some((
+                        child.clone(),
+                        observation.outcome.as_ref()?.completed_ordinal,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let steps = completion_steps(
+                &finished,
+                |child, ordinal| {
+                    noticed.get(child) == Some(&ordinal)
+                        || completion_ids.values().any(|(id, _)| id == child)
+                        || fact_ids.values().any(|(id, _)| id == child)
+                        || retry.get(child).is_some_and(|retry| {
+                            retry.ordinal == ordinal && retry.at > Instant::now()
+                        })
+                },
+                &facts_done,
+                completion_ids.len(),
+            );
+            for step in steps {
+                match step {
+                    // In this child's own task and with no admission: a
+                    // replaced daemon asks again before any report exists.
+                    CompletionStep::CollectFacts(child, ordinal) => {
+                        let state = state.clone();
+                        let child_id = child.clone();
+                        let task = fact_tasks.spawn(async move {
+                            state.collect_finish_facts(&child_id, ordinal).await
+                        });
+                        fact_ids.insert(task.id(), (child, ordinal));
+                    }
+                    CompletionStep::Complete(child, ordinal) => {
+                        let Ok(work) =
+                            crate::upgrade::activity_unless_draining("delegation child completion")
+                        else {
+                            continue;
+                        };
+                        let Some(observation) = observations.get(&child).cloned() else {
+                            continue;
+                        };
+                        let child_id = child.clone();
+                        let backend = backend.clone();
+                        let state = state.clone();
+                        let task = completions.spawn(async move {
+                            complete_child(state, backend, child_id, observation, work).await
+                        });
+                        completion_ids.insert(task.id(), (child, ordinal));
+                    }
                 }
-                let Some(outcome) = observation.outcome.as_ref() else {
-                    continue;
-                };
-                if noticed.get(child) == Some(&outcome.completed_ordinal)
-                    || completion_ids.values().any(|(id, _)| id == child)
-                    || retry.get(child).is_some_and(|retry| {
-                        retry.ordinal == outcome.completed_ordinal && retry.at > Instant::now()
-                    })
-                {
-                    continue;
-                }
-                let Ok(work) =
-                    crate::upgrade::activity_unless_draining("delegation child completion")
-                else {
-                    continue;
-                };
-                let child_id = child.clone();
-                let backend = backend.clone();
-                let state = state.clone();
-                let observation = observation.clone();
-                let task = completions.spawn(async move {
-                    complete_child(state, backend, child_id, observation, work).await
-                });
-                completion_ids.insert(task.id(), (child.clone(), outcome.completed_ordinal));
             }
         }
         tokio::select! {
@@ -213,6 +285,7 @@ async fn run(
                     dispatch.retire(&id);
                     observations.remove(&id);
                     retry.remove(&id);
+                    facts_done.remove(&id);
                     // A parked child loses its observer and gets a new one
                     // when `send_message` starts it again. That observer first
                     // reports the turn this loop already settled; forgetting
@@ -245,6 +318,26 @@ async fn run(
                         Err(error) => {
                             tracing::warn!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation task failed");
                             dispatch.failed_task(&id);
+                        }
+                    }
+                }
+            }
+            completed = fact_tasks.join_next_with_id(), if !fact_tasks.is_empty() => {
+                let Some(completed) = completed else { continue };
+                let (task_id, result) = match completed {
+                    Ok((id, result)) => (id, result),
+                    Err(error) => (error.id(), Err(anyhow::Error::from(error))),
+                };
+                if let Some((id, ordinal)) = fact_ids.remove(&task_id) {
+                    match result {
+                        Ok(()) => { facts_done.insert(id, ordinal); }
+                        Err(error) => {
+                            let failure = format!("{error:#}");
+                            let (next, report) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), Some(failure.clone()));
+                            if report {
+                                tracing::warn!(child_session_id = %id, error = %failure, retry_in_seconds = (next.at - Instant::now()).as_secs(), "collecting a finished child's facts failed; retrying with backoff");
+                            }
+                            retry.insert(id, next);
                         }
                     }
                 }
@@ -288,6 +381,7 @@ async fn run(
     }
     jobs.abort_all();
     completions.abort_all();
+    fact_tasks.abort_all();
     while let Some(result) = jobs.join_next().await {
         if let Err(error) = result
             && !error.is_cancelled()
@@ -312,7 +406,6 @@ async fn complete_child(
     observation: DelegationObservation,
     work: crate::upgrade::Work,
 ) -> Result<ChildCompletion> {
-    let mut work = Some(work);
     let id = child_id.clone();
     let relation =
         tokio::task::spawn_blocking(move || crate::database::load_subagent(&id)).await??;
@@ -364,21 +457,6 @@ async fn complete_child(
         if reminded {
             return Ok(ChildCompletion::Settled);
         }
-    }
-    if relation.kind == mj_core::subagent::SubagentKind::Worker {
-        // What the child's worker observed is asked once per finish, here, in
-        // this child's own task. The wait is on the worker and can take a
-        // while (an idle checkpoint holds its connection), so it holds no
-        // handoff admission: a replaced daemon asks again before any report.
-        drop(work.take());
-        state
-            .collect_finish_facts(&child_id, outcome.completed_ordinal)
-            .await?;
-        let Ok(admitted) = crate::upgrade::activity_unless_draining("delegation child completion")
-        else {
-            return Ok(ChildCompletion::RetryPark);
-        };
-        work = Some(admitted);
     }
     let _work = work;
     state
@@ -473,6 +551,45 @@ mod tests {
         }
     }
 
+    // Hard-won: a195a62bc: a child's wait on its worker for its facts occupied
+    // one of the 32 completion slots, so 32 children inside idle checkpoints
+    // blocked every other completion, reviewers and oracles included.
+    #[test]
+    fn children_waiting_for_their_facts_never_occupy_the_completion_pool() {
+        let finished = (0..100)
+            .map(|index| (format!("child-{index:03}"), 7))
+            .collect::<Vec<_>>();
+        // Nobody's facts are stored: every child starts collecting, none takes
+        // a completion slot, however many there are.
+        let steps = completion_steps(&finished, |_, _| false, &BTreeMap::new(), 0);
+        assert_eq!(steps.len(), 100);
+        assert!(
+            steps
+                .iter()
+                .all(|step| matches!(step, CompletionStep::CollectFacts(_, 7)))
+        );
+        // Of children whose facts are stored, the pool still limits how many
+        // complete at once, and the ones still collecting do not count in it.
+        let facts_done = finished
+            .iter()
+            .skip(10)
+            .map(|(child, ordinal)| (child.clone(), *ordinal))
+            .collect::<BTreeMap<_, _>>();
+        let steps = completion_steps(&finished, |_, _| false, &facts_done, 4);
+        let completing = steps
+            .iter()
+            .filter(|step| matches!(step, CompletionStep::Complete(..)))
+            .count();
+        let collecting = steps
+            .iter()
+            .filter(|step| matches!(step, CompletionStep::CollectFacts(..)))
+            .count();
+        assert_eq!((completing, collecting), (COMPLETION_POOL - 4, 10));
+        // A child that is settled, running or waiting is left alone.
+        let steps = completion_steps(&finished, |child, _| child != "child-050", &facts_done, 0);
+        assert_eq!(steps, [CompletionStep::Complete("child-050".into(), 7)]);
+    }
+
     // Hard-won: 5bb43721a: child completion wrote a redundant notice to the parent.
     #[tokio::test]
     async fn a_finished_child_retries_busy_parking_without_a_parent_notice() {
@@ -558,16 +675,18 @@ mod tests {
             ChildCompletion::Settled
         ));
         assert_eq!(parks.0.load(Ordering::SeqCst), 2);
-        // The facts were asked once for this finish by the child's own task
-        // (it has no worker here, so they are stored as unknown, with why),
-        // and the second pass did not ask again.
+        // The child's own facts task asks once for this finish (this child has
+        // no worker, so they are stored as unknown, with why), and asking again
+        // for the same finish changes nothing.
+        state.collect_finish_facts("child", 10).await.unwrap();
+        state.collect_finish_facts("child", 10).await.unwrap();
         let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
         let recorded = &recorded["child"];
         assert_eq!(recorded.finish_ordinal, Some(10));
         assert!(matches!(
             &recorded.finish.as_ref().unwrap().processes,
             mj_core::work_facts::Observed::Unavailable { reason }
-                if reason.contains("the worker could not be reached")
+                if reason.contains("worker") || reason.contains("session")
         ));
         assert_eq!(
             crate::database::load_subagent("child")

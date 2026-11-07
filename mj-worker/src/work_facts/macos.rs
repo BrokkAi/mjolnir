@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, bail};
 use std::process::Command;
 
-use super::{Described, ProcRow, ProcessReader};
+use super::{Described, Marker, ProcRow, ProcessReader};
 
 /// `[[dd-]hh:]mm:ss` as `ps -o etime` prints it.
 pub(super) fn parse_elapsed_secs(text: &str) -> Option<i64> {
@@ -75,7 +75,11 @@ pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReade
             ppid,
             age_ms: elapsed.saturating_mul(1000),
             zombie: stat.starts_with('Z'),
-            marked: marked.contains(&pid),
+            marker: if marked.contains(&pid) {
+                Marker::Present
+            } else {
+                Marker::Absent
+            },
         });
     }
     let reader = ProcessReader::new(move |row| {

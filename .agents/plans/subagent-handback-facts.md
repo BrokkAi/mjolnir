@@ -152,6 +152,37 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
   Date/Author: 2026-11-07 / implementing agent, from review.
 
 
+- Decision (second review, 2026-11-07): The facts wait leaves the bounded completion pool. The delegation loop plans each finished child's next step with a pure function (`completion_steps`): a child whose facts for the completed turn are not stored starts a facts task of its own (no limit on how many at once, no admission); only a child whose facts are stored takes one of the 32 completion slots, and that completion no longer waits on any worker. A failed collection retries with the existing per-child backoff.
+  Rationale: The earlier version collected inside `complete_child`, so 32 children inside idle checkpoints held every slot and blocked reviewers, oracles and every other worker's completion. Test `children_waiting_for_their_facts_never_occupy_the_completion_pool` pins the planner.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (second review): Facts are asked on a relay connection opened for the question, not on the session actor's, and as two requests. `WorkFacts { processes, worktree }` asks for each part separately; the processes request keeps the ordinary request deadline (a `/proc` scan answers at once), the worktree request has no deadline (`RelayClient::work_facts_unbounded`), and the daemon's per-child task waits for it or goes away with the work. A failure of the Git part is stored as that part unavailable with the reason; the processes are never lost with it. The `RelayJob` for facts, `ManagedSessionHandle::work_facts` and the lifecycle-hold retry loop are removed: the dedicated connection neither needs the actor's lease nor holds the actor's command loop.
+  Rationale: A guessed 15 s deadline on Git lost both parts and abandoned the connection while Git kept running (the connection is strictly sequential, so a timeout abandons it), and the inline job monopolized the actor, so input, stop and lifecycle leases waited on a `git status`. A report for a child whose Git read never ends is delayed for that child only; no fixed timeout is placed on it. Test `a_slow_working_tree_read_on_one_connection_never_delays_processes_on_another` runs a four-second fake `git` on one connection while another connection's processes request answers at once.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (second review): The working tree is read with `--untracked-files=all`, which overrides `status.showUntrackedFiles`, so untracked directories expand to files and a configured `no` cannot report a dirty tree as clean.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (second review): The park reports "no longer running after the park", not "stopped by the park". `ParkFacts.stopped` and `stopped_shown` became `gone` and `gone_shown`; the message says Mjolnir cannot tell whether the park stopped a process or it exited on its own.
+  Rationale: The check after the stop sees only that a process is gone. The stop script does not say which PIDs it signaled, so splitting would be a guess.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (second review): The scan reports processes whose environment it cannot read as `ProcessFacts.unattributed`, a count of the user's processes outside the harness's tree that refused the read, beside `running`. The Linux reader keeps three marker states (present, absent, unreadable) and counts a refused read as unreadable only for a process owned by the same user.
+  Rationale: An unreadable environment was treated as "no marker", so work that a process forbidding the read had detached was left out with no sign. The count is shown as one line when above zero. Test `the_linux_reader_tells_unreadable_from_absent` uses a real process that sets itself not dumpable.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (second review, refines the earlier park-settling decision): The park saves the child as parked before it checks survivors and records the outcome, and startup settles a marker only for a child whose record says parked. A marker on a child in any other state (the stop failed, or the child started again, possibly on a new worker) is dropped without a message, and a stop that errors drops its own marker. The recorded worker identity (`ProcessFacts.worker`) is removed: the parked record is the proof that the stop ran, so a second proof by process identity added nothing.
+  Rationale: A gone worker did not prove the park ran: a stop that errored after the worker died, followed by an actor restart on a new worker, made settle send a false "parked" message. The cost is that a crash between the stop and the saving of the parked record loses the message; the child continues and the parent is not told of a park that the record does not show.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (second review): The park message keeps the finish report's promise. When the finish report listed running processes, the parent gets a park message even if the park's snapshot was unavailable or showed none running; the daemon reads the promise from the stored finish facts in the same transaction that records the outcome. The unavailable-snapshot message says the listed processes could not be checked when the park began and that a detached process may keep running.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (second review): Readiness has one owner. `DurableRelay` no longer stores `acp_ready`; `is_acp_ready()` derives it from `harness_ready_ms`, and `set_acp_ready` is the only writer. Tests that assigned the field now call the setter.
+  Rationale: Two stores of one fact let a test set the flag and leave the instant at 0, which the work-facts scan reads as "no harness" and which hid the agent's processes. Test `readiness_and_the_instant_the_scan_reads_cannot_disagree`.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+
 ## Outcomes & Retrospective
 
 Review round (2026-11-07): see the Decision Log entries marked "review fix". After them, live Claude runs 5 and 6 of `tests/e2e/handback_facts.py` passed, clippy was clean, and the isolated upgrade regressions in `mj-cli/tests/daemon_startup.rs` passed (21 of 21).

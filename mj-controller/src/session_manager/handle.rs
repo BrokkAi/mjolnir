@@ -297,22 +297,6 @@ impl ManagedSessionHandle {
             .map_err(anyhow::Error::msg)
     }
 
-    /// What this session's agent left running and the state of its working
-    /// tree, asked of the worker on the actor's own connection. The worker
-    /// answers from its own process table and repository; nothing is cached
-    /// here.
-    ///
-    /// The error is typed: a [`RelayJobDeferred`] says the actor could not lend
-    /// its connection, and why.
-    pub async fn work_facts(&self) -> Result<mj_core::work_facts::WorkFacts> {
-        let (reply, response) = oneshot::channel();
-        self.run_on_connection(Box::new(WorkFactsJob { reply }))
-            .await;
-        response
-            .await
-            .context("work facts request did not receive a relay result")?
-    }
-
     pub async fn lease_connection(&self) -> Result<ManagedSessionLease> {
         self.lease_connection_for(None).await
     }
@@ -379,24 +363,6 @@ impl RelayConnectionJob for InstallGithubTokenJob {
 
     fn refuse(self: Box<Self>, error: anyhow::Error) {
         let _ = self.reply.send(Err(format!("{error:#}")));
-    }
-}
-
-struct WorkFactsJob {
-    reply: oneshot::Sender<Result<mj_core::work_facts::WorkFacts>>,
-}
-
-impl RelayConnectionJob for WorkFactsJob {
-    fn run<'a>(self: Box<Self>, client: &'a mut RelayClient) -> futures::future::BoxFuture<'a, ()> {
-        Box::pin(async move {
-            if self.reply.send(client.work_facts(true).await).is_err() {
-                tracing::debug!("work facts receiver was dropped");
-            }
-        })
-    }
-
-    fn refuse(self: Box<Self>, error: anyhow::Error) {
-        let _ = self.reply.send(Err(error));
     }
 }
 

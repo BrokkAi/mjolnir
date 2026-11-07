@@ -7916,7 +7916,10 @@ async fn work_facts_answer_on_the_connection_without_journaling() {
     let request = RelayRequestEnvelope {
         request_id: "facts".into(),
         protocol_version: RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::WorkFacts { worktree: true },
+        request: RelayRequest::WorkFacts {
+            processes: true,
+            worktree: true,
+        },
     };
     let mut bytes = serde_json::to_vec(&request).unwrap();
     bytes.push(b'\n');
@@ -7943,6 +7946,96 @@ async fn work_facts_answer_on_the_connection_without_journaling() {
     assert_eq!(relay.lock().unwrap().latest_ordinal(), 0);
     drop(client);
     task.await.unwrap().unwrap();
+}
+
+// Hard-won: a195a62bc: the whole observation went over one request with a
+// fixed deadline on the actor's own connection, so a slow `git status` lost the
+// process facts and held the session actor.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_slow_working_tree_read_on_one_connection_never_delays_processes_on_another() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+    ));
+    let slow_git = temp.path().join("slow-git");
+    std::fs::write(&slow_git, "#!/bin/sh\nsleep 4\nexit 1\n").unwrap();
+    std::fs::set_permissions(&slow_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let observer = crate::work_facts::WorkObserver {
+        session_id: SESSION_ID.into(),
+        worker_pid: std::process::id(),
+        directory: temp.path().to_path_buf(),
+        git: slow_git.into(),
+        harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
+    };
+    async fn connect(
+        relay: &Arc<Mutex<DurableRelay>>,
+        observer: &crate::work_facts::WorkObserver,
+    ) -> BufReader<tokio::net::UnixStream> {
+        let (wake, _wakes) = mpsc::channel(1);
+        let (fatal, _errors) = mpsc::channel(1);
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(unix::serve_client_with_memory(
+            server,
+            relay.clone(),
+            wake,
+            Err("no credentials".into()),
+            unix::ConnectionRuntime {
+                work: Some(observer.clone()),
+                ..Default::default()
+            },
+            fatal,
+        ));
+        BufReader::new(client)
+    }
+    async fn send(client: &mut BufReader<tokio::net::UnixStream>, processes: bool, worktree: bool) {
+        let request = RelayRequestEnvelope {
+            request_id: "facts".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::WorkFacts {
+                processes,
+                worktree,
+            },
+        };
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        client.get_mut().write_all(&bytes).await.unwrap();
+    }
+    let mut slow = connect(&relay, &observer).await;
+    let mut quick = connect(&relay, &observer).await;
+    send(&mut slow, false, true).await;
+    let asked = std::time::Instant::now();
+    send(&mut quick, true, false).await;
+    let mut line = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        quick.read_line(&mut line),
+    )
+    .await
+    .expect("the process facts waited for the working tree read")
+    .unwrap();
+    assert!(asked.elapsed() < std::time::Duration::from_secs(3));
+    let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::WorkFacts { facts },
+    } = response.body
+    else {
+        panic!("{line}");
+    };
+    assert!(facts.processes.known().is_some(), "{:?}", facts.processes);
+    // The part not asked for says so; it is not an empty tree.
+    assert!(facts.worktree.known().is_none());
+    // The slow read finishes on its own connection, and says that Git failed.
+    let mut line = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        slow.read_line(&mut line),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(line.contains("work_facts"), "{line}");
 }
 
 #[test]

@@ -51,8 +51,18 @@ pub(crate) struct ProcRow {
     /// Milliseconds the process has existed, on the host's monotonic clock.
     pub age_ms: i64,
     pub zombie: bool,
-    /// The environment holds this session's `MJ_SESSION_ID`.
-    pub marked: bool,
+    pub marker: Marker,
+}
+
+/// Whether a process's environment carries this session's `MJ_SESSION_ID`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Marker {
+    Present,
+    Absent,
+    /// The environment could not be read although the process is the same
+    /// user's (a process that forbids it, such as one that is not dumpable), so
+    /// whether it is this session's cannot be known.
+    Unreadable,
 }
 
 #[derive(Clone, Debug)]
@@ -92,12 +102,19 @@ pub(crate) fn select_processes(
         }
     }
     let mut work = Vec::new();
+    let mut unattributed = 0_u32;
     for row in rows {
         if row.pid == ctx.worker_pid || row.zombie {
             continue;
         }
         let in_tree = tree.contains(&row.pid);
-        if !in_tree && !row.marked {
+        if !in_tree && row.marker == Marker::Unreadable {
+            // Not the harness's descendant and not readable: it may be work
+            // the agent detached, and it is counted rather than left out.
+            unattributed = unattributed.saturating_add(1);
+            continue;
+        }
+        if !in_tree && row.marker != Marker::Present {
             continue;
         }
         // A descendant that existed when the harness session was configured is
@@ -124,15 +141,8 @@ pub(crate) fn select_processes(
             detached: *detached,
         })
         .collect();
-    let worker = rows
-        .iter()
-        .find(|row| row.pid == ctx.worker_pid)
-        .map(|row| ProcessIdentity {
-            pid: row.pid,
-            start: describe(row).identity,
-        });
     ProcessFacts {
-        worker,
+        unattributed,
         running,
         omitted: running.saturating_sub(u32::try_from(shown.len()).unwrap_or(u32::MAX)),
         shown,
@@ -215,7 +225,16 @@ fn read_worktree(git: &std::ffi::OsStr, directory: &Path) -> Observed<WorktreeFa
     let status = match run_git(
         git,
         directory,
-        &["status", "--porcelain=v2", "-z", "--branch"],
+        &[
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--branch",
+            // Whatever `status.showUntrackedFiles` says, and with untracked
+            // directories expanded to their files: a configured `no` would
+            // report a tree with new files as clean.
+            "--untracked-files=all",
+        ],
     ) {
         Ok(output) => output,
         Err(reason) => return Observed::unavailable(reason),
@@ -346,20 +365,25 @@ fn change_record(rest: &str, leading: usize) -> (String, &str) {
     (letter.to_string(), path)
 }
 
-/// Observe the processes, then the working tree when `worktree` asks for it.
-/// Always returns: a part that fails says why.
+/// Observe the processes when `processes` asks for them, then the working tree
+/// when `worktree` does. Always returns: a part that fails says why, and a part
+/// not asked for says so.
 ///
 /// The processes are read first and Git started after, in one order: the
 /// collector's own `git` children are descendants of the worker that started
 /// after the harness was configured, which is how the agent's work is told
 /// apart, so a scan that ran beside Git could report the observer's own
-/// subprocesses as the agent's work.
-pub async fn collect(observer: &WorkObserver, worktree: bool) -> WorkFacts {
-    let processes = {
+/// subprocesses as the agent's work. The Git read has no fixed duration; the
+/// caller that asks for it does so on a connection of its own and waits for it
+/// or goes away.
+pub async fn collect(observer: &WorkObserver, processes: bool, worktree: bool) -> WorkFacts {
+    let processes = if processes {
         let observer = observer.clone();
         tokio::task::spawn_blocking(move || scan_processes(&observer))
             .await
             .unwrap_or_else(|error| Observed::unavailable(format!("process scan failed: {error}")))
+    } else {
+        Observed::unavailable("the processes were not requested")
     };
     let worktree = if worktree {
         let git = observer.git.clone();
@@ -389,7 +413,11 @@ mod tests {
             ppid,
             age_ms,
             zombie: false,
-            marked,
+            marker: if marked {
+                Marker::Present
+            } else {
+                Marker::Absent
+            },
         }
     }
 
@@ -643,7 +671,7 @@ mod tests {
             git: slow_git.clone().into(),
             harness_ready_ms: Arc::new(AtomicI64::new(mj_core::clock::epoch_millis() - 1)),
         };
-        let facts = collect(&observer, true).await;
+        let facts = collect(&observer, true, true).await;
         let Observed::Known(processes) = &facts.processes else {
             panic!("{:?}", facts.processes);
         };
@@ -667,10 +695,80 @@ mod tests {
             git: "/nonexistent/git-must-not-run".into(),
             harness_ready_ms: Arc::new(AtomicI64::new(0)),
         };
-        let facts = collect(&observer, false).await;
+        let facts = collect(&observer, false, false).await;
         assert!(matches!(
             &facts.worktree,
             Observed::Unavailable { reason } if reason.contains("not requested")
         ));
+    }
+    // Hard-won: a195a62bc: `status.showUntrackedFiles=no` in a repository's
+    // configuration made a tree with new files read as clean, and untracked
+    // directories were reported as one path.
+    #[test]
+    fn untracked_directories_are_expanded_whatever_the_repository_configures() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path();
+        git(directory, &["init", "-q"]);
+        git(directory, &["config", "status.showUntrackedFiles", "no"]);
+        std::fs::create_dir(directory.join("newdir")).unwrap();
+        std::fs::write(directory.join("newdir/a.txt"), "a\n").unwrap();
+        std::fs::write(directory.join("newdir/b.txt"), "b\n").unwrap();
+        let Observed::Known(facts) = read_worktree("git".as_ref(), directory) else {
+            panic!("worktree unavailable");
+        };
+        assert_eq!((facts.changed, facts.untracked), (2, 2));
+        let paths: Vec<_> = facts.shown.iter().map(|path| path.path.as_str()).collect();
+        assert_eq!(paths, ["newdir/a.txt", "newdir/b.txt"]);
+    }
+
+    // Hard-won: a195a62bc: an unreadable environment counted as "no session
+    // marker", so live work whose environment could not be read was left out
+    // with no sign that it had been.
+    #[test]
+    fn a_process_whose_environment_cannot_be_read_is_counted_not_omitted() {
+        let mut rows = busy_table();
+        rows.push(ProcRow {
+            marker: Marker::Unreadable,
+            ..row(400, 1, 15_000, false)
+        });
+        // One inside the harness's tree needs no marker to be attributed.
+        rows.push(ProcRow {
+            marker: Marker::Unreadable,
+            ..row(401, 105, 15_000, false)
+        });
+        let facts = select_processes(&rows, &context(Path::new("/bin/hel")), describe);
+        assert_eq!(facts.unattributed, 1);
+        assert_eq!(facts.running, 13);
+        assert!(!facts.identities.iter().any(|identity| identity.pid == 400));
+    }
+
+    // A same-user process that forbids reading its environment (a process that
+    // is not dumpable), found by the real reader.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_reader_tells_unreadable_from_absent() {
+        let mut child = std::process::Command::new("python3")
+            .args([
+                "-I",
+                "-c",
+                "import ctypes, time; ctypes.CDLL(None).prctl(4, 0); time.sleep(30)",
+            ])
+            .env("MJ_SESSION_ID", "unreadable-test")
+            .spawn()
+            .expect("start a process that is not dumpable");
+        let wanted = b"MJ_SESSION_ID=unreadable-test";
+        let mut seen = Marker::Absent;
+        for _ in 0..100 {
+            seen = linux::session_marker(child.id(), wanted);
+            if seen == Marker::Unreadable {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let own = linux::session_marker(std::process::id(), b"MJ_NO_SUCH_VARIABLE=1");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(seen, Marker::Unreadable);
+        assert_eq!(own, Marker::Absent);
     }
 }

@@ -12,19 +12,50 @@ impl RelayClient {
     }
 
     /// What this session's agent left running and the state of its working
-    /// tree, as its worker observes them. A worker that predates the request
-    /// answers with facts that say so: that is an unknown, never a zero.
-    ///
-    /// `worktree` false leaves out the Git read, for a caller that needs only
-    /// the processes.
-    pub async fn work_facts(&mut self, worktree: bool) -> Result<mj_core::work_facts::WorkFacts> {
-        if !(RelayRequest::WorkFacts { worktree }).supported_at(self.protocol_version) {
+    /// tree, as its worker observes them, each part only when asked for. A
+    /// worker that predates the request answers with facts that say so: that is
+    /// an unknown, never a zero. Subject to the ordinary request deadline, so
+    /// for the processes, which a scan answers at once; see
+    /// [`Self::work_facts_unbounded`] for the Git read.
+    pub async fn work_facts(
+        &mut self,
+        processes: bool,
+        worktree: bool,
+    ) -> Result<mj_core::work_facts::WorkFacts> {
+        self.work_facts_within(processes, worktree, self.request_timeout)
+            .await
+    }
+
+    /// As [`Self::work_facts`], with no deadline: a `git status` of a large tree
+    /// takes as long as it takes, and a guessed limit would abandon this
+    /// connection while Git kept running. The caller owns the wait; dropping
+    /// the connection cancels it.
+    pub async fn work_facts_unbounded(
+        &mut self,
+        processes: bool,
+        worktree: bool,
+    ) -> Result<mj_core::work_facts::WorkFacts> {
+        self.work_facts_within(processes, worktree, Duration::MAX)
+            .await
+    }
+
+    async fn work_facts_within(
+        &mut self,
+        processes: bool,
+        worktree: bool,
+        timeout: Duration,
+    ) -> Result<mj_core::work_facts::WorkFacts> {
+        let request = RelayRequest::WorkFacts {
+            processes,
+            worktree,
+        };
+        if !request.supported_at(self.protocol_version) {
             return Ok(mj_core::work_facts::WorkFacts::unavailable(format!(
                 "the worker predates work facts (relay protocol {})",
                 self.protocol_version
             )));
         }
-        match self.call(RelayRequest::WorkFacts { worktree }).await? {
+        match self.call_with_timeout(request, timeout).await? {
             RelayResponsePayload::WorkFacts { facts } => Ok(facts),
             _ => bail!("relay returned an unexpected work facts response"),
         }

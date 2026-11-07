@@ -2157,14 +2157,18 @@ pub(super) async fn serve_client_with_memory(
                 write_logged_response(&mut writer, &response, &session_id, "cpu_usage").await?;
                 continue;
             }
-            if let RelayRequest::WorkFacts { worktree } = &envelope.request {
-                let worktree = *worktree;
+            if let RelayRequest::WorkFacts {
+                processes,
+                worktree,
+            } = &envelope.request
+            {
+                let (processes, worktree) = (*processes, *worktree);
                 // The scan reads `/proc` and runs Git, so it never runs on
                 // this loop, and it holds no relay lock. A controller that
                 // goes away cancels the wait.
                 let facts = match &work {
                     Some(observer) => tokio::select! {
-                        facts = crate::work_facts::collect(observer, worktree) => facts,
+                        facts = crate::work_facts::collect(observer, processes, worktree) => facts,
                         disconnected = reader.fill_buf() => match disconnected {
                             Ok(_) => return Ok(()),
                             Err(error) => return Err(error.into()),

@@ -1069,7 +1069,7 @@ fn latch_relay_child_serves_stdio() {
                     worker_build: None,
                 })
             }
-            mj_core::relay::RelayRequest::WorkFacts { worktree } => {
+            mj_core::relay::RelayRequest::WorkFacts { worktree, .. } => {
                 std::env::var_os(LATCH_RELAY_WORK_FACTS).map(|path| {
                     // Record what each request asked for, beside the facts.
                     use std::io::Write;
@@ -4284,14 +4284,6 @@ async fn a_relay_job_runs_on_the_actors_own_connection_and_defers_to_a_lease() {
     assert!(
         crate::session_manager::RelayJobDeferred::marks(&deferred),
         "{deferred:#}"
-    );
-    // A request for work facts is deferred the same way, and its refusal says
-    // a lifecycle operation holds the connection, which ends by itself: the
-    // daemon waits for exactly that and for no other deferral.
-    let facts_deferred = handle.work_facts().await.unwrap_err();
-    assert!(
-        crate::session_manager::RelayJobDeferred::is_lifecycle_hold(&facts_deferred),
-        "{facts_deferred:#}"
     );
     lease.release();
     wait_until_the_actor_serves_again(&handle).await;

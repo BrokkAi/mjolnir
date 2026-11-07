@@ -3281,7 +3281,7 @@ fn a_lagging_idle_task_end_cannot_settle_the_next_turn_after_output() {
 fn replayed_autonomous_spawn_and_untyped_end_leave_no_imminent_turn() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
-    relay.acp_ready = true;
+    relay.set_acp_ready(true);
     relay
         .apply_claude_task_fixture("replayed".into(), true, true, false, true)
         .unwrap();
@@ -5594,7 +5594,13 @@ fn credential_requests_cannot_enter_durable_relay_state() {
 
     for (request_id, request) in [
         ("cpu-usage", RelayRequest::CpuUsage),
-        ("work-facts", RelayRequest::WorkFacts { worktree: true }),
+        (
+            "work-facts",
+            RelayRequest::WorkFacts {
+                processes: true,
+                worktree: true,
+            },
+        ),
         ("credential-state", RelayRequest::CredentialState),
         ("read-credentials", RelayRequest::ReadCredentials),
         (
@@ -7938,4 +7944,27 @@ fn settled_harness_turn_admits_only_its_current_reminder() {
             completed_ordinal: completion.completed_ordinal,
         },
     );
+}
+
+// Hard-won: a195a62bc: readiness was stored as a flag and, beside it, as the
+// instant the work-facts scan reads. Tests (and any future writer) that set one
+// left the other at 0, which the scan reads as "no harness" and so hid the
+// agent's processes. The instant is the only owner; the flag is derived.
+#[test]
+fn readiness_and_the_instant_the_scan_reads_cannot_disagree() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let clock = relay.harness_ready_clock();
+    assert!(!relay.is_acp_ready());
+    assert_eq!(clock.load(std::sync::atomic::Ordering::Acquire), 0);
+    relay.set_acp_ready(true);
+    let first = clock.load(std::sync::atomic::Ordering::Acquire);
+    assert!(relay.is_acp_ready() && first != 0);
+    assert_eq!(relay.operational_state().acp_ready, Some(true));
+    // A second configuration of an open session keeps the first instant.
+    relay.set_acp_ready(true);
+    assert_eq!(clock.load(std::sync::atomic::Ordering::Acquire), first);
+    relay.clear_acp_readiness();
+    assert!(!relay.is_acp_ready());
+    assert_eq!(clock.load(std::sync::atomic::Ordering::Acquire), 0);
 }

@@ -363,6 +363,22 @@ pub(crate) fn record_park_outcome(
             |row| row.get(0),
         )?;
         let relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&stored)?;
+        // The finish report told the parent a later message would say what
+        // happened to each process it listed; that promise holds even when the
+        // park could not observe them.
+        let finish_json: Option<String> = transaction
+            .query_row(
+                "SELECT finish_json FROM subagent_work_facts WHERE child_session_id=?1",
+                [&child],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let promised = finish_json
+            .map(|text| serde_json::from_str::<mj_core::work_facts::WorkFacts>(&text))
+            .transpose()?
+            .and_then(|facts| facts.running_processes())
+            .is_some_and(|running| running > 0);
         transaction.execute(
             "INSERT INTO subagent_work_facts(child_session_id, finish_json, park_json)
              VALUES (?1, NULL, ?2)
@@ -370,7 +386,7 @@ pub(crate) fn record_park_outcome(
             params![child, serde_json::to_string(&park)?],
         )?;
         let mut enqueued = false;
-        if park.is_news() {
+        if park.is_news(promised) {
             let key = subagent_parked_key(&relation)?;
             let already_enqueued: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",

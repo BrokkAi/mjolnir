@@ -174,7 +174,7 @@ After spawning, end your turn with a one-line status. Each time a message from M
         assert parked["wake"] is True, parked
         park = parked["body"]["park"]
         survived = [p["pid"] for p in park.get("survived_shown", [])]
-        stopped = [p["pid"] for p in park.get("stopped_shown", [])]
+        stopped = [p["pid"] for p in park.get("gone_shown", [])]
         # The park message must say what the process table says.
         if alive(sleep_pid):
             assert sleep_pid in survived and sleep_pid not in stopped, park

@@ -96,7 +96,7 @@ child sessions in the same target and filesystem:
   running.
 - `list_agents` — this parent's children and their status. An entry's `facts` hold
   what Mjolnir observed when the child finished (processes its agent left running,
-  its working tree) and, while it is parked, what the park stopped and what survived.
+  its working tree) and, while it is parked, which of those processes were no longer running after the park and which survived.
   Read them against the child's own report.
 - `send_message` — send follow-up work to one child. With a worker that supports
   structured events, a running child receives it at its next tool boundary without its turn being cancelled; an idle child wakes and

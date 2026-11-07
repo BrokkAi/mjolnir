@@ -1751,7 +1751,7 @@ sys.stdin.read()
         .await
         .unwrap();
     let before = client.next_request;
-    let facts = client.work_facts(true).await.unwrap();
+    let facts = client.work_facts(true, true).await.unwrap();
     // Unknown, never zero: a parent must not read "0 processes" from a worker
     // that cannot count them.
     assert!(matches!(

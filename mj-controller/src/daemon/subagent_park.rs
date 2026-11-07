@@ -186,10 +186,9 @@ impl RuntimeState {
                 let state = state.clone();
                 tokio::spawn(async move {
                     // Another operation on the child (a restart that recovery
-                    // is running for the same crash) ends by itself, and the
-                    // settling does not depend on which comes first: it asks
-                    // whether the parked worker still lives. So it waits its
-                    // turn, with a growing pause.
+                    // is running for the same crash) ends by itself. Settling
+                    // reads the child's record, which that operation may
+                    // change, so it waits its turn, with a growing pause.
                     let mut pause = Duration::from_millis(250);
                     let settled = loop {
                         let attempt = state

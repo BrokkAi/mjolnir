@@ -156,11 +156,15 @@ pub enum RelayRequest {
     /// Connection-only CPU measurement; never journaled.
     CpuUsage,
     /// Connection-only observation of the processes this session's agent left
-    /// running and, unless `worktree` is false, of its working tree; never
-    /// journaled. A caller that needs only processes (a park, which holds the
-    /// worker's idle reservation) leaves the Git read out.
+    /// running (unless `processes` is false) and of its working tree (unless
+    /// `worktree` is false); never journaled. The parts are separate requests
+    /// for callers that need only one: a park, which holds the worker's idle
+    /// reservation, asks for processes alone, and the Git read, which has no
+    /// fixed duration, is asked for on a connection of its own.
     WorkFacts {
-        #[serde(default = "work_facts_worktree_default")]
+        #[serde(default = "work_facts_part_default")]
+        processes: bool,
+        #[serde(default = "work_facts_part_default")]
         worktree: bool,
     },
     /// Report non-secret metadata for this session's harness credentials.
@@ -870,7 +874,7 @@ fn review_base_changed_default() -> bool {
     true
 }
 
-fn work_facts_worktree_default() -> bool {
+fn work_facts_part_default() -> bool {
     true
 }
 
