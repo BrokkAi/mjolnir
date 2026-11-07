@@ -235,10 +235,11 @@ Git fetches it runs for its clone cache and checkpoint checks, whether those run
 on the controller or on an SSH machine that hosts a target's containers. Someone
 who can intercept a first connection can present their own key, and it is
 trusted from then on. Other Git commands that run on a target follow that
-target's own SSH settings. SSH options you set yourself, such as a
-`StrictHostKeyChecking` option in a machine's `extra_args` or a
-`GIT_SSH_COMMAND` in the daemon's environment, change the checking for the
-connections that use them.
+target's own SSH settings. A `StrictHostKeyChecking` option in a machine's
+`extra_args` (or an EC2 machine's `ssh_args`) changes the checking for
+Mjolnir's connections to that machine. Setting `GIT_SSH_COMMAND` does not
+reliably change it for Mjolnir's Git fetches: some of them set their own
+command.
 
 A key that is already in `known_hosts` is checked, not trusted anew, unless an
 SSH option you set turns checking off. To avoid first-use trust:
