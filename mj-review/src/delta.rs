@@ -87,13 +87,20 @@ pub fn trees_unchanged(deltas: &[RepoDelta]) -> bool {
 /// short.
 #[must_use]
 pub fn changed_files_table(deltas: &[RepoDelta]) -> String {
+    changed_files_table_in(deltas, None)
+}
+
+/// [`changed_files_table`] naming `checkout`, where a reviewer reads a
+/// separate checkout of the one repository, instead of the repository's root.
+#[must_use]
+pub fn changed_files_table_in(deltas: &[RepoDelta], checkout: Option<&std::path::Path>) -> String {
     let sections = deltas
         .iter()
         .filter(|delta| !delta.patch.trim().is_empty())
         .map(|delta| {
             let mut lines = vec![format!(
                 "Repository: {} -- {}",
-                delta.root.display(),
+                checkout.unwrap_or(&delta.root).display(),
                 delta.diffstat
             )];
             if delta.files.is_empty() {

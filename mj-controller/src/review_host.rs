@@ -72,6 +72,7 @@ mod resolve;
 mod roles;
 mod set_base;
 mod slots;
+mod snapshot;
 use slots::*;
 mod recovery;
 mod reviewer;

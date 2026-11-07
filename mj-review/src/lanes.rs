@@ -18,6 +18,10 @@ pub struct RepositoryCapture {
     pub merged_in: Vec<String>,
     /// Why the diff may hold changes outside the reviewed commits.
     pub unattributed: Option<String>,
+    /// A separate checkout of the reviewed commit that the reviewer reads and
+    /// runs git in, when the review has one. The author's worktree at `root`
+    /// keeps changing while the review runs.
+    pub checkout: Option<PathBuf>,
 }
 
 /// Everything about a review pass needed to construct its prompt.
@@ -108,7 +112,18 @@ pub fn review_prompt(job: &ReviewJob) -> String {
         .repositories
         .iter()
         .map(|repository| {
-            let root = repository.root.display().to_string();
+            // Where the reviewer runs git: its own checkout when it has one.
+            let root = repository
+                .checkout
+                .as_ref()
+                .unwrap_or(&repository.root)
+                .display()
+                .to_string();
+            let checkout_note = if repository.checkout.is_some() {
+                "\nThis is a separate checkout of the reviewed commit. The author keeps working in another worktree, so read files here, not there."
+            } else {
+                ""
+            };
             let merged = if repository.merged_in.is_empty() {
                 String::new()
             } else {
@@ -128,7 +143,7 @@ pub fn review_prompt(job: &ReviewJob) -> String {
                 })
                 .unwrap_or_default();
             format!(
-                "Repository root: {root}\nRun this exact command: `git -C {} diff --no-ext-diff --ignore-submodules=none {} {}`{merged}{unattributed}",
+                "Repository root: {root}{checkout_note}\nRun this exact command: `git -C {} diff --no-ext-diff --ignore-submodules=none {} {}`{merged}{unattributed}",
                 shell_quote(&root),
                 repository.baseline_tree,
                 repository.capture_tree
@@ -197,6 +212,7 @@ mod tests {
                 capture_tree: "capture456".into(),
                 merged_in: Vec::new(),
                 unattributed: None,
+                checkout: None,
             }],
             changed_files: "Repository: /workspace/app -- 1 file changed\n  +1 -1 src/lib.rs"
                 .into(),

@@ -3,7 +3,7 @@ use crate::session_manager::{
     RelaySessionTarget, RemoteSessionRequest, RemoteSessionRequests, spawn_remote_session_manager,
 };
 use mj_core::state::{ManagedSessionSnapshot, MaterializedExecutionState, MaterializedSession};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// One session id per test keeps the fake manager and durable review state
 /// independent across concurrent test execution.
@@ -170,6 +170,11 @@ fn answer_for(action: &ReviewerAction) -> Result<ReviewerOutcome, String> {
         ReviewerAction::RecordReviewed { .. } | ReviewerAction::RecordOverridden { .. } => {
             Ok(ReviewerOutcome::BaselineAdvanced)
         }
+        ReviewerAction::Snapshot {
+            repository,
+            instance,
+            operation,
+        } => snapshot_answer(repository, instance, operation),
         ReviewerAction::SetReviewBase { path, commit } => Ok(ReviewerOutcome::ReviewBaseSet {
             changed: true,
             root: path.clone().unwrap_or_else(|| "/workspace/app".into()),
@@ -177,6 +182,51 @@ fn answer_for(action: &ReviewerAction) -> Result<ReviewerOutcome, String> {
             tree: "settree".into(),
         }),
     }
+}
+
+/// The worker's answer to a snapshot request. A repository that exists on this
+/// machine gets the worker's own snapshot code and real git; a made-up path
+/// gets a plausible answer.
+fn snapshot_answer(
+    repository: &Path,
+    instance: &str,
+    operation: &mj_core::relay::SnapshotOperation,
+) -> Result<ReviewerOutcome, String> {
+    use mj_core::relay::SnapshotOperation;
+    #[cfg(unix)]
+    if repository.join(".git").exists() {
+        let git = &mj_checkpoint::archive::SystemGit;
+        return match operation {
+            SnapshotOperation::Create { id, commit } => mj_worker::review::snapshot::create(
+                git, repository, instance, id, commit,
+            )
+            .map(|snapshot| ReviewerOutcome::Snapshots {
+                path: Some(snapshot.path),
+                present: snapshot.present,
+                notes: snapshot.notes,
+            }),
+            SnapshotOperation::Remove { id } => {
+                mj_worker::review::snapshot::remove(git, repository, instance, id).map(|present| {
+                    ReviewerOutcome::Snapshots {
+                        path: None,
+                        present,
+                        notes: Vec::new(),
+                    }
+                })
+            }
+        }
+        .map_err(|error| format!("{error:#}"));
+    }
+    Ok(ReviewerOutcome::Snapshots {
+        path: match operation {
+            SnapshotOperation::Create { id, .. } => {
+                Some(repository.join(".git/mj-reviews").join(id))
+            }
+            SnapshotOperation::Remove { .. } => None,
+        },
+        present: Vec::new(),
+        notes: Vec::new(),
+    })
 }
 
 /// A view of a turn that is answering a prompt, which is the kind an
@@ -199,8 +249,10 @@ fn view_of(
     materialized.execution = execution;
     materialized.applied_event_ordinal = 12;
     let mut operational = operational();
-    // Sessions run the current worker unless a test publishes an older one.
-    operational.relay_protocol_version = Some(mj_core::relay::RELAY_PROTOCOL_VERSION);
+    // Sessions run a worker that predates review snapshots unless a test
+    // publishes the current one, so a test about something else does not
+    // have to answer the host's request for a checkout.
+    operational.relay_protocol_version = Some(mj_core::relay::RELAY_REVIEW_SNAPSHOT_PROTOCOL - 1);
     if prompt_driven
         && matches!(
             execution,
@@ -2938,6 +2990,46 @@ async fn open_commit_review(
     environment: &FakeEnvironment,
     manual: bool,
 ) -> String {
+    open_review_at(
+        manager,
+        host,
+        environment,
+        manual,
+        Path::new("/workspace/app"),
+        "bbbbbbb456",
+        43,
+    )
+    .await
+}
+
+/// Opens a review of `head` in `root` against a worker speaking `protocol`.
+/// A worker new enough for review snapshots is asked for one, and the fake
+/// worker answers it.
+async fn open_review_at(
+    manager: &mut FakeManager,
+    host: &TurnReviewHost,
+    environment: &FakeEnvironment,
+    manual: bool,
+    root: &Path,
+    head: &str,
+    protocol: u32,
+) -> String {
+    open_review_answered(manager, host, environment, manual, root, head, protocol)
+        .await
+        .0
+}
+
+/// [`open_review_at`], also returning what the requester was told when the
+/// review was accepted.
+async fn open_review_answered(
+    manager: &mut FakeManager,
+    host: &TurnReviewHost,
+    environment: &FakeEnvironment,
+    manual: bool,
+    root: &Path,
+    head: &str,
+    protocol: u32,
+) -> (String, serde_json::Value) {
     let mut running = view(
         &manager.session,
         MaterializedExecutionState::Running { started_at_ms: 1 },
@@ -2947,7 +3039,7 @@ async fn open_commit_review(
         .as_mut()
         .unwrap()
         .operational
-        .relay_protocol_version = Some(43);
+        .relay_protocol_version = Some(protocol);
     running.snapshot.as_mut().unwrap().materialized.transcript =
         ["Keep the public API stable", "Fix the retry behavior"]
             .into_iter()
@@ -2990,9 +3082,9 @@ async fn open_commit_review(
     reply
         .send(Ok(ReviewerOutcome::Delta {
             repositories: vec![mj_core::relay::RepoDelta {
-                root: "/workspace/app".into(),
+                root: root.into(),
                 base_commit: Some("aaaaaaa123".into()),
-                head_commit: Some("bbbbbbb456".into()),
+                head_commit: Some(head.into()),
                 base_kind: Some("merge base with main".into()),
                 baseline_tree: Some("base".into()),
                 current_tree: "newtree".into(),
@@ -3006,18 +3098,27 @@ async fn open_commit_review(
             }],
         }))
         .unwrap();
+    if protocol >= mj_core::relay::RELAY_REVIEW_SNAPSHOT_PROTOCOL {
+        let (_, action, reply) = manager
+            .next_reviewer(|_, action| matches!(action, ReviewerAction::Snapshot { .. }))
+            .await;
+        reply.send(answer_for(&action)).unwrap();
+    }
     let answer = request.await.unwrap().unwrap();
     assert_eq!(answer["accepted"], true);
     if !manual {
         assert_eq!(answer["repositories"][0]["base_commit"], "aaaaaaa123");
-        assert_eq!(answer["repositories"][0]["head_commit"], "bbbbbbb456");
+        assert_eq!(answer["repositories"][0]["head_commit"], head);
         assert_eq!(
             answer["repositories"][0]["base_kind"],
             "merge base with main"
         );
         assert_eq!(answer["repositories"][0]["changed_file_count"], 1);
     }
-    wait_for_child(environment, host, &manager.session).await
+    (
+        wait_for_child(environment, host, &manager.session).await,
+        answer,
+    )
 }
 
 // Hard-won: 5dde3143c: child registration refusal was acknowledged as a started review.
@@ -4504,5 +4605,472 @@ async fn repeated_push_reviews_keep_distinct_mailbox_keys_across_host_restart() 
             3
         );
     }
+    host.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+fn git_text(directory: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(directory)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// A repository with two commits, returning the second.
+#[cfg(unix)]
+fn two_commit_repository(root: &Path) -> String {
+    git_text(root, &["init", "-q", "-b", "main"]);
+    git_text(root, &["config", "user.name", "Review Test"]);
+    git_text(root, &["config", "user.email", "review@example.test"]);
+    for content in ["first\n", "reviewed\n"] {
+        std::fs::write(root.join("f"), content).unwrap();
+        git_text(root, &["add", "f"]);
+        git_text(root, &["commit", "-qm", "change f"]);
+    }
+    git_text(root, &["rev-parse", "HEAD"])
+}
+
+/// The repository and snapshot id of the removal the host asks for next. The
+/// fake worker carries it out with real git before this returns.
+#[cfg(unix)]
+async fn next_snapshot_removal(manager: &mut FakeManager) -> (PathBuf, String) {
+    let (_, action, reply) = manager
+        .next_reviewer(|_, action| {
+            matches!(
+                action,
+                ReviewerAction::Snapshot {
+                    operation: mj_core::relay::SnapshotOperation::Remove { .. },
+                    ..
+                }
+            )
+        })
+        .await;
+    let ReviewerAction::Snapshot {
+        repository,
+        instance,
+        operation: mj_core::relay::SnapshotOperation::Remove { id },
+    } = &action
+    else {
+        unreachable!("the wanted action is a snapshot removal");
+    };
+    // The host acts inside its own instance's namespace only.
+    assert_eq!(*instance, mj_core::config::instance_identity());
+    let removal = (repository.clone(), id.clone());
+    reply.send(answer_for(&action)).unwrap();
+    removal
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_push_review_reads_its_own_checkout_and_removes_it_when_it_resolves() {
+    let session = session_id("snapshot");
+    let repository = tempfile::tempdir().unwrap();
+    let head = two_commit_repository(repository.path());
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let child = open_review_at(
+        &mut manager,
+        &host,
+        &environment,
+        false,
+        repository.path(),
+        &head,
+        mj_core::relay::RELAY_PROTOCOL_VERSION,
+    )
+    .await;
+
+    let directories = environment
+        .registered_working_directories
+        .lock()
+        .unwrap()
+        .clone();
+    let [Some(snapshot)] = directories.as_slice() else {
+        panic!("the reviewer starts in one directory: {directories:?}");
+    };
+    assert!(
+        snapshot.canonicalize().unwrap().starts_with(
+            repository
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join(".git/mj-reviews")
+        ),
+        "{snapshot:?}"
+    );
+    assert_eq!(git_text(snapshot, &["rev-parse", "HEAD"]), head);
+
+    // The reviewer is told to read and run git in its own checkout, not in
+    // the worktree the requester keeps changing.
+    let prompt = environment.children.lock().unwrap()[0].2.clone();
+    let checkout = snapshot.display().to_string();
+    let requester = repository.path().display().to_string();
+    assert!(
+        prompt.contains(&format!("Repository root: {checkout}")),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!("git -C {checkout} diff")),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!("Repository: {checkout} --")),
+        "{prompt}"
+    );
+    // The checkout sits inside the requester's git directory, so only the
+    // lines that would name the requester's worktree itself are checked.
+    assert!(
+        !prompt.contains(&format!("Repository root: {requester}\n"))
+            && !prompt.contains(&format!("git -C {requester} "))
+            && !prompt.contains(&format!("Repository: {requester} --")),
+        "{prompt}"
+    );
+
+    // The requester keeps working while the reviewer reads.
+    std::fs::write(repository.path().join("f"), "edited\n").unwrap();
+    git_text(
+        repository.path(),
+        &["commit", "-qam", "edit after the request"],
+    );
+    assert_eq!(
+        std::fs::read_to_string(snapshot.join("f")).unwrap(),
+        "reviewed\n"
+    );
+    assert_eq!(git_text(snapshot, &["rev-parse", "HEAD"]), head);
+
+    let finished = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            host.reviewer_finished(session, child, Some("No findings.".to_owned()))
+                .await
+        })
+    };
+    let (removed_from, removed) = next_snapshot_removal(&mut manager).await;
+    finished.await.unwrap().unwrap();
+    assert_eq!(removed_from, repository.path());
+    assert_eq!(snapshot.file_name().unwrap().to_str().unwrap(), removed);
+    assert!(!snapshot.exists());
+    assert_eq!(
+        git_text(repository.path(), &["worktree", "list", "--porcelain"])
+            .matches("worktree ")
+            .count(),
+        1
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_sweep_removes_an_orphaned_review_checkout_and_leaves_user_worktrees_alone() {
+    let session = session_id("snapshotsweep");
+    let repository = tempfile::tempdir().unwrap();
+    let head = two_commit_repository(repository.path());
+    let elsewhere = tempfile::tempdir().unwrap();
+    let user_worktree = elsewhere.path().join("user");
+    git_text(
+        repository.path(),
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            user_worktree.to_str().unwrap(),
+        ],
+    );
+    // A checkout whose review no longer exists, as a crash would leave it.
+    let orphan = mj_worker::review::snapshot::create(
+        &mj_checkpoint::archive::SystemGit,
+        repository.path(),
+        &mj_core::config::instance_identity(),
+        "review-group-orphan",
+        &head,
+    )
+    .unwrap()
+    .path;
+    // Another Mjolnir instance's live review in the same repository. This
+    // daemon does not hold its group, and must not sweep it.
+    let foreign = mj_worker::review::snapshot::create(
+        &mj_checkpoint::archive::SystemGit,
+        repository.path(),
+        "another-instance",
+        "review-group-foreign",
+        &head,
+    )
+    .unwrap()
+    .path;
+
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    open_review_at(
+        &mut manager,
+        &host,
+        &environment,
+        false,
+        repository.path(),
+        &head,
+        mj_core::relay::RELAY_PROTOCOL_VERSION,
+    )
+    .await;
+
+    let (_, removed) = next_snapshot_removal(&mut manager).await;
+    assert_eq!(removed, "review-group-orphan");
+    assert!(!orphan.exists());
+    assert!(
+        foreign.join("f").exists(),
+        "another instance's checkout is not this daemon's to remove"
+    );
+    assert!(user_worktree.join("f").exists());
+    let live = environment.registered_working_directories.lock().unwrap()[0]
+        .clone()
+        .unwrap();
+    assert!(
+        live.join("f").exists(),
+        "the running review keeps its checkout"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "nothing else is removed"
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_checkout_finished_after_its_review_ended_is_removed() {
+    let session = session_id("snapshotlate");
+    let repository = tempfile::tempdir().unwrap();
+    let head = two_commit_repository(repository.path());
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let mut running = view(
+        &session,
+        MaterializedExecutionState::Running { started_at_ms: 1 },
+    );
+    running
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(mj_core::relay::RELAY_PROTOCOL_VERSION);
+    manager
+        .publisher
+        .publish(session.clone(), running)
+        .await
+        .unwrap();
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move { host.begin_push(&session, None).await })
+    };
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    reply
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![mj_core::relay::RepoDelta {
+                root: repository.path().into(),
+                base_commit: Some("aaaaaaa123".into()),
+                head_commit: Some(head.clone()),
+                current_tree: "newtree".into(),
+                ..Default::default()
+            }],
+        }))
+        .unwrap();
+    // Hold the worker's answer while the person cancels the review.
+    let (_, action, held) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Snapshot { .. }))
+        .await;
+    host.resolve(&session, Resolution::Cancelled).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.view(&session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let reply = answer_for(&action);
+    let Ok(ReviewerOutcome::Snapshots {
+        path: Some(created),
+        ..
+    }) = &reply
+    else {
+        panic!("the worker makes the checkout: {reply:?}");
+    };
+    let created = created.clone();
+    assert!(created.exists());
+    held.send(reply).unwrap();
+    let (_, removed) = next_snapshot_removal(&mut manager).await;
+    assert_eq!(created.file_name().unwrap().to_str().unwrap(), removed);
+    assert!(!created.exists());
+    assert!(request.await.unwrap().is_err());
+    host.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_checkout_that_cannot_be_made_falls_back_to_the_requesters_checkout_with_a_warning() {
+    let session = session_id("snapshotfallback");
+    let repository = tempfile::tempdir().unwrap();
+    two_commit_repository(repository.path());
+    let log = crate::test_log::CapturedLog::default();
+    let _log = tracing::subscriber::set_default(log.clone());
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    // The reviewed commit does not exist, so the worker's git refuses it.
+    let (_, answer) = open_review_answered(
+        &mut manager,
+        &host,
+        &environment,
+        false,
+        repository.path(),
+        &"d".repeat(40),
+        mj_core::relay::RELAY_PROTOCOL_VERSION,
+    )
+    .await;
+    assert_eq!(
+        *environment.registered_working_directories.lock().unwrap(),
+        vec![Some(repository.path().to_owned())]
+    );
+    // The requester is told it lost the isolation, and why.
+    let notice = answer["notice"].as_str().expect("the answer has a notice");
+    assert!(
+        notice.contains("reading your live checkout")
+            && notice.contains("a snapshot could not be created"),
+        "{notice}"
+    );
+    let warnings = log.at(tracing::Level::WARN);
+    assert!(
+        warnings
+            .iter()
+            .any(|line| line.contains("could not create the review's own checkout")),
+        "{warnings:#?}"
+    );
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: 045e18a59: a cancelled review removed its checkout
+// while its reviewer's close was still running.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_checkout_stays_until_the_closes_of_its_reviewers_complete() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let session = session_id("snapshotclose");
+    let repository = tempfile::tempdir().unwrap();
+    let head = two_commit_repository(repository.path());
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let child = open_review_at(
+        &mut manager,
+        &host,
+        &environment,
+        false,
+        repository.path(),
+        &head,
+        mj_core::relay::RELAY_PROTOCOL_VERSION,
+    )
+    .await;
+    let snapshot = environment.registered_working_directories.lock().unwrap()[0]
+        .clone()
+        .unwrap();
+
+    // The person cancels while the reviewer's session cannot be closed.
+    environment.close_fails.store(true, SeqCst);
+    host.resolve(&session, Resolution::Cancelled).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.view(&session).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while environment.close_attempts.load(SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the reviewer's close is attempted");
+    // The group is gone and the close keeps failing: the reviewer may still
+    // be running in the checkout, so the host does not ask for its removal.
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            manager.next_reviewer(|_, action| matches!(
+                action,
+                ReviewerAction::Snapshot {
+                    operation: mj_core::relay::SnapshotOperation::Remove { .. },
+                    ..
+                }
+            ))
+        )
+        .await
+        .is_err(),
+        "the checkout was removed while its reviewer's close had not completed"
+    );
+    assert!(snapshot.join("f").exists());
+
+    // The close completes on a retry, and only then is the checkout removed.
+    environment.close_fails.store(false, SeqCst);
+    let (_, removed) =
+        tokio::time::timeout(Duration::from_secs(10), next_snapshot_removal(&mut manager))
+            .await
+            .expect("the checkout is removed after the close completes");
+    assert_eq!(snapshot.file_name().unwrap().to_str().unwrap(), removed);
+    assert!(environment.closed.lock().unwrap().contains(&child));
+    assert!(!snapshot.exists());
+    host.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_worker_without_snapshots_tells_the_requester_its_reviewers_read_the_live_checkout() {
+    let session = session_id("snapshotoldworker");
+    let repository = tempfile::tempdir().unwrap();
+    let head = two_commit_repository(repository.path());
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let (_, answer) = open_review_answered(
+        &mut manager,
+        &host,
+        &environment,
+        false,
+        repository.path(),
+        &head,
+        mj_core::relay::RELAY_REVIEW_SNAPSHOT_PROTOCOL - 1,
+    )
+    .await;
+    let notice = answer["notice"].as_str().expect("the answer has a notice");
+    assert!(
+        notice.contains("reading your live checkout")
+            && notice.contains("predates review snapshots"),
+        "{notice}"
+    );
+    let prompt = environment.children.lock().unwrap()[0].2.clone();
+    assert!(
+        prompt.contains(&format!("Repository root: {}", repository.path().display())),
+        "{prompt}"
+    );
     host.shutdown().await.unwrap();
 }

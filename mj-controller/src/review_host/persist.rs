@@ -4,7 +4,7 @@ impl HostState {
     pub(super) fn prepared(
         &mut self,
         session_id: String,
-        reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
+        reply: Option<StartReply>,
         prepared: Result<Prepared, StartRefusal>,
     ) {
         let cancelled = matches!(self.preparing.get(&session_id), Some(PreparingOperation::Review { cancelled, .. }) if cancelled.load(std::sync::atomic::Ordering::Acquire));
@@ -156,7 +156,7 @@ impl HostState {
                 // Registration is durable. Provisioning and harness readiness
                 // continue asynchronously, within the accepted review.
                 if let Some(slot) = self.reviews.get_mut(&session_id) {
-                    answer(slot.start_reply.take(), Ok(()));
+                    accept(slot.start_reply.take(), slot.checkout_note.clone());
                 }
                 self.launch_reviewer_child(&session_id, &role, true);
             }
@@ -203,6 +203,10 @@ impl HostState {
                         pending_outcome: None,
                         queued_outcomes: Vec::new(),
                         ended_while_queued: BTreeMap::new(),
+                        snapshot: None,
+                        awaiting_snapshot: None,
+                        checkout_note: None,
+                        closing_children: BTreeSet::new(),
                     },
                 );
                 if let Some(slot) = self.reviews.get_mut(&session_id)
@@ -210,7 +214,7 @@ impl HostState {
                 {
                     answer(slot.start_reply.take(), Ok(()));
                 }
-                self.run(&session_id, pending.requests);
+                self.start_group(&session_id, pending.requests);
             }
             PersistenceCompletion::Close => {
                 self.closing.remove(&session_id);
@@ -238,7 +242,7 @@ impl HostState {
                         }
                     })
                     .unwrap_or_default();
-                self.reviews.remove(&session_id);
+                self.release_group(&session_id);
                 if let Some(notice) = notice {
                     self.record_notice(&session_id, notice);
                 }

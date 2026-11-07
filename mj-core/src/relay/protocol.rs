@@ -287,6 +287,30 @@ pub enum ReviewerRequest {
         path: Option<std::path::PathBuf>,
         commit: String,
     },
+    /// Create or remove the review-owned checkout of one repository. The
+    /// worker runs git on the session's target; the review host owns which
+    /// snapshots should exist. `instance` is the asking daemon's
+    /// `config::instance_identity`: every Mjolnir instance that reviews in a
+    /// repository keeps its checkouts in its own directory there, so one
+    /// instance never lists or removes another's.
+    Snapshot {
+        repository: std::path::PathBuf,
+        instance: String,
+        operation: SnapshotOperation,
+    },
+}
+
+/// What a [`ReviewerRequest::Snapshot`] asks of the worker. `id` names the
+/// review group that owns the checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SnapshotOperation {
+    /// A detached worktree at `commit`. An existing checkout of that commit is
+    /// kept; one at another commit is replaced.
+    Create { id: String, commit: String },
+    /// Removes the checkout and prunes the worktree record. Removing one that
+    /// does not exist succeeds.
+    Remove { id: String },
 }
 
 /// What one repository contributed to a cumulative review delta.
@@ -362,6 +386,7 @@ impl ReviewerRequest {
             Self::RecordReviewed { .. } => "reviewer_record_reviewed",
             Self::RecordOverridden { .. } => "reviewer_record_overridden",
             Self::SetReviewBase { .. } => "reviewer_set_review_base",
+            Self::Snapshot { .. } => "reviewer_snapshot",
         }
     }
 }
@@ -452,6 +477,10 @@ impl RelayRequest {
                     },
                 ..
             } => super::RELAY_WORKTREE_REVIEW_PROTOCOL,
+            Self::Reviewer {
+                request: ReviewerRequest::Snapshot { .. },
+                ..
+            } => super::RELAY_REVIEW_SNAPSHOT_PROTOCOL,
             Self::Reviewer {
                 request:
                     ReviewerRequest::RecordOverridden { .. } | ReviewerRequest::SetReviewBase { .. },
@@ -708,6 +737,17 @@ pub enum RelayResponsePayload {
         tree: String,
         #[serde(default = "review_base_changed_default")]
         changed: bool,
+    },
+    /// Answers `Snapshot`: where the checkout is (`None` after a removal) and
+    /// every review snapshot id the repository holds once the operation has
+    /// finished, so the host can sweep the ones it no longer owns. `notes` say
+    /// what a creation left out (a submodule it could not populate offline).
+    ReviewSnapshots {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<std::path::PathBuf>,
+        present: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<String>,
     },
 }
 
