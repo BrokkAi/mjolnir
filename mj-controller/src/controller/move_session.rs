@@ -1338,8 +1338,11 @@ impl Controller {
             workspace,
             source_unavailable: false,
             in_place,
-            stops_subagents: should_stop_move_subagents(in_place, destination_has_parent_role)
-                && !self.state.active_child_session_ids(&source.id).is_empty(),
+            // Recreating the environment can stop native children too; retain
+            // that warning even when no managed child is recorded yet.
+            stops_subagents: !in_place
+                || (!destination_has_parent_role
+                    && !self.state.active_child_session_ids(&source.id).is_empty()),
             conversion,
             selection,
             source_profile_id: source.last_profile.clone(),
@@ -1366,7 +1369,7 @@ impl Controller {
         let started = std::time::Instant::now();
         executor.notify_notice("Checking destination");
         let mut source_relay = MoveSourceRelay::default();
-        let checked = {
+        let mut checked = {
             let _checking_destination =
                 ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
             let mut checked = {
@@ -1419,6 +1422,13 @@ impl Controller {
             checked.fingerprint == prepared.fingerprint,
             "session, pending work, or destination configuration changed; prepare and confirm Move again"
         );
+        // Preserve the warning the person accepted, including old workers
+        // whose child admission cannot be drained before interruption.
+        ensure!(
+            !checked.stops_subagents || prepared.stops_subagents,
+            "sub-agents appeared after preparation; prepare and confirm Move again before stopping them"
+        );
+        checked.stops_subagents = prepared.stops_subagents;
         let queue = request.queue.unwrap_or(ResumeQueueDisposition::Discard);
         let source = self.state.sessions[&id].clone();
         if let Some(assessment) = &checked.workspace {
@@ -1699,7 +1709,7 @@ impl Controller {
 
     /// Whether the session's worker exposes the durable sub-agent request
     /// queue, which every top-level session does.
-    fn source_has_request_queue(&self, id: &str) -> bool {
+    pub(crate) fn source_has_request_queue(&self, id: &str) -> bool {
         self.state.sessions.get(id).is_some_and(|session| {
             worker_subagent_queue_enabled(
                 &session.subagents.clone().unwrap_or_default(),
@@ -2252,10 +2262,13 @@ impl Controller {
                         // The drained request queue owns the child set now. A child
                         // admitted after preparation must never be stopped by an
                         // automatic quota Move.
-                        let error = if operation.quota_stop_reason.is_some()
-                            && !current.active_child_session_ids(&id).is_empty()
-                        {
+                        let stopping_children = !current.active_child_session_ids(&id).is_empty();
+                        let error = if stopping_children && operation.quota_stop_reason.is_some() {
                             Some("automatic quota Move would stop existing sub-agents".into())
+                        } else if stopping_children && operation.accepted_preparation.as_ref()
+                            .is_some_and(|accepted| !accepted.stops_subagents)
+                        {
+                            Some("sub-agents appeared after preparation; prepare and confirm Move again before stopping them".into())
                         } else {
                             roleless_move_children_error(&live_move_children(&current, &id))
                         };

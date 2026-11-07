@@ -361,7 +361,6 @@ test('golden_viewer_resume', async ({ context }) => {
   await expect(restorePage.locator('#conversation-title')).toHaveText('restored');
   await captureResumeState(output, restorePage, 'restored archive opens as a new conversation', restoreState);
 
-  // Hard-won: #1470: Move failures were missing from the conversation after the worker stopped.
   const restored = restoreState.snapshot.sessions.find(row => row.id === 'restored');
   restored.state = 'suspended';
   restored.lifecycle = 'suspended';
@@ -370,6 +369,7 @@ test('golden_viewer_resume', async ({ context }) => {
     operation_id: 'failed-move', phase: 'failed', checkpoint_retained: true,
     environment_retained: true,
   };
+  // Hard-won: #1470: Move failures were missing from the conversation after the worker stopped.
   await refresh(restorePage, restoreState);
   await expect(restorePage.locator('#conversation-move-failure')).toBeVisible();
   output.push('=== failed Move remains visible in the conversation without a worker ===');

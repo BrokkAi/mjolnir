@@ -3153,7 +3153,7 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
     // A child admitted after the empty preview is checked under the drained
     // worker queue before an automatic Move can run the child-stop hook.
     let mut automatic = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
-    automatic.selection = empty.selection;
+    automatic.selection = empty.selection.clone();
     automatic.configuration_fingerprint = fixture
         .controller
         .move_configuration_fingerprint(&automatic.selection)
@@ -3173,6 +3173,22 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         fixture.controller.state.sessions[parent_id].state,
         SessionState::Running
     );
+    let mut manual = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    manual.selection = empty.selection.clone();
+    manual.configuration_fingerprint = fixture
+        .controller
+        .move_configuration_fingerprint(&manual.selection)
+        .unwrap();
+    manual.accepted_preparation = Some(Box::new(empty));
+    let error = run_in_place_move(
+        &mut fixture.controller,
+        &mut manual,
+        &fixture.worker_root,
+        &executor,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("sub-agents appeared after preparation"));
+    assert_eq!(executor.move_stop_calls(), 0);
 }
 
 #[cfg(unix)]

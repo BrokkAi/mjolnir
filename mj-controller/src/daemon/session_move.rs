@@ -112,7 +112,7 @@ impl RuntimeState {
         self: &Arc<Self>,
         selection: MoveSelection,
     ) -> Result<MovePreparation> {
-        let (source_harness, source_active, source_has_parent_role) = {
+        let (source_harness, source_active, source_has_request_queue) = {
             let controller_owner = self.owner();
             let controller = controller_owner.controller();
             let source = controller
@@ -126,10 +126,7 @@ impl RuntimeState {
                     source.state,
                     SessionState::Running | SessionState::Disconnected
                 ),
-                crate::controller::move_session::parent_tools_enabled(
-                    &source.subagents.clone().unwrap_or_default(),
-                    source.harness_kind,
-                ),
+                controller.source_has_request_queue(&source.id),
             )
         };
         let snapshot = if source_active {
@@ -141,7 +138,6 @@ impl RuntimeState {
         } else {
             None
         };
-        let selection_session_id = selection.session_id.clone();
         let mut preparation = blocking(move || {
             let controller = Controller::load()?;
             mj_core::runtime::block_on(
@@ -155,16 +151,9 @@ impl RuntimeState {
                 .is_none_or(|snapshot| !snapshot.operational.native_session_is_ready());
         preparation.active |= preparation.source_unavailable;
         if let Some(snapshot) = snapshot {
-            // An in-place Move stops the children itself when the source
-            // worker is too old to drain their requests.
-            preparation.stops_subagents |= !self
-                .owner()
-                .controller()
-                .state
-                .active_child_session_ids(&selection_session_id)
-                .is_empty()
-                && preparation.in_place
-                && source_has_parent_role
+            // Old workers cannot freeze the child set, so their stop hook
+            // requires a warning even when no child is recorded yet.
+            preparation.stops_subagents |= source_has_request_queue
                 && snapshot
                     .operational
                     .relay_protocol_version
@@ -210,7 +199,7 @@ impl RuntimeState {
             ),
             (
                 preparation.stops_subagents,
-                "existing sub-agents would be stopped",
+                "the Move cannot guarantee that sub-agents stay running",
             ),
             (
                 preparation.conversion.is_some(),
