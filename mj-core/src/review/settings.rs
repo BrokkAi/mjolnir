@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Model families used by reviewer autoconfiguration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReviewModelFamily {
     Terra,
     Sol,
@@ -11,11 +11,15 @@ pub enum ReviewModelFamily {
     DeepSeek,
     Grok,
     Kimi,
+    Other(String),
 }
 impl ReviewModelFamily {
     pub fn for_model(model: &str) -> Option<Self> {
         let model = crate::usage::pricing::normalize_model(model);
         let model = model.rsplit('/').next().unwrap_or(&model);
+        if model.trim().is_empty() {
+            return None;
+        }
         if model.starts_with("gpt-") && model_matches_family(model, "terra") {
             Some(Self::Terra)
         } else if model.starts_with("gpt-") && model_matches_family(model, "sol") {
@@ -30,16 +34,17 @@ impl ReviewModelFamily {
                 .any(|part| model.contains(part))
         {
             Some(Self::Grok)
-        } else if model.starts_with("kimi-k3.")
-            && model[8..]
-                .split(|c: char| !c.is_ascii_digit())
-                .next()
-                .and_then(|n| n.parse::<u32>().ok())
-                .is_some_and(|n| n >= 1)
-        {
+        } else if model.starts_with("kimi-") {
             Some(Self::Kimi)
         } else {
-            None
+            // Keep versions and reduced variants in one advertised family,
+            // including names such as gemini-3-pro, glm-5.3 and qwen3-235b.
+            let family = model
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .next()
+                .filter(|family| !family.is_empty())
+                .unwrap_or(model);
+            Some(Self::Other(family.to_owned()))
         }
     }
 }

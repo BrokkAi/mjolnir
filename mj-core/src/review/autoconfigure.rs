@@ -2,6 +2,7 @@
 use crate::acp::SessionConfigChoice;
 use crate::config::SubagentChoice;
 use crate::review::settings::{ReviewModelFamily, model_version_cmp};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffortAdjustment {
@@ -118,10 +119,32 @@ fn undated(id: &str) -> &str {
     }
 }
 
+/// Full models precede reduced variants even when the latter are newer or
+/// offered by more profiles. Opaque advertised models remain candidates.
+fn full_model(id: &str) -> bool {
+    !id.split(['-', '_', '.', '/']).any(|part| {
+        matches!(
+            part,
+            "flash"
+                | "flashx"
+                | "mini"
+                | "nano"
+                | "lite"
+                | "small"
+                | "haiku"
+                | "luna"
+                | "dsf"
+                | "dsfmax"
+                | "default"
+                | "auto"
+        )
+    })
+}
+
 /// Choose review slots from the enabled profiles' model offers. Within a
-/// family a value offered by a subscription profile beats one only
-/// usage-priced profiles offer, then the value more enabled profiles offer
-/// wins, then the newest version. Reviewers are load-balanced only across
+/// family full models precede reduced variants, then a subscription value
+/// beats one only usage-priced profiles offer, then the value offered by
+/// more enabled profiles wins, then the newest version. Reviewers are load-balanced only across
 /// profiles that offer their exact value, so this keeps reviews on
 /// subscriptions and spread over as many profiles as possible.
 pub fn autoconfigure(
@@ -134,22 +157,16 @@ pub fn autoconfigure(
         .collect::<Vec<_>>();
     // Each family keeps its best (offer, identity) pair; identities decide
     // versions, values are what the reviewer is launched with.
-    let mut selected: [Option<(&ModelOffer, String)>; 6] = Default::default();
+    let mut selected: BTreeMap<ReviewModelFamily, (&ModelOffer, String)> = BTreeMap::new();
     for offer in offers {
         let id = crate::usage::model_catalog::model_id(&models, &offer.choice.value);
         let Some(family) = ReviewModelFamily::for_model(&id) else {
             continue;
         };
-        let index = match family {
-            ReviewModelFamily::Terra => 0,
-            ReviewModelFamily::Sol => 1,
-            ReviewModelFamily::Sonnet => 2,
-            ReviewModelFamily::DeepSeek => 3,
-            ReviewModelFamily::Grok => 4,
-            ReviewModelFamily::Kimi => 5,
-        };
-        let current = &mut selected[index];
-        let better = current.as_ref().is_none_or(|(old_offer, old)| {
+        let better = selected.get(&family).is_none_or(|(old_offer, old)| {
+            if full_model(&id) != full_model(old) {
+                return full_model(&id);
+            }
             let subscribed = |offer: &ModelOffer| offer.subscription_profiles > 0;
             if subscribed(offer) != subscribed(old_offer) {
                 return subscribed(offer);
@@ -165,56 +182,61 @@ pub fn autoconfigure(
                 .is_gt()
         });
         if better {
-            *current = Some((offer, id));
+            selected.insert(family, (offer, id));
         }
     }
-    let choice = |index: usize, effort: &str, adjusted: &mut Vec<EffortAdjustment>| {
-        let model = selected[index].as_ref().unwrap().0.choice.value.clone();
-        let offered = efforts(&model);
-        let used = offered
-            .map(|choices| fallback_effort(effort, &choices))
-            .unwrap_or_else(|| Some(effort.to_owned()));
-        if used.as_deref() != Some(effort) {
-            adjusted.push(EffortAdjustment {
-                model: model.clone(),
-                requested: effort.to_owned(),
-                used: used.clone(),
-            });
-        }
-        SubagentChoice {
-            model,
-            effort: used,
-        }
+    let choice =
+        |family: &ReviewModelFamily, effort: &str, adjusted: &mut Vec<EffortAdjustment>| {
+            let model = selected[family].0.choice.value.clone();
+            let offered = efforts(&model);
+            let used = offered
+                .map(|choices| fallback_effort(effort, &choices))
+                .unwrap_or_else(|| Some(effort.to_owned()));
+            if used.as_deref() != Some(effort) {
+                adjusted.push(EffortAdjustment {
+                    model: model.clone(),
+                    requested: effort.to_owned(),
+                    used: used.clone(),
+                });
+            }
+            SubagentChoice {
+                model,
+                effort: used,
+            }
+        };
+    use ReviewModelFamily::{DeepSeek, Grok, Kimi, Sol, Sonnet, Terra};
+    let preset = if selected.contains_key(&Terra) && selected.contains_key(&Sol) {
+        [(Terra, "high"), (Sol, "medium")]
+    } else {
+        let family = [Sonnet, DeepSeek, Grok, Kimi]
+            .into_iter()
+            .find(|family| selected.contains_key(family))
+            .or_else(|| {
+                selected
+                    .iter()
+                    .max_by(
+                        |(family, (offer, id)), (other_family, (other_offer, other_id))| {
+                            full_model(id)
+                                .cmp(&full_model(other_id))
+                                .then_with(|| {
+                                    (offer.subscription_profiles > 0)
+                                        .cmp(&(other_offer.subscription_profiles > 0))
+                                })
+                                .then_with(|| offer.profiles.cmp(&other_offer.profiles))
+                                // Provider versions are incomparable; names only
+                                // break ties between otherwise equal providers.
+                                .then_with(|| other_family.cmp(family))
+                        },
+                    )
+                    .map(|(family, _)| family.clone())
+            })?;
+        [(family.clone(), "high"), (family, "high")]
     };
     let mut adjusted = Vec::new();
-    let reviewers = if selected[0].is_some() && selected[1].is_some() {
-        vec![
-            choice(0, "high", &mut adjusted),
-            choice(1, "medium", &mut adjusted),
-        ]
-    } else if selected[2].is_some() {
-        vec![
-            choice(2, "high", &mut adjusted),
-            choice(2, "high", &mut adjusted),
-        ]
-    } else if selected[3].is_some() {
-        vec![
-            choice(3, "high", &mut adjusted),
-            choice(3, "high", &mut adjusted),
-        ]
-    } else if selected[4].is_some() {
-        vec![
-            choice(4, "high", &mut adjusted),
-            choice(4, "high", &mut adjusted),
-        ]
-    } else if selected[5].is_some() {
-        vec![
-            choice(5, "high", &mut adjusted),
-            choice(5, "high", &mut adjusted),
-        ]
-    } else {
-        return None;
-    };
+    let reviewers = preset
+        .into_iter()
+        .map(|(family, effort)| choice(&family, effort, &mut adjusted))
+        .collect();
     Some(Autoconfigured {
         reviewers,
         adjusted,
@@ -318,7 +340,10 @@ mod tests {
                 &["kimi-k3.1", "kimi-k3.2"],
                 &[("kimi-k3.2", "high"), ("kimi-k3.2", "high")],
             ),
-            (&["unrelated-model", "kimi-k3"], &[]),
+            (
+                &["unrelated-model", "kimi-k3"],
+                &[("kimi-k3", "high"), ("kimi-k3", "high")],
+            ),
         ];
         for (ids, expected) in cases {
             let got = models(autoconfigure(&merged_model_offers(&choices(ids)), |_| None));

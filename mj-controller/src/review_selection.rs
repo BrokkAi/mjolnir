@@ -695,6 +695,24 @@ mod tests {
         // Outside every drafted family: nothing to guess about.
         assert!(blocked(&["other"]).is_empty());
         assert_eq!(blocked(&["other", "claude3", "codex2"]), ["codex2"]);
+        // Generic providers retain separate families: an unrelated provider's
+        // unknown billing cannot delay the selected flagship's upgrade.
+        let generic = vec![
+            (
+                "gemini".into(),
+                catalog_profile(&["google/gemini-3-pro", "google/gemini-3.5-flash"]),
+            ),
+            ("glm".into(), catalog_profile(&["z-ai/glm-5.3"])),
+        ];
+        assert_eq!(
+            unclassified_in_draft(
+                &legacy,
+                &generic,
+                &BTreeSet::new(),
+                &BTreeSet::from(["gemini".into(), "glm".into()])
+            ),
+            ["gemini"]
+        );
         // A pinned profile decides without Autoconfigure.
         let pinned = LegacyReview {
             profile: Some("codex1".into()),

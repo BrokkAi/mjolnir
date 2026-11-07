@@ -282,14 +282,10 @@ fn opening_with_reviewers_preserves_them_when_catalog_arrives() {
 }
 
 #[test]
-fn autoconfigure_disabled_without_supported_models() {
+fn autoconfigure_disabled_without_advertised_models() {
     let config = config();
     let mut dialog = ReviewSettingsDialog::new(&config);
-    dialog.update_choices(
-        &config,
-        &catalog(&config, &["other-model"]),
-        &Default::default(),
-    );
+    dialog.update_choices(&config, &catalog(&config, &[]), &Default::default());
     assert!(dialog.review.reviewers.is_empty());
     assert!(
         !dialog
@@ -512,6 +508,7 @@ fn reviewer_focus_follows_model_effort_remove_order() {
     }
 }
 
+// Hard-won: a5f1492f8: providers outside the original preset table got no reviewers.
 #[test]
 fn golden_review_settings() {
     let mut dashboard = DashboardState::new(config(), Default::default(), Default::default());
@@ -549,8 +546,20 @@ fn golden_review_settings() {
         .draw(|frame| crate::render::render(frame, &mut anthropic))
         .unwrap();
     let anthropic = buffer_lines(terminal.backend().buffer()).join("\n");
+    let mut other = DashboardState::new(config(), Default::default(), Default::default());
+    other.begin_setup();
+    other.begin_setup_review();
+    other.set_profile_capabilities(catalog(
+        &other.config,
+        &["google/gemini-3-pro", "google/gemini-3.5-flash"],
+    ));
+    press_autoconfigure(&mut other);
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut other))
+        .unwrap();
+    let other = buffer_lines(terminal.backend().buffer()).join("\n");
     let rendered = format!(
-        "=== Wide (100x30) ===\n{wide}\n=== Narrow (60x30) ===\n{narrow}\n=== Anthropic (100x30) ===\n{anthropic}"
+        "=== Wide (100x30) ===\n{wide}\n=== Narrow (60x30) ===\n{narrow}\n=== Anthropic (100x30) ===\n{anthropic}\n=== Other provider (100x30) ===\n{other}"
     );
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),

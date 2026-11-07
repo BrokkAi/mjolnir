@@ -89,3 +89,34 @@
   │                                                                                              │
   │  Cancel     Back     Save Settings                                                           │
   ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+=== Other provider (100x30) ===
+
+
+  ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
+  │Reviewer 1  google/gemini-3-pro ▾                                high ▾               Remove  │
+  │                                                                                              │
+  │Reviewer 2  google/gemini-3-pro ▾                                high ▾               Remove  │
+  │                                                                                              │
+  │  Add reviewer     Autoconfigure                                                              │
+  │Review runs before push when reviewers are set.                                               │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │  Cancel     Back     Save Settings                                                           │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
