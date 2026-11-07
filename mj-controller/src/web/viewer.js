@@ -6157,7 +6157,7 @@ function refreshOpenConversationDetail(id) {
   errorNode.textContent = 'Refreshing session details…';
   ensureSessionDetail(id).then(session => {
     if (route.name !== 'conversation' || route.sessionId !== id || currentSession !== id) return;
-    if (!canViewConversation(session)) {
+    if (!canViewConversation(session) && !isLoadingConversationSession(session)) {
       navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
       return;
     }

@@ -140,10 +140,11 @@ async function mount(page, {
   return state;
 }
 
-async function refresh(page, state) {
+async function refresh(page, state, detailChanged = []) {
   if (!state.lastWireSnapshot) throw new Error('the fixture has not served its initial snapshot');
   state.snapshot.revision += 1;
   const update = viewerDelta(state.lastWireSnapshot, state.snapshot, state.streamInternedKeys);
+  update.frame.detail_changed = detailChanged;
   state.lastWireSnapshot = update.wire;
   state.streamInternedKeys = update.knownInternedKeys;
   await dispatchRuntimeFrame(page, update.frame);
@@ -385,6 +386,14 @@ test('golden_viewer_resume', async ({ context }) => {
   output.push(await restorePage.locator('#conversation-move-failure').innerText());
   await expect(restorePage.getByRole('button', { name: 'Retry move', exact: true })).toBeVisible();
 
+  // Hard-won: #1470: a detail response after Resume redirected the failure view to the dashboard.
+  let releaseMoveDetail;
+  restoreState.holdDetail = new Promise(resolve => { releaseMoveDetail = resolve; });
+  const detailRequestsBeforeResume = restoreState.detailRequests.length;
+  restored.detail = false;
+  await refresh(restorePage, restoreState, ['restored']);
+  await expect.poll(() => restoreState.detailRequests.length).toBeGreaterThan(detailRequestsBeforeResume);
+
   // Resume leaves a cancelled Move record but retires its public failure.
   restored.state = 'running';
   restored.lifecycle = 'live';
@@ -393,7 +402,8 @@ test('golden_viewer_resume', async ({ context }) => {
   restored.move_recovery.phase = 'cancelled';
   restored.move_recovery.failure_notice = null;
   restored.launch_error = null;
-  await refresh(restorePage, restoreState);
+  releaseMoveDetail();
+  restoreState.holdDetail = null;
   await expect(restorePage).toHaveURL(/restored$/);
   await expect(restorePage.locator('#conversation-move-failure')).toBeHidden();
   await expect(restorePage.locator('#conversation-transition-title')).toHaveText('Loading conversation');

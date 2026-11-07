@@ -33,6 +33,10 @@ Decision: preserve the existing public lifecycle diagnostic, correlated with the
 
 Decision: record asynchronous quota failures before the admitted lifecycle completes. Admission is the daemon's hold preventing an upgrade from cancelling accepted control work. Rationale: failures before Move persistence still need a durable conversation line, and its delivery belongs to the bounded operation rather than an unowned watcher. Date/Author: 2026-11-07, Codex.
 
+Decision: failure notices identify the attempted destination without asserting a current profile. Rationale: the worker journal is historical, so a later Resume or Move would make that assertion stale; the session header supplies the current profile. Date/Author: 2026-11-07, Codex.
+
+Decision: retain the existing Move panic boundary instead of adding a second notification watcher. Rationale: `run_move_controller_work` awaits its blocking task and converts its panic `JoinError` into the error handled by the admitted notice reporter. The lifecycle admission prevents automatic handoff from cancelling that work. Date/Author: 2026-11-07, Codex.
+
 ## Context and Orientation
 
 `mj-controller/src/daemon/continuation/quota.rs` selects a destination after a quota stop and stores the retry plan in the worker. `mj-controller/src/daemon/session_move.rs` admits and supervises the resulting Move. `mj-controller/src/controller/move_session.rs` prepares and executes it. An in-place Move replaces the harness and profile inside the existing environment; it does not recreate that environment.
@@ -108,3 +112,5 @@ Reuse `mj_core::refusal::Refusal`, `SessionManagerControl`, and `RelayCommand::R
 Plan created during follow-up review when the initially small fix grew to include lifecycle admission and child-stop ownership; it records the implemented design and its validation without treating earlier discarded approaches as separate supported paths.
 
 Updated at 2026-11-07 19:28Z after the final ownership and failure-delivery checks passed; Progress and Outcomes now record the completed validation rather than pending runs.
+
+Follow-up review found one remaining Resume routing race: a session-detail request begun in the failed Move view could return after Resume retired the failure, but before the worker became openable. The detail callback now uses the same loading predicate as snapshot routing. The existing browser golden holds that request across Resume; it reproduced the redirect before the fix and passed afterward, without changing expected output. This round changes JavaScript and planning notes only; the completed Rust checks still apply.
