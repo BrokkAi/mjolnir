@@ -1,0 +1,228 @@
+{
+  "id": "L2606",
+  "title": "Loop control exemption decision",
+  "category": "still-open-user-question",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "cb392781d78b44f849b507ebb5e959fe",
+    "session_title": "qs13r4-coverage",
+    "reply_position": 2984,
+    "captured_at": "2026-10-29T17:17:37.537Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /home/jonathan/Projects/bifrost/.mj/agents/cb392781d78b44f849b507ebb5e959fe. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nRead and follow /home/jonathan/Projects/bifrost/.mj/qs13/COVERAGE-r4.md. Worktree /home/jonathan/Projects/bifrost/.mj/lanes/qs13r4-coverage on branch qs13r4-coverage."
+        },
+        {
+          "id": "agent:25",
+          "role": "assistant",
+          "text": "I’ll read the lane brief, make the coverage changes it calls for, and run the focused checks before handing back.\n"
+        },
+        {
+          "id": "agent:154",
+          "role": "assistant",
+          "text": "Both recursive walks have input-controlled depth. The comment classifier also accepts either quote style as a closing delimiter. I’ll make the walks iterative and add regressions through RQL searches, including a mixed-quote case checked against the old code.\n"
+        },
+        {
+          "id": "agent:378",
+          "role": "assistant",
+          "text": "The focused regression build is still compiling dependencies. I also found that decorator facts come from `mro-members`; I’ll use that surface for the deep-chain regression and check the short control’s exact decorator fact.\n"
+        },
+        {
+          "id": "agent:604",
+          "role": "assistant",
+          "text": "The comment regression expects one block containing the full commented function: the opposite quote marker remains string content, so the following dedented payload line belongs to the docstring. For the coverage clusters, I’m checking observable facts against Python’s binding, inheritance, and exception rules.\n"
+        },
+        {
+          "id": "agent:673",
+          "role": "assistant",
+          "text": "The build is progressing through the analyzer and store crates; no test has run yet. The coverage cases will compare semantic fields and source spans, avoiding generated IDs so the assertions stay readable.\n"
+        },
+        {
+          "id": "agent:1055",
+          "role": "assistant",
+          "text": "Compilation has reached the RQL crate. Once the old-code comment regression runs, I’ll record the failure, apply the delimiter fix, and run the new cases.\n"
+        },
+        {
+          "id": "agent:1098",
+          "role": "assistant",
+          "text": "The old-code comment regression failed as expected: the block stopped at the opposite quote marker and omitted the docstring payload and return statement. The delimiter fix now tracks the opening quote style. I’ve also added coverage cases for constructors, raises, properties, lifecycle calls, cleanup, documentation, and range shadowing.\n"
+        },
+        {
+          "id": "agent:1185",
+          "role": "assistant",
+          "text": "Four new cases pass, including the delimiter regression and constructor and raise checks. Five failed; I’ll inspect their diagnostics to distinguish test setup or schema mistakes from product defects, and stop any cluster that reveals another defect.\n"
+        },
+        {
+          "id": "agent:1259",
+          "role": "assistant",
+          "text": "The lifecycle and range failures were test setup mistakes; those cases now pass. Decorated declarations need further investigation: the searches returned no decorated class members and mapped property methods to the class. I’ve saved the inputs and failures for the parent and stopped those clusters as instructed. Seven cases remain in the test module, and the full RQL library suite is running.\n"
+        },
+        {
+          "id": "agent:1525",
+          "role": "assistant",
+          "text": "The path classification check passed. Clippy currently holds the Cargo build lock, so the library and policy commands are waiting behind it. The parent will need to decide how to test the deep decorator walk: `mro-members` returns no rows for the decorated class fixture.\n"
+        },
+        {
+          "id": "agent:1754",
+          "role": "assistant",
+          "text": "The pack drift check passed with `core.autocrlf=false`. The default setting produced the known Node notice false positive; no pack content changed. Format checking passed too. Clippy has reached RQL, and I’ve saved the blocked cases, oracle notes, and test corrections in the report directory.\n"
+        },
+        {
+          "id": "agent:1823",
+          "role": "assistant",
+          "text": "Clippy passed with warnings denied. The Python policy suite is compiling its remaining crates; the full RQL library run is still waiting for the build lock.\n"
+        },
+        {
+          "id": "agent:1958",
+          "role": "assistant",
+          "text": "The policy build is still compiling. I’ve prepared one more coverage case for loop exits: break, continue, and return in the current iteration should affect redefinition analysis, while exits inside a nested function or inner loop should not.\n"
+        },
+        {
+          "id": "agent:2095",
+          "role": "assistant",
+          "text": "All 261 Python policy tests passed. The RQL library suite is running and has passed more than 450 tests so far. I’ll wait for it to finish before adding and checking the loop-exit case.\n"
+        },
+        {
+          "id": "agent:2227",
+          "role": "assistant",
+          "text": "The library suite finished with 639 passes and only the known Go failure named in the brief. The new loop case found another discrepancy: a return inside a nested function was treated as an exit from the current iteration. I’ll preserve that reproduction and stop the cluster as instructed, without changing production code.\n"
+        },
+        {
+          "id": "agent:2293",
+          "role": "assistant",
+          "text": "Handed back three commits with both production fixes and seven passing tests. All 261 Python policy tests passed; the library suite had only the exempted Go failure.\n\nReport includes blocked decorator/property coverage and a newly found nested-function exit defect."
+        },
+        {
+          "id": "user:2369",
+          "role": "user",
+          "text": "Decisions on your three stopped clusters; do them as further commits on qs13r4-coverage.\n1. Deep dotted decorator: keep the iterative python_expression_path/is_range_call commit without a deep regression. The conversion follows AGENTS.md's stack-safety rule and no product query reaches the walker with decorated roots (they are refused). Say so in that commit's message if it does not already; no further test.\n2. Nested-loop exit: fix it. statement_may_exit (python_variables.rs ~934) exempts the root statement from the nested-scope skip, so when the statement itself is a nested `def` (or class or lambda), the deferred body's `return` counts as a loop exit. A definition never exits the enclosing loop. Change the condition so scope nodes are skipped even at the root (`scope_kind(current).is_some()` always skips; the loop-kind skip keeps the `current.id() != node.id()` root exemption as it is). Restore your nested-loop regression: the nested def containing `return` followed by an unconditional reassignment must give nested_loop_reused=false, with your conditional break/continue/return controls and the inner-loop break control that did not run. Tag it #[hardwon(\"<12-char hash>: a nested function's return counted as a loop exit\")] with the commit that introduced the root exemption (git log -S), and save the fail-before log.\n3. Property mutators: do not fix. Write an issue-ready note to <report dir>/property-mutators-issue.md: the exact Python input, the query, the expected rows and the actual class-documentation row, the source of the expectation (Python property semantics and the query's declaration contract, with file:line), and whether this looks like a mapping bug or an intended choice. I will file it.\nThen rerun the rql lib tests, the Python policy tests (suite_bench_policy -E 'test(/python/)'), rql Clippy -D warnings and fmt. Commits end with Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>. Report the hashes, the fix hunk, the fail-before log and the note path."
+        },
+        {
+          "id": "agent:2374",
+          "role": "assistant",
+          "text": "I’ll fix the nested-scope exit check and restore its regression, add the decorator validation limit to a follow-up commit message, and write the property note. Then I’ll rerun the requested checks.\n"
+        },
+        {
+          "id": "agent:2593",
+          "role": "assistant",
+          "text": "The restored regression fails on the old code at the nested-function case, and Git history identifies `409a4f663f49` as the commit that introduced the root exemption. The fix now skips scopes at every depth while preserving the existing loop-node rule. The property note is written; full library validation is running.\n"
+        },
+        {
+          "id": "agent:2750",
+          "role": "assistant",
+          "text": "The nested-function case now passes. The restored inner-loop control exposed a separate problem: a direct inner `for` with `break` still yields `nested_loop_reused=true`. That follows from the loop-root exemption you explicitly asked me to preserve. I’ll hand back this conflict with the failure evidence and finish the independent validation checks.\n"
+        },
+        {
+          "id": "agent:2908",
+          "role": "assistant",
+          "text": "All 261 Python policy tests pass again, along with Clippy, fmt, and pack drift. The library suite has two failures: the exempted Go test and the inner-loop control that conflicts with preserving the loop-root exemption. The changes are committed and the worktree is clean; I’ll hand back that decision with the patch, logs, and property note.\n"
+        },
+        {
+          "id": "agent:2984",
+          "role": "assistant",
+          "text": "Committed `fd58b6e85f` and `b526af63cf`; handed back the patch, fail-before log, and property issue note.\n\nPolicy tests, Clippy, and fmt pass. The nested-function fix passes, but the inner-loop control fails because of the explicitly preserved loop-root exemption. That conflict needs your decision."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "lowed by an unconditional reassignment must give nested_loop_reused=false, with your conditional break/continue/return controls and the inner-loop break control that did not run. Tag it #[hardwon(\"<12-char hash>: a nested function's return counted as a loop exit\")] with the commit that introduced the root exemption (git log -S), and save the fail-before log.\n3. Property mutators: do not fix. Write an issue-ready note to <report dir>/property-mutators-issue.md: the exact Python input, the query, the expected rows and the actual class-documentation row, the source of the expectation (Python property semantics and the query's declaration contract, with file:line), and whether this looks like a mapping bug or an intended choice. I will file it.\nThen rerun the rql lib tests, the Python policy tests (suite_bench_policy -E 'test(/python/)'), rql Clippy -D warnings and fmt. Commits end with Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>. Report the hashes, the fix hunk, the fail-before log and the note path.",
+    "assistant_text_tail": "Committed `fd58b6e85f` and `b526af63cf`; handed back the patch, fail-before log, and property issue note.\n\nPolicy tests, Clippy, and fmt pass. The nested-function fix passes, but the inner-loop control fails because of the explicitly preserved loop-root exemption. That conflict needs your decision.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      2750,
+      2908,
+      2984
+    ],
+    "user_position": 2369,
+    "input_rationale": "The parent told the agent to keep the loop-root exemption. The restored inner-loop control cannot pass with it, so the agent committed the partial work and handed back for a decision. The parent's next message decides it.",
+    "label": "required_final",
+    "triggers": [
+      "needs you"
+    ],
+    "project": "bifrost-dev",
+    "is_child": true,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-29T17:17:56.922Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-29T17:17:58.425Z",
+        "kind": "user",
+        "text": "Decision: correct the loop-root behavior too, with one general rule instead of root exemptions. In Python, break and continue bind to the nearest enclosing loop and return leaves every loop; a nested "
+      },
+      {
+        "at": "2026-10-29T17:18:03.067Z",
+        "kind": "agent",
+        "text": "I’ll replace the exemptions with the `(node, inside_loop)` walk, extend the regression to cover returns inside inner loops, and capture the failure before the fix. Then I’ll commit and rerun the reque"
+      },
+      {
+        "at": "2026-10-29T17:19:01.968Z",
+        "kind": "agent",
+        "text": "The new control fails on the old code as expected: a return inside a conditionally nested loop produced `reused=false` instead of `true`. Commit `66242b145f` adds the context-aware walk and both direc"
+      },
+      {
+        "at": "2026-10-29T17:20:32.421Z",
+        "kind": "agent",
+        "text": "The full library run has passed the expanded loop-exit regression, including all controls. Clippy and fmt also pass. The remaining library tests and the Python policy build are still running."
+      },
+      {
+        "at": "2026-10-29T17:21:49.482Z",
+        "kind": "agent",
+        "text": "Validation is complete: all 261 Python policy tests pass, and the library suite has 640 passes with only the exempted Go failure. Clippy, fmt, and pack drift pass. The worktree is clean; I’ll hand bac"
+      }
+    ]
+  }
+}

@@ -144,19 +144,22 @@
   },
   "expected": {
     "failure": "none",
-    "input": "none",
+    "input": "required",
     "work": "finished",
     "quiet": true,
-    "action": "finished",
+    "action": "await_input",
     "wrong_actions": [
-      "continue"
+      "continue",
+      "finished",
+      "wait"
     ]
   },
   "known_failure": [],
   "outcome": {
     "mjolnir": "nothing (uncertain)",
     "judgment": "harmless",
-    "next": "no further user message in the window"
+    "next": "no further user message in the window",
+    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent. The earlier menu (open the issue, raise the timeout, or fix the regressions) is still unanswered after the user's side question. Was input=none, action=finished."
   },
   "context": {
     "after": [

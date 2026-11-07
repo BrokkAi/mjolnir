@@ -1,0 +1,533 @@
+{
+  "id": "L2502",
+  "title": "Mutation testing required_final",
+  "category": "still-open-user-question",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "5b9275ef422b8eb3146a4a11fb9dd1aa",
+    "session_title": "bifrost via claude4",
+    "reply_position": 3894,
+    "captured_at": "2026-10-23T19:31:58.786Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "upgrade to cargo 1.101"
+        },
+        {
+          "id": "user:93",
+          "role": "user",
+          "text": "Stable Rust is 1.99.1, and the repo already uses it. Cargo 1.101 exists only as a nightly build. What should I do?\n\nCancelled"
+        },
+        {
+          "id": "user:127",
+          "role": "user",
+          "text": "let's do mutation testing using https://github.com/BrokkAi/quicksilver\n\nfirst you'll need to build it since it's not released\n\nthen apply it to our bottom-most crate\n\n1. decide which uncovered fns should get coverage; assign subagents to build those\n\n2. then re-map, and have \"straightforward\" subagents create mutations in parallel, then you can have \"subtle\" subagents check the results to see which survivors should be targeted w additional tests\n\n3. give me feedback on what we should build into quicksilver to make this better\n\n4. you can fix bugs in quicksilver that you find; if it needs a total redesign then stop and discuss w/ me"
+        },
+        {
+          "id": "agent:229",
+          "role": "assistant",
+          "text": "71K lines, lib tests only. Before mapping, I need to know whether `map --package` limits which tests run (the whole Bifrost suite would take hours)."
+        },
+        {
+          "id": "agent:289",
+          "role": "assistant",
+          "text": "Core has ~470 tests; the workspace has ~20,000 (about 1,600 scheduled-only). Let me check how quicksilver runs tests before deciding scope."
+        },
+        {
+          "id": "agent:306",
+          "role": "assistant",
+          "text": "I have enough to frame a scope decision that changes everything downstream, so I'll ask before building anything heavy."
+        },
+        {
+          "id": "user:323",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nTest scope: hmm i think we should change how --package works, or at least reverse-depedents a non-default option\nTest kind: Follow repo policy (Recommended)"
+        },
+        {
+          "id": "agent:326",
+          "role": "assistant",
+          "text": "Plan: make `--package` select only the named packages' tests by default, with an opt-in `--reverse-dependents` flag. Let me find every use."
+        },
+        {
+          "id": "agent:347",
+          "role": "assistant",
+          "text": "Also notable: the baseline green run always uses `PackageSelect::Workspace` (`src/baseline.rs:68`), regardless of `--package`. Reading the rest of baseline."
+        },
+        {
+          "id": "user:422",
+          "role": "user",
+          "text": "you're literally the first user so it's fine to be skeptical and bias towards fixing/changing qs"
+        },
+        {
+          "id": "agent:451",
+          "role": "assistant",
+          "text": "Now editing. First `cargo_cmd.rs`:"
+        },
+        {
+          "id": "agent:469",
+          "role": "assistant",
+          "text": "Now config, CLI, and callers (baseline build, green suite, list, map build, `build`):"
+        },
+        {
+          "id": "agent:489",
+          "role": "assistant",
+          "text": "I'll thread a `test_packages` list through `isolate_all`/`bisect_all` into the build, computed once in `build_map_from` and stored in the map."
+        },
+        {
+          "id": "agent:518",
+          "role": "assistant",
+          "text": "Compiles cleanly (the one Clippy warning is pre-existing in `src/exec/build.rs`, untouched). Running quicksilver's own suite while I update the README:"
+        },
+        {
+          "id": "agent:551",
+          "role": "assistant",
+          "text": "While the quicksilver suite runs, checking the Bifrost side for existing quicksilver config and build-identity setup:"
+        },
+        {
+          "id": "agent:565",
+          "role": "assistant",
+          "text": "Core has no build script, so the facade's source-hashing build identity won't matter for a core-only run. Waiting on quicksilver's tests."
+        },
+        {
+          "id": "agent:585",
+          "role": "assistant",
+          "text": "All 109 quicksilver tests pass. Committing (quicksilver's CLAUDE.md says commit on master and push), then reinstalling."
+        },
+        {
+          "id": "agent:606",
+          "role": "assistant",
+          "text": "Pushed (`50cf721`). Now mapping `brokk-bifrost-core` with Bifrost's test env defaults (one worker per test, open packs disabled, `eatmydata`)."
+        },
+        {
+          "id": "agent:627",
+          "role": "assistant",
+          "text": "While the map builds, I'll review how I spawn Mjolnir children here (the user named \"straightforward\" and \"subtle\" child types)."
+        },
+        {
+          "id": "agent:641",
+          "role": "assistant",
+          "text": "My filter matches crate names like `quick-error`; tightening it."
+        },
+        {
+          "id": "agent:652",
+          "role": "assistant",
+          "text": "Mapping is running. The MCP tools here only send messages, so let me check how this host spawns Mjolnir children."
+        },
+        {
+          "id": "agent:676",
+          "role": "assistant",
+          "text": "No `mj` CLI on this host. The user explicitly asked for parallel subagents, which is the opt-in the Workflow tool needs, so I'll load its authoring reference."
+        },
+        {
+          "id": "agent:692",
+          "role": "assistant",
+          "text": "The baseline build failed with E0514 (\"compiled by an incompatible version of rustc\"). Looking at the log:"
+        },
+        {
+          "id": "agent:727",
+          "role": "assistant",
+          "text": "Cargo did recompile `sha2` etc. in this run, yet the output came from rustc 1.96.1, while core's test compiled with 1.99.1. So two compilers ran inside one build. Checking the environment:"
+        },
+        {
+          "id": "agent:786",
+          "role": "assistant",
+          "text": "That `find /` was a mistake (it scans the whole filesystem). Stopping it and rerunning a simpler probe."
+        },
+        {
+          "id": "agent:804",
+          "role": "assistant",
+          "text": "Hypothesis refuted: mbx passes the absolute 1.99.1 rustc path even with `RUSTUP_TOOLCHAIN` unset. Looking at Cargo's fingerprint for `sha2` in that target, and asking mbx what happened:"
+        },
+        {
+          "id": "agent:856",
+          "role": "assistant",
+          "text": "Not hard-linked. I'll reproduce directly: drop Cargo's fingerprint for `sha2` in quicksilver's target and rebuild verbosely to see which rustc runs and what it writes."
+        },
+        {
+          "id": "agent:882",
+          "role": "assistant",
+          "text": "Many deps in that target (`digest`, `aho_corasick`, ...) are 1.96.1 artifacts, all written by the first quicksilver build. Let me read the rest of quicksilver's build environment setup."
+        },
+        {
+          "id": "agent:951",
+          "role": "assistant",
+          "text": "Not reproduced: the pinned build got 1.99.1. Next angle: was this target directory used before today (an earlier quicksilver run at the same path, from the 1.96 era)?"
+        },
+        {
+          "id": "agent:1002",
+          "role": "assistant",
+          "text": "Now both modes produce 1.99.1, so the first build differed somehow. The harness puts its own tool-cache directories first on `PATH`; checking whether they hold a Rust toolchain:"
+        },
+        {
+          "id": "agent:1131",
+          "role": "assistant",
+          "text": "Rustup resolves 1.99.1 with every variable here. The difference must be in how mbx picks its cargo/rustc. Running mbx itself with the inherited variables and looking at the rustc path it passes:"
+        },
+        {
+          "id": "agent:1248",
+          "role": "assistant",
+          "text": "The bisect already shows that dropping `CARGO` restores the absolute rustc path. I'll install, commit, clean quicksilver's mixed-compiler state, and rerun the map as the end-to-end check."
+        },
+        {
+          "id": "agent:1269",
+          "role": "assistant",
+          "text": "Pushed `e3d6c8f`. Rerunning the map:"
+        },
+        {
+          "id": "agent:1282",
+          "role": "assistant",
+          "text": "While it builds, checking where mbx lives in case this also warrants an mbx report:"
+        },
+        {
+          "id": "agent:1295",
+          "role": "assistant",
+          "text": "mbx's source isn't on this host, so I'll report the mbx side in my feedback rather than patch it. Waiting for the map."
+        },
+        {
+          "id": "agent:1377",
+          "role": "assistant",
+          "text": "Yes: `test-support/git.rs` is compiled into both core and analysis. A file shared by two crates can't carry one crate's instrumentation, so I need to handle that too. Reading `scan_workspace`:"
+        },
+        {
+          "id": "agent:1471",
+          "role": "assistant",
+          "text": "Adding a regression test that a `..` `#[path]` yields a normalized path:"
+        },
+        {
+          "id": "agent:1498",
+          "role": "assistant",
+          "text": "110/110 pass, including the new regression test. Formatting, committing, pushing, and rerunning the map:"
+        },
+        {
+          "id": "agent:1511",
+          "role": "assistant",
+          "text": "`cargo fmt` also reformatted my earlier `--package` change in two files, which I'd missed. Committing that separately:"
+        },
+        {
+          "id": "agent:1541",
+          "role": "assistant",
+          "text": "The map works: 2,081 sites, 460 tests, 827 sites entered, in 40 seconds. That leaves 1,254 uncovered functions. Listing them grouped by file:"
+        },
+        {
+          "id": "agent:1668",
+          "role": "assistant",
+          "text": "Now launching the coverage workflow (Sonnet, one agent per lane, each confined to its own worktree, with structured reports):"
+        },
+        {
+          "id": "agent:1748",
+          "role": "assistant",
+          "text": "I'll extract the capture half of `edited::build` into its own `capture_edits` function and add a `--capture-only` flag that calls just that. Reading the exact region to restructure:"
+        },
+        {
+          "id": "agent:1772",
+          "role": "assistant",
+          "text": "Compiles cleanly. Extending the existing end-to-end `edited` test to cover capture-then-compile:"
+        },
+        {
+          "id": "agent:1785",
+          "role": "assistant",
+          "text": "I'll make the \"second round\" step use `capture_edits`. The next `build` must then compile that captured mutant, which the existing assertion at line 132 already checks."
+        },
+        {
+          "id": "agent:1811",
+          "role": "assistant",
+          "text": "Pushed `f489da1`. Checking on the coverage lanes:"
+        },
+        {
+          "id": "agent:1821",
+          "role": "assistant",
+          "text": "Three lanes have committed. I'll review their diffs while the rest finish, starting with canonical-hash and fq-name:"
+        },
+        {
+          "id": "agent:1834",
+          "role": "assistant",
+          "text": "Solid: FIPS vectors, a chunked-digest property, a table-based reference renderer, and the multibyte-UTF-8-of-length-64 edge. Checking compact-graph and fq-name:"
+        },
+        {
+          "id": "agent:1857",
+          "role": "assistant",
+          "text": "Good: a set-of-pairs reference covering both constructors, duplicates, and self-loops. Waiting for the remaining five lanes:"
+        },
+        {
+          "id": "agent:2118",
+          "role": "assistant",
+          "text": "All merged without conflicts, but 2,964 lines of tests is heavy, and gitblob alone is 685. Let me see which gitblob tests target dead code:"
+        },
+        {
+          "id": "agent:2153",
+          "role": "assistant",
+          "text": "Before deleting, I need the full picture of which `WorkingTreeIdentity` methods production actually calls, since `clean_index_oid` also only appears in a test:"
+        },
+        {
+          "id": "agent:2200",
+          "role": "assistant",
+          "text": "Deleting the dead functions, then removing the tests that only exercised them (by name, with brace matching):"
+        },
+        {
+          "id": "agent:2231",
+          "role": "assistant",
+          "text": "Clean. Now the stdin-timeout fix. First, reading the full `run_bounded_process` flow to make sure timeout precedence can't change the outcome for a normal run:"
+        },
+        {
+          "id": "agent:2278",
+          "role": "assistant",
+          "text": "There's a neighboring test that may assert the old behavior. Checking lines 866-906:"
+        },
+        {
+          "id": "agent:2293",
+          "role": "assistant",
+          "text": "I'll fold the timeout assertion into the existing timeout test, tag it `#[hardwon]`, and remove the two contract-question tests:"
+        },
+        {
+          "id": "agent:2364",
+          "role": "assistant",
+          "text": "Clean. Committing the integration fixes:"
+        },
+        {
+          "id": "agent:2374",
+          "role": "assistant",
+          "text": "Before re-mapping, checking that the new tests are cheap: the slowest tests in core's suite."
+        },
+        {
+          "id": "agent:2388",
+          "role": "assistant",
+          "text": "The slowest tests are all pre-existing `cache_db` migration tests, so the new ones are cheap. Re-mapping at the new head:"
+        },
+        {
+          "id": "agent:2403",
+          "role": "assistant",
+          "text": "Coverage went from 827 to 924 entered sites (2,075 total after the deletions). Now step 2: the mutation agents need the list of *covered* functions. Inspecting the sitemap's structure:"
+        },
+        {
+          "id": "agent:2461",
+          "role": "assistant",
+          "text": "Each lane has 88-89 functions. Launching the mutation workflow (8 Sonnet agents):"
+        },
+        {
+          "id": "agent:2477",
+          "role": "assistant",
+          "text": "While the agents write mutants, I'll prepare the capture loop. It applies each patch to the mapped checkout, captures with `--capture-only`, resets, and logs any rejection:"
+        },
+        {
+          "id": "agent:2506",
+          "role": "assistant",
+          "text": "The first patch landed (lane 8, 62 hunks). Capturing it now to test the pipeline early:"
+        },
+        {
+          "id": "agent:2518",
+          "role": "assistant",
+          "text": "Captured 64 mutants from the first patch, so the pipeline works. Waiting for the other lanes:"
+        },
+        {
+          "id": "agent:2564",
+          "role": "assistant",
+          "text": "The agent's edit also changed a doc comment, and quicksilver correctly rejected the whole round. I'll apply the patch, revert just that doc line, and capture:"
+        },
+        {
+          "id": "agent:2579",
+          "role": "assistant",
+          "text": "929 mutants captured. Compiling them all in one build:"
+        },
+        {
+          "id": "agent:2589",
+          "role": "assistant",
+          "text": "920 mutants compiled in 28 seconds with two cargo invocations, which is the schemata payoff. Nine came back unviable even though each round passed `cargo check`; let me see why:"
+        },
+        {
+          "id": "agent:2673",
+          "role": "assistant",
+          "text": "I'll fix this properly: carry each diagnostic's rendered text through attribution, so an unviable mutant shows the error that actually hit its site. Checking all users of these types first:"
+        },
+        {
+          "id": "agent:2743",
+          "role": "assistant",
+          "text": "All 110 pass. Committing and pushing:"
+        },
+        {
+          "id": "agent:2752",
+          "role": "assistant",
+          "text": "Now running all 920 compiled mutants against the tests that enter their functions:"
+        },
+        {
+          "id": "agent:2764",
+          "role": "assistant",
+          "text": "The test run moved to the background and has a 30-minute limit there, so I'm checking its progress:"
+        },
+        {
+          "id": "agent:2811",
+          "role": "assistant",
+          "text": "The run finished: 920 mutants in 17 minutes, **434 caught, 475 missed, 11 timeouts**. Now I'll prepare survivor data for the \"subtle\" reviewers. Inspecting the saved state for each mutant's edit:"
+        },
+        {
+          "id": "agent:2867",
+          "role": "assistant",
+          "text": "While the reviewers work, I'll gather two things myself: how much time the budget-timeout reruns cost, and why mutants survived in `canonical_hash`, which just got thorough tests."
+        },
+        {
+          "id": "agent:2983",
+          "role": "assistant",
+          "text": "I'll keep the cache next to the existing process-wide `CONFIRM_LOCK`, keyed by test id:"
+        },
+        {
+          "id": "agent:2997",
+          "role": "assistant",
+          "text": "Adding a test in the style of the existing fake-runner timeout tests. Reading one first:"
+        },
+        {
+          "id": "agent:3040",
+          "role": "assistant",
+          "text": "No CI workflows. I'll give each timeout test its own fake test name so the shared cache can't couple them under `cargo test`, then add the new test:"
+        },
+        {
+          "id": "agent:3065",
+          "role": "assistant",
+          "text": "111/111 under nextest. Also checking the lib tests under plain `cargo test`, where tests share one process:"
+        },
+        {
+          "id": "agent:3089",
+          "role": "assistant",
+          "text": "Pushed `5b05298`. Waiting for the survivor reviewers:"
+        },
+        {
+          "id": "agent:3103",
+          "role": "assistant",
+          "text": "Reviews are in. Aggregating classifications, priorities, and clusters:"
+        },
+        {
+          "id": "agent:3235",
+          "role": "assistant",
+          "text": "The test run spanned about 13:41-13:59, and the `family_prefix`, `publish_template`, and `normalize_schema_sql` mutants all ran in it. Removing only the three mutant-written files:"
+        },
+        {
+          "id": "agent:3333",
+          "role": "assistant",
+          "text": "That's the known false positive from `core.autocrlf=input` (I have a memory note on it). Re-running with the documented override:"
+        },
+        {
+          "id": "agent:3348",
+          "role": "assistant",
+          "text": "Still flagged. Checking whether my branch touches that file at all:"
+        },
+        {
+          "id": "agent:3381",
+          "role": "assistant",
+          "text": "532 pass, formatting clean. Pushing with an explicit refspec (to avoid the `push.default=upstream`-to-master trap) and opening a **draft** PR:"
+        },
+        {
+          "id": "agent:3404",
+          "role": "assistant",
+          "text": "Draft PR: https://github.com/BrokkAi/bifrost-dev/pull/6656. Updating two memory notes: the drift-check override, and how to run quicksilver on Bifrost."
+        },
+        {
+          "id": "agent:3421",
+          "role": "assistant",
+          "text": "I've done all four steps. Quicksilver needed seven fixes or additions before it could run on Bifrost. The coverage work is up as **draft PR [#6656](https://github.com/BrokkAi/bifrost-dev/pull/6656)**. Of 920 mutants, 434 were caught and 475 survived; the survivors have been triaged.\n\n## Step 1: Coverage\n\nThe first map showed 827 of 2,081 core functions entered by core's own tests. Following Bifrost's test policy, I only covered functions with an independent oracle or a tricky condition. That was 8 lanes, from `canonical_hash` to `fq_name`, using property tests against reference implementations and integration tests against real git repos and real processes. Core's suite went from 460 to 532 tests and still runs in about 23s. The re-map shows 924 functions entered.\n\nI checked every bug the lanes reported against the source:\n- **Fixed, with `#[hardwon]` tests:**\n  - A stdin writer that missed its deadline was reported as a broken pipe, and the error was then dropped.\n  - `origin/release/1.0` was displayed as `1.0`.\n- **Deleted as dead code:** `is_path_dirty` and five helpers. They had four real defects, but nothing calls them.\n- **Left alone as contract questions:**\n  - On Unix, dropping an `OwnedProcess` doesn't kill its process tree.\n  - `byte_ranges_overlap` treats an empty range inside another range as overlapping.\n\nThe PR is a draft because it deletes production code; please look before I mark it ready.\n\n## Step 2: Mutants and survivors\n\nEight Sonnet agents wrote 929 mutants as patch files. Compiling all of them took **28 seconds** in two cargo invocations, and the test run took 17 minutes. Eight Opus reviewers then classified the 486 survivors (475 missed plus 11 timeouts): 292 test gaps, 79 logging or performance only, 58 unreachable, 36 equivalent, 11 reachable only from other crates, and 10 timeout noise. I think \"test gap\" is over-called; many medium and low items would be table tests that the repo policy treats as waste.\n\nThe survivors worth targeting, highest first:\n1. **Persisted identities aren't pinned to known values.** `CanonicalHasher`'s byte framing and `DeclarationId` (`decl:v1`) are only checked for consistency, so endianness or prefix changes survive. I checked this one myself. One known-answer table would cover about 10 survivors.\n2. **`StructuredTypeIdentity` round trips:** a stored lvalue reference can decode as a pointer, and the JSON path the store actually uses has no core test.\n3. **Gitblob's production identity path:** the `#1742` hard-won tests exercise `working_tree_oids`, which is likely dead (no callers outside its file). The live `resolve_with_metadata` path has no tests for git content filters or line-ending conversion. Also untested: a size-only change, blobs reachable only from history, and promisor detection for ordinary https remotes.\n4. **cache_gc:** no core test shows `maybe_gc` actually collecting. Two related checks are untested or weak:\n   - nothing reads the accounting written after a collection;\n   - the forced-GC hard-won test drops the lock before it ever causes contention.\n5. **pool_memo:** builder-counter leaks and builder selection on rayon workers, which is the deadlock shape from `#549`.\n6. **project / ProjectFile:** the thread-local root interning, invalidation of the `.bifrostignore` matcher, the multi-root common ancestor, and a test that compares `disk()` with itself.\n7. **ResolutionSession:** unbounded `query_limited_rows`, and `remaining_budget`, which feeds a memo key.\n\n**Side findings I verified:**\n- **`CodeUnit`'s `Ord` and `Eq` disagree** (`model.rs:3953`). `Ord` compares rendered names; `Eq` compares the structured name, including segment kinds. With 193 uses of `BTreeSet<CodeUnit>`, units that differ only in segment kind get merged silently.\n- **Core's tests read and write the real `~/.cache/bifrost`.** During the run, mutants wrote three junk template files there. I deleted only those three.\n\n## Steps 3 and 4: Quicksilver\n\nPushed to quicksilver master (110→111 tests, all passing):\n- `--package` now runs only that package's own tests; `--reverse-dependents\n[... 921 bytes omitted from the middle of this message ...]\niven the cache pollution above.\n2. **Record each mutant's intent and diff** in the output. I had to rebuild diffs by hand, and every reviewer complained that notes matched by function name were wrong.\n3. **Handle `-> impl Trait` functions** with separate builds; 9 mutants were lost to this.\n4. **Mutate nested items**, such as serde `Visitor` impls, which are currently unreachable.\n5. **Distinguish real timeouts:** a mutant that trips a test's own internal deadline should count as caught.\n6. **Platform awareness:** Windows-only functions show up as uncovered on Linux.\n7. **Concurrency-safe or patch-based capture.**\n8. **Allow chosen downstream test targets** without pulling in every reverse dependent.\n9. **Flag dead code and test scaffolding** in `uncovered`: zero references usually means delete, not test.\n\nThere's also an mbx issue (with `CARGO` set, it doesn't pin the toolchain). mbx's source isn't on this host, so I didn't file it.\n\nDecisions for you:\n- Should I mark #6656 ready for the queue?\n- Should I file issues for the `CodeUnit` `Ord`/`Eq` bug, test-cache isolation, and the likely-dead gitblob functions?\n- Should I write the targeted tests (about 15) as a follow-up PR?\n\n`★ Insight ─────────────────────────────────────`\n- Building all 920 mutants once instead of 920 times turns compilation into a 28-second step, so the cost moves to running tests and reviewing survivors.\n- Most survivors here are not missing assertions on obvious paths. They are invariants nobody pinned: known digests, `Ord`/`Eq` agreement, round trips through the encoding production actually uses.\n- Several \"covered\" functions are only covered by tests whose expected value comes from the same code (`disk()` compared with `disk()`, paths derived from the same function). Mutation testing exposes that kind of test well.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "agent:3894",
+          "role": "assistant",
+          "text": "That stopped task was a leftover wait loop from the mutant test run. Its grep pattern never matched quicksilver's final summary line, so it waited until it hit its time limit and was stopped. The test run itself had already finished (920 mutants: 434 caught, 475 missed, 11 timeouts). Nothing needs restarting.\n\nThe three questions from my last message are still open:\n- Should I mark #6656 ready?\n- Should I file issues for the bugs I verified?\n- Should I write the targeted tests as a follow-up PR?"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "you're literally the first user so it's fine to be skeptical and bias towards fixing/changing qs",
+    "assistant_text_tail": "That stopped task was a leftover wait loop from the mutant test run. Its grep pattern never matched quicksilver's final summary line, so it waited until it hit its time limit and was stopped. The test run itself had already finished (920 mutants: 434 caught, 475 missed, 11 timeouts). Nothing needs restarting.\n\nThe three questions from my last message are still open:\n- Should I mark #6656 ready?\n- Should I file issues for the bugs I verified?\n- Should I write the targeted tests as a follow-up PR?",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Still open / needs you turn-ending label",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_positions": [
+      3421,
+      3894
+    ],
+    "user_position": 422,
+    "input_rationale": "The draft PR and survivor triage are delivered; the agent explicitly restates three unanswered permission questions (mark PR ready, file issues, write follow-up tests). The case reply itself only explains a stale background task and repeats them.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "approval_gate"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-23T19:32:34.540Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-23T21:57:23.239Z",
+        "kind": "user",
+        "text": "> so several agents' patches can be captured  why isn't \"just build it with all the patches in place\" enough?  > with CARGO set, it doesn't pin the toolchain  pls create a ticket in jbellis/mr-boxingt"
+      },
+      {
+        "at": "2026-10-23T21:57:55.797Z",
+        "kind": "agent",
+        "text": "Starting with the quick items: the 17-minute question, the mbx ticket, and submitting #6656. Then I'll set up the survivor and side-finding work.  On the 17 minutes, I'll check the facts rather than g"
+      },
+      {
+        "at": "2026-10-23T21:58:13.339Z",
+        "kind": "agent",
+        "text": "No duplicate. Building a minimal reproduction to put in the ticket, using the probe crate (pins 1.99.1, depends on registry crates):"
+      },
+      {
+        "at": "2026-10-23T21:58:20.155Z",
+        "kind": "agent",
+        "text": "Clean reproduction with only `CARGO` set: a dependency gets built by 1.96.1 in a project pinned to 1.99.1. Filing the issue:"
+      },
+      {
+        "at": "2026-10-23T21:58:32.707Z",
+        "kind": "agent",
+        "text": "Filed: https://github.com/jbellis/mr-boxington/issues/36. Now submitting #6656: merging current master first, then re-validating."
+      }
+    ]
+  }
+}

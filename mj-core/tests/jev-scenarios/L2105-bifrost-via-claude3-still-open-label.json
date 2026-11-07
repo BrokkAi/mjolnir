@@ -1,0 +1,422 @@
+{
+  "id": "L2105",
+  "title": "bifrost via claude3 still-open label",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "83512a5a8bc941e782f89140d47156f8",
+    "session_title": "bifrost via claude3",
+    "reply_position": 12897,
+    "captured_at": "2026-10-08T00:33:18.251Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:16",
+          "role": "user",
+          "text": "i want a list of the top 50 RQL policies I could\nadd to Bifrost that would be valuable to Rust projects.\nfigure out how to collect this efficiently by having\nsubagents go through bugfixes to the rust repos in\n/nfs/repo-clones. Pull repos that are older than a\nweek out of date to latest first. Go through repos in the\norder suggested by the FIRD runbook. (\"not too large, not\ntoo small\"); you can stop when you're satisfied with the quality and utility of your 50 rules. I suggest having the subagents propose ideas to you that you validate for feasibility. I'm happy with ideas that we can build with today's RQL *or* with ones that we\ncan build with reasonable extensions, goal is to get both\nthe rule ideas and also the gap analysis. File gap tickets\nunder a \"Mined Rule Gaps\" Epic; include the list of rules in\na table with whether we can build them today. For the rules\nthat you think have no gaps: have subagents implement them\nto see if that is in fact the case; create a PR with all of the successful ones."
+        },
+        {
+          "id": "user:318",
+          "role": "user",
+          "text": "subagents should be fixed now, pls check"
+        },
+        {
+          "id": "user:571",
+          "role": "user",
+          "text": "now?"
+        },
+        {
+          "id": "user:629",
+          "role": "user",
+          "text": "yes. we're looking for \"meaty\" rules not something that a single-file-visibility linter can do"
+        },
+        {
+          "id": "user:1858",
+          "role": "user",
+          "text": "Good work, fix the top four issues. Use parallel statements where useful"
+        },
+        {
+          "id": "user:2326",
+          "role": "user",
+          "text": "Please continue, I've enabled compression on /mnt/optane which should allow everyone to build without stepping on each others' toes\n\nI moved a few worktrees and outputs that I didn't recognize to /tmp, everything else from that volume is gone and needs to be rebuilt"
+        },
+        {
+          "id": "user:2758",
+          "role": "user",
+          "text": "prioritize #3856 (helper-call discovery), #3860\n│    (format!), #3852 (API model binding) as well pls"
+        },
+        {
+          "id": "user:3136",
+          "role": "user",
+          "text": "i freed up space for you to continue, but don't leave shit in /tmp after you're done with it"
+        },
+        {
+          "id": "user:7300",
+          "role": "user",
+          "text": "What do we need next to match of CodeQL for rust? "
+        },
+        {
+          "id": "user:7783",
+          "role": "user",
+          "text": "How does bf ship framework packs? Do we have the infra to massively expand that? "
+        },
+        {
+          "id": "user:8161",
+          "role": "user",
+          "text": "> Packs compiled into the binary\n\nwtf is this, i'm trying to reduce build times and we're compiling entire packs into our binary?"
+        },
+        {
+          "id": "user:8359",
+          "role": "user",
+          "text": "okay, but it's still a messy way to ship packs compared to bifrost-packs right? also why do we have both bifrost-packs and semantic-packs?"
+        },
+        {
+          "id": "user:8644",
+          "role": "user",
+          "text": "what are \"host plugins\""
+        },
+        {
+          "id": "user:8867",
+          "role": "user",
+          "text": "why the fuck would we do that instead of baking it into bf itself?"
+        },
+        {
+          "id": "user:9155",
+          "role": "user",
+          "text": "okay. create a ticket, self-assign, let's retarget the rust downloader, move the \"what to grab\" logic there, and remove the \"host plugin\" download logic"
+        },
+        {
+          "id": "user:9206",
+          "role": "user",
+          "text": "i'm going to punt on the embedded packs for now, david already has a plan to clean them up for v0.13, but what's going on with the completely unpublished semantic-packs folder? and are there docs pointing to bifrost-premium-packs and describing the difference between those and the public packs?"
+        },
+        {
+          "id": "user:9572",
+          "role": "user",
+          "text": "get a subagent moving on the downloader issue pls"
+        },
+        {
+          "id": "user:9600",
+          "role": "user",
+          "text": "god\n\npls create a ticket for the pack snafu, mark Escalated, assign to David"
+        },
+        {
+          "id": "user:9738",
+          "role": "user",
+          "text": "ticket lgtm but did you cover why agents keep editing engine copy instead of bf-packs? i.e. either there's stale old guidance, insufficent new guidance, or both"
+        },
+        {
+          "id": "user:10050",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:10289",
+          "role": "user",
+          "text": "sorry, pls spell this out for me more, what happened and what are our options w pros and cons"
+        },
+        {
+          "id": "user:10556",
+          "role": "user",
+          "text": "ty, agreed on option 1"
+        },
+        {
+          "id": "agent:10558",
+          "role": "assistant",
+          "text": "I'll tell David on #4437 first, then send the child the expanded assignment. It already has the context."
+        },
+        {
+          "id": "agent:10589",
+          "role": "assistant",
+          "text": "The child is restarting with the new assignment. I'll wait for its handback."
+        },
+        {
+          "id": "agent:10628",
+          "role": "assistant",
+          "text": "The child is still running after an hour. I'll check its progress in the checkout instead of re-reading the full status list."
+        },
+        {
+          "id": "agent:10643",
+          "role": "assistant",
+          "text": "It has merged, committed and is near the end of its gates. Waiting for the handback."
+        },
+        {
+          "id": "agent:10736",
+          "role": "assistant",
+          "text": "The binary built. Now the live run against real GitHub, using a scratch cache directory."
+        },
+        {
+          "id": "agent:10784",
+          "role": "assistant",
+          "text": "New releases exist since my last check: rules v0.1.3 and packs v0.2.0. I'll compare rules v0.1.3's requirements with this build's profile to see whether \"no compatible release\" is correct or a bug."
+        },
+        {
+          "id": "agent:10815",
+          "role": "assistant",
+          "text": "The verdict is correct. Rules v0.1.3 requires a long list of engine capabilities, and this build advertises none. I'll confirm the merge didn't drop a capability list that master's binary advertises."
+        },
+        {
+          "id": "agent:10863",
+          "role": "assistant",
+          "text": "The direct scan acquired, printed the diagnostic and fell back to embedded packs. It exited with status 2, so I'll confirm that comes from this policy file and not from acquisition."
+        },
+        {
+          "id": "agent:10883",
+          "role": "assistant",
+          "text": "My policy path was relative to the wrong root. Rerunning with an absolute path, then again warm and offline."
+        },
+        {
+          "id": "agent:10917",
+          "role": "assistant",
+          "text": "Master's launcher falls back on four error codes, including \"unavailable\". I'll see what code master's script raised for the same offline case."
+        },
+        {
+          "id": "agent:11008",
+          "role": "assistant",
+          "text": "The child fixed the offline regression. I'm rebuilding and rerunning my live smoke matrix to confirm it myself before pushing."
+        },
+        {
+          "id": "agent:11095",
+          "role": "assistant",
+          "text": "While the child works, master keeps moving. After the fix lands I'll fetch, merge any new commits, rerun the smoke, and push."
+        },
+        {
+          "id": "agent:11115",
+          "role": "assistant",
+          "text": "The rate-limit fix is in. Next I'll fetch master again, merge any new commits, rebuild, and rerun the full live matrix, including a forced rate-limit case."
+        },
+        {
+          "id": "agent:11137",
+          "role": "assistant",
+          "text": "Master hasn't moved since the merge. Rebuilding and running the full live matrix."
+        },
+        {
+          "id": "agent:11173",
+          "role": "assistant",
+          "text": "That endpoint doesn't count against the quota, so the limit wasn't reached. Retrying with an endpoint that counts."
+        },
+        {
+          "id": "agent:11189",
+          "role": "assistant",
+          "text": "The rate-limited run now says \"rate limit reached\" and continues with embedded packs. Final check of what I'm about to push, then push."
+        },
+        {
+          "id": "agent:11205",
+          "role": "assistant",
+          "text": "Clean, with no stale references. Pushing to master over HTTPS."
+        },
+        {
+          "id": "agent:11215",
+          "role": "assistant",
+          "text": "GitHub rejected the push because of a repository rule. I'll check which rule applies to master."
+        },
+        {
+          "id": "agent:11306",
+          "role": "assistant",
+          "text": "The pull request is open and ready, so the merge queue will pick it up. I'll save the session's key lessons to memory, then watch the queue in the background in case it rejects the PR."
+        },
+        {
+          "id": "agent:11336",
+          "role": "assistant",
+          "text": "Option 1 is finished and in the merge queue as PR #4625. It has not landed on master yet. I'm watching the queue in the background and will fix the PR if the queue rejects it.\n\n**What the PR does:**\n- **Downloads in the binary.** `bifrost` now picks, downloads, verifies and caches packs from Bifrost-packs. Running the binary directly now works the same as running it through a plugin.\n- **David's #4494 features moved into Rust.** These cover choosing an exact source and version, private GitHub releases with a token, and HTTPS sources pinned by digest. The token is sent only to the configured repository's GitHub API, and a test checks it never leaks into URLs, logs or receipts.\n- **CI switched to the binary.** The SARIF action, quick-performance and release-readiness workflows call a new `bifrost prepare-open-packs` command.\n- **Node script deleted everywhere.** It is gone from both plugins, the action, and the scripts folder. The plugins still download the binary itself.\n\n**Two bugs found during review and fixed before delivery.** The child's offline tests passed, but a live run against GitHub caught both:\n- **Offline aborted the scan.** With no network, the binary refused to run any policy scan. Master's launcher printed a warning and continued with embedded packs, and the binary does that again now.\n- **Rate limits looked like a login failure.** GitHub answers a request over its 60-per-hour unauthenticated limit with error 403. The binary treated that as an authentication failure and aborted. CI runners share IP addresses and hit this limit often. The binary now reports \"rate limit reached\" and continues with embedded packs.\n\n**Live results with the final build.** Every case continued with embedded packs and a warning, except the corrupt cache, which failed on purpose:\n- online, with an empty cache and a warm cache\n- no network, with a warm cache and an empty cache\n- offline mode, with a warm cache and an empty cache\n- a real exhausted rate limit\n- a corrupt cache\n\nToday every case ends with \"no compatible release\". The current rules release requires engine capabilities that this build does not advertise, and master's build behaves the same.\n\n**Delivery changed.** A ruleset added on 2026-10-06 blocks direct pushes to master. The repository's updated CLAUDE.md now requires a work branch and a pull request that the MergeMarshall queue merges. I followed that procedure, using the branch `4437-binary-pack-acquisition`.\n\n**Not verified locally:** five agent-plugin test files could not run because their npm packages were not installed. The merge queue's CI will run them.\n\nI commented on #4437 so David can review the token handling, since this replaces the download path he built for #4494."
+        },
+        {
+          "id": "agent:11517",
+          "role": "assistant",
+          "text": "Still open, with no queue comments. I'll check whether the queue has started on it."
+        },
+        {
+          "id": "agent:11644",
+          "role": "assistant",
+          "text": "Even the schema 1 manifest lists required capabilities. Master's script probably ignored those for schema 1 and checked only engine bounds. I'll confirm that in master's script and in the Rust code."
+        },
+        {
+          "id": "agent:11708",
+          "role": "assistant",
+          "text": "The green master run included #4494. I'll read what its prepare step did with the same pinned release."
+        },
+        {
+          "id": "agent:11764",
+          "role": "assistant",
+          "text": "Master defaulted to the same pin and also required \"qualified\", so its smoke must not have reached the acquire step in this case. I'll compare how the smoke's clean case calls the action."
+        },
+        {
+          "id": "agent:11787",
+          "role": "assistant",
+          "text": "On master, the smoke saw a core build with no rules, so it used a policy file and the action skipped acquisition. I'll check what the branch run saw at the same step."
+        },
+        {
+          "id": "agent:11889",
+          "role": "assistant",
+          "text": "I'll make the edit: the input default becomes empty, and the pin moves into the identity step."
+        },
+        {
+          "id": "agent:11963",
+          "role": "assistant",
+          "text": "The commit is in. This version of the GitHub CLI lacks the draft flag, so I'll move the PR back to draft through the GraphQL API before pushing."
+        },
+        {
+          "id": "agent:11980",
+          "role": "assistant",
+          "text": "The fix is pushed and the PR is a draft again. I'll wait for the policy-action smoke and quick-policy checks to finish before marking it ready."
+        },
+        {
+          "id": "agent:11996",
+          "role": "assistant",
+          "text": "PR #4625 is not merged. Its first CI run failed, and I've pushed a fix. The PR is a draft again while the new checks run, and I'll mark it ready once they pass.\n\n**What failed and why:**\n- **Policy-scan smoke test, caused by this PR.** When the child ported #4494, it put the pinned rules v0.1.1 source into the action's \"packs source\" input as its default. Every call then looked like an explicit source. So scans that should skip downloading, such as the smoke test's policy-file-only run on a build with no rules, tried to download v0.1.1. That release is not qualified, so the scan never ran. Master's script applied the pin only after deciding a download was needed.\n- **Quick policy, already failing on master.** The open-core inventory was missing seven private records and kept one row for a deleted file.\n- **Performance comparison, already failing on master.** Quick-performance has failed on every master run since at least 2026-10-06.\n\n**What I changed:**\n- **Action default.** The input default is empty again. The v0.1.1 pin now lives in the identity step and applies only when the action actually downloads. The resolved source is passed to the download step, and the action test checks both the empty default and the pin. All 43 action and workflow Node tests pass locally.\n- **Open-core inventory.** I regenerated it with the repository's own command, which carries existing decisions forward. Only those eight rows changed and no classification decision changed. The check now passes locally.\n\n**Delivery:** master had no new commits to merge. I pushed the fix and moved the PR back to draft first, as the repository rules require. Because this version of the GitHub CLI cannot do that, I used the GitHub API.\n\nA background job is watching three checks: the two policy-action smokes and quick policy. The performance comparison will probably still fail, as it does on master."
+        },
+        {
+          "id": "agent:12121",
+          "role": "assistant",
+          "text": "Policy-action smoke on Ubuntu and quick policy now pass. A Rust test job, \"Everything else (MCP, RQL, policy)\", failed this time. It didn't run on the first commit, so I'll check whether it's ours."
+        },
+        {
+          "id": "agent:12249",
+          "role": "assistant",
+          "text": "Still running after an hour; the full policy suite is long. I'll check its progress in the checkout."
+        },
+        {
+          "id": "agent:12261",
+          "role": "assistant",
+          "text": "The child has edits in progress and is running the final gates. It also touched the built-in policy module, which I'll check during review. Waiting for the handback."
+        },
+        {
+          "id": "agent:12307",
+          "role": "assistant",
+          "text": "master's latest CI fails the same golden test, so that failure isn't ours. I'll review the child's diff, especially the built-in policy change it described as ignoring external roots."
+        },
+        {
+          "id": "agent:12363",
+          "role": "assistant",
+          "text": "The revert applied cleanly. Now the affected tests: the policy crate's external-root tests, the three policy CLI test files that set roots, and the root binary tests."
+        },
+        {
+          "id": "agent:12423",
+          "role": "assistant",
+          "text": "All 44 tests pass, and fmt and Clippy are clean. Committing, then merging the latest master as the repository rules require before marking the PR ready."
+        },
+        {
+          "id": "agent:12438",
+          "role": "assistant",
+          "text": "Master hasn't moved. Pushing, then I'll watch the jobs that failed before: the two policy-action smokes, quick policy, and the Rust job."
+        },
+        {
+          "id": "agent:12462",
+          "role": "assistant",
+          "text": "PR #4625 is still a draft and not merged. I pushed fixes for this PR's CI failures, and the new CI run is in progress. A background job is watching the jobs that failed before. I'll mark the PR ready for the merge queue once they pass.\n\n**What the second CI run showed.** Seven test failures and the cause of an eighth came from this PR:\n- **Downloads ran too early.** The binary tried to download before checking its arguments. So listing the built-in catalog or passing a bad flag reached the network and printed a fallback message.\n- **Too much stderr output.** The fallback message went to stderr even for ordinary outcomes such as \"no compatible release\". That broke tests that require a quiet stderr.\n- **Tests used the network.** Tests that start the binary made real requests to GitHub, so they weren't hermetic.\n- **Old wording.** One test expected the old \"Bifrost does not download packs\" message, which this change correctly updated.\n\n**What the child fixed:**\n- **Late downloads.** The binary now downloads only after checking its arguments, and only for scans, MCP and the explicit prepare command.\n- **Quiet ordinary outcomes.** Ordinary outcomes print nothing. Network problems, rate limits, and missing offline caches print one warning line.\n- **Hermetic tests.** A new setting, `BIFROST_OPEN_PACKS_DISABLE`, turns downloads off for all tests through `.cargo/config.toml`.\n- **The wording test** now expects the new message.\n\n**One correction I made.** The child's disable setting also made the binary ignore pack locations that a host sets explicitly. That's host configuration, not downloading, and master honors it. I reverted that part, rewrote its test, and updated the docs.\n\n**Still failing, but also failing on master:**\n\n| Check | Status on master |\n|---|---|\n| Golden test of receiver type families | fails on the latest master CI |\n| Quick-performance comparison | fails on every master run since at least 2026-10-06 |\n\n**Validated locally:**\n- The full policy suite with one failure, the golden test above\n- The full MCP suite\n- The semantic-packs and binary tests\n- The tests that set explicit pack locations\n- fmt and Clippy"
+        },
+        {
+          "id": "agent:12610",
+          "role": "assistant",
+          "text": "Both policy-action smokes and quick policy now pass. The Rust job still failed, so I'll check whether only the golden test that also fails on master remains."
+        },
+        {
+          "id": "agent:12625",
+          "role": "assistant",
+          "text": "Two new failures appeared: a Java golden test, and the main Rust job. The Java golden test passed on this branch's previous run, so I'll look at what differs, and at the Rust job."
+        },
+        {
+          "id": "agent:12645",
+          "role": "assistant",
+          "text": "None of these touch pack acquisition: Rust reverse rows, cognitive complexity, and a Scala alias golden case. I'll compare with master's CI to confirm they're unrelated."
+        },
+        {
+          "id": "agent:12741",
+          "role": "assistant",
+          "text": "PR #4625 is ready for review and waiting in the merge queue. It has not merged yet. A background job is watching it and will tell me if the queue lands or rejects it.\n\n**CI on the latest commit.** Every failure this PR caused is fixed:\n- The policy-scan smoke test passes on Ubuntu and Windows.\n- The quick policy check passes.\n\n**Failures that remain but are not caused by this PR:**\n\n| Test or check | Why it is not this PR |\n|---|---|\n| Golden test of receiver type families | Fails on master's last three CI runs |\n| Two Rust reverse-inventory tests | Fail on master's last three CI runs |\n| Quick-performance comparison | Fails on every master run since at least 2026-10-06 |\n| Java golden test, Scala case | Passed 3 of 3 times locally on this commit, so likely flaky |\n| Cognitive-complexity golden test | Failed with \"database is locked\", which is SQLite contention; passes locally |\n\nI posted the same breakdown as a comment on the PR, so reviewers and the queue see why those checks are red."
+        },
+        {
+          "id": "agent:12837",
+          "role": "assistant",
+          "text": "PR #4625 has not merged yet. The merge queue is testing it, and GitHub shows its \"in progress\" label.\n\nThe new message in the mailbox is my own CI-status comment on the PR, echoed back. It contains no new request.\n\nA background watch is running again. It reports when the queue merges or rejects the PR. If the queue rejects it, I'll read the failing tests from the queue's comment and fix them on the same branch."
+        },
+        {
+          "id": "agent:12872",
+          "role": "assistant",
+          "text": "Merged. I'll close out the issue state, update memory, and tidy the local checkout."
+        },
+        {
+          "id": "agent:12897",
+          "role": "assistant",
+          "text": "PR #4625 merged into master on 2026-10-08, so #4437 is done. The merge queue landed it in batch commit d1bdc11850, and #4437 is closed.\n\n**What is on master now:**\n- **The binary downloads packs.** `bifrost` picks, downloads, verifies and caches packs from Bifrost-packs. Running it directly from the command line or in CI gets the same packs as running it through a plugin.\n- **The Node download script is gone.** It was removed from both plugins, the SARIF action and the scripts folder. CI calls `bifrost prepare-open-packs` instead.\n- **David's #4494 features work in Rust.** These are exact source and version pinning, private GitHub releases with a token, and HTTPS sources pinned by digest.\n- **Behavior matches master's launcher.** When no compatible release is found, the network is down, the cache is empty, or GitHub rate-limits the request, the scan continues with embedded packs. A corrupt cache or bad metadata stops the scan.\n- **Tests stay offline.** A new `BIFROST_OPEN_PACKS_DISABLE` setting is on for all tests. It stops downloads only; pack locations a host sets explicitly are still used.\n\n**Cleanup:**\n- I removed the in-progress label from #4437.\n- I moved the local checkout back to master and deleted the merged branch.\n- I closed the child agent and deleted my scratch folder.\n- I updated memory with the lessons from this work. Offline tests missed several problems that only a live run against GitHub and the full CI suites caught.\n\n**Still open, not part of this PR:**\n- **#4438** is assigned to David. It covers the engine's `semantic-packs/` folder drifting from Bifrost-packs.\n- **The embedded packs** remain until David's v0.13 cleanup.\n- **Failures already on master** were reported in a comment on the PR: a golden test, two Rust reverse-inventory tests, and the quick-performance comparison."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "ty, agreed on option 1",
+    "assistant_text_tail": "PR #4625 merged into master on 2026-10-08, so #4437 is done. The merge queue landed it in batch commit d1bdc11850, and #4437 is closed.\n\n**What is on master now:**\n- **The binary downloads packs.** `bifrost` picks, downloads, verifies and caches packs from Bifrost-packs. Running it directly from the command line or in CI gets the same packs as running it through a plugin.\n- **The Node download script is gone.** It was removed from both plugins, the SARIF action and the scripts folder. CI calls `bifrost prepare-open-packs` instead.\n- **David's #4494 features work in Rust.** These are exact source and version pinning, private GitHub releases with a token, and HTTPS sources pinned by digest.\n- **Behavior matches master's launcher.** When no compatible release is found, the network is down, the cache is empty, or GitHub rate-limits the request, the scan continues with embedded packs. A corrupt cache or bad metadata stops the scan.\n- **Tests stay offline.** A new `BIFROST_OPEN_PACKS_DISABLE` setting is on for all tests. It stops downloads only; pack locations a host sets explicitly are still used.\n\n**Cleanup:**\n- I removed the in-progress label from #4437.\n- I moved the local checkout back to master and deleted the merged branch.\n- I closed the child agent and deleted my scratch folder.\n- I updated memory with the lessons from this work. Offline tests missed several problems that only a live run against GitHub and the full CI suites caught.\n\n**Still open, not part of this PR:**\n- **#4438** is assigned to David. It covers the engine's `semantic-packs/` folder drifting from Bifrost-packs.\n- **The embedded packs** remain until David's v0.13 cleanup.\n- **Failures already on master** were reported in a comment on the PR: a golden test, two Rust reverse-inventory tests, and the quick-performance comparison.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 10556,
+    "input_rationale": "Option 1 was delivered and PR #4625 merged. The still-open items are another person's ticket (David), a planned cleanup, and master failures already reported; none asks the user for anything.",
+    "label": "none",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-08T00:47:17.555Z",
+        "kind": "system",
+        "text": "Interrupted"
+      },
+      {
+        "at": "2026-10-08T00:47:43.435Z",
+        "kind": "system",
+        "text": "Sent 1 event in a new turn:   External event: Your PR #4625 \"Move open pack acquisition into the bifrost binary (#4437)\" was merged by unknown."
+      },
+      {
+        "at": "2026-10-08T00:47:44.143Z",
+        "kind": "user",
+        "text": ""
+      }
+    ]
+  }
+}

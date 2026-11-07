@@ -1,0 +1,272 @@
+{
+  "id": "L2510",
+  "title": "bifrost via claude none",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "9f0e62853fb553748c7c410780b8c4d1",
+    "session_title": "bifrost via claude",
+    "reply_position": 17896,
+    "captured_at": "2026-10-27T20:35:31.836Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:1265",
+          "role": "user",
+          "text": "1. run your tests on an EC2 VM\n\n2. wdym here > Java and C#: their callee-changed pairs still change a callee and leave the caller untouched."
+        },
+        {
+          "id": "user:1348",
+          "role": "user",
+          "text": "> For agrona and ShareX, no pinned policy converts the caller-side edit into a new\n│ finding, so a correct engine and one that skips the caller's unit would look\n│ identical there—only flask and bifrost-service actually prove reverse dependency\n│ through findings\n\nso what's the gap here, is it that don't have useful jvm policies that would benefit from the proposed optimization?"
+        },
+        {
+          "id": "user:1396",
+          "role": "user",
+          "text": "> Java and C# lack confirmed\n│ cross-file test pairs\n\nit sounds like the right solution is to generate some, is that what you're doing?"
+        },
+        {
+          "id": "user:2424",
+          "role": "user",
+          "text": "> most of a cold scan runs on a single thread\n\npls file a bug report and send it to session 0305d10cd40fb1342e5ad6171d6ae993. not sure how much if at all this is invalidated by that session's engine work. give it connection info for ec2 in case it wants to attach a profiler"
+        },
+        {
+          "id": "user:3217",
+          "role": "user",
+          "text": "> the policy worker pool is half the analyzer width\n\nwhy?\n\n> thread per policy\n\nhmm i thought we had code to parallelize single policies, maybe this is just unsolved tickets? or maybe it got implemented for a single language?"
+        },
+        {
+          "id": "user:3451",
+          "role": "user",
+          "text": "good. we shouldn't fix memory use by bounding parallelism jfc. create a ticket pls"
+        },
+        {
+          "id": "agent:16124",
+          "role": "assistant",
+          "text": "The twin is confirmed: it is the second entry in the same list, identical in every field. Pushing the head and checking that GitHub shows it."
+        },
+        {
+          "id": "agent:16145",
+          "role": "assistant",
+          "text": "The PR body is updated. The head was merged with master at 97a35feae7, so I'll check how far master has moved since, and whether a trial merge is clean."
+        },
+        {
+          "id": "agent:16162",
+          "role": "assistant",
+          "text": "Master has not moved since 97a35feae7, so the head is current. Sending the reviewer everything they asked for."
+        },
+        {
+          "id": "agent:16177",
+          "role": "assistant",
+          "text": "#7278's reworked head (2c0eba9b47) is pushed, and the PR body is updated. It is with reviewer 61f0abcc for the final confirmation they asked for. Master has not moved since the merged base (97a35feae7), so no further merge is needed.\n\nWhat changed in the last step:\n- **Duplicate entries:** seven goldens and one expected value drop 45 diagnostics that repeated an identical entry. Each one was checked against its remaining twin. I verified one sample myself.\n- **`python_call_signature`:** the test now counts open constructor sites from the call rows, by distinct `site_id`, instead of from the number of identical diagnostics.\n- **jvac:** the stray trailing newline is removed.\n- **Tests:** the ten tests that failed in the full suites pass, and so do fmt and `git diff --check`.\n\nThe reviewer has everything they asked for: the epoch string, the identity audit for each stored product, the full suite results, and the restored-sites table. Once they confirm, I'll mark #7278 ready and remove its agent-in-progress label."
+        },
+        {
+          "id": "agent:16260",
+          "role": "assistant",
+          "text": "The reviewer confirmed. Before marking ready, I'll verify the head once more. The old `mergemarshall:rejected` label applies only to the rejected commit c899bf0712, so the new head re-enters the queue on its own."
+        },
+        {
+          "id": "agent:16277",
+          "role": "assistant",
+          "text": "#7278 is ready at 2c0eba9b47, with agent-in-progress removed. I'll post a short note on the PR for anyone following the rejection thread, and tell the reviewer."
+        },
+        {
+          "id": "agent:16301",
+          "role": "assistant",
+          "text": "#7278 is back in the merge queue. It is marked ready at 2c0eba9b47 after reviewer 61f0abcc confirmed the final head. Its agent-in-progress label is removed, and a note on the PR summarizes the rework for anyone following the rejection thread.\n\n**Rework since the rejection:**\n- **Codes:** producers emit master's diagnostic codes again. Execution causes now reach the unit as data instead of changing the code users see.\n- **Deduplication:** RQL output reports identical diagnostics once.\n- **Smaller fixes:** the layer check, the C# test's request framing, and the master integration fixes are all in.\n- **Substrate token:** the policy substrate epoch gains `-7107-content-diagnostic-units`. I had missed this in the original PR; the reviewer's identity question caught it. No other stored product needed a version change.\n- **Tests:** the full queue suites ran on the merged head. The remaining failures were duplicate-diagnostic expectations and a merge-introduced newline, all fixed and rerun.\n\n**Still open after it lands:**\n- Delete the lane worktree and remove the agent-in-progress label from #7107.\n- Close the lane child fa4a1cb9. I'm keeping it parked until #7278 lands, because it holds the lane context if the queue rejects it again.\n- Two follow-ups stay open: #7481 (fixed per-item limits count as execution-dependent) and #7311 (the interim persistent-fill guard)."
+        },
+        {
+          "id": "agent:16411",
+          "role": "assistant",
+          "text": "This comment on #7116 needs nothing from me. It is another session's after-measurement for the memory work I filed the issue for, and it confirms the fix. On Cassandra at width 32, peak memory fell from 54.1 to 17.5 GiB. Memory growth from width 1 to width 32 fell by 86%. Per-policy completions and findings match the baseline. The default-width change will come in its own PR, from that session.\n\nTwo points touch my work:\n\n- **#7425:** the comment credits the residency race fix (#7421) as found by its measurement and fixed independently here. That is consistent with what landed.\n- **#7323** (MCP request entries have no attribution frame) concerns the same rule that #7278's C# test fix followed. #7278 adds fills that attach ledgers, so an MCP read on a rayon thread without a frame would trip the debug assertion in tests. Release builds would count a fallback and record the read in every active ledger, which costs reuse, not correctness. The full push-tests suite passed on #7278's merged head, so no MCP path hit it there. I'm leaving #7323 to its owner.\n\n#7278 is still in the merge queue at 2c0eba9b47. The cleanup after it lands is unchanged."
+        },
+        {
+          "id": "agent:16504",
+          "role": "assistant",
+          "text": "Another informational event on #7116, but it changes a rule I have recorded. The owner set the default policy width to min(analyzer width, 8) in #7526. The reason is not memory: once the memory sources were fixed, widths above 8 bought no wall time on either corpus and cost CPU and memory. My saved feedback memory says never to accept a lower default worker count, so I'll update it to record this decision and its reason. Otherwise a later session could argue against #7526."
+        },
+        {
+          "id": "agent:16540",
+          "role": "assistant",
+          "text": "The memory file was never listed in `MEMORY.md`, so future sessions would not have loaded it. Adding it to the index."
+        },
+        {
+          "id": "agent:16556",
+          "role": "assistant",
+          "text": "I updated my feedback memory to match your #7116 decision, and nothing else needed doing. The memory said never to accept a lower default worker count. It now separates two things:\n\n- **Unchanged:** never cap parallelism as a fix for memory use.\n- **Your decision:** the default policy width of min(analyzer width, 8) in #7526 is for CPU and wall time. With the memory sources fixed, widths above 8 bought no wall time on Cassandra or flask, and they cost CPU and memory.\n\nThe memory also records when to revisit the cap: when longest-first dispatch (#7110) or parallelism inside one policy (#3710) lowers the floor set by the longest single policy. The file had never been listed in the memory index, so future sessions would not have loaded it; it is listed now.\n\n#7278 is still in the merge queue at 2c0eba9b47."
+        },
+        {
+          "id": "agent:16624",
+          "role": "assistant",
+          "text": "This is the closing summary for #7116, posted by the session that did the work. Its ExecPlan closes in #7526. It needs nothing from me, and nothing in it changes my open work. The width-8 default it describes is already recorded in my memory from the previous update.\n\nOne lesson in it matches what happened with #7278: the debug assertion on rayon threads with no attribution frame caught missed handoffs that inventories did not. That assertion is what failed #7278's C# test in the queue. The issue's listed follow-ups (#7262, #7323, #3710, #7110) belong to their owners. #7262 is already among #7278's known limits.\n\n#7278 is still in the merge queue at 2c0eba9b47."
+        },
+        {
+          "id": "agent:16720",
+          "role": "assistant",
+          "text": "This #7110 update needs nothing from me. Another session is handling the Bifrost items: cost hints for longest-first dispatch on branch `7110-policy-cost-hints`, a per-policy deadline (#7557), and profiling `ignored-status-result` and `ctor-initialization`. My comment's semantic counters are its starting point. The bifrost-service items belong to that repository.\n\nThe session restart did flag a real problem: `MEMORY.md` is 202 lines against a 200-line limit, so the last two entries were cut off. One of them is the parallelism memory I just added. My main #7095/#7107 project memory also seems to be missing from the index, so I'll check where it went before trimming."
+        },
+        {
+          "id": "agent:16824",
+          "role": "assistant",
+          "text": "The index is down to 199 lines. My three combined lines are 255 to 268 characters, over the guide of about 200, so I'll shorten them."
+        },
+        {
+          "id": "agent:16840",
+          "role": "assistant",
+          "text": "The index is at 199 lines, all under 210 characters. A quick check on #7278's queue state:"
+        },
+        {
+          "id": "agent:16852",
+          "role": "assistant",
+          "text": "The memory index is back under its 200-line limit. Two entries had been cut off at load time, and my main #7107 project memory is listed again.\n\n- **Removed from the index:** the #7179 plan-review memory moved to the archive, because that issue is closed.\n- **Combined:** three pairs of closely related feedback entries now share one index line each, linking both files. No memory file changed.\n- **Restored:** the #7095/#7107 project memory is back in the index. Its work is still open: #7278 is in the queue. The archive file had five copies of that entry, now removed.\n\nThe index now has 199 lines, all under 210 characters. I saved copies of both files in `/tmp` before editing.\n\nThe #7110 update needs nothing from me: another session owns the cost-hint dispatch, the per-policy deadline (#7557) and the slow-policy profiling.\n\n#7278 is in the merge queue at 2c0eba9b47, and the queue is testing it now (`mergemarshall:in-progress`). Child fa4a1cb9 stays parked in case of another rejection. After the PR lands, I'll delete the lane, close the child, and remove the agent-in-progress label from #7107."
+        },
+        {
+          "id": "agent:16939",
+          "role": "assistant",
+          "text": "#7278 has landed. Before cleaning up, I'll check four things: the merge commit, whether #7107's items are now all done, whether this work left any ExecPlan or records under `.agents/` that must be deleted when work finishes, and the state of #7095."
+        },
+        {
+          "id": "agent:16980",
+          "role": "assistant",
+          "text": "That merge commit covers a batch of 13 PRs, so its `.agents` changes belong to the others. #7278's own diff is its head against the master base it merged:"
+        },
+        {
+          "id": "agent:17053",
+          "role": "assistant",
+          "text": "The rule covers fix PRs, and a docs correction counts, so the docs PR goes to the reviewer too. I'll make it in a fresh worktree from current master, then remove the landed lane."
+        },
+        {
+          "id": "agent:17185",
+          "role": "assistant",
+          "text": "Both entries are in. The repository asks for the pack-drift check before any submission, so I'll run it, then commit and open the PR. Docs changes need no other validation."
+        },
+        {
+          "id": "agent:17229",
+          "role": "assistant",
+          "text": "The branch is pushed. But the drift check exits 1, so I'll read what it flagged. My notes mention a known false positive from line-ending conversion."
+        },
+        {
+          "id": "agent:17278",
+          "role": "assistant",
+          "text": "The landed lane is removed. Before closing child fa4a1cb9, which deletes its report directory, I'll make sure every report subdirectory is already copied out."
+        },
+        {
+          "id": "agent:17341",
+          "role": "assistant",
+          "text": "#7095 is closed with its label removed. I'll update my project memory and the index line, and tell session db3662eb, which relayed this work, that #7278 has landed."
+        },
+        {
+          "id": "agent:17360",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The failed push shows why a pushed branch should be named in full. A worktree branch created with `-b <name> origin/master` takes `origin/master` as its upstream. With `push.default=upstream`, `git push origin <name>` then targets `master`. GitHub's required-check rule rejected it here, but `HEAD:refs/heads/<name>` avoids depending on that safety net.\n- The `unit_diagnostics` text in the user docs is the kind of statement that goes stale silently. No test pins prose, and the queue's suites could not see it. The repository's rule of moving still-true decisions into guidance or docs when work finishes exists because a reader of the docs has no other way to learn that behavior changed.\n`─────────────────────────────────────────────────`\n\n#7278 has landed on master (batch 3b5a5ab171), so all three #7107 items are now in master. One small docs follow-up is open.\n\n- **Docs and changelog, #7564 (draft):** the incremental-report reference still said that any unit diagnostic makes a policy evaluate whole. It now matches the code: only diagnostics that can depend on the state of the run do so, and `unit_unbounded` also covers units whose result depended on it. The Unreleased changelog gains entries for #7278 and for #7425's crash fix. The PR is with reviewer 61f0abcc. The pack-drift check flags only its known false positive, a file this PR doesn't touch.\n- **A failed push:** my first push of that branch went to `master` because the branch tracked it. GitHub's branch rule rejected it, so nothing reached master. I pushed again to the named branch.\n- **Cleanup:** I deleted the landed lane worktree and branch. I closed the lane child after copying all its reports to `/tmp/diffroots/reports/7278-child-all/`.\n- **#7095:** closed as not planned. You dropped both of its pieces, and the closing comment summarizes the work it led to: #7121, #7107, #7421, #7110 and #7481.\n- **Memory and relay:** my project memory and its index line are updated, and session db3662eb has the landing status.\n\nNext: when the reviewer approves #7564, I'll mark it ready. After it lands, I'll close #7107 with a summary, remove its agent-in-progress label, and delete the docs worktree. Open follow-ups: #7481 (fixed per-item limits) and #7311 (the interim persistent-fill guard)."
+        },
+        {
+          "id": "agent:17536",
+          "role": "assistant",
+          "text": "The reviewer confirmed #7564. The repository rule is to merge the latest master before marking ready. Other PRs edit the same Unreleased changelog entry, so I'll do a trial merge to check for a conflict first."
+        },
+        {
+          "id": "agent:17555",
+          "role": "assistant",
+          "text": "Master hasn't moved since the branch was cut, so there is nothing to merge. Verifying the head and marking #7564 ready."
+        },
+        {
+          "id": "agent:17570",
+          "role": "assistant",
+          "text": "While #7564 is in the queue, I'll draft #7107's closing comment so it's ready to post when the PR lands."
+        },
+        {
+          "id": "agent:17584",
+          "role": "assistant",
+          "text": "#7564, the docs and changelog follow-up, is in the merge queue at b71fc9d072. Reviewer 61f0abcc checked the new text against the widening code and confirmed it. Master had not moved since I cut the branch, so no merge was needed before marking it ready.\n\n#7107's closing comment is drafted in `/tmp/7107-close.md`. It lists the three landed items (#7278, #7160 and #7161), the measured gains with the caveat that they predate the rework, and the open follow-ups (#7481, #7311, #7262 and #7496). When #7564 lands, I'll post that comment, close #7107, remove its agent-in-progress label and delete the docs worktree."
+        },
+        {
+          "id": "agent:17663",
+          "role": "assistant",
+          "text": "Both events are informational. One detail affects something I posted. The #7110 status says the profiles trace the slow policies to per-call-site Rust receiver and type proofs, with about 82% of samples in SQLite. My earlier #7110 comment, marked as likely and unprofiled, suggested repeated per-root lowering and pointed at #2445. The profile supersedes that, so I'll add a short correction so no reader acts on my guess. First I'll check #7564 and the memory index, which a concurrent session appears to have rewritten."
+        },
+        {
+          "id": "agent:17728",
+          "role": "assistant",
+          "text": "I posted a correction on #7110. My earlier comment there had suggested, as likely and without a profile, that `ignored-status-result` lost its time to procedures being lowered again for each root. The profiles on #7572 and #7573 show the real cause: per-call-site Rust receiver and type proofs, with about 82% of samples in SQLite. The correction says to rely on those profiles. The measured numbers in my comment still stand.\n\nThe other events need nothing from me. #7573 (ctor-initialization) and the #7110 status are owned by another session, and its longest-first dispatch (#7561) and the width-8 default (#7526) have landed. The memory index is at 193 lines, under the limit.\n\n#7564, my docs and changelog follow-up, is being tested in the merge queue. When it lands, I'll post the drafted closing comment on #7107, close it, remove its agent-in-progress label and delete the docs worktree."
+        },
+        {
+          "id": "agent:17816",
+          "role": "assistant",
+          "text": "#7564 has landed, so all of #7107's work is in master. I'll post the drafted summary, close #7107, remove its label, and delete the docs worktree after checking that it's clean and its head is in master."
+        },
+        {
+          "id": "agent:17881",
+          "role": "assistant",
+          "text": "Now the memory: the #7095/#7107 work is finished, so its index line moves to the archive with a final state line in the memory file."
+        },
+        {
+          "id": "agent:17896",
+          "role": "assistant",
+          "text": "#7564 has landed, so all of the #7107 work is finished and nothing from it remains open.\n\n- **#7107 is closed as completed.** The closing comment lists the three landed items (#7278, #7160 and #7161), the measured gains, and the follow-ups still open: #7481, #7311, #7262 and #7496. Its agent-in-progress label is removed.\n- **Cleanup:** the docs worktree and branch are deleted. No lane worktrees, children or measurement VMs remain from this work.\n- **Scratch:** `/tmp/diffroots` is down from 4.8 GB to 147 MB. I deleted the binaries, the corpus-pair scratch and the raw stage logs, and kept the reports, the results, the harness and the briefs. My #7110 comment cites those results, and another session is still profiling those policies.\n- **Memory:** the project memory has a final state line, and its index entry moved to the archive of closed work.\n\nOne new memory from another session is relevant to future changes in this area: reason labels not registered in `read_ledger` are treated as execution-dependent, so they silently stop unit reuse (#7470 interacting with #7278). That is the fail-closed behavior #7278 chose, and the memory records the step that keeps new labels from losing reuse."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "good. we shouldn't fix memory use by bounding parallelism jfc. create a ticket pls",
+    "assistant_text_tail": "#7564 has landed, so all of the #7107 work is finished and nothing from it remains open.\n\n- **#7107 is closed as completed.** The closing comment lists the three landed items (#7278, #7160 and #7161), the measured gains, and the follow-ups still open: #7481, #7311, #7262 and #7496. Its agent-in-progress label is removed.\n- **Cleanup:** the docs worktree and branch are deleted. No lane worktrees, children or measurement VMs remain from this work.\n- **Scratch:** `/tmp/diffroots` is down from 4.8 GB to 147 MB. I deleted the binaries, the corpus-pair scratch and the raw stage logs, and kept the reports, the results, the harness and the briefs. My #7110 comment cites those results, and another session is still profiling those policies.\n- **Memory:** the project memory has a final state line, and its index entry moved to the archive of closed work.\n\nOne new memory from another session is relevant to future changes in this area: reason labels not registered in `read_ledger` are treated as execution-dependent, so they silently stop unit reuse (#7470 interacting with #7278). That is the fail-closed behavior #7278 chose, and the memory records the step that keeps new labels from losing reuse.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Still open / needs you turn-ending label",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_positions": [],
+    "user_position": 3451,
+    "input_rationale": "The user asked only for a ticket (#7116, filed in the next reply). The case reply reports that #7107 closed; the 'still open' follow-ups are tracked issues, not decisions for the user.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null
+  },
+  "context": {
+    "after": []
+  }
+}

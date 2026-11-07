@@ -1,0 +1,169 @@
+{
+  "id": "L0106",
+  "title": "Python comprehension precision gap",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "80ccd5c49d985e817a28c189b663a4eb",
+    "session_title": "eval15 3333 opus",
+    "reply_position": 2609,
+    "captured_at": "2026-09-17T13:56:45.413Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:19",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3333: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 3427b2ad84cc0d6ebacd963182cd4f1fed8f88c8\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitati\n[... 7011 bytes omitted from the middle of this message ...]\n index-read slice through f8033fecd. Explicit heap candidate kinds distinguish lists, tuples, and instances. Read proofs share bounded alias/initialization evidence; mutation stays list-only. Local tuple aliases and implicit tuple literals now retain the selected element class in semantic tests. Expanded/custom/unknown inputs remain unclosed.\n\nThe required tuple mutation near miss exposed an existing false positive, independently reproduced on frozen da963cf45 and filed as #3340. Its exceptional-control repair is included. All 3,459 integration tests and workspace Clippy pass. Frozen CLI and original Seaborn replay follow the release build.\n\nKeeping #3333 open: cross-call returned-container contents and general unpack/iteration transport remain unresolved. No new real-repository bug claimed.\n\n\n---\nComment by jbellis:\nThe local tuple-read milestone is pushed and its frozen controls pass, but this ticket remains open: the authentic KDE query still has unmodeled-load evidence and now exhausts its unchanged refinement/solve limits (392 rows; 30544/29959 refinement, 29960/29959 solve on compiled 48fd9674d).\n\nReturn-location investigation found another correctness constraint. Runtime-confirmed synthetic controls distinguish `finally` mutating the returned list, replacing the return value, and merely rebinding the local after the object was selected. Python lowering emits the current Return event before cleanup. Copying contents to a return-port location there would freeze contents too early; projecting every candidate allocation at exit would lose which object was returned. Neither is an adequate general fix. These controls join the different-return-path, alias-overwrite, and custom-iteration controls for the return/unpack work. They are synthetic analyzer acceptance cases, not additional real-world bugs.\n\nI am also checking the scalar return case against the frozen CLI to determine whether superseded return values currently survive cleanup. No additional defect is asserted until that analyzer comparison is complete.\n\n"
+        },
+        {
+          "id": "agent:22",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state and reading the required guidance."
+        },
+        {
+          "id": "agent:746",
+          "role": "assistant",
+          "text": "Now let me add a temporary diagnostic so I can see exactly where the unknown atom originates."
+        },
+        {
+          "id": "agent:886",
+          "role": "assistant",
+          "text": "Let me add a diagnostic for the call coverage itself."
+        },
+        {
+          "id": "agent:1192",
+          "role": "assistant",
+          "text": "I've confirmed the cause. Let me explain what the evidence shows before implementing.\n\n★ Insight ─────────────────────────────────────\nThe chain I isolated by bisecting a reduction (varC vs varD) and instrumenting the plan builder:\n\n1. Python lowers `self.resolve(...)` as a **field load** of `resolve` from `self`, then a call.\n2. Every `self.<name>` load requests an **instance-attribute field slot** for `(enclosing_class, name)` — including names the class declares as *methods*.\n3. `field_slot_is_complete` answers `false` for a class-body `def`, so the slot becomes `[Unknown(FieldSlotIncomplete)]`.\n4. That unknown is pushed **onto `self` itself** as a \"member-surface source\", making the receiver class set `Partial`.\n5. `dispatch_hint_flags` needs a `Known` receiver to emit an exhaustive dispatch hint, so dispatch stays `Open` → the call result is `unknown:unresolved_call`.\n6. A non-class base means the returned-tuple element load is not class-closed, so the unpack `densities, baselines = self._resolve_multiple(...)` seeds `unknown:unmodeled_load`.\n\nSo a **method name is being treated as an unclassifiable instance attribute** — a category error that degrades every `self.method(...)` call in Python.\n─────────────────────────────────────────────────"
+        },
+        {
+          "id": "agent:1305",
+          "role": "assistant",
+          "text": "Now let me implement the fix. First the adapter contract:"
+        },
+        {
+          "id": "agent:1327",
+          "role": "assistant",
+          "text": "Now the Python adapter:"
+        },
+        {
+          "id": "agent:1354",
+          "role": "assistant",
+          "text": "Now the field-slot build:"
+        },
+        {
+          "id": "agent:1393",
+          "role": "assistant",
+          "text": "Now bump the identities so cached answers are invalidated:"
+        },
+        {
+          "id": "agent:1570",
+          "role": "assistant",
+          "text": "Now let me add the regression tests."
+        },
+        {
+          "id": "agent:1937",
+          "role": "assistant",
+          "text": "Now let me address the second cause the seaborn measurement exposed. First, remove the diagnostics:"
+        },
+        {
+          "id": "agent:1977",
+          "role": "assistant",
+          "text": "Now the second fix — a dynamic write through the procedure's own receiver:"
+        },
+        {
+          "id": "agent:2040",
+          "role": "assistant",
+          "text": "The fix now shows measurable movement on the real witness. Let me pin down exactly what remains at line 947."
+        },
+        {
+          "id": "agent:2118",
+          "role": "assistant",
+          "text": "I have a complete, evidence-backed picture. Let me remove the diagnostic and run full validation."
+        },
+        {
+          "id": "agent:2325",
+          "role": "assistant",
+          "text": "Now let me run the full validation gate and capture the base/fixed witness evidence."
+        },
+        {
+          "id": "agent:2514",
+          "role": "assistant",
+          "text": "Work is committed. One decision is genuinely open, so let me put it to you before I go further."
+        },
+        {
+          "id": "agent:2532",
+          "role": "assistant",
+          "text": "The judge's call is clear. Let me reduce the residual `uncertain_flow` to a fixture as instructed."
+        },
+        {
+          "id": "agent:2582",
+          "role": "assistant",
+          "text": "I've minimized the residual precisely. Let me record it as the judge asked."
+        },
+        {
+          "id": "agent:2609",
+          "role": "assistant",
+          "text": "★ Insight ─────────────────────────────────────\nThe deepest lesson from this bug: the two defects **masked each other**. Fix A alone left the authentic Seaborn query byte-identical (388 rows, same atoms), because the unresolved `setattr` in `regression.py` re-opened the very slot Fix A had just removed. Only the ablation — measuring A alone, then A+B — showed which repair was load-bearing. A single before/after comparison would have concluded Fix A did nothing and thrown it away.\n─────────────────────────────────────────────────\n\nFINAL REPORT\n\n## 1. Confirmed cause with structured evidence\n\nTwo defects on the structured flow from `densities = {}` (distributions.py:323) to the `.index` reads at distributions.py:947, both of which open a receiver that is exactly its own class.\n\n**Defect A — a declared method is treated as an unclassifiable instance attribute.** Python lowers `self._resolve_multiple(...)` as a field load of `_resolve_multiple` from `self`, then a call. `field_slots.rs` requests an instance-attribute slot for *every* `self.<name>` load, including method names, and `field_slot_is_complete` answered `false` for a class-body `def` (a class-level binding is not an instance store). Instrumented on the real witness:\n\n```\nDBGSLOT class=\"seaborn.distributions._DistributionPlotter\" member=\"_resolve_multiple\"\n        atoms=[(Unknown(FieldSlotIncomplete), .../distributions.py 939:31..43)]\n```\n\nThat atom is published as the callee's class *and* pushed onto `self` as a member-surface source, so the receiver set goes Partial. `dispatch_hint_flags` (solve.rs:1159) requires `status == Known`, so no exhaustive hint is emitted and dispatch stays open:\n\n```\nDBGCALL reason=Some(UnresolvedCall) entered=[Plotter.resolve] uncovered_boundary=true\n        dispatch=Resolved { status: Unproven, coverage: Open }\n```\n\nWith a non-class atom on the base, `class_closed_loads` (plan.rs:2178) rejects the returned-tuple element load, so the unpack reseeds `UnmodeledLoad`:\n\n```\nDBGCL load base=ValueId(6) reaching=3\nDBGCL   atom=Unknown(UnresolvedCall) site=app.py 13:31..61     # self.resolve(...)\n```\n\nThe module-function control has `reaching=2`, both `builtins.tuple` — closed, Known, finding fires.\n\n**Defect B — one unobservable `setattr` reopens every field slot in the workspace.** `ScopedDynamicWrite::affects` returns true for every class once `evidence.reason.is_some()`, ignoring a proven class scope. On the witness:\n\n```\nDBGDYN [ScopedDynamicWrite { classes: [_LinearPlotter, _RegressionPlotter],\n          site: regression.py:54, reason: Some(UnmodeledLoad) },\n        ScopedDynamicWrite { classes: [_LinearPlotter, _RegressionPlotter],\n          site: regression.py:64, reason: None }]\n```\n\n`setattr(self, var, vector)` in `_LinearPlotter.establish_variables` has a correct, complete class scope *and* a reason, so it opened `_DistributionPlotter._resolve_multiple` — an unrelated hierarchy — turning `incomplete=false` into `incomplete=true` on the second index build.\n\n## 2. Changes and reasons\n\nBase `3427b2ad84cc0d6ebacd963182cd4f1fed8f88c8` → final `83d47ed9eecae9b0b8c2635609e29846666cc859` (fix commit `4cc23ab56d99db5389cfd1029192ff778a10e3ef`).\n\n- `analyzer/semantic/type_flow.rs`: replaced the boolean `field_slot_is_complete` with `class_body_member_binding` returning `ClassBodyMemberBinding::{Unbound, Procedure, Unclassified}`. A boolean conflated \"the class body declares this method\" with \"the class body binds a value the survey cannot classify\"; only the second is an open instance-attribute slot.\n- `analyzer/python/type_flow.rs`: a bare `function_definition` maps to `Procedure`; class-level assignments, decorated definitions, decorated classes and unreadable declarations stay `Unclassified`. `field_access_is_plain` still rejects any class-level binding, because the read goes through the class.\n- `type_flow/field_slots.rs`: a declared procedure opens th\n[... 8145 bytes omitted from the middle of this message ...]\non on `self`. A partial receiver denies the call an exhaustive dispatch hint, so `self.method(...)` resolved open, its result carried `unresolved_call`, and the element load off the returned tuple was no longer class-closed, which reseeded `unmodeled_load` at the unpack. The adapter now names what the class body binds — unbound, a procedure, or an unclassified value — and a declared procedure opens the slot only when an instance store can shadow it. Second, the bounded dynamic-write survey opened every field slot in the workspace whenever it could not observe one `setattr` receiver, because a proven class scope is ignored once a reason is present; a write through a method's own stable receiver now keeps the bound its own `self` states, which is the same bound the survey's `SelfReceiver` arm already records. The first repair alone left the authentic query byte-identical, because one unobservable `setattr(self, var, vector)` in `regression.py` reopened the slot it had just removed. On the pinned witness the class-set replay moves from 388 to 356 untruncated rows, the `self` receivers at lines 930 and 939 become Known `_DistributionPlotter`, and both line-947 `.index` receivers lose `unresolved_call`. The absent-member replay still returns zero findings and no limit is exceeded, so this ticket stays open and no detection improvement is claimed. What blocks detection is precise: `_resolve_multiple`'s second return arm rebinds `curves = pd.DataFrame(curves).iloc[:, ::-1]`, whose pandas value the pinned stdlib pack does not model, and an absent-member finding requires a complete receiver set. A probe replacing only that expression with a modeled allocation removes `unmodeled_load` and proves the attribution. That probe also exposes the remaining precision gap, recorded as a follow-up with a fifteen-line reduction: a dict or set comprehension in a callee marks every meeting through it uncertain, because its insertion gaps for hashing and equality are unpartitioned while the equivalent loop and the list form are not."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "ement/solve limits (392 rows; 30544/29959 refinement, 29960/29959 solve on compiled 48fd9674d).\n\nReturn-location investigation found another correctness constraint. Runtime-confirmed synthetic controls distinguish `finally` mutating the returned list, replacing the return value, and merely rebinding the local after the object was selected. Python lowering emits the current Return event before cleanup. Copying contents to a return-port location there would freeze contents too early; projecting every candidate allocation at exit would lose which object was returned. Neither is an adequate general fix. These controls join the different-return-path, alias-overwrite, and custom-iteration controls for the return/unpack work. They are synthetic analyzer acceptance cases, not additional real-world bugs.\n\nI am also checking the scalar return case against the frozen CLI to determine whether superseded return values currently survive cleanup. No additional defect is asserted until that analyzer comparison is complete.\n\n",
+    "assistant_text_tail": "on on `self`. A partial receiver denies the call an exhaustive dispatch hint, so `self.method(...)` resolved open, its result carried `unresolved_call`, and the element load off the returned tuple was no longer class-closed, which reseeded `unmodeled_load` at the unpack. The adapter now names what the class body binds — unbound, a procedure, or an unclassified value — and a declared procedure opens the slot only when an instance store can shadow it. Second, the bounded dynamic-write survey opened every field slot in the workspace whenever it could not observe one `setattr` receiver, because a proven class scope is ignored once a reason is present; a write through a method's own stable receiver now keeps the bound its own `self` states, which is the same bound the survey's `SelfReceiver` arm already records. The first repair alone left the authentic query byte-identical, because one unobservable `setattr(self, var, vector)` in `regression.py` reopened the slot it had just removed. On the pinned witness the class-set replay moves from 388 to 356 untruncated rows, the `self` receivers at lines 930 and 939 become Known `_DistributionPlotter`, and both line-947 `.index` receivers lose `unresolved_call`. The absent-member replay still returns zero findings and no limit is exceeded, so this ticket stays open and no detection improvement is claimed. What blocks detection is precise: `_resolve_multiple`'s second return arm rebinds `curves = pd.DataFrame(curves).iloc[:, ::-1]`, whose pandas value the pinned stdlib pack does not model, and an absent-member finding requires a complete receiver set. A probe replacing only that expression with a modeled allocation removes `unmodeled_load` and proves the attribution. That probe also exposes the remaining precision gap, recorded as a follow-up with a fifteen-line reduction: a dict or set comprehension in a callee marks every meeting through it uncertain, because its insertion gaps for hashing and equality are unpartitioned while the equivalent loop and the list form are not.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 19,
+    "input_rationale": "FINAL REPORT for the issue brief. 'Ticket stays open' and the follow-up precision gap are the agent's reported limitations; no decision or action is requested.",
+    "label": "none",
+    "trigger": "still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

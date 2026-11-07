@@ -1,0 +1,565 @@
+{
+  "id": "L0202",
+  "title": "Still open report 2",
+  "category": "still-open-none",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "48d54ba8a31b9f9e786d75b459089091",
+    "session_title": "eval16 3130 dsh",
+    "reply_position": 1587786,
+    "captured_at": "2026-09-18T22:25:00.070Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:19",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3130: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 844ca7606768b8dd504d3cd23af038a612e1f35a\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitati\n[... 6168 bytes omitted from the middle of this message ...]\nlapping.\n\n---\nComment by DavidBakerEffendi:\nImplementation checkpoint for the CSMI-backed prerequisite:\n\n- CSMI PR #35 is merged and publishes the exact `csmi.collection-flow` 0.1.0 contract.\n- Bifrost now imports, validates, persists, activates, and looks up typed collection-flow contracts.\n- The Scala standard-library pack emits exact `scala.collection.mutable.Map[K,V]` contracts for `apply`, `update`, and tuple-entry `foreach`, including receiver generic substitution and explicit key/value entry components.\n- Scala lowering consumes those active contracts for indexed map storage/loading and tuple-pattern projection. A custom `Map` near miss remains unmodeled.\n- The semantic-model snapshot is frozen into threaded Scala lowering so call-site consumption uses the same active-model generation as artifact derivation.\n\nValidation on the rebased branch:\n\n- `cargo fmt --check`: pass\n- `git diff --check origin/master...HEAD`: pass\n- `node scripts/check-open-core-classification.mjs`: pass\n- `CARGO_PROFILE_DEV_DEBUG=0 cargo check -p brokk-bifrost-analysis --tests --message-format short`: pass\n- `CARGO_PROFILE_DEV_DEBUG=0 cargo clippy -p brokk-bifrost-analysis --lib --tests -- -D warnings`: pass\n- producer/activation focused nextest slice: 3/3 pass\n- end-to-end Scala semantic slice: 3/3 pass after rebase; a later repeat exhausted local disk while linking unrelated root binaries, before test execution\n\nThis is deliberately a prerequisite rather than closure for #3130. CSMI collection flow does not prove callback execution/count/termination or the remaining control-flow protocol, so the full DataFlowBench scenario remains inconclusive and this issue should stay open.\n\n---\nComment by DavidBakerEffendi:\nCSMI prerequisite merged via #3166 at 435327366d15f1b5822d6462743cc0633ff55281. This adds generic Scala Map identity, indexed access/update, and Map-entry-to-tuple projection through the csmi.collection-flow profile. #3130 remains open: callback execution and the remaining control-flow protocol semantics are still not proven.\n"
+        },
+        {
+          "id": "agent:919807",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:919841",
+          "role": "assistant",
+          "text": "I'll start by verifying the repository state and the work already done by the previous lane."
+        },
+        {
+          "id": "agent:949368",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:949413",
+          "role": "assistant",
+          "text": "I'll start by verifying the repository state and reviewing the prior lane's work."
+        },
+        {
+          "id": "agent:957949",
+          "role": "assistant",
+          "text": "Now let me run a quick experiment to identify the exact blocking cause. First, temporarily instrument the harness to print the incomplete cause:"
+        },
+        {
+          "id": "agent:969341",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:992600",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:992659",
+          "role": "assistant",
+          "text": "I'll start by checking the current state of the working tree and the background probe run."
+        },
+        {
+          "id": "agent:993642",
+          "role": "assistant",
+          "text": "Confirmed: `allocations=[]` — the `Map[String,String]()` call records no allocation. Let me read the key decision points."
+        },
+        {
+          "id": "agent:1019945",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1020010",
+          "role": "assistant",
+          "text": "I'll start by verifying the repository state and the base commit."
+        },
+        {
+          "id": "agent:1038697",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1038743",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state and re-reading the working tree."
+        },
+        {
+          "id": "agent:1038849",
+          "role": "assistant",
+          "text": "The working tree matches the handoff. Let me read the key code regions."
+        },
+        {
+          "id": "agent:1079181",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1079267",
+          "role": "assistant",
+          "text": "I'll start by verifying the current state of the checkout and the work in progress."
+        },
+        {
+          "id": "agent:1105495",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1105535",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state and the current working tree."
+        },
+        {
+          "id": "agent:1135297",
+          "role": "assistant",
+          "text": "Now let me implement the construction fix."
+        },
+        {
+          "id": "agent:1135308",
+          "role": "assistant",
+          "text": "Now the `call_expression` change:"
+        },
+        {
+          "id": "agent:1137118",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1137119",
+          "role": "assistant",
+          "text": "I'll start by verifying the working tree state and the changes already made."
+        },
+        {
+          "id": "agent:1171936",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1171967",
+          "role": "assistant",
+          "text": "I'll start by verifying the repository state and picking up from the handoff."
+        },
+        {
+          "id": "agent:1205791",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1205820",
+          "role": "assistant",
+          "text": "I'll verify the current repository state and build on the existing work."
+        },
+        {
+          "id": "agent:1246998",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1246999",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state and reading the working-tree changes left by the previous session."
+        },
+        {
+          "id": "agent:1267800",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1267828",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state and reviewing the current working tree."
+        },
+        {
+          "id": "agent:1290817",
+          "role": "assistant",
+          "text": "Now let me write the new `for_expression` implementation."
+        },
+        {
+          "id": "agent:1295043",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1295065",
+          "role": "assistant",
+          "text": "I'll start by orienting myself in the checkout and verifying the state left by the previous session."
+        },
+        {
+          "id": "agent:1339763",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1339791",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state and understanding where the previous work left off."
+        },
+        {
+          "id": "agent:1381393",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1381497",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state and the current uncommitted work."
+        },
+        {
+          "id": "agent:1423210",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1423211",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state and the current work in progress."
+        },
+        {
+          "id": "agent:1452648",
+          "role": "assistant",
+          "text": "Now let me write the implementation patch."
+        },
+        {
+          "id": "agent:1452662",
+          "role": "assistant",
+          "text": "Now the `step` dispatch arm:"
+        },
+        {
+          "id": "agent:1452673",
+          "role": "assistant",
+          "text": "Now update the `for_expression` call site and add the new methods:"
+        },
+        {
+          "id": "agent:1454518",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1454547",
+          "role": "assistant",
+          "text": "I'll start by verifying the environment and the state of the working tree."
+        },
+        {
+          "id": "agent:1461844",
+          "role": "assistant",
+          "text": "The guard case leaves `complete=false`. Let me probe which guard shapes decide, to understand whether that's our lowering or an unrelated operator-call gap."
+        },
+        {
+          "id": "agent:1470173",
+          "role": "assistant",
+          "text": "Let me probe wildcard-slot handling and a custom-receiver near miss before writing the final tests."
+        },
+        {
+          "id": "agent:1474373",
+          "role": "assistant",
+          "text": "Let me review the full implementation region once more for quality."
+        },
+        {
+          "id": "agent:1480724",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1497111",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1497112",
+          "role": "assistant",
+          "text": "I'll start by verifying the current state of the checkout and the in-flight baseline run."
+        },
+        {
+          "id": "agent:1497152",
+          "role": "assistant",
+          "text": "Baseline negative confirmed. Let me check the full baseline log and then restore the implementation."
+        },
+        {
+          "id": "agent:1497203",
+          "role": "assistant",
+          "text": "Now let me remove the temporary probe test and restore the implementation."
+        },
+        {
+          "id": "agent:1497225",
+          "role": "assistant",
+          "text": "Now restore the implementation from the stash."
+        },
+        {
+          "id": "agent:1497285",
+          "role": "assistant",
+          "text": "Implementation restored. Let me review the key parts of the diff before running validation."
+        },
+        {
+          "id": "agent:1497676",
+          "role": "assistant",
+          "text": "The implementation is restored. Let me look at the test file structure and start the focused validation run in the background."
+        },
+        {
+          "id": "agent:1497871",
+          "role": "assistant",
+          "text": "While that runs, let me review the rest of the implementation."
+        },
+        {
+          "id": "agent:1498225",
+          "role": "assistant",
+          "text": "Still compiling. Let me review the test file."
+        },
+        {
+          "id": "agent:1499622",
+          "role": "assistant",
+          "text": "Progressing. Let me review the ExecPlan while waiting."
+        },
+        {
+          "id": "agent:1500421",
+          "role": "assistant",
+          "text": "All 9 focused tests pass with the expected polarity. Now let me find the Scala usage/issue suites required by the brief."
+        },
+        {
+          "id": "agent:1500988",
+          "role": "assistant",
+          "text": "All focused tests pass. Let me check disk space and then launch the broader Scala suites in the background."
+        },
+        {
+          "id": "agent:1501234",
+          "role": "assistant",
+          "text": "While the broad suites run, let me review the issue_2664 test changes."
+        },
+        {
+          "id": "agent:1501410",
+          "role": "assistant",
+          "text": "suite_usages Scala: 280/280 passed. Waiting for suite_issues."
+        },
+        {
+          "id": "agent:1501539",
+          "role": "assistant",
+          "text": "All Scala usage/issue/symbol suites pass. Now running the full semantic suite and analysis lib tests."
+        },
+        {
+          "id": "agent:1501723",
+          "role": "assistant",
+          "text": "While those run, let me check formatting of the changed files."
+        },
+        {
+          "id": "agent:1502333",
+          "role": "assistant",
+          "text": "Formatting is clean. Let me check the semantic suite progress."
+        },
+        {
+          "id": "agent:1502674",
+          "role": "assistant",
+          "text": "Full semantic suite: 1793/1793 passed. Waiting for the analysis lib tests."
+        },
+        {
+          "id": "agent:1503348",
+          "role": "assistant",
+          "text": "Full semantic suite 1793/1793 and analysis lib 3050/3050 pass. Now running clippy and the open-core check."
+        },
+        {
+          "id": "agent:1504379",
+          "role": "assistant",
+          "text": "The DFB evidence repo is present. Let me inspect the Scala map-iteration kernel and its runner."
+        },
+        {
+          "id": "agent:1508166",
+          "role": "assistant",
+          "text": "Clippy reports a failure in a file I did not touch. Let me verify it is pre-existing at the base."
+        },
+        {
+          "id": "agent:1508744",
+          "role": "assistant",
+          "text": "The identical line exists unchanged at base. Let me confirm by running the same clippy target on the base via a temporary stash."
+        },
+        {
+          "id": "agent:1508902",
+          "role": "assistant",
+          "text": "Confirmed pre-existing at base. Restoring the implementation."
+        },
+        {
+          "id": "agent:1509156",
+          "role": "assistant",
+          "text": "Now let me run clippy scoped to the crates and targets I changed."
+        },
+        {
+          "id": "agent:1513398",
+          "role": "assistant",
+          "text": "Let me check whether a current bifrost debug binary exists and empirically run the DFB pair through it."
+        },
+        {
+          "id": "agent:1514039",
+          "role": "assistant",
+          "text": "The real DFB harness still reports incomplete. Let me get the full diagnostic detail."
+        },
+        {
+          "id": "agent:1518528",
+          "role": "assistant",
+          "text": "This is an important finding. Let me examine what #3166 actually landed regarding pack provisioning."
+        },
+        {
+          "id": "agent:1521951",
+          "role": "assistant",
+          "text": "The evidence repo has a newer `main` with a v0.8.0 freeze. Let me check whether it configures the Scala library pack."
+        },
+        {
+          "id": "agent:1524419",
+          "role": "assistant",
+          "text": "Let me check how a workspace declares semantic packs, to validate the DFB witness end-to-end through the CLI with the standard-library contract active."
+        },
+        {
+          "id": "agent:1524456",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1524457",
+          "role": "assistant",
+          "text": "I'll start by verifying the working state and picking up the remaining steps from the handoff."
+        },
+        {
+          "id": "agent:1542737",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1542805",
+          "role": "assistant",
+          "text": "I'll start by verifying the repository state and the work already done."
+        },
+        {
+          "id": "agent:1543022",
+          "role": "assistant",
+          "text": "State matches the handoff. Let me read the routed guidance and the plan."
+        },
+        {
+          "id": "agent:1543070",
+          "role": "assistant",
+          "text": "Now let me review the implementation diff."
+        },
+        {
+          "id": "agent:1543578",
+          "role": "assistant",
+          "text": "Now let me examine the DataFlowBench evidence and how the Bifrost adapter runs."
+        },
+        {
+          "id": "agent:1553203",
+          "role": "assistant",
+          "text": "Let me run the DFB-shaped pair end-to-end with dependency evidence to see whether the standard-library pack activates."
+        },
+        {
+          "id": "agent:1556849",
+          "role": "assistant",
+          "text": "The pack now activates. Let me isolate which half is still gapped by probing the update model alone (no comprehension)."
+        },
+        {
+          "id": "agent:1557520",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1557555",
+          "role": "assistant",
+          "text": "I'll start by verifying the current state of the checkout and work."
+        },
+        {
+          "id": "agent:1557617",
+          "role": "assistant",
+          "text": "The tree matches the handoff. Let me review the actual changes."
+        },
+        {
+          "id": "agent:1574902",
+          "role": "assistant",
+          "text": "Warning: Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.\n\n"
+        },
+        {
+          "id": "agent:1574903",
+          "role": "assistant",
+          "text": "I'll verify the current state of the working tree and then complete the remaining steps."
+        },
+        {
+          "id": "agent:1575838",
+          "role": "assistant",
+          "text": "Now I'll update the ExecPlan to reflect the completed comprehension lowering work."
+        },
+        {
+          "id": "agent:1578477",
+          "role": "assistant",
+          "text": "Now let me verify the open-core classification passes with the commit in place and confirm a clean tree."
+        },
+        {
+          "id": "agent:1580134",
+          "role": "assistant",
+          "text": "I want a rigorous before/after measurement against the exact base production code. Let me temporarily restore the base `semantic.rs` (keeping the committed tests), run the fixtures, then restore."
+        },
+        {
+          "id": "agent:1582498",
+          "role": "assistant",
+          "text": "Now I'll re-run the broad validation on the committed content (the target dir was invalidated by the base-code measurement)."
+        },
+        {
+          "id": "agent:1587786",
+          "role": "assistant",
+          "text": "All validation is complete on the committed content. Final report follows.\n\nFINAL REPORT\n\n## 1. Confirmed cause with structured evidence\n\nBase commit `844ca7606768b8dd504d3cd23af038a612e1f35a` already contains #3166 (`435327366d15f1b5822d6462743cc0633ff55281`) as an ancestor, so of the two gaps named in the issue only one was still open:\n\n- The `array_index_access`/update gap is **closed by #3166**, not by this commit. Its `csmi.collection-flow` 0.1.0 contract retains exact `scala.collection.mutable.Map[K, V]` identity and lowers `records(\"record\") = value` to a keyed `MemoryStore { kind: Index }`. Re-measuring the base with the real Scala-library pack producer and activation (committed fixtures, base `semantic.rs`) shows the store lowering and a partially resolved finding, not a missing update model: `map-iteration-positive expected=reached observed=reached complete=false findings=3`, and the same for `guard` and `yield`.\n- The still-open gap is exactly `for_expression`. Before this change the adapter admitted no comprehension to a modeled path: it scheduled only the *first* enumerator's source expression plus the body, and emitted the blanket protocol gaps. Since `emit_local_bindings`/`tuple_pattern_bindings` returned bare identifiers (and dropped `_` by position), a `(key, value) <- records` enumerator read no aggregate entry and bound no value. Base outputs: `map-iteration-negative observed=inconclusive complete=false findings=0`, `map-iteration-nested observed=inconclusive complete=false findings=0`, `map-iteration-wildcard-key observed=inconclusive complete=false` (from `/tmp/runs/final_before_measure.log`; negative/nested from the pre-fix run `/tmp/runs/baseline2.log`, since the pinned assertions abort a test at its first mismatching row).\n- The frozen DataFlowBench v0.7.1 report (`/workspace/evidence/DataFlowBench/reports/bifrost-scala-kernel.json`) records both cases as `inconclusive` with `procedure value-flow snapshot for MapIteration{Positive,Negative}.scala:....run is unsupported (assignments)`.\n\n## 2. Changes and reasons\n\nBase `844ca7606768b8dd504d3cd23af038a612e1f35a` → final `9b955abe8ae86c030eb71be18235f05e096bc3c7` (single commit, detached HEAD, not pushed).\n\n- `crates/bifrost-analysis/src/analyzer/scala/semantic.rs` (`ADAPTER_VERSION` v14 → v15; lowering facts change, no extraction-epoch change):\n  - New `Work::ForEnumeratorStage` + `ForStage::{Generator, Guard}`. `for_expression` first tries `modeled_for_stages`; the admission is all-or-nothing, so an unproven receiver or unsupported shape keeps the original four blanket protocol gaps unchanged.\n  - `modeled_for_stages` reads only tree-sitter fields (`enumerators`, `generator`, `guard`, `pattern`, `rhs`) plus the activated contract. A generator needs a `tuple_pattern` and an rhs the `foreach` contract proves as the keyed collection; a guard is either the inline `guard` child of a generator enumerator or a guard-only brace enumerator. The value binder is chosen by the contract's named value component, not by written order or name.\n  - `modeled_for_expression` lowers one conditional per stage in source order, body loops back with `LoopBack`, false arms leave the comprehension, and `yield` adds a point-scoped `Values`/`Unsupported` gap because the result collection is not constructed.\n  - `for_enumerator_stage` evaluates the source, adds `MemoryLocationKind::Index { identity: Aggregate }` + `MemoryLoad{Index}`, flows the entry into the value binder, publishes one non-blocking point-scoped `Calls`/`Unsupported` gap for the desugared `map`/`flatMap`/`withFilter`/`foreach` call it deliberately does not fabricate, and adds both conditional edges.\n  - `tuple_pattern_bindings` now returns `(slot, identifier)` pairs from top-level named children, preserving wildcard slots and nested-pattern slots; `emit_local_bindings` records each binder with its `component_index`. `modeled_keyed_collection` is the single shared proof used by both construction and iteration.\n  - I did not re-implement the Map construction/access/update model: #3166 already covers it, as me\n[... 6518 bytes omitted from the middle of this message ...]\nwas still open (positive reached but incomplete; negative and nested generators inconclusive). I added a per-enumerator lowering that admits a comprehension only when every enumerator is either a generator whose right-hand side an active `csmi.collection-flow` contract proves as the keyed collection, or a guard. Each stage becomes one conditional in source order, the body loops back, and a generator reads one aggregate entry and projects the contract's named value component into the tuple binder at that component slot, so `(key, _)` stays clean while `(_, value)` carries taint. Everything reads tree-sitter fields (`enumerators`, `generator`, `guard`, `pattern`, `rhs`) and the activated contract; there is no name check, source-text parsing, or benchmark-shaped flow, and an unproven receiver keeps the old four-gap path so it can never inherit standard-library iteration or fake a clean negative. The desugared `map`/`flatMap`/`withFilter`/`foreach` call is deliberately not fabricated as a call site; each generator records that omission as a point-scoped, non-blocking `Calls` gap, and `yield` keeps a `Values` gap because the result collection is not constructed. The pair now decides (positive reached with `complete=true`, negative clean with `complete=true`), and the same lowering holds for the guard, guard-only enumerator, nested-generator, and yield fixtures; the custom same-terminal receiver stays inconclusive. Validation: full `suite_semantic` 1793/1793, Scala slices of usages/issues/symbols 280/137/52, `brokk-bifrost-analysis --lib` 3050/3050, formatting, scoped clippy, and open-core classification pass; workspace clippy fails only on a pre-existing `clone_on_copy` outside this change. One caveat worth a follow-up: the DataFlowBench adapter supplies no dependency evidence and the CLI then rejects the installed Scala-library pack with a shard-selector mismatch, reproducible without any comprehension, so the DFB harness could not be replayed end to end in-container and the acceptance harness above was used instead."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "0 cargo check -p brokk-bifrost-analysis --tests --message-format short`: pass\n- `CARGO_PROFILE_DEV_DEBUG=0 cargo clippy -p brokk-bifrost-analysis --lib --tests -- -D warnings`: pass\n- producer/activation focused nextest slice: 3/3 pass\n- end-to-end Scala semantic slice: 3/3 pass after rebase; a later repeat exhausted local disk while linking unrelated root binaries, before test execution\n\nThis is deliberately a prerequisite rather than closure for #3130. CSMI collection flow does not prove callback execution/count/termination or the remaining control-flow protocol, so the full DataFlowBench scenario remains inconclusive and this issue should stay open.\n\n---\nComment by DavidBakerEffendi:\nCSMI prerequisite merged via #3166 at 435327366d15f1b5822d6462743cc0633ff55281. This adds generic Scala Map identity, indexed access/update, and Map-entry-to-tuple projection through the csmi.collection-flow profile. #3130 remains open: callback execution and the remaining control-flow protocol semantics are still not proven.\n",
+    "assistant_text_tail": "was still open (positive reached but incomplete; negative and nested generators inconclusive). I added a per-enumerator lowering that admits a comprehension only when every enumerator is either a generator whose right-hand side an active `csmi.collection-flow` contract proves as the keyed collection, or a guard. Each stage becomes one conditional in source order, the body loops back, and a generator reads one aggregate entry and projects the contract's named value component into the tuple binder at that component slot, so `(key, _)` stays clean while `(_, value)` carries taint. Everything reads tree-sitter fields (`enumerators`, `generator`, `guard`, `pattern`, `rhs`) and the activated contract; there is no name check, source-text parsing, or benchmark-shaped flow, and an unproven receiver keeps the old four-gap path so it can never inherit standard-library iteration or fake a clean negative. The desugared `map`/`flatMap`/`withFilter`/`foreach` call is deliberately not fabricated as a call site; each generator records that omission as a point-scoped, non-blocking `Calls` gap, and `yield` keeps a `Values` gap because the result collection is not constructed. The pair now decides (positive reached with `complete=true`, negative clean with `complete=true`), and the same lowering holds for the guard, guard-only enumerator, nested-generator, and yield fixtures; the custom same-terminal receiver stays inconclusive. Validation: full `suite_semantic` 1793/1793, Scala slices of usages/issues/symbols 280/137/52, `brokk-bifrost-analysis --lib` 3050/3050, formatting, scoped clippy, and open-core classification pass; workspace clippy fails only on a pre-existing `clone_on_copy` outside this change. One caveat worth a follow-up: the DataFlowBench adapter supplies no dependency evidence and the CLI then rejects the installed Scala-library pack with a shard-selector mismatch, reproducible without any comprehension, so the DFB harness could not be replayed end to end in-container and the acceptance harness above was used instead.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 19,
+    "input_rationale": "FINAL REPORT. 'Still open' describes what remained at the pinned base before the fix, which the commit then closed; the caveat about the DFB harness is a reported limitation.",
+    "label": "none",
+    "trigger": "still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-18T22:25:59.820Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

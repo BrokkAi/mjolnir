@@ -1,0 +1,320 @@
+{
+  "id": "L0304",
+  "title": "Activation measurement decision",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "f24c209772b9f48e6d52f382a2d26395",
+    "session_title": "#3748",
+    "reply_position": 1261,
+    "captured_at": "2026-09-30T00:15:12.563Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight.",
+    "is_child": false
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "You are implementing one GitHub issue in BrokkAi/bifrost-dev (the repository is cloned at `bifrost/`). Read `bifrost/AGENTS.md` first and follow it. In particular:\n\n- Assign the issue to yourself and add the `agent-in-progress` label before starting (`gh issue edit N --add-assignee @me --add-label agent-in-progress`). Remove the label if you stand down without resolving it.\n- Read the issue with all comments: `gh issue view N --comments`. The comments hold measurements and revised plans that override the issue body where they differ.\n- `.agents/docs/*` files are point-in-time records; recheck any claim from them against the code before relying on it.\n- Commit directly to `master`, only the files you changed, with a clear multiline message. Push to `origin/master`. If the push is rejected, `git fetch`, `git merge origin/master` (never rebase), rerun the affected tests, push again. If pushing is impossible (no credentials), leave your commits on the local branch and say so in your final message; do not open a PR.\n- Build with plain `cargo`; do not set or redirect `CARGO_TARGET_DIR`. Keep validation proportional: `cargo fmt`, the two clippy commands from `.agents/docs/testing-and-rust-validation.md`, and `cargo nextest run --max-fail 100 -p <crate>` for the affected crates, with `BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1` and `JAVA_HOME` cleared. Run the whole test suite only if your change touches a shared path whose consumers extend beyond the crate.\n- Other sessions are working concurrently on issues #3748, #3749, #3751, #3755, #3761, #3762, #3763, #3764 (and later #3754, #3756). Stay inside your issue's scope; do not refactor code those issues own. If you find a bug outside your scope, file an issue instead of fixing it.\n- Check `nproc` and available memory first and size benchmark runs to the machine. Prefer existing `BIFROST_TIMING=1` spans and the MCP stdio server for measurements; the `benchmark/` harness is available too.\n- You may delegate research, independent verification, or a second opinion on a design to your subagent, which runs a different model. Use it for review of your diff before you push.\n- When done: comment on the issue with the landed commit SHA(s), what changed, exactly which validation ran, before/after measurements where the issue's acceptance asks for them, and any follow-ups. Close the issue only if its acceptance criteria are met; otherwise leave it open and state what remains. Finish with a short final message to me: outcome, commit, open questions. If you are blocked, stop and say so rather than widening scope.\n\nIssue: #3748 (warm start and semantic packs). The comments revised the scope; the negative cache is explicitly NOT wanted. Do, in order:\n\n1. Failed release-checksum fetches: the per-process memo in `UreqTransport::fetch` (`crates/bifrost-semantic-packs/src/download.rs` about 384-401) stores only successes, so an unpublished version (404) is refetched once per dependency, about 11 s on hister. Remember a failed checksum fetch for the rest of the process (still refresh on the next process), or skip acquisition when the release tag for `CARGO_PKG_VERSION` is not published. Keep the existing \"absence still requires a catalog proof\" rule. Add a test with the fake transport.\n\n2. Pack catalog opened per lookup: with downloads off, hister activation is still 1.8 s and about 1.4 s of it is `semantic_pack.catalog.db_open` / `.configure` / `.reconcile_storage` running 356 times per start. First confirm in code that the catalog is reopened per dependency lookup (the comment says this is inferred from span names). If so, open it once per activation (or once per process) and reuse the connection, respecting the store's connection rules in `.agents/docs/architecture-and-analyzer-store.md`.\n\n3. Measure before and after on an npm project with node_modules (clone https://github.com/asciimoo/hister at master and run `npm ci`), warm start with `BIFROST_TIMING=1 bifrost --root <repo> --tool search_symbols --args '{\"patterns\":[\"Server\"]}'`, 3 repeats each: wall, `semantic_pack.activate_configured`, `fetch_checksum` count, catalog open count. Post the table on the issue.\n\nDo not change the TypeScript declaration producer (`js_ts/external.rs`); that is #3762, in progress in another session.\n"
+        },
+        {
+          "id": "agent:24",
+          "role": "assistant",
+          "text": "I'll start by reading the repository guidance and the issue, then claim it."
+        },
+        {
+          "id": "agent:53",
+          "role": "assistant",
+          "text": "The GitHub CLI wrapper expects a token file that does not exist. Let me check whether git push credentials exist, and whether the issue can be read without auth."
+        },
+        {
+          "id": "agent:84",
+          "role": "assistant",
+          "text": "Fetch also fails without credentials. Now I'll look at the checksum memo and at where the catalog is opened."
+        },
+        {
+          "id": "agent:95",
+          "role": "assistant",
+          "text": "There is already an on-disk negative cache in this file. Let me look at the catalog open path and how the MCP activation uses the catalog."
+        },
+        {
+          "id": "agent:110",
+          "role": "assistant",
+          "text": "Activation opens one catalog in the prelude. Next I'll find every other caller of the catalog open to see what runs per dependency."
+        },
+        {
+          "id": "agent:133",
+          "role": "assistant",
+          "text": "`shared_generated_catalog()` opens the host-level shared catalog read-write each time it is called. Let me see its four call sites."
+        },
+        {
+          "id": "agent:193",
+          "role": "assistant",
+          "text": "Nothing in the store guide constrains the pack catalog's connection lifetime. Now I'll check network access and start a baseline release build of the binary while I read the download path."
+        },
+        {
+          "id": "agent:224",
+          "role": "assistant",
+          "text": "While those run, I'll read how acquisition is invoked and how downloads are switched on or off."
+        },
+        {
+          "id": "agent:271",
+          "role": "assistant",
+          "text": "`npm ci` succeeded. I must not edit source until the baseline build finishes compiling the analysis crate, so I'll wait for it."
+        },
+        {
+          "id": "agent:294",
+          "role": "assistant",
+          "text": "The baseline built. I'll save the binary, check whether the v0.12.0 release checksum is published, and do a first cold run to see the timing output format."
+        },
+        {
+          "id": "agent:311",
+          "role": "assistant",
+          "text": "The release checksum returns 404, as expected. The timing output is a nested BEGIN/END trace, so I'll write a small summarizer and look at the cold run."
+        },
+        {
+          "id": "agent:325",
+          "role": "assistant",
+          "text": "The cold run shows 202 checksum fetches and 934 catalog opens. Now the three warm baseline runs."
+        },
+        {
+          "id": "agent:338",
+          "role": "assistant",
+          "text": "Warm baseline matches the issue: about 11 s in 77 checksum fetches. Now the baseline with downloads off, which isolates the catalog-open cost."
+        },
+        {
+          "id": "agent:352",
+          "role": "assistant",
+          "text": "Downloads-off activation spends about 4.5 s of 6.7 s in repeated catalog opens here. To confirm the opens come from the shared host catalog, I'll count the enclosing span of each open."
+        },
+        {
+          "id": "agent:426",
+          "role": "assistant",
+          "text": "Now I'll write the wrapper transport and replace the in-`UreqTransport` memo."
+        },
+        {
+          "id": "agent:437",
+          "role": "assistant",
+          "text": "Step 1 is written. Now step 2: keep the shared host catalog open for the lifetime of the local catalog, caching only a successful open so the existing retry-on-failure behavior stays."
+        },
+        {
+          "id": "agent:462",
+          "role": "assistant",
+          "text": "Both crates compile. I'll start the release build for the after-measurement, and in parallel ask a child agent to review the diff."
+        },
+        {
+          "id": "agent:486",
+          "role": "assistant",
+          "text": "Mjolnir is not answering, possibly because the build is saturating the machine. I'll review the reentrancy question myself meanwhile, starting with `copy_generated_from`."
+        },
+        {
+          "id": "agent:526",
+          "role": "assistant",
+          "text": "The new binary is built. I'll run the after-measurements first, before tests load the machine: downloads on, then downloads off."
+        },
+        {
+          "id": "agent:602",
+          "role": "assistant",
+          "text": "Both fixes are in and measured. Warm start on hister dropped from about 20 s to about 2.8 s. I'm now installing clippy and running the lint and test gates."
+        },
+        {
+          "id": "agent:638",
+          "role": "assistant",
+          "text": "Both clippy gates pass. Now the tests for the three affected crates, run in the background, while I retry the review child."
+        },
+        {
+          "id": "agent:657",
+          "role": "assistant",
+          "text": "The earlier spawn went through and the reviewer has already finished. I'll collect its report."
+        },
+        {
+          "id": "agent:707",
+          "role": "assistant",
+          "text": "Tests are running from compiled binaries, so I can safely edit the test now."
+        },
+        {
+          "id": "agent:775",
+          "role": "assistant",
+          "text": "I'm rerunning the one load-sensitive failure alone and the semantic-packs tests with the strengthened test. Waiting for that background run to finish."
+        },
+        {
+          "id": "agent:794",
+          "role": "assistant",
+          "text": "The load-sensitive test passes alone. But the semantic-packs run shows only 17 tests and no line for my new test, so I'll check whether the download module is behind a feature."
+        },
+        {
+          "id": "agent:829",
+          "role": "assistant",
+          "text": "While that runs, I'll check whether root-level test suites also exercise the pack catalog."
+        },
+        {
+          "id": "agent:839",
+          "role": "assistant",
+          "text": "`suite_semantic` exercises dependency pack activation and the pack lifecycle directly, so I'll run it after the current run."
+        },
+        {
+          "id": "agent:854",
+          "role": "assistant",
+          "text": "My new test passes. A JDK release-bundle test fails; it may need a JDK, since `JAVA_HOME` is cleared. I'll look at its panic message."
+        },
+        {
+          "id": "agent:893",
+          "role": "assistant",
+          "text": "Confirmed: the JDK release-bundle test also fails on the unmodified tree at 1683f0dc68, so it predates my change. Clippy on the semantic-packs crate passed. Now `suite_semantic`."
+        },
+        {
+          "id": "agent:913",
+          "role": "assistant",
+          "text": "While the suite runs, I'll draft the issue comment in a durable file outside the repository, since I cannot post it without GitHub credentials."
+        },
+        {
+          "id": "agent:928",
+          "role": "assistant",
+          "text": "Before relying on the \"re-produces 77 packages\" claim in that draft, I'll check it against the trace."
+        },
+        {
+          "id": "agent:942",
+          "role": "assistant",
+          "text": "The 77 produce calls are real but cost only about 106 ms in total, so I'll correct that note to avoid overstating it."
+        },
+        {
+          "id": "agent:973",
+          "role": "assistant",
+          "text": "`suite_semantic` passes fully. Now I'll commit only my two files."
+        },
+        {
+          "id": "agent:984",
+          "role": "assistant",
+          "text": "The push reached GitHub and was rejected as non-fast-forward, which means credentials now work. I'll fetch, merge, and check what changed upstream."
+        },
+        {
+          "id": "agent:1000",
+          "role": "assistant",
+          "text": "The token is now present. I'll claim the issue and read it with comments to confirm the scope I worked from, and look at the upstream change to `searchtools_service.rs`."
+        },
+        {
+          "id": "agent:1096",
+          "role": "assistant",
+          "text": "I merged the latest `origin/master` and am rerunning the affected tests before pushing. Meanwhile I'll update the issue comment draft with the load caveat and the remaining-cost breakdown."
+        },
+        {
+          "id": "agent:1118",
+          "role": "assistant",
+          "text": "That claim about which stage durable outcomes would help is an inference, so I'll mark it as likely. I'll also check whether the pre-existing JDK test failure already has an issue."
+        },
+        {
+          "id": "agent:1134",
+          "role": "assistant",
+          "text": "No issue exists for the JDK test failure. Before filing one, I'll check whether the failure depends on the local JDK."
+        },
+        {
+          "id": "agent:1171",
+          "role": "assistant",
+          "text": "I stated in that issue that the test also fails on the merged tree; the running test pass will confirm that. Waiting for it."
+        },
+        {
+          "id": "agent:1186",
+          "role": "assistant",
+          "text": "On the merged tree, 186 of 187 tests pass, and the only failure is the known one now filed as #3767. Pushing."
+        },
+        {
+          "id": "agent:1204",
+          "role": "assistant",
+          "text": "The new upstream commits touch only the RQL and policy crates, which my changes and tests do not depend on, so nothing needs rerunning. Pushing again."
+        },
+        {
+          "id": "agent:1219",
+          "role": "assistant",
+          "text": "Pushed. Now I'll finalize the issue comment with the commit SHA and suite result, post it, and remove the in-progress label while leaving the issue open."
+        },
+        {
+          "id": "agent:1238",
+          "role": "assistant",
+          "text": "I'll release the assignment too, since the remaining step waits on an owner decision, and retire the finished review child."
+        },
+        {
+          "id": "agent:1261",
+          "role": "assistant",
+          "text": "I fixed both warm-start costs in #3748 and pushed them to master as commit 83daf7d904 (merged in 8d3798aa25). A warm start on hister dropped from about 20 s to about 2.8 s, and the tool output is identical before and after. I left the issue open because step 3 of the revised plan, durable pack outcomes, needs your decision.\n\n**What changed**\n- **Failed checksum fetches are remembered.** The first checksum result, success or failure, now lasts for the rest of the process, and the next process fetches again. A failure records no absence, so absence still needs a catalog proof. A new fake-transport test checks both points.\n- **The shared catalog is opened once.** The reopen was confirmed in code, but it was not the workspace catalog. It was the machine-wide shared cache of generated packs, reopened read-write on every lookup that missed locally. Each open scanned every stored object file. The workspace catalog now keeps that connection after the first successful open. A failed open still retries on the next use.\n\n**Measurements** (median of 3 warm runs, hister after `npm ci`):\n\n| | wall | activation | real checksum requests | catalog opens |\n|---|---|---|---|---|\n| before | 20.5 s | 19.2 s | 77 | 434 |\n| after | 2.8 s | 1.7 s | 1 | 2 |\n\nWith downloads off, wall time went from 7.9 s to 2.5 s. Other sessions kept the host load average around 170 on 96 CPUs, so absolute times are inflated. The span counts are exact. The full table is posted on the issue.\n\n**Validation**\n- `cargo fmt` and both clippy commands pass.\n- Nextest on the analysis, semantic-packs and MCP crates: 5179 of 5180 tests passed.\n- The one failure missed a timing deadline under load and passes when run alone.\n- `suite_semantic` passed in full.\n\n**Things you should know**\n- **One JDK test was already failing.** Running the semantic-packs crate with all features, one release-bundle test fails on the unmodified tree too. I filed it as #3767.\n- **Transient failures are remembered too.** A 429, 5xx or timeout on the checksum turns off downloads until the MCP server restarts. The brief asked for this. A repeated 30 s timeout per dependency would be worse.\n- **GitHub access arrived late.** No GitHub token was available at first, so I started from the brief's scope. The token appeared before I pushed, and the issue comments confirmed the same scope. The label and assignment have been removed.\n\n**Open question:** should step 3 go ahead? Activation is still about 1.4 s of the 2.5 s wall time here, with downloads off. Durable outcomes would likely help only the dependency preparation part, about 0.5 s. They probably would not help active-set resolution, about 0.7 s. An idle-host measurement should decide."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "port.\n\n2. Pack catalog opened per lookup: with downloads off, hister activation is still 1.8 s and about 1.4 s of it is `semantic_pack.catalog.db_open` / `.configure` / `.reconcile_storage` running 356 times per start. First confirm in code that the catalog is reopened per dependency lookup (the comment says this is inferred from span names). If so, open it once per activation (or once per process) and reuse the connection, respecting the store's connection rules in `.agents/docs/architecture-and-analyzer-store.md`.\n\n3. Measure before and after on an npm project with node_modules (clone https://github.com/asciimoo/hister at master and run `npm ci`), warm start with `BIFROST_TIMING=1 bifrost --root <repo> --tool search_symbols --args '{\"patterns\":[\"Server\"]}'`, 3 repeats each: wall, `semantic_pack.activate_configured`, `fetch_checksum` count, catalog open count. Post the table on the issue.\n\nDo not change the TypeScript declaration producer (`js_ts/external.rs`); that is #3762, in progress in another session.\n",
+    "assistant_text_tail": "ened once.** The reopen was confirmed in code, but it was not the workspace catalog. It was the machine-wide shared cache of generated packs, reopened read-write on every lookup that missed locally. Each open scanned every stored object file. The workspace catalog now keeps that connection after the first successful open. A failed open still retries on the next use.\n\n**Measurements** (median of 3 warm runs, hister after `npm ci`):\n\n| | wall | activation | real checksum requests | catalog opens |\n|---|---|---|---|---|\n| before | 20.5 s | 19.2 s | 77 | 434 |\n| after | 2.8 s | 1.7 s | 1 | 2 |\n\nWith downloads off, wall time went from 7.9 s to 2.5 s. Other sessions kept the host load average around 170 on 96 CPUs, so absolute times are inflated. The span counts are exact. The full table is posted on the issue.\n\n**Validation**\n- `cargo fmt` and both clippy commands pass.\n- Nextest on the analysis, semantic-packs and MCP crates: 5179 of 5180 tests passed.\n- The one failure missed a timing deadline under load and passes when run alone.\n- `suite_semantic` passed in full.\n\n**Things you should know**\n- **One JDK test was already failing.** Running the semantic-packs crate with all features, one release-bundle test fails on the unmodified tree too. I filed it as #3767.\n- **Transient failures are remembered too.** A 429, 5xx or timeout on the checksum turns off downloads until the MCP server restarts. The brief asked for this. A repeated 30 s timeout per dependency would be worse.\n- **GitHub access arrived late.** No GitHub token was available at first, so I started from the brief's scope. The token appeared before I pushed, and the issue comments confirmed the same scope. The label and assignment have been removed.\n\n**Open question:** should step 3 go ahead? Activation is still about 1.4 s of the 2.5 s wall time here, with downloads off. Durable outcomes would likely help only the dependency preparation part, about 0.5 s. They probably would not help active-set resolution, about 0.7 s. An idle-host measurement should decide.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      1261
+    ],
+    "user_position": 21,
+    "input_rationale": "The fix is pushed, but step 3 is not started; the agent ends with 'Open question: should step 3 go ahead?' and wants an idle-host measurement to decide.",
+    "label": "required_final",
+    "trigger": "needs you",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-30T00:15:27.892Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-30T01:28:07.043Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-30T14:28:00.691Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

@@ -1,0 +1,143 @@
+{
+  "id": "L2312",
+  "title": "stacked-pr-orientation",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "78f2326da706066a4669e85ee4e37c3d",
+    "session_title": "bifrost via claude2",
+    "reply_position": 591,
+    "captured_at": "2026-10-20T20:29:28.712Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "> #5110 remains rejected at its current head. It restores release-qualification\nmachinery deliberately removed from master; integrating it requires a design\ndecision.\n\nwhat's going on here, is this a merge gone wrong? it doesn't look to me like\nthat's (restoring obsolete rq machinery) an intentional implementation goal\n\nbig messy patchset so orient yourself and then fan out subagents if necessary"
+        },
+        {
+          "id": "agent:42",
+          "role": "assistant",
+          "text": "Checking what #5110's own commits change, separate from the closed prerequisite branches it was stacked on."
+        },
+        {
+          "id": "agent:114",
+          "role": "assistant",
+          "text": "No, this is not a merge gone wrong. #5110 is part of an abandoned 13-PR stack. The quoted line is MergeMarshall's wording, and \"restores\" overstates it: the stack was written before master removed the machinery, so it still contains it.\n\n**What happened (confirmed from GitHub and git):**\n\n1. **The stack's purpose was v0.13.1 release qualification.** David built #5110 on `dave/v0.13.1-preparation` (#4775 → #4785). The PR body says what it is for: an \"activation receipt\" whose references are checked \"in the existing private capture\", plus an update to \"source contract 6 and its plan pin\". Twelve more PRs sit on top of it (#5123 … #5175), about 50k added lines in all.\n2. **On 2026-10-16, David replaced that approach himself.** #5409 introduced the 8-hourly Release gate. Commit ef23afb931 then deleted `scripts/pack-release-contract*` and its guidance doc, and cut `release-qualification.mjs` down to green CI plus Release gate runs.\n3. **On 2026-10-19, David closed only the two base PRs**, #4775 and #4785, with the comment \"Superseded for v0.13.2 by #5775, #5779, #5781 and #5782.\" #5110 and its 12 descendants stayed open, marked ready, with the `mergemarshall:high` label David added on 10-16. Leaving them open looks like an oversight (likely, not confirmed).\n4. **On 2026-10-20, MergeMarshall retargeted #5110 to master** (timeline: `base_ref_changed` by `mergemarshall[bot]` at 08:45). Its diff then included the whole closed preparation branch, so it showed 516 files and +113k lines. At 09:07 the queue rejected it after reading the merge.\n\n**Was the release machinery an intended part of #5110? Yes.** I split out #5110's own 11 commits from its base: 63 files, about 5k lines.\n\n- **Engine side:** a new `semantic_model/activation_receipt.rs` plus wiring in `bifrost-mcp` and `src/bin/bifrost.rs`. It writes an opt-in sidecar file of activation events.\n- **Script side:** that sidecar's only reader is the new `scripts/pack-activation-receipt.mjs`. The PR also changes `pack-behavior-*`, `pack-query-*` and `pack-release-contract/*.json`. None of those scripts were ever on master; they exist only on David's closed base branch.\n\nSo the release machinery is the point of #5110, not something a merge dragged in. The engine part only exists to supply evidence to scripts that master no longer has. Nothing on master mentions activation receipts.\n\n**Recommendation:** treat #5110 and its 12 descendants as superseded, the same way David treated #4775 and #4785. He wrote all of it and made the decision that obsoleted it, so closing is his call. There is one caveat. Several descendants have titles that sound like engine fixes, for example #5143 \"Fix PHP reject accounting\", #5148 \"Fix class-set storage identity\" and #5160 \"Fix public projection support\". If any of those fixes are not on master, they should be pulled out before the stack is closed.\n\nThat last point is what the four children are checking now. Each takes a slice of the stack and looks for engine changes that are useful without the deleted scripts and missing from master. The audit is read-only: I haven't changed any PRs, labels or branches. I'll report back when the four handbacks arrive.\n\n`★ Insight ─────────────────────────────────────`\n- In a stacked PR, the diff GitHub shows depends on the base branch. Once the base PRs closed and the queue moved #5110's base to master, its diff grew from about 5k lines to 113k. Most of that came from the closed bases, so the size alone says nothing about what #5110 itself changed.\n- To see one PR's own work in a stack that has merged master several times, use `git log --no-merges HEAD ^base ^origin/master`. This drops both the base PR's commits and the master merges.\n- The rejection comment says \"rejected by inspection (no build run)\". The queue's merge-conflict analysis was correct. \"Restores\" is just loose wording.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "agent:411",
+          "role": "assistant",
+          "text": "Slice 4 reports nothing to salvage. That child couldn't reach GitHub or run `git fetch`, though. I'll fetch every stack head into the local object store so the other children can read them, then check slice 4's one-commit-per-PR claim myself."
+        },
+        {
+          "id": "agent:551",
+          "role": "assistant",
+          "text": "I'm checking whether master's red Release gate fails for the projection reasons that #5156's fixes target. That decides whether those small fixes are worth salvaging."
+        },
+        {
+          "id": "agent:591",
+          "role": "assistant",
+          "text": "The audit is done. Nearly all of the stack is either release-qualification work or fixes David has already ported to master. One small TypeScript fix is missing from master.\n\nThe children couldn't fetch commits, so three of the four handbacks were incomplete. I fetched every head myself, listed each PR's own commits, and checked every commit that touches engine code against master.\n\n| Engine commit | Status on master |\n|---|---|\n| #5143 `1b64589009`: PHP reject accounting | Already there. David ported it as d8f522861c (2026-10-19). Confirmed. |\n| #5148 `8f236e0808`/`3f65620071`: class-set storage dialect | Already there. David ported it as 859d455187 today; it landed as migration 0193. Confirmed. |\n| #5154 `f5bb58630c`: SQLite probe under the upgrade lock | Already covered by #5152 (for #5150). #5151 was closed as a duplicate. Confirmed. |\n| #5123 `be1a7a3aca`: C# char→int32 conversion | Comments and tests only, no behavior change. Nothing to port. |\n| #5143 `e3a32c20e6`, #5154 `6b6f6eb87a` | They change `src/engine_contracts.rs`, which exists only on the closed base branch. They go wherever David's base-branch work went. |\n| #5160/#5166: public-projection fixes (#5156, still open) | Probably no longer needed. Master already marks `test-support/policy_report.rs` and `src/bin/common/mod.rs` as public. Master's \"projected public tree\" job builds and runs 8,511 tests; its current failure is one unrelated test (`covering_index_preserves_canonical_bindings_routes_and_evidence`). |\n| **#5148 `36783dd420`: TypeScript result obligations** | **Not on master.** `reviewed_js_ts_evidence_selected` (`crates/bifrost-rql/src/structural/search/effects.rs:5515`) still accepts only `typescript-lib:es5`. The fix also accepts ES2019 lib selection and `trimStart`/`trimEnd` from `lib.es2019.string.d.ts`. It doesn't depend on the deleted scripts. It is likely a fix for missed findings in projects that target ES2019 (not tested). |\n\nThe other PRs, #5110, #5134, #5164, #5167, #5169, #5173 and #5175, change only release-qualification code. The Rust changes in #5110 exist only to write the activation-receipt sidecar file for those scripts.\n\n**Recommendation:** David wrote the stack and is clearly part-way through retiring it: he has made two ports in the last two days, one of them today. The rest is his call:\n- close #5110 and its 12 descendants as superseded;\n- port `36783dd420` if he wants the ES2019 behavior;\n- recheck whether #5156 can be closed.\n\nI haven't commented on or changed any PR, issue or branch. I can draft a comment to David, or port `36783dd420` on a new branch, if you want either.\n\nOne side note on how this got messy: the queue's 08:32 comment suggested retargeting the PR to master, and then the queue retargeted it itself at 08:45. The diff grew from about 5k to 113k lines, and a simple \"base PR closed\" block became a large rejection. You may want to raise that with whoever runs MergeMarshall.\n\n`★ Insight ─────────────────────────────────────`\n- `git patch-id --stable` found no matches here, even though two fixes had clearly been ported. David reworked them on top of later master changes; the class-set migration, for example, was renumbered from 0192 to 0193. Patch-ids only catch near-exact cherry-picks. To find reworked ports, you have to read the current master code.\n- The children's restricted sandbox (no network, read-only `.git`) meant they could only see objects already in the shared store. Fetching the heads first, before spawning them, would have saved a round.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "> #5110 remains rejected at its current head. It restores release-qualification\nmachinery deliberately removed from master; integrating it requires a design\ndecision.\n\nwhat's going on here, is this a merge gone wrong? it doesn't look to me like\nthat's (restoring obsolete rq machinery) an intentional implementation goal\n\nbig messy patchset so orient yourself and then fan out subagents if necessary",
+    "assistant_text_tail": "ipt-lib:es5`. The fix also accepts ES2019 lib selection and `trimStart`/`trimEnd` from `lib.es2019.string.d.ts`. It doesn't depend on the deleted scripts. It is likely a fix for missed findings in projects that target ES2019 (not tested). |\n\nThe other PRs, #5110, #5134, #5164, #5167, #5169, #5173 and #5175, change only release-qualification code. The Rust changes in #5110 exist only to write the activation-receipt sidecar file for those scripts.\n\n**Recommendation:** David wrote the stack and is clearly part-way through retiring it: he has made two ports in the last two days, one of them today. The rest is his call:\n- close #5110 and its 12 descendants as superseded;\n- port `36783dd420` if he wants the ES2019 behavior;\n- recheck whether #5156 can be closed.\n\nI haven't commented on or changed any PR, issue or branch. I can draft a comment to David, or port `36783dd420` on a new branch, if you want either.\n\nOne side note on how this got messy: the queue's 08:32 comment suggested retargeting the PR to master, and then the queue retargeted it itself at 08:45. The diff grew from about 5k to 113k lines, and a simple \"base PR closed\" block became a large rejection. You may want to raise that with whoever runs MergeMarshall.\n\n`★ Insight ─────────────────────────────────────`\n- `git patch-id --stable` found no matches here, even though two fixes had clearly been ported. David reworked them on top of later master changes; the class-set migration, for example, was renumbered from 0192 to 0193. Patch-ids only catch near-exact cherry-picks. To find reworked ports, you have to read the current master code.\n- The children's restricted sandbox (no network, read-only `.git`) meant they could only see objects already in the shared store. Fetching the heads first, before spawning them, would have saved a round.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      591
+    ],
+    "user_position": 9,
+    "input_rationale": "The user asked what was going on with the #5110 stack; the audit is delivered. The agent closes with a recommendation that is David's call and offers two follow-ups (draft comment, port one fix) awaiting the user's choice. '#5156, still open' is a table cell.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "next_work_menu",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "menu": "unsolicited",
+    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-20T20:35:13.110Z",
+        "kind": "user",
+        "text": "i talked to Dave, we're good to close these out in principle. pls reboot 5148 and dblchk 5156"
+      },
+      {
+        "at": "2026-10-20T20:35:41.484Z",
+        "kind": "agent",
+        "text": "I'll take \"reboot 5148\" to mean: rebuild whatever #5148 still contributes on a fresh branch from current master. After my audit, that should be just the TypeScript fix, but I'll confirm the class-set "
+      },
+      {
+        "at": "2026-10-20T20:37:38.507Z",
+        "kind": "agent",
+        "text": "The drift check flags `semantic-packs/node/runtime-values/notices/node-v22.11.0.txt`, which my change doesn't touch. I'm checking whether master fails the same way."
+      },
+      {
+        "at": "2026-10-20T20:38:11.407Z",
+        "kind": "agent",
+        "text": "The drift check passes. I'll commit the port, then start the focused test run in the background. It's a long build, so I'll check #5156 while it runs."
+      },
+      {
+        "at": "2026-10-20T20:39:23.581Z",
+        "kind": "agent",
+        "text": "The v0.14.0 RC passed \"projected public tree\" on 10-19. Master has failed it on every run since. Next I'm checking what that job runs, and why master fails it."
+      },
+      {
+        "at": "2026-10-20T20:40:57.994Z",
+        "kind": "agent",
+        "text": "Master solves the fixture-corpus problem differently: the test sits between `BEGIN/END PRIVATE FIXTURE CORPUS ROUND TRIP` markers, so the projection strips it. Now the acquisition snapshot tests."
+      }
+    ]
+  }
+}

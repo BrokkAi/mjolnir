@@ -1,0 +1,166 @@
+{
+  "id": "L0301",
+  "title": "Header free function identity follow-up",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "ae15914d74cfe9e0fdd46802822ccaf8",
+    "session_title": "eval29 3457 sonnet55med",
+    "reply_position": 502,
+    "captured_at": "2026-09-29T21:39:55.056Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight.",
+    "is_child": false
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3457: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 18fa60ee98f92a8dca58ffbd3a5d949adb30ee19\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nRepository history after the base commit is out of bounds. This issue was\nsolved on master after the base commit; do not read, fetch, log, diff or\ncheck out anything newer than the base commit named above, do not look at\nclosed pull requests or issue comments, and do not search master for the\nlanded solution. Solve it from the base commit and the issue text below.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache\n[... 2655 bytes omitted from the middle of this message ...]\nte must bind the exact API identity through the language's own resolver, and an unbound callee reports an unmet obligation, never a clean verdict.\n\nReference rows: JavaScript and TypeScript landed in 3f4c2eabf (`tests/fixtures/network-effect-boundary/{javascript,typescript}/`, `semantic-packs/web-network/{javascript,typescript}/`, `crates/bifrost-policy/policy-packs/bifrost.effects/policies/{javascript,typescript}/selected-boundary-no-network-io.rqlp`, `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs`). Copy their structure.\n\nDeliver, for this language:\n\n1. Fixture set under `tests/fixtures/network-effect-boundary/<language>/`: a finding tree (selected root -> helper chain across files -> concrete network API), a corrected tree (the caller owns the effect, the root is clean), a same-name near miss (a local or unrelated function with the API's name that must not become a proven effect by spelling), a recursion case (the helper reaches the effect exactly once and terminates), and an unresolved-helper case (coverage stays open, no clean verdict).\n2. Reviewed model under `semantic-packs/web-network/<language>/` (or the language's existing reviewed pack tree) declaring `bifrost.network_io` on the exact API identity at the arity the fixture writes.\n3. Policy specialization in `crates/bifrost-policy/policy-packs/bifrost.effects/` with the stable id `bifrost.effects.<language>.selected-boundary-no-network-io`, a documented declaration-selection block, and the manifest row.\n4. Acceptance: tests in `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs` covering all five fixtures, a CLI run through `--policy-file` (exit 1 finding, 0 corrected, 2 unresolved), and one MCP `run_policy` run.\n5. Update this language's row in the matrix doc with the evidence.\n\nIf the language cannot bind the exact API identity or cannot key its workspace callees (compare #3451 for Python), stop, file the focused capability-gap issue, link it on the row, and leave this ticket open. Do not fill the gap with text matching.\n\n"
+        },
+        {
+          "id": "agent:24",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\nI'll begin by checking the checkout is clean and moving to the pinned base commit, then read the matrix doc and the reference JS/TS rows.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "agent:74",
+          "role": "assistant",
+          "text": "I'm checking whether the C resolver can bind a free function like `connect` declared in an external header. That decides whether this row can land or has to stop as a capability gap."
+        },
+        {
+          "id": "agent:110",
+          "role": "assistant",
+          "text": "Start the test-binary build in the background while I write the fixture."
+        },
+        {
+          "id": "agent:146",
+          "role": "assistant",
+          "text": "Still waiting on the background build; meanwhile I'm reading the #3466 test, which covers the C free-function-from-header shape (`getenv`)."
+        },
+        {
+          "id": "agent:209",
+          "role": "assistant",
+          "text": "Meanwhile, write the C finding fixture and probe policy."
+        },
+        {
+          "id": "agent:247",
+          "role": "assistant",
+          "text": "Still compiling the analysis crate; the probe test is ready and runs when it finishes."
+        },
+        {
+          "id": "agent:286",
+          "role": "assistant",
+          "text": "I'm querying `procedure-effects` and call-relation rows through the CLI on the C fixture to see exactly which callee stays unresolved."
+        },
+        {
+          "id": "agent:330",
+          "role": "assistant",
+          "text": "Running two probes: a pure C chain (does keying work?) and a resolved `-isystem` header root (does `connect` bind?). One is slow, so I'm polling its output."
+        },
+        {
+          "id": "agent:355",
+          "role": "assistant",
+          "text": "The pure-C chain returned no diagnostics, so keying works and the run completes. The `-isystem` probe is still running."
+        },
+        {
+          "id": "agent:418",
+          "role": "assistant",
+          "text": "The clippy run is going in the background. Meanwhile I'm cleaning the test policy `c.rqlp`, which still carries Rust wording in its header."
+        },
+        {
+          "id": "agent:435",
+          "role": "assistant",
+          "text": "My replacement mangled a comment; fixing it."
+        },
+        {
+          "id": "agent:462",
+          "role": "assistant",
+          "text": "Formatting is clean. Now clippy in the background, with a full test-suite run of the file afterwards."
+        },
+        {
+          "id": "agent:489",
+          "role": "assistant",
+          "text": "Clippy is clean. Now the whole 3387 test file, then commit."
+        },
+        {
+          "id": "agent:502",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nThe C row is blocked by a resolver gap, so I did not ship the row. The base is `18fa60ee98f92a8dca58ffbd3a5d949adb30ee19`. I committed the fixtures, the gap-pinning tests and the matrix note, and left #3457 open. I did not run `analysis --lib` or the C++ usage/issue suites, because no graph or usages code changed.\n\n`★ Insight ─────────────────────────────────────`\nThe external identity the effect relation keys on is `<owner>.<member>`. C has no `::` and no class or namespace, so a bare `connect(...)` has no owner to publish.\nThe only fallback that would make it bind is matching the spelling `connect`, which is the same-name near miss this family exists to reject.\n`─────────────────────────────────────────────────`\n\n## 1. Confirmed cause\nThe fixture chain is `price_total -> audit_record -> audit_send -> connect`, with `#include <sys/socket.h>` in `audit_client.c`.\n- **Callee stays name-only:** `candidates_of` on the `connect` token reports `{candidate_kind: external_route, name: \"connect\"}`. The tier is `external_root`, the boundary is `external_unknown`, and the outcome is `rejected` (`boundary_blocked`).\n- **Effect set stays open:** `procedure-effects` on `audit_send` reports coverage `open`, derivation `incomplete` and reason `dispatch_unresolved`. The policy run is `Inconclusive`, with `absence-requires-exhaustive-coverage` and `EffectDerivationIncomplete`.\n- **An include root does not help:** with a `compile_commands.json` giving `-isystem` to a directory holding `sys/socket.h`, the boundary becomes `external_declared_unindexed`. The candidate is still name-only and the effect set is still open.\n- **Why no identity is minted (from the code):** `canonical_external_callee` in `usages/call_relations.rs` returns `None` unless `split_canonical_qualified_callee` yields an owner.\n  - The C++ external header route in `cpp/external.rs` answers type members and namespaces, not free functions.\n  - The only free-function route is the `has_unresolved_include_visible_before` arm in `get_definition/cpp.rs` (#3466). It publishes a name-only boundary from the include fact.\n- **Keying is not the problem:** the corrected tree, whose whole reachable graph is analyzed workspace code, concludes with zero findings and a `Complete` run.\n\n## 2. Changes and reasons\n- **Base:** `18fa60ee98f92a8dca58ffbd3a5d949adb30ee19`. **Final commit:** `8ff03b7ed4c8f2deed0b7e03ce21b536645d380e`.\n- **Fixtures:** `tests/fixtures/network-effect-boundary/c/{finding,corrected}/`.\n- **Test-only candidate:** the reviewed model is `c/model/bifrost.web-network-c.json` (`connect`, arity 3) and the policy is `policies/c.rqlp`. Neither is under `semantic-packs/` or the `bifrost.effects` pack, because a shipped model that cannot bind would advertise a row that cannot conclude.\n- **Tests in `issue_3387_network_effect_boundary.rs`:**\n  - `the_c_corrected_tree_keys_its_workspace_callees_and_concludes_clean` passes.\n  - `a_c_system_header_free_function_call_binds_no_reviewed_identity_yet` passes and pins the gap.\n  - `a_c_system_header_free_function_call_binds_the_reviewed_posix_identity` is `#[ignore]` and expects one finding, so it fails with zero findings until the gap closes.\n- **Matrix note:** the C row and a new section carry the evidence.\n- **Not delivered:** the recursion, near-miss and unresolved fixtures, the CLI exit-code run and the MCP run. Every one of them depends on the binding that does not exist yet.\n- **No extraction epoch bump:** no persisted fact changed.\n\n## 3. Validation\n- `cargo nextest run --max-fail 100 --test suite_bench_policy issue_3387` (`BIFROST_PARALLELISM=1`, `RAYON_NUM_THREADS=1`, `JAVA_HOME` unset): 70 passed.\n- The same filter with `--run-ignored all`, scoped to the C tests, fails only the ignored target test, with `left: 0, right: 1` findings.\n- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: clean.\n- `rustfmt --edition 2024 --ch\n[... 318 bytes omitted from the middle of this message ...]\none clean C verdict is the corrected tree. The issue names no external repositories, so there was no census to run.\n\n## 5. State, limitations, separately actionable\n`git status --short` is clean.\n\nI could not file the capability-gap issue: I was told not to touch GitHub, and no issue-creation permission was given. The draft is below.\n\n> **Draft issue: C/C++ resolver needs a header-scoped external free-function identity.** A bare free function declared in a system or library header (`connect` from `<sys/socket.h>`, `curl_easy_perform`) has no owner segment. The resolver reports a name-only `external_route` boundary, `canonical_external_callee` mints no identity, and reviewed summaries cannot bind. Wanted: bind a free-function identity scoped to the declaring header, resolved through the include closure the file reaches, and publish it through `canonical_external_callee`. Blocks #3457 and #3458.\n\n## 6. Draft approach comment for #3457\nI could not land the C row, because the C resolver cannot bind an exact identity for `connect` from `<sys/socket.h>`. On the finding fixture, the call reports only a name-only `external_route` candidate with boundary `external_unknown`, and `procedure-effects` on the helper reports coverage `open`, reason `dispatch_unresolved`. An explicit `-isystem` root moves the boundary to `external_declared_unindexed` but still mints no identity. The cause is that the external identity is `<owner>.<member>`, and C has no owner segment for a bare free function. The C++ header route only answers type members and namespaces. Keying is fine: the corrected tree concludes clean with a `Complete` run. I did not add a shipped model or specialization, since matching the spelling `connect` is the near miss this family rejects. I committed the fixtures, a passing test that pins the gap and an ignored test that expects the finding once it closes. The fix is a resolver change: a header-scoped free-function identity from the include closure. It also serves C++ (#3458), so I suggest a separate capability issue."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "lper case (coverage stays open, no clean verdict).\n2. Reviewed model under `semantic-packs/web-network/<language>/` (or the language's existing reviewed pack tree) declaring `bifrost.network_io` on the exact API identity at the arity the fixture writes.\n3. Policy specialization in `crates/bifrost-policy/policy-packs/bifrost.effects/` with the stable id `bifrost.effects.<language>.selected-boundary-no-network-io`, a documented declaration-selection block, and the manifest row.\n4. Acceptance: tests in `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs` covering all five fixtures, a CLI run through `--policy-file` (exit 1 finding, 0 corrected, 2 unresolved), and one MCP `run_policy` run.\n5. Update this language's row in the matrix doc with the evidence.\n\nIf the language cannot bind the exact API identity or cannot key its workspace callees (compare #3451 for Python), stop, file the focused capability-gap issue, link it on the row, and leave this ticket open. Do not fill the gap with text matching.\n\n",
+    "assistant_text_tail": "one clean C verdict is the corrected tree. The issue names no external repositories, so there was no census to run.\n\n## 5. State, limitations, separately actionable\n`git status --short` is clean.\n\nI could not file the capability-gap issue: I was told not to touch GitHub, and no issue-creation permission was given. The draft is below.\n\n> **Draft issue: C/C++ resolver needs a header-scoped external free-function identity.** A bare free function declared in a system or library header (`connect` from `<sys/socket.h>`, `curl_easy_perform`) has no owner segment. The resolver reports a name-only `external_route` boundary, `canonical_external_callee` mints no identity, and reviewed summaries cannot bind. Wanted: bind a free-function identity scoped to the declaring header, resolved through the include closure the file reaches, and publish it through `canonical_external_callee`. Blocks #3457 and #3458.\n\n## 6. Draft approach comment for #3457\nI could not land the C row, because the C resolver cannot bind an exact identity for `connect` from `<sys/socket.h>`. On the finding fixture, the call reports only a name-only `external_route` candidate with boundary `external_unknown`, and `procedure-effects` on the helper reports coverage `open`, reason `dispatch_unresolved`. An explicit `-isystem` root moves the boundary to `external_declared_unindexed` but still mints no identity. The cause is that the external identity is `<owner>.<member>`, and C has no owner segment for a bare free function. The C++ header route only answers type members and namespaces. Keying is fine: the corrected tree concludes clean with a `Complete` run. I did not add a shipped model or specialization, since matching the spelling `connect` is the near miss this family rejects. I committed the fixtures, a passing test that pins the gap and an ignored test that expects the finding once it closes. The fix is a resolver change: a header-scoped free-function identity from the include closure. It also serves C++ (#3458), so I suggest a separate capability issue.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      502
+    ],
+    "user_position": 21,
+    "input_rationale": "The agent stopped without delivering the requested fix because the C resolver cannot bind the identity, left #3457 open, and says it could not file the capability-gap issue it recommends (GitHub off-limits). The scope change (do the resolver work or file a separate capability issue) is left to the judge. Borderline: it is phrased as a report, not a question.",
+    "label": "required_final",
+    "trigger": "needs you",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-29T21:51:50.631Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-29T22:41:26.061Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ],
+    "strict_input_scoring": false
+  }
+}

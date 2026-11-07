@@ -1,0 +1,392 @@
+{
+  "id": "L2305",
+  "title": "django-defaults",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "88fabf153909de961f8399b07adb5645",
+    "session_title": "eval40 5044 sonnetxhigh",
+    "reply_position": 3255,
+    "captured_at": "2026-10-16T00:34:37.553Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #5044: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). Direct unresolved contract questions to the series lead.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: c6e05f1044055726082a50f194221451db3fef8f\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls, report the evidence to the judge.\nDo not bypass the mbx cargo shim, redirect target/, set CARGO_TARGET_DIR,\nor change shared cache settings.\n\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories\n[... 1996 bytes omitted from the middle of this message ...]\nwith a committed regression fixture. If the exact external repository is available, keep its stated pin.\n\nThe working-time budget is 12 hours, with inter-turn and documented judge-question waits excluded. Finish the requested implementation, validation, commits and FINAL REPORT within that budget. No production pack authoring, grammar changes, unrelated cleanup, upstream history lookup, or changes to build-cache configuration.\n\n# Issue\n\nIssue #5044: Python saved defaults: a dynamic setattr on an unproven receiver disables every function's defaults workspace-wide\n\nPart of #3745. Found while tracing #4620 on django-guardian.\n\nThe saved-default safety scan (`crates/bifrost-analysis/src/analyzer/python/default_arguments.rs`, scoped by #4724) opens positional and keyword-only defaults for the whole workspace when a dynamic write's receiver is not a uniquely bound function. In django-guardian, exactly one construct does this: `setattr(override, key, new_value)` at `guardian/testapp/tests/conf.py:76`, in a test helper. The receiver is `UserSettingsHolder(settings._wrapped)` from `django.conf`. Without a Django pack the analyzer cannot prove that value is not a function object, so every omitted default argument in the project becomes unknown. Call bindings, class flow and taint all lose the default. Dynamic `setattr` in test helpers and settings code is common in Django projects.\n\nA sound narrowing: a write through an unknown receiver can only change the defaults of a function whose object can reach that receiver. A function whose object never escapes cannot be the receiver. Escaping means being read as a value anywhere other than as a direct call's callee or an import binding, or living in a module whose module object escapes (the #4622 cross-file module scanner already tracks module escapes). Unknown-receiver writes would then open only escaped functions' defaults.\n\nMeasured impact: in django-guardian, this blocks 6 false positives that #4620 targets.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n"
+        },
+        {
+          "id": "agent:24",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state and base commit."
+        },
+        {
+          "id": "agent:34",
+          "role": "assistant",
+          "text": "The checkout is clean and detached at the exact base. Now the routed guidance and the target file."
+        },
+        {
+          "id": "agent:122",
+          "role": "assistant",
+          "text": "Before designing, I need to know how the analyzer resolves Python imports to workspace files, how `SemanticLocator` identifies a function, and who calls `default_is_available`."
+        },
+        {
+          "id": "agent:143",
+          "role": "assistant",
+          "text": "Starting a build of the policy suite in the background now, since the first link is slow. While it builds I'll keep reading."
+        },
+        {
+          "id": "agent:175",
+          "role": "assistant",
+          "text": "While that builds, I'll read the caller of `default_is_available` to see which kinds of function it asks about."
+        },
+        {
+          "id": "agent:215",
+          "role": "assistant",
+          "text": "Now the analyzer-level Python import resolution, since cross-file escape needs to map `from m import f` to a workspace file."
+        },
+        {
+          "id": "agent:461",
+          "role": "assistant",
+          "text": "The build is on the final downstream crates. While it finishes I'm drafting the new scan implementation in a scratch file outside the repo, so I don't disturb the baseline run."
+        },
+        {
+          "id": "agent:484",
+          "role": "assistant",
+          "text": "The base build is done. Now the failing-before witness: running the saved-defaults golden against the unmodified base with my intended expected output."
+        },
+        {
+          "id": "agent:612",
+          "role": "assistant",
+          "text": "Now I'll install the scan rewrite in the repo and add its tests, replacing the stub test module with the updated original assertion plus a table of escape channels."
+        },
+        {
+          "id": "agent:703",
+          "role": "assistant",
+          "text": "Status: the three extra golden cases and their intended outputs are written. I'm waiting on the analysis-crate `cargo check` to see whether the new scan compiles."
+        },
+        {
+          "id": "agent:824",
+          "role": "assistant",
+          "text": "Status: still waiting on the type-check of the analysis crate with the new scan. It's a large crate and the host is loaded, so I'm watching for either `Finished` or the first compile error."
+        },
+        {
+          "id": "agent:888",
+          "role": "assistant",
+          "text": "Status: my cleanup command matched its own command line and killed the shell, so nothing started. I'll re-run the formatting and start the analysis-lib test build for the `default_arguments` tests."
+        },
+        {
+          "id": "agent:934",
+          "role": "assistant",
+          "text": "Status: the analysis-lib test binary is still compiling in the background; I'm not editing crate sources until it finishes. I'll check the log and keep waiting on one watcher."
+        },
+        {
+          "id": "agent:981",
+          "role": "assistant",
+          "text": "Status: the analysis-lib test binary is still building (the host is loaded). I'm only waiting; I'll act as soon as the build reports compile errors or test results."
+        },
+        {
+          "id": "agent:1026",
+          "role": "assistant",
+          "text": "Status: still waiting for the test-profile compile of the analysis crate to finish. Nothing has failed yet."
+        },
+        {
+          "id": "agent:1065",
+          "role": "assistant",
+          "text": "Status: still waiting for the analysis-crate test build; I haven't seen any compile errors yet. I'll check the log now."
+        },
+        {
+          "id": "agent:1105",
+          "role": "assistant",
+          "text": "Status: the build is still compiling language crates in the test profile, ahead of the analysis crate itself. I'll look at the log again and keep waiting."
+        },
+        {
+          "id": "agent:1146",
+          "role": "assistant",
+          "text": "Status: waiting on the same test-profile build; the Go and JS/TS language crates are the last ones ahead of the analysis crate. Next I'll read the build log."
+        },
+        {
+          "id": "agent:1190",
+          "role": "assistant",
+          "text": "Status: the analysis crate's test-profile compile is underway. Nothing has errored, and I'm waiting for either the first test results or a compiler diagnostic."
+        },
+        {
+          "id": "agent:1235",
+          "role": "assistant",
+          "text": "Status: one `rustc` process is still compiling the analysis crate's test binary, which is the slow step. I'll check for a result again."
+        },
+        {
+          "id": "agent:1277",
+          "role": "assistant",
+          "text": "Status: still waiting for the analysis crate's test build. I'll read the log directly once more."
+        },
+        {
+          "id": "agent:1425",
+          "role": "assistant",
+          "text": "Status: I cancelled the lock-blocked build and am stopping its leftover child processes. Then I'll apply the remaining edits to the sources."
+        },
+        {
+          "id": "agent:1476",
+          "role": "assistant",
+          "text": "Status: `cargo check` is now on the analysis crate itself, with no errors so far. I'm waiting for it to report."
+        },
+        {
+          "id": "agent:1498",
+          "role": "assistant",
+          "text": "`cargo check` of the analysis crate (lib and tests) finished clean, with no errors or warnings. Now the real run: the saved-defaults golden tests against the new scan."
+        },
+        {
+          "id": "agent:1536",
+          "role": "assistant",
+          "text": "It compiled and ran. The existing `#4724` golden still passes, and the new `#5044` test fails on one or more cases. I'll read the diff."
+        },
+        {
+          "id": "agent:1603",
+          "role": "assistant",
+          "text": "Status: I bisected the one leaking channel to a function-scoped import, and I'm now reading how the analyzer serves per-file import facts to see why that read isn't resolved."
+        },
+        {
+          "id": "agent:1811",
+          "role": "assistant",
+          "text": "Status: now picking the validation suites. Python's usage and issue suites are required, and I want any suite where saved-default behavior is observable."
+        },
+        {
+          "id": "agent:1832",
+          "role": "assistant",
+          "text": "Before starting the long validation builds, which lock out further source edits, I'll review the full diff of the implementation once more."
+        },
+        {
+          "id": "agent:1857",
+          "role": "assistant",
+          "text": "The implementation review turned up nothing new. Before the long validation builds, I'm committing a checkpoint with the change, the regression test, and the goldens."
+        },
+        {
+          "id": "agent:1877",
+          "role": "assistant",
+          "text": "Checkpoint committed. Now the repository's cheap gate, the pack-authoring drift check, and a format check."
+        },
+        {
+          "id": "agent:1949",
+          "role": "assistant",
+          "text": "While that builds, I'll check whether the issue's named repository, django-guardian, is reachable for a before/after run. The issue states no pinned commit, so a successful fetch would be unpinned."
+        },
+        {
+          "id": "agent:1968",
+          "role": "assistant",
+          "text": "Network access works. I'll fetch django-guardian into `/workspace/evidence`, outside the checkout, and check that the issue's named construct still exists at the fetched commit."
+        },
+        {
+          "id": "agent:2063",
+          "role": "assistant",
+          "text": "The binaries built and 2,491 selected tests are running, with 1,333 done and no failures so far."
+        },
+        {
+          "id": "agent:2130",
+          "role": "assistant",
+          "text": "Status: the full analysis-crate lib run is compiling. Next I'm checking whether it is progressing or blocked on the mbx lock again."
+        },
+        {
+          "id": "agent:2197",
+          "role": "assistant",
+          "text": "Status: still queued behind other sessions' identical `rustc` action. The lock changed hands again at 21:09, so the queue is moving, and I'm continuing to wait."
+        },
+        {
+          "id": "agent:2268",
+          "role": "assistant",
+          "text": "After 57 minutes in the queue my build acquired the lock at 21:50:12 and is compiling. Now waiting for the lib tests."
+        },
+        {
+          "id": "agent:2314",
+          "role": "assistant",
+          "text": "The compile finished and the lib tests are running. A slow store test just printed. I'll let it run and check the summary."
+        },
+        {
+          "id": "agent:2334",
+          "role": "assistant",
+          "text": "4,836 of 4,837 analysis-lib tests pass. The one failure is my own new nested-function test, so I'll read its message."
+        },
+        {
+          "id": "agent:2412",
+          "role": "assistant",
+          "text": "This time the compile skipped the queue. Waiting for the build and the census."
+        },
+        {
+          "id": "agent:2514",
+          "role": "assistant",
+          "text": "Running, no queue this time. Waiting for the census."
+        },
+        {
+          "id": "agent:2583",
+          "role": "assistant",
+          "text": "While that builds, I'll verify the four functions the census reports as escaped really are read as values. A census is only evidence if its escapes are genuine."
+        },
+        {
+          "id": "agent:2657",
+          "role": "assistant",
+          "text": "The Django census is running in the background. The analysis-lib test binary is already built from the latest source, so I can rerun the full lib suite now without recompiling."
+        },
+        {
+          "id": "agent:2767",
+          "role": "assistant",
+          "text": "Status: remeasuring Celery's scan consumption with the resolver on its own per-file budget, so I can separate the base cost from what my change adds."
+        },
+        {
+          "id": "agent:2839",
+          "role": "assistant",
+          "text": "Rich is under the budget and has unproven writes, but everything is escaped, which means a collapse trigger fired. I'll check which one and whether it is a genuine channel or an over-wide match."
+        },
+        {
+          "id": "agent:2883",
+          "role": "assistant",
+          "text": "One more test is worth adding, since the Celery measurement exposed it. With the resolver on its own allowance, a source that exactly exhausts the syntax budget must still complete."
+        },
+        {
+          "id": "agent:2940",
+          "role": "assistant",
+          "text": "2,491 of 2,491 pass on the final source. I'll commit the follow-up fixes now, then run Clippy across the workspace."
+        },
+        {
+          "id": "agent:2956",
+          "role": "assistant",
+          "text": "The follow-up commit message overstates one thing: the function-scoped import and conditional `def` goldens were already in the first commit. I'll reword it to be accurate before moving on."
+        },
+        {
+          "id": "agent:2974",
+          "role": "assistant",
+          "text": "Now the Clippy gate across the whole workspace, in the background."
+        },
+        {
+          "id": "agent:3039",
+          "role": "assistant",
+          "text": "Status: the two source files are at base content, and the golden suite is rebuilding against them. I'll restore my versions immediately after reading the results."
+        },
+        {
+          "id": "agent:3113",
+          "role": "assistant",
+          "text": "My `pkill -f` matched its own command line and killed the shell again. I'll use PIDs this time and check what state things are in."
+        },
+        {
+          "id": "agent:3136",
+          "role": "assistant",
+          "text": "Cleared, and the tree is clean at the committed HEAD. Now I'll add the bound-collapse test and requeue the single final lib run."
+        },
+        {
+          "id": "agent:3156",
+          "role": "assistant",
+          "text": "No queue this time. The compile is running."
+        },
+        {
+          "id": "agent:3182",
+          "role": "assistant",
+          "text": "The full analysis-lib suite passes on the final source: 4,840 of 4,840. Now I'll commit the bound test and re-run Clippy over this crate's test targets, since the commit adds test code."
+        },
+        {
+          "id": "agent:3210",
+          "role": "assistant",
+          "text": "The clippy run was cut off by its own `timeout 280`. I'll rerun it properly in the background."
+        },
+        {
+          "id": "agent:3232",
+          "role": "assistant",
+          "text": "Clippy is clean. Committing the bound-collapse test."
+        },
+        {
+          "id": "agent:3255",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nIssue #5044 is fixed at the Python saved-default scan. One unproven-receiver `setattr` now opens the defaults of escaped functions only, not the whole workspace. The base is `c6e05f1044055726082a50f194221451db3fef8f` and the final detached HEAD is `6640fe5e61e4ff132e9245c0b84ab09d30648c5b`, with a clean tree. Methods, constructors and lambdas are never narrowed, so django-guardian's 27 methods with defaults stay unknown.\n\n`★ Insight ─────────────────────────────────────`\n- The narrowing rests on one fact: a function object can only reach an arbitrary receiver after some code reads it as a value. The change is therefore mostly \"record the reads\", and the write site stays simple.\n- Real repositories found four defects that the fixtures and unit tests missed. A literal `__import__(\"grappelli\")` collapsed django-guardian, a comprehension variable matched a same-named `def`, function-scoped imports were invisible, and the new resolver's budget could push repositories over the scan limit.\n`─────────────────────────────────────────────────`\n\n## 1. Confirmed cause\n\nAt the base commit `scan_tree` in `crates/bifrost-analysis/src/analyzer/python/default_arguments.rs` resolves a write's receiver with `function_for_receiver`. A receiver that is not a uniquely bound `def` returned `None`, and `mark(safety, None, kind)` called `mark_workspace_open(kind)`. `setattr(obj, name, value)` has no literal name, so it opens both kinds. `default_is_available` then returns false for every callee, and the oracle at `workspace_oracle/value_flow.rs:6799` sets `build.open = true; continue`.\n\nIn django-guardian, `override = UserSettingsHolder(settings._wrapped)` is a local bound by assignment, so it is never a unique function. I confirmed this at the base commit with a Django-shaped golden: the one `setattr` in a `conf.py` helper removes all 10 probe findings. With `conf.py` removed, all 10 report.\n\n## 2. Changes and reasons\n\nThree commits on the detached base:\n\n- `c99a6093ad87385d7fc74331f2347362148a78b3`: the fix.\n- `b6c9f8d6b92ce687f8438444e1d3d30c7f76a283`: corrections found by running on real repositories.\n- `6640fe5e61e4ff132e9245c0b84ab09d30648c5b`: a test pinning the evidence bound.\n\nWhat the fix does:\n\n- **Per-kind flag instead of a workspace flag.** `languages.rs` gains `SavedDefaultEscapes` and a per-kind unproven-receiver flag. `default_is_available` is false only if the callee is open, or the flag is set and the callee escapes.\n- **What counts as a read.** Any evaluation of a name or static attribute chain except a direct callee, decorator head, import binding, binding target, parameter name, keyword name or attribute member. Unknown positions count as reads.\n- **Name resolution.** It uses a cached lexical inventory per function. Parameters, locals, loop, comprehension and lambda variables that share a function's name do not escape it. Aliases, `global`/`nonlocal` names and redefinitions escape every candidate.\n- **Decorated functions** escape where they are defined. `locals()`, `vars()`, `eval()` and `exec()` escape the observed local functions, and `globals()` escapes the module.\n- **Cross-file reads** stay symbolic during the per-file scan. They are resolved against the import graph only when some write is unproven, so workspaces without one pay nothing.\n- **Escaped module objects.** A module object read as a value escapes every function it defines, the names its imports bind, and its submodules if it is a package. Re-exports and star imports are covered.\n- **Module acquisition by name.** A plain absolute literal given to `__import__` or `import_module` escapes only that module. A computed name, `sys.modules` or `__main__` escapes every module. Frame access (`_getframe`, `f_locals`, `f_back`) escapes everything.\n- **Conservative defaults.** Methods, constructors, lambdas and any callable the locator cannot place stay escaped. Past the entry or deferre\n[... 5559 bytes omitted from the middle of this message ...]\n`. One wait lasted 57 minutes and another I cancelled at 21 minutes. The lock changed hands at 20:42, 21:02, 21:09 and 21:50 UTC, and other sessions' leases were active. I did not bypass the shim or touch any cache setting. `mbx` also ran its own GC during my session.\n\n## 6. Draft approach comment\n\nThe saved-default scan treated a write through any receiver it could not resolve to one function as a write that might hit every function, so one dynamic `setattr` in a test helper made every omitted default in the project unknown. I narrowed that using a fact about Python: a function object can only reach an arbitrary receiver after some code reads it as a value, which means anywhere other than as a direct call's callee or an import binding. The scan now records which functions are read that way. It resolves names through the lexical scope inventory, so parameters, locals, and comprehension or lambda variables that share a function's name do not count. A function read through its imported name, a module attribute or a wildcard import escapes in the module that defines it, and a module object read as a value escapes everything it defines, imports and, for a package, its submodules. An unproven write now sets a per-kind flag that opens only the escaped functions, while methods, lambdas and anything the locator cannot place stay escaped. An incomplete or over-bound scan, a computed `import_module`, `sys.modules` use or frame inspection still opens everything, and the cross-file work only runs when some write in the workspace is unproven. On django-guardian the one construct at `guardian/testapp/tests/conf.py:76` no longer opens the workspace: 10 of the 14 module-level functions with defaults become available again, 4 stay open because the tests pass them to `assertRaises`, and the 27 methods stay open. A Django-shaped golden with the same helper reports nothing at the base commit and reports the four expected findings with the fix. Methods are the main thing left and need a model of class objects before they can narrow."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "er. The receiver is `UserSettingsHolder(settings._wrapped)` from `django.conf`. Without a Django pack the analyzer cannot prove that value is not a function object, so every omitted default argument in the project becomes unknown. Call bindings, class flow and taint all lose the default. Dynamic `setattr` in test helpers and settings code is common in Django projects.\n\nA sound narrowing: a write through an unknown receiver can only change the defaults of a function whose object can reach that receiver. A function whose object never escapes cannot be the receiver. Escaping means being read as a value anywhere other than as a direct call's callee or an import binding, or living in a module whose module object escapes (the #4622 cross-file module scanner already tracks module escapes). Unknown-receiver writes would then open only escaped functions' defaults.\n\nMeasured impact: in django-guardian, this blocks 6 false positives that #4620 targets.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
+    "assistant_text_tail": "`. One wait lasted 57 minutes and another I cancelled at 21 minutes. The lock changed hands at 20:42, 21:02, 21:09 and 21:50 UTC, and other sessions' leases were active. I did not bypass the shim or touch any cache setting. `mbx` also ran its own GC during my session.\n\n## 6. Draft approach comment\n\nThe saved-default scan treated a write through any receiver it could not resolve to one function as a write that might hit every function, so one dynamic `setattr` in a test helper made every omitted default in the project unknown. I narrowed that using a fact about Python: a function object can only reach an arbitrary receiver after some code reads it as a value, which means anywhere other than as a direct call's callee or an import binding. The scan now records which functions are read that way. It resolves names through the lexical scope inventory, so parameters, locals, and comprehension or lambda variables that share a function's name do not count. A function read through its imported name, a module attribute or a wildcard import escapes in the module that defines it, and a module object read as a value escapes everything it defines, imports and, for a package, its submodules. An unproven write now sets a per-kind flag that opens only the escaped functions, while methods, lambdas and anything the locator cannot place stay escaped. An incomplete or over-bound scan, a computed `import_module`, `sys.modules` use or frame inspection still opens everything, and the cross-file work only runs when some write in the workspace is unproven. On django-guardian the one construct at `guardian/testapp/tests/conf.py:76` no longer opens the workspace: 10 of the 14 module-level functions with defaults become available again, 4 stay open because the tests pass them to `assertRaises`, and the 27 methods stay open. A Django-shaped golden with the same helper reports nothing at the base commit and reports the four expected findings with the fix. Methods are the main thing left and need a model of class objects before they can narrow.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "Eval final report with the fix committed and validated. The 'still opens' phrases describe analyzer behaviour; the limitations list and the mbx build-queue note are informational and ask nothing. The operator ruling that follows concerns the scheduler incident and is not a response to an open request here.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-16T00:34:58.490Z",
+        "kind": "user",
+        "text": "Message from the user:   > Operator ruling: this was a confirmed shared mbx scheduler incident (undersized global budget plus starvation), not a ticket defect. Fixed mbx 6ff583a was deployed at 23:26 "
+      },
+      {
+        "at": "2026-10-16T00:35:05.976Z",
+        "kind": "agent",
+        "text": "Understood. I'll first check my current state, then use the repaired scheduler to close the two gaps I reported: the `--features python` policy gate, which I hadn't run, and a measured base scan on dj"
+      },
+      {
+        "at": "2026-10-16T00:44:45.483Z",
+        "kind": "agent",
+        "text": "The build went through quickly this time and 1,846 tests are running."
+      },
+      {
+        "at": "2026-10-16T00:52:11.940Z",
+        "kind": "agent",
+        "text": "1,845 of 1,846 pass. The one failure is a Go typestate latency test, unrelated to Python. It passed in my earlier full policy-suite run, so I'll read its message and rerun it alone."
+      },
+      {
+        "at": "2026-10-16T01:04:09.233Z",
+        "kind": "agent",
+        "text": "Status: the tree is back at my final HEAD. Now the measured base scan on django-guardian. I'll temporarily apply a tiny read-only probe to the base sources, run it, and restore."
+      },
+      {
+        "at": "2026-10-16T01:17:15.302Z",
+        "kind": "agent",
+        "text": "Measured at the base sources: django-guardian's scan publishes `workspace_open=true` for both kinds, which is the \"before\" state I had inferred. Restoring my files."
+      }
+    ]
+  }
+}

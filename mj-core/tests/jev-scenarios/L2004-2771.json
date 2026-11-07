@@ -1,0 +1,451 @@
+{
+  "id": "L2004",
+  "title": "2771",
+  "category": "still-open-user-question",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "0bf0983d553751026807d97d54857ede",
+    "session_title": "bifrost2 via claude",
+    "reply_position": 15035,
+    "captured_at": "2026-10-02T20:44:19.572Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "/goal land java + go using parallel worktrees + Luna\nsubagents as appropriate, following the handoff in 49586c3b"
+        },
+        {
+          "id": "user:124",
+          "role": "user",
+          "text": "1. i'd like to push to origin/master as you land coherent pieces of work, is that possible without breaking everyone else? if not we should wait until we're ready for a full cutover\n\n2. as with the original 2771 land to master, i don't care about migrating older dbs, we can have a flag day for the new schema if that simplifies things materially"
+        },
+        {
+          "id": "user:6546",
+          "role": "user",
+          "text": "how is your progress since i last asked?"
+        },
+        {
+          "id": "user:6774",
+          "role": "user",
+          "text": "> an explicit link from Java to Kotlin and Scala\n│ declaration rows would cover\n\nwhat's the downside?\n\n> mbx build cache\n\nyeah, sorry about that, i've installed a hotfix"
+        },
+        {
+          "id": "user:7063",
+          "role": "user",
+          "text": "what is your max subagents count? could you usefully work on kotlin and scala as well? the \"link\" hack sounds pretty gnarly and \"we can't delete legacy Java\" is a massive downside"
+        },
+        {
+          "id": "user:7305",
+          "role": "user",
+          "text": "is #3789 in scope here or a followup?"
+        },
+        {
+          "id": "user:7610",
+          "role": "user",
+          "text": "i'll need to restart this session to pick up the increased subagents limit. lmk when you get to a good point to do tha"
+        },
+        {
+          "id": "user:7796",
+          "role": "user",
+          "text": "back. subagent cap should be 16 now"
+        },
+        {
+          "id": "user:8814",
+          "role": "user",
+          "text": "MBX is using hardlinks so it should be quite space efficient. Is there stuff that looks like temporary crap from other agents as well?"
+        },
+        {
+          "id": "user:9038",
+          "role": "user",
+          "text": "pls get your subagents to a good stopping point, i need to move this to a new session"
+        },
+        {
+          "id": "user:9449",
+          "role": "user",
+          "text": "/goal land java + go using parallel worktrees + Luna\nsubagents as appropriate"
+        },
+        {
+          "id": "user:9456",
+          "role": "user",
+          "text": "(we're in the new session now)"
+        },
+        {
+          "id": "user:9476",
+          "role": "user",
+          "text": "oh, and go ahead and make progress on kotlin + scala since that affects java"
+        },
+        {
+          "id": "user:9621",
+          "role": "user",
+          "text": "if you need temp space use /tmp instead of optane"
+        },
+        {
+          "id": "user:9741",
+          "role": "user",
+          "text": "you can have up to 16 subagents and this is the most important project on the host so don't be shy about scaling out\n\nespecially important to land go asap, when in doubt, prioritize go"
+        },
+        {
+          "id": "user:10095",
+          "role": "user",
+          "text": "chill, mbx will start evicting if necessary when we hit 40GB, it's fine"
+        },
+        {
+          "id": "user:10244",
+          "role": "user",
+          "text": "file a bug report in mj on behalf of mbx (mbx issues are closed)"
+        },
+        {
+          "id": "user:11065",
+          "role": "user",
+          "text": "i've freed 1TB on /mnt/optane, unleash the agents"
+        },
+        {
+          "id": "user:12050",
+          "role": "user",
+          "text": "100+GB free now on optane"
+        },
+        {
+          "id": "user:12308",
+          "role": "user",
+          "text": "i'm about to reformat /mnt/optane, move anything you care about to /tmp"
+        },
+        {
+          "id": "agent:12394",
+          "role": "assistant",
+          "text": "Git objects live under /home, so committed work is safe. I'll pin each worktree's HEAD with a `refs/rescue/` ref, which is not a branch, and copy each uncommitted diff and untracked file to /tmp."
+        },
+        {
+          "id": "agent:12416",
+          "role": "assistant",
+          "text": "All 16 worktrees are saved, and seven had uncommitted work. Next I'll check the size of the lane receipts, which hold the frozen Go baseline. The JVM selection lane's stash is also pinned below."
+        },
+        {
+          "id": "agent:12445",
+          "role": "assistant",
+          "text": "The lane receipts are copied. I'll write a restore note into the rescue directory and check for processes still running on /mnt/optane that would block unmounting."
+        },
+        {
+          "id": "agent:12516",
+          "role": "assistant",
+          "text": "All twelve lanes are closed. A lane could have written something between my snapshot and the close, so I'll take the snapshot again and confirm nothing of mine still runs on /mnt/optane."
+        },
+        {
+          "id": "agent:12537",
+          "role": "assistant",
+          "text": "The snapshot is unchanged. Two mbx compile processes still run from /mnt/optane, so I'll check whose they are before saying anything about them."
+        },
+        {
+          "id": "agent:12593",
+          "role": "assistant",
+          "text": "Everything I need from /mnt/optane is saved, and all my lanes are stopped, so you can reformat. Two builds that aren't mine still use it, though.\n\n**Still running on /mnt/optane.** Two short-lived mbx compile processes are using the mbx shim there. One runs in the main bifrost2 checkout and one in bifrost3. My twelve lanes are all closed, so these come from another session. I left them alone, but they will hold the mount open until they stop.\n\n**What I saved:**\n- **Commits.** Git objects live under /home, so committed work survives. Each of the 16 worktree HEADs is pinned as a `refs/rescue/<worktree>` ref in the shared repo, so nothing becomes unreachable when the worktrees disappear.\n- **Uncommitted work.** Seven lanes had uncommitted changes: Go diff, Go flip, Go performance, Go semantics A, Java semantics, JVM selection and Kotlin. Their diffs and one untracked file are in /tmp/optane-rescue, one directory per worktree.\n- **Lane receipts.** The 5.9 GB of lane receipts, including the frozen Go baseline for the reference differential, are copied to /tmp/optane-rescue/lane-receipts.\n- **Restore steps.** /tmp/optane-rescue/README.md explains how to restore. The rollout handoff document also records the rescue, committed on 2771 as d76ba779f.\n\n**Where the rollout stands.** Nothing new is pushed to origin/master yet.\n- The integration branch 2771 has the fixes from every lane merged locally.\n- The push-seven candidate is pinned as `refs/rescue/bifrost-native-gate`. It leaves out Kotlin and passed formatting and both Clippy modes. Its full test run was cut off by the shutdown, so it must be gated again before pushing.\n- Kotlin combined with the other lanes still panics in several per-push tests. The Kotlin lane's unfinished fix is in its saved patch.\n- The mbx cache goes with the reformat, so the first builds afterwards will start from scratch."
+        },
+        {
+          "id": "user:12718",
+          "role": "user",
+          "text": "pls rm any of the wt that you don't need"
+        },
+        {
+          "id": "agent:12720",
+          "role": "assistant",
+          "text": "You asked me to remove worktrees I don't need. All 16 rollout worktrees on /mnt/optane are saved, and I'll recreate any I need from `refs/rescue`, so I'll remove all of them. They're the only worktrees that sessions in this conversation created."
+        },
+        {
+          "id": "agent:12751",
+          "role": "assistant",
+          "text": "I removed all 16 worktrees on /mnt/optane and pruned git's worktree records, so git lists none there now. Their commits are still pinned by the 17 `refs/rescue` refs, and their uncommitted changes are in /tmp/optane-rescue.\n\nThree `bifrost-*` directories remain on /mnt/optane. None of them is a git worktree:\n\n- **bifrost-3828** belongs to other work, issue #3828. I left it.\n- **bifrost-3834-materialize-after-cache** belongs to other work, issue #3834. I left it.\n- **bifrost-sg-h-corpus-wgpu-48904f8e** is probably a corpus checkout from earlier stack-graph sessions. I can't confirm that I made it, so I left it too."
+        },
+        {
+          "id": "user:12820",
+          "role": "user",
+          "text": "we're back. unleash the agents!"
+        },
+        {
+          "id": "agent:12823",
+          "role": "assistant",
+          "text": "You're back, so I'll restart the rollout lanes. First I'll check the reformatted disk, the mbx settings and the git state."
+        },
+        {
+          "id": "agent:12862",
+          "role": "assistant",
+          "text": "All eleven worktrees are back with their uncommitted work. Before writing the briefs, I'll check what each lane has committed that 2771 doesn't have yet."
+        },
+        {
+          "id": "agent:12905",
+          "role": "assistant",
+          "text": "I'm spawning the push gate first, then the other ten lanes."
+        },
+        {
+          "id": "agent:12947",
+          "role": "assistant",
+          "text": "All eleven lanes are running. I'll record their IDs in the handoff so a later session can find them."
+        },
+        {
+          "id": "agent:12965",
+          "role": "assistant",
+          "text": "All eleven lanes are progressing, and the disk is healthy at about 77 GB used. I'll keep waiting."
+        },
+        {
+          "id": "user:12980",
+          "role": "user",
+          "text": "sorry, it looks like btrfs is slow as fuck, going to repave\nit once more with zfs. move anything off optane that you\nwant to keep and then pause please"
+        },
+        {
+          "id": "agent:12984",
+          "role": "assistant",
+          "text": "The disk is getting reformatted again, so I'll repeat the rescue: stop the lanes, save every worktree's state to /tmp, then pause."
+        },
+        {
+          "id": "agent:13031",
+          "role": "assistant",
+          "text": "Every lane is closed. Next I'll save each worktree's HEAD, uncommitted diff and untracked files to a second rescue directory, so the first one stays intact."
+        },
+        {
+          "id": "agent:13045",
+          "role": "assistant",
+          "text": "All eleven worktrees are saved. Fifty-three processes still reference /mnt/optane, so I'll check whether any of them run in my worktrees."
+        },
+        {
+          "id": "agent:13085",
+          "role": "assistant",
+          "text": "No lane processes remain on /mnt/optane. Last time you asked me to remove the worktrees after saving, so I'll do that again. Everything is recoverable from the rescue refs and patches."
+        },
+        {
+          "id": "agent:13104",
+          "role": "assistant",
+          "text": "Last, I'll write the restore notes and point the handoff and memory at the new rescue."
+        },
+        {
+          "id": "agent:13116",
+          "role": "assistant",
+          "text": "Everything of mine is off /mnt/optane, and the lanes are paused, so you can repave with ZFS.\n\n- **Lanes:** All eleven are closed. I also stopped the detached build and test processes they had left running in their own worktrees, and nothing of mine runs on /mnt/optane now.\n- **Commits:** All eleven lane worktrees are removed. Their commits are pinned by the `refs/rescue/` refs, which now point at each lane's latest HEAD. Git objects live under /home, so the repave won't touch them.\n- **Uncommitted work:** Seven lanes had some: Kotlin, Go semantics A, Java semantics, JVM selection, the Go heap-identity lane, Java calls and Go semantics B. It is saved in /tmp/optane-rescue-2, which also has a README listing each lane's HEAD and the state it stopped in.\n- **Go baseline:** The receipts and frozen Go baseline are still in /tmp/optane-rescue from the first rescue.\n- **Push seven:** The candidate had merged the newer origin/master and passed formatting. Its workspace Clippy run was cut off, so the full gate still has to run. Nothing has been pushed.\n\nThe rollout handoff on 2771 records all of this, committed as 771cc1737. When the disk is ready, I'll recreate the worktrees from the rescue refs and restart the lanes with the same scopes.\n\nTwo other sessions still use /mnt/optane: `bifrost-3828-panic-smoke-tract-20261002a` and builds from bf-3828, bf-4281 and bifrost3. They aren't mine, and they may hold the mount open."
+        },
+        {
+          "id": "user:13247",
+          "role": "user",
+          "text": "zfs is live, launch all zig"
+        },
+        {
+          "id": "agent:13250",
+          "role": "assistant",
+          "text": "ZFS is live, so I'll relaunch every lane. First, a quick check of the new disk and the mbx settings."
+        },
+        {
+          "id": "agent:13272",
+          "role": "assistant",
+          "text": "All eleven worktrees are back on ZFS with their saved changes. I'm relaunching the lanes with the same scopes. Each brief points at both predecessors' report directories."
+        },
+        {
+          "id": "user:13332",
+          "role": "user",
+          "text": "btw you mentioned java kotlin scala but not go, does that mean go is done?"
+        },
+        {
+          "id": "agent:13336",
+          "role": "assistant",
+          "text": "No, Go isn't done. Go has the most lanes running, and nothing new has reached origin/master yet. The \"Java, Kotlin and Scala together\" wording only refers to your decision that those three flip as a unit. Go flips on its own and is still the priority.\n\nThe Go production flip is written, but it isn't merged, because too much still fails with it switched on:\n\n- **Speed is the biggest blocker.** Native usages, call relations, rename and graph queries ran 100 to 300 times slower than the incumbent in the differential, and some real calls came back unproven. Three RQL tests time out. The Go performance lane owns this.\n- **Semantic gaps remain.** Under the flip, about 65 call and effect failures remain, about half of them RQL tests and half Go library-model policy tests. There are also about 15 package and import failures and about 9 receiver and dispatch failures. Three lanes split these: Go semantics A, Go semantics B, and Go heap identity.\n- **Owner review needed.** Four tests pin incumbent-only behavior. Native Go also reports plain receiver-field lookups such as `s.ID` as incomplete where the incumbent says resolved. The flip lane is writing these up for you.\n\nSeparately, push seven is a batch of branch fixes and test-support Go and JVM code. It changes no production routing, and its per-push gate is running now. The Go flip itself would be a later push, once the failures above are near zero and the incumbent Go resolver paths can be removed."
+        },
+        {
+          "id": "user:13451",
+          "role": "user",
+          "text": "luna isn't smart enough to own performance on something this complicated unless you're consulting very closely"
+        },
+        {
+          "id": "agent:13453",
+          "role": "assistant",
+          "text": "Agreed. I'll take over diagnosis and design for Go performance myself. The Go performance lane becomes a measurement assistant: it runs the profiles and timings I ask for, reports raw data, and makes no design changes without my sign-off."
+        },
+        {
+          "id": "agent:13471",
+          "role": "assistant",
+          "text": "While the profile runs, I'll read the native Go reverse path myself, so I can interpret the data when it arrives."
+        },
+        {
+          "id": "user:13548",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "agent:13563",
+          "role": "assistant",
+          "text": "The profile is in. There are only 25 candidates, yet the query took 45 seconds, and SQLite accounts for only about 5 of them. The time is CPU in Rust, so I'll read the frame tables."
+        },
+        {
+          "id": "user:13838",
+          "role": "user",
+          "text": "it's been ~an hour, are you still gathering timings? seems excessive"
+        },
+        {
+          "id": "agent:13842",
+          "role": "assistant",
+          "text": "I'll check where the measurement stands before answering."
+        },
+        {
+          "id": "agent:14126",
+          "role": "assistant",
+          "text": "Java implements the same demand provider too, so Go is the only language still on the eager path. I'm reading the trait and the Java implementation, the smaller precedent, to write the Go spec."
+        },
+        {
+          "id": "agent:14147",
+          "role": "assistant",
+          "text": "The design is settled, so the in-flight measurement isn't needed anymore. I'll stop it and give the same lane an implementation brief, which I'll review closely."
+        },
+        {
+          "id": "agent:14172",
+          "role": "assistant",
+          "text": "I stopped gathering timings, and I agree it was taking too long. Each measurement round needed an instrumented release build, and with ten other lanes compiling that took most of an hour per round. The data I already had was enough to find the cause by reading the code, and the fix is now being built.\n\n**Cause:** Building the Go import context resolves the prefix of every qualified reference in the whole file, every `x` in an `x.y`, before the query can confirm anything. That context is built for each candidate file. In ttlcache's cache_test.go that means about 860 engine resolutions at roughly 35 ms each, just to confirm six `New` sites. For each reference it also re-scans the imported package's full export list. This one step took 30 of the 39 seconds; actual reference resolution took under 0.2 seconds.\n\n**Why Go alone:** Rust and Java hit the same problem earlier and moved to a demand-driven provider that answers one prefix only when the engine needs it. Their eager version survives only as a test oracle. Go was never ported.\n\n**Fix:** Port Go qualified-import prefixes to that demand provider, modeled on the Java one, and index each package's exports once per query. The eager version stays as a test oracle, with a differential test against it. Rust and Java behavior must not change.\n\n**Oversight:** The Go performance lane implements it, but it must send me a design note before writing the bulk of the code. I'll review that note and the final diff myself.\n\nTwo smaller findings can wait until after the port shrinks the work:\n\n- About 20 percent of CPU is clock reads, because every cancellation check reads the clock when a deadline is set.\n- Path selection compares paths pairwise, which is quadratic in the number of paths."
+        },
+        {
+          "id": "user:14312",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "agent:14502",
+          "role": "assistant",
+          "text": "The lane's turn ended again, and its output still shows the old message. I'll look for a design note file in its report directory."
+        },
+        {
+          "id": "agent:14545",
+          "role": "assistant",
+          "text": "The new lane ended its turn after 23 seconds without doing the work. It landed on a different login profile than the other lanes, which may be the cause. I'll prompt it once to do the work now."
+        },
+        {
+          "id": "agent:14606",
+          "role": "assistant",
+          "text": "The Go demand provider is implemented and committed for review as 0b496e311. I'll review the diff myself before any tests run."
+        },
+        {
+          "id": "user:14667",
+          "role": "user",
+          "text": "The fact that Go is the third engine to hit this suggests to me that we need to refactor and DRY this functionality so that we're not doing it one language at a time going forward. Is that reasonable, or am I drawing conclusions based on incomplete information?"
+        },
+        {
+          "id": "agent:14671",
+          "role": "assistant",
+          "text": "Your conclusion is reasonable. Here is what I've confirmed and what I'm still inferring, from a quick comparison of the three providers."
+        },
+        {
+          "id": "agent:14688",
+          "role": "assistant",
+          "text": "Mostly yes. The evidence supports refactoring, with one caveat about scope.\n\n**Confirmed:**\n- **Same failure three times.** The default way to build a language's context was an eager whole-file prefix pass. Rust and Java each shipped that first and later replaced it with a demand provider, and Go repeated the pattern.\n- **Go and JVM share a skeleton.** Both providers have the same parts: a `source_demand` classifier, `discover`, `close`, discharge bookkeeping, a `with_<lang>_forward_operation` wrapper, `register_context`, and per-file context preparation. Most of it is copied boilerplate.\n- **Shared machinery already exists but is misplaced.** The demand plumbing (`ClosedRelations`, `ClosedForwardSource`) lives in `rust_demand::relations`, yet the JVM and Go providers both import it.\n\n**Caveat:** Rust's provider is not a copy of the same skeleton. It adds reverse dependencies and crate topologies that Go and JVM lack. A single generic provider would have to cover Rust's extra protocol, or Rust stays a special case of the abstraction. I haven't read Rust's provider closely enough to say which; that's unknown.\n\n**Recommendation:** Factor out what the three share, rather than forcing one implementation.\n\n1. **Move the shared machinery.** Put the demand plumbing in a language-neutral `demand` module.\n2. **Write one generic provider.** It would own discovery, pending and discharge state, the export index, context registration and the forward-operation wrapper. Each language would supply a small trait with two parts: which root halves carry a prefix question, and how a prefix answer becomes bridges. For Go that's import definition to package exports, for JVM it's package and type evidence, for Rust it's type prefixes.\n3. **Close the eager door.** Make the eager prefix compilers test-only oracles everywhere. The generic provider becomes the only production path for prefixed bridges, so the next language can't ship an eager pass by default.\n\n**Sequencing:** The Go demand provider is already written and in validation. I'd land it first, because Go is the priority and it gives a third concrete instance to design against. Then I'd do the refactor before any other language starts native rollout. Kotlin and Scala already run through the JVM provider, so the refactor doesn't block them."
+        },
+        {
+          "id": "user:14860",
+          "role": "user",
+          "text": "sgtm"
+        },
+        {
+          "id": "agent:14862",
+          "role": "assistant",
+          "text": "The plan is approved. I'll record the decision in the handoff, then keep collecting lane results."
+        },
+        {
+          "id": "agent:15012",
+          "role": "assistant",
+          "text": "Go flip's consumer-contract fix, 1a472635e, is mergeable. Its base is older than 2771, so I'll check that it merges cleanly before I bring you the review items."
+        },
+        {
+          "id": "agent:15035",
+          "role": "assistant",
+          "text": "Go flip's consumer-contract fix is merged into 2771 as fb9c8e504. Lanes keep running.\n\nThe Go flip turned up five tests where native and incumbent Go disagree. Changing a test that pins incumbent behavior needs your sign-off, so here are my recommendations.\n\n1. **Sibling-module package lookup** (`definition_lookup_resolves_sibling_module_package_clause_without_workspace_hydration`). Native returns the same correct definition and does no full hydration. The test also requires exactly one build of an incumbent path index, which native never builds. I'd remove only that count assertion and keep the semantic ones.\n2. **Method expressions versus conversions** (`native_outgoing_projects_workspace_calls_and_omits_conversions`). Native reports `model.Widget.Method(w)` as a call and leaves out the conversion `model.Widget(w)`. The incumbent does the reverse, and native is correct Go. I'd update the expectation to native's answer.\n3. **Fallback call count** (`ambiguous_edges_sharing_a_file_batch_one_resolve_definition_batch_with_source_call`). The test counts calls to an incumbent fallback function and never checks the graph it produces. I'd drop the count and assert the graph output instead.\n4. **Rename under incomplete reverse evidence** (`selected_go_native_rename_refuses_incomplete_qualified_multifile_inventory`). Native refuses the rename because reverse evidence is incomplete, while the incumbent produces four edits. Refusing is correct while evidence is incomplete. I'd leave the test expecting four edits and treat it as a blocker for the performance and completeness fix in progress, not weaken it.\n5. **Receiver fields reported incomplete** (`go_shallower_promoted_field_keeps_exact_target_and_incomplete_frontier`). Native finds the exact field `A.ID` but reports it incomplete, because the package placement frontier is open; the incumbent says resolved. Being incomplete is only justified when the package's file inventory is incomplete. For a promoted field, a method of the same name on the outer type could sit in an unplaced file, for example one excluded by build tags, and shadow it. If every file of the package is placed, the answer should be resolved. I'd have Go semantics B close the frontier when the package inventory is complete and keep it open only when files are unplaced.\n\nDo you agree with all five, or want to change any?"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "sgtm",
+    "assistant_text_tail": "lves_sibling_module_package_clause_without_workspace_hydration`). Native returns the same correct definition and does no full hydration. The test also requires exactly one build of an incumbent path index, which native never builds. I'd remove only that count assertion and keep the semantic ones.\n2. **Method expressions versus conversions** (`native_outgoing_projects_workspace_calls_and_omits_conversions`). Native reports `model.Widget.Method(w)` as a call and leaves out the conversion `model.Widget(w)`. The incumbent does the reverse, and native is correct Go. I'd update the expectation to native's answer.\n3. **Fallback call count** (`ambiguous_edges_sharing_a_file_batch_one_resolve_definition_batch_with_source_call`). The test counts calls to an incumbent fallback function and never checks the graph it produces. I'd drop the count and assert the graph output instead.\n4. **Rename under incomplete reverse evidence** (`selected_go_native_rename_refuses_incomplete_qualified_multifile_inventory`). Native refuses the rename because reverse evidence is incomplete, while the incumbent produces four edits. Refusing is correct while evidence is incomplete. I'd leave the test expecting four edits and treat it as a blocker for the performance and completeness fix in progress, not weaken it.\n5. **Receiver fields reported incomplete** (`go_shallower_promoted_field_keeps_exact_target_and_incomplete_frontier`). Native finds the exact field `A.ID` but reports it incomplete, because the package placement frontier is open; the incumbent says resolved. Being incomplete is only justified when the package's file inventory is incomplete. For a promoted field, a method of the same name on the outer type could sit in an unplaced file, for example one excluded by build tags, and shadow it. If every file of the package is placed, the answer should be resolved. I'd have Go semantics B close the frontier when the package inventory is complete and keep it open only when files are unplaced.\n\nDo you agree with all five, or want to change any?",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      15035
+    ],
+    "user_position": 14860,
+    "input_rationale": "Five Go test disagreements with recommendations; the agent will not change the pinned tests without the user's sign-off.",
+    "label": "required_final",
+    "triggers": [
+      "needs you"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-02T20:44:26.751Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-02T21:32:08.668Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-02T21:48:16.468Z",
+        "kind": "system",
+        "text": "Subagent \"go-heap-identity\" (14440a6b) finished turn 26 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-02T22:12:53.449Z",
+        "kind": "system",
+        "text": "Subagent \"push-gate\" (63703dca) finished turn 13669 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-02T22:16:07.633Z",
+        "kind": "system",
+        "text": "Subagent \"go-sem-b\" (b053ed30) finished turn 14750 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-02T22:42:37.710Z",
+        "kind": "system",
+        "text": "Subagent \"kotlin\" (1740f1e6) finished turn 5164 (completed, end of turn)."
+      }
+    ]
+  }
+}

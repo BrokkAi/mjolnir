@@ -1,0 +1,230 @@
+{
+  "id": "L3008",
+  "title": "mjolnir via claude3",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "f159941bd0d3f33153b3b4c22b05e718",
+    "session_title": "mjolnir via claude3",
+    "reply_position": 3925,
+    "captured_at": "2026-11-06T19:36:33.053Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "why did Move of d8443f17cb24506c5ee26277fcf319f4 fail"
+        },
+        {
+          "id": "user:544",
+          "role": "user",
+          "text": "1. retry Move for me pls\n2. fix as you propose\n3. diagnose slow ssh\n\nin that order"
+        },
+        {
+          "id": "user:619",
+          "role": "user",
+          "text": "oh and read AGENTS.md after (1)"
+        },
+        {
+          "id": "user:1179",
+          "role": "user",
+          "text": "so we're doing connection-per-mj-node? doesn't ssh have a concept of multiple commands per connection, or sessions per connection, something like that?"
+        },
+        {
+          "id": "user:1466",
+          "role": "user",
+          "text": "ugh this is a fucking mess\n\nwhy should we have more than one connection, instead of increasing channels per connection? aren't they ~isomorphic from a load perspective?\n\nwe could have mj doctor check for a large channels configuration per target (i know we've set morannon to 100, not sure about precision)"
+        },
+        {
+          "id": "user:1820",
+          "role": "user",
+          "text": "> The admission limit of 6 caps commands no matter how many channels or connections exist\n\nyes, i've noticed that you/past-you love adding \"protective\" caps that cause more problems than they solve\n\nso i guess\n\n0. read all of AGENTS.md and add a genearl injunction against this \n\nthen\n\n1. remove the fucking 6 cap\n\nand\n\n2. figure out how to deal with this in a principled way -- when do we add a channel to an existing connection vs when do we create a new connection\n\nin the past i've tried keeping a \"slow\" and a \"fast\" connection but things go sideways fast when a \"fast\" op depends on a \"slow\" one by mistake\n\n> For large uploads (checkpoint archives are 100+ MB), one busy master slows every other channel on it."
+        },
+        {
+          "id": "user:2600",
+          "role": "user",
+          "text": "item 2 direction accepted"
+        },
+        {
+          "id": "agent:2602",
+          "role": "assistant",
+          "text": "Direction accepted. I'll hand item 2 to a subtle child. It builds on the item 1 edits in the working tree, which are uncommitted until their checks finish, and takes ownership of the SSH files from here on."
+        },
+        {
+          "id": "agent:2653",
+          "role": "assistant",
+          "text": "Item 2 has started, and item 1 is committed locally as `334656d57`, removing the limit of 6 SSH commands per host. Nothing is pushed yet.\n\n- **Item 2 (learning connection capacity):** a child is implementing it now. When sshd refuses a session on a connection, mj records that connection's capacity, retries the command on the next connection, and forgets the value when that connection is reopened. `MJ_SSH_SESSIONS_PER_CONNECTION` and its default of 8 go away. It covers the paths that cannot retry, confirms the exact OpenSSH refusal message, and updates the docs and the existing connection-sharing design plan. If `mj doctor` already has a way to get data from the daemon, it will also report what mj learned for each host. If that would need new plumbing, it will tell me what it would take instead.\n- **Item 1:** I committed it before item 2 started, so the two changes stay separate commits. The diff is the one I reviewed, and its `targets` tests passed. The `worker_client` and `node` tests and the mj-core lint check are still running. If any of them fail, I'll fix them in a follow-up commit.\n- **Connection-wait fix:** the child is still fixing the two review findings. Then I'll commit the fix and request review again for everything before pushing.\n\nI closed the two children that had finished their work. The Move retry is still blocked until these fixes are installed, and I'll ask before installing."
+        },
+        {
+          "id": "agent:2834",
+          "role": "assistant",
+          "text": "It compiles with no warnings. Before committing, I'll confirm the `connect.rs` diff contains only my edits."
+        },
+        {
+          "id": "agent:2858",
+          "role": "assistant",
+          "text": "Now I'll review the readiness follow-up and run its tests."
+        },
+        {
+          "id": "agent:2922",
+          "role": "assistant",
+          "text": "No precedent in the repo, so I'll use a plain `#[allow]` with a comment above it explaining why."
+        },
+        {
+          "id": "agent:2943",
+          "role": "assistant",
+          "text": "Lint check and formatting are clean, and all 35 readiness tests pass. Committing the review fixes:"
+        },
+        {
+          "id": "agent:2993",
+          "role": "assistant",
+          "text": "All five commits are done locally, and a second pre-push review is running on them. Nothing is pushed yet.\n\n| Commit | What it does |\n|---|---|\n| `ee2e05027` | Connection-wait fix for the Move failure |\n| `9b9d12225` | AGENTS.md rule against speculative caps |\n| `334656d57` | Removes the limit of 6 SSH commands per host (item 1) |\n| `d544f1192` | Follow-up: `334656d57` left one call passing the removed argument, so mj-controller did not compile; this fixes it |\n| `a7ccb75f3` | Fixes for both earlier review findings |\n\nThe fixes for the review findings (`a7ccb75f3`):\n- Each connection attempt now runs in its own task, so a slow worker check cannot stall it.\n- If an attempt finishes while a check is running, the wait uses that connection instead of giving up.\n- The first check waits for the first attempt or 3 seconds, as before `ee2e05027`. The reviewers were right: a replacement worker clears the old worker's records only after it claims its root (`mj-worker/src/main.rs:400-406`, `root_owner.rs:94-104`). So the immediate check could have aborted worker restarts and upgrades.\n- Validation: all 35 readiness tests pass, including two new ones for these findings, and the mj-controller lint check and formatting are clean.\n\nThe review gate refuses to run while the working tree has uncommitted changes, and the item 2 child's edits are in it. So the review runs on a detached copy of the same commit at `.mj/review-wt`; it creates no branch, and the copy is ignored by git. I'll remove it after pushing.\n\nItem 2 (learning connection capacity from sshd refusals) is still with its child. It will get its own commit and review.\n\nRetrying the Move is still blocked until these fixes are installed, and I won't install without your go-ahead."
+        },
+        {
+          "id": "agent:3110",
+          "role": "assistant",
+          "text": "Both findings hold up, in my judgment.\n\n1. **A hung attempt is never replaced.** A real way this happens: during a restart, an attempt made before the new worker starts accepting can reach the previous worker's socket or backlog, and it then hangs until the ceiling. My earlier change to the #1192 test hid this. The fix ties a new attempt to an actual change: when the probe first shows `serving`, any attempt already running started before then, so the wait starts a fresh one alongside it, and the first to succeed wins. I'll restore the hanging #1192 test case.\n2. **The refusal retry budget is a fixed cap.** Removing the gate made it the only protection, and three attempts over about 6 seconds can run out during a burst of logins. A refusal before login means sshd is running and saying \"try later\", and the command never ran. So it should retry with backoff until it succeeds or the caller cancels, not stop after a fixed number of attempts. That code is in `targets.rs`, which the item 2 child is rewriting now, so I'll send this fix to that child and fix finding 1 myself."
+        },
+        {
+          "id": "agent:3219",
+          "role": "assistant",
+          "text": "Available in 1.52. Applying the change:"
+        },
+        {
+          "id": "agent:3257",
+          "role": "assistant",
+          "text": "All 36 tests pass. The tool reported that `readiness.rs` changed on disk, probably from `cargo fmt`. I'll check that the diff contains only my edits, then run the lint check."
+        },
+        {
+          "id": "agent:3299",
+          "role": "assistant",
+          "text": "I've committed the fix for review finding 1 as `2c66b7651`. For finding 2, I'm holding the push until the item 2 child finishes its work.\n\n- **Finding 1 (an attempt that hangs is never replaced):** when the worker's record first shows `serving`, the wait now starts a fresh attempt alongside any still running, and the first to connect wins. The new attempt is tied to the worker reaching `serving`, not to a timer, so a slow but healthy connection is never cut off. A new test restores the hanging case from #1192. All 36 readiness tests pass, and the mj-controller lint check is clean on the committed code.\n- **Finding 2 (the 3-attempt cap on SSH refusal retries):** I sent this to the item 2 child, which is rewriting the same retry code. A refusal before login means sshd is running and saying \"try later\", and the command never ran. So it should retry with backoff until it succeeds or the caller cancels, with a warning logged after a minute so a refusal that never stops is still visible. I asked the child to report any caller with no way to cancel, where an unlimited retry could hang a daemon task.\n\nI'll push once the item 2 change is committed with that retry fix and passes one review covering all the commits. Pushing the cap removal on its own now would ship a version where a burst of refused logins fails after about 6 seconds.\n\nMy shell is now in the review worktree (`.mj/review-wt`), and I run commits from the main checkout. Retrying the Move is still blocked until these fixes are installed, and I won't install without your go-ahead."
+        },
+        {
+          "id": "agent:3409",
+          "role": "assistant",
+          "text": "Before committing I'll review the diff, mainly the ledger change and the retry loop."
+        },
+        {
+          "id": "agent:3479",
+          "role": "assistant",
+          "text": "Item 2 is committed as `5cb64e019`, and one pre-push review now covers all seven commits since `e264ec0`. Nothing is pushed yet.\n\n**What item 2 changes:**\n- mj no longer assumes 8 sessions per SSH connection. A connection's capacity starts unknown, and mj records it when sshd refuses a session. The command then moves to another connection immediately.\n- With the server limits you set, morannon (`MaxSessions 200`) should need only one connection, instead of the many masters mj opened before.\n- An integration test against a real sshd set to `MaxSessions 2` checks this: 7 commands run at once, all succeed, and the first connection learns a capacity of 2. The test skips when sshd is not installed.\n- The child confirmed OpenSSH's exact refusal text with a real run, and mj's existing check already matches it.\n\n**Review finding 2 is fixed in the same commit:** a refusal before login now retries with backoff until the command succeeds or its caller cancels or reaches its deadline, and it logs one warning after a minute.\n\n**One choice I made that you may want to override:** callers that cannot be cancelled still stop after 3 attempts. These go through `ProcessExecutor` and include destroy, lifecycle, session move and import. None of them has a timeout, so an unlimited retry there could hang a daemon task forever. To change that, those callers would need a way to be cancelled.\n\n**Not built: the `mj doctor` report of learned capacity per host.** The learned values live in the daemon's memory, and doctor runs as a separate CLI process. Reporting them would need a new daemon API route, a client method and a doctor check. The child's report lists a smaller alternative. Tell me if you want either one.\n\n**Testing:** the child ran targeted tests only: 69 in mj-core and 108 in mj-controller, all passing, plus a clean lint check on both crates. I didn't run the full suites, because you stopped a full run last time. AGENTS.md asks for one full run after the last round, so tell me if you want it before the push.\n\nAfter a clean review I'll push to `origin/master`. Then the Move retry for `d8443f17cb24506c5ee26277fcf319f4` needs these fixes installed on your daemon. Shall I run `scripts/install.sh` once the push is done?"
+        },
+        {
+          "id": "agent:3638",
+          "role": "assistant",
+          "text": "I'm splitting these findings into two groups, because they say different things.\n\n**The three readiness findings are real and have clear fixes:**\n- After the one extra attempt fails or hangs, no further attempt is ever started.\n- An attempt that hangs after `serving` is never replaced.\n- The probe still blocks the loop. Under the new unlimited refusal retry, it can block until the 5-minute ceiling.\n\nI'll settle those and hand them to a child.\n\n**The four SSH findings point to a deeper problem with learned capacity**, so I'll stop and put that to you before writing more code for it."
+        },
+        {
+          "id": "agent:3693",
+          "role": "assistant",
+          "text": "You're away, so the SSH question stays open. I'll restate it at the end. The readiness work doesn't depend on it, and a child is doing that now.\n\n**Readiness fixes (child running, decided design):**\n- **One rule for new attempts:** start a fresh attempt when none is in flight. Also start one when the worker is accepting and every attempt still in flight began before the latest probe that finished. A finished probe is an SSH round trip that started after those attempts, so SSH is working and those attempts are probably stuck. This adds at most one attempt per probe cycle, never cancels a slow attempt, and uses no timer.\n- **The probe becomes a task that can be cancelled:** the wait never blocks on it, and the probe is cancelled on every exit path and when the caller cancels.\n\n**The decision I need from you:** review found two structural gaps in learning SSH capacity from refusals:\n- **Streamed commands fail at the first refusal.** Checkpoint uploads, Move uploads and relays run through `mj node` send stdin as they go, so they can't be safely replayed when refused.\n- **The capacity estimate is racy.** mj counts its own sessions at the moment of a refusal, which can come out too high or too low. A low value stays until that connection is reopened.\n\nThe options:\n1. **Configured limit (my recommendation; your original idea):**\n   - Add a per-target `max_sessions` setting, defaulting to 10 (sshd's documented default). Set 200 for morannon and 64 for precision-3260.\n   - `mj doctor` compares the setting with the server's readable sshd config.\n   - A refusal then means the setting is wrong: mj retries where it is safe and reports the problem clearly.\n   - This is a small change with no races, and it fits the AGENTS.md rule, since the value comes from the server's own config.\n2. **Learning plus a start marker:**\n   - Every remote command prints a marker byte before it runs, so mj knows a session started before it sends any stdin.\n   - Every refusal can then be retried safely, and capacity can be counted accurately.\n   - This is fully automatic, but it changes how every SSH command is built, and the marker must be stripped from all output, the relay stream included.\n3. **Both:**\n   - Use the configured limit, and learn from refusals as a correction for retryable commands only.\n   - Streamed commands never go past the configured limit.\n\nAfter you choose, I'll implement it on top of `5cb64e019`, commit the readiness fix, and request one more review before pushing. Retrying the Move still needs the fixes installed, which I'll ask about after the push."
+        },
+        {
+          "id": "agent:3864",
+          "role": "assistant",
+          "text": "I've reviewed the child's three open questions:\n\n- **Probes that return errors don't count as evidence:** agreed.\n- **Up to about 100 hung attempts in the worst case:** I'm accepting this without a cap. It happens only when every attempt hangs against a worker that is accepting connections while ordinary commands succeed, which would be a worker bug. The 5-minute ceiling ends it and all attempts are then aborted. Cancelling the older attempts instead would bring back the original bug, where slow but healthy connections were cut off.\n- **No probe at the deadline:** this is a regression. The final probe at the deadline existed so that a worker that has just moved to a new step is not given up on. The fix needs no new timer: if a probe is running at the deadline, keep waiting for it, up to the existing ceiling, and let its result extend the deadline."
+        },
+        {
+          "id": "agent:3925",
+          "role": "assistant",
+          "text": "The readiness fix is done apart from one change I sent back to the child. The SSH capacity work still needs your choice.\n\n**Readiness, ready except for the deadline change:**\n- New attempts follow the one rule from my last message.\n- The probe now runs as its own cancellable task, so the wait never blocks on it.\n- The child found that all five callers pass the same daemon executor. The probe's new executor loses only one info log line per probe.\n- Tests: 41 readiness tests pass, and the lint check and formatting are clean.\n- The child is now restoring the probe that runs at the deadline. This is the regression I described above: a worker that had just moved to a new step could be given up on.\n- When it reports back, I'll review and commit.\n\n**SSH capacity: still needs your choice.** This is the question from my previous message:\n- **Configured limit** (my recommendation): a per-target `max_sessions` setting that `mj doctor` checks against the server's sshd config.\n- **Learning plus a start marker:** every remote command prints a marker byte, so every refusal can be retried safely.\n- **Both:** the configured limit, with learning as a correction for commands that can be retried.\n\nThe push waits for both pieces and one more review. Retrying the Move after that still needs your go-ahead to install."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "item 2 direction accepted",
+    "assistant_text_tail": "The readiness fix is done apart from one change I sent back to the child. The SSH capacity work still needs your choice.\n\n**Readiness, ready except for the deadline change:**\n- New attempts follow the one rule from my last message.\n- The probe now runs as its own cancellable task, so the wait never blocks on it.\n- The child found that all five callers pass the same daemon executor. The probe's new executor loses only one info log line per probe.\n- Tests: 41 readiness tests pass, and the lint check and formatting are clean.\n- The child is now restoring the probe that runs at the deadline. This is the regression I described above: a worker that had just moved to a new step could be given up on.\n- When it reports back, I'll review and commit.\n\n**SSH capacity: still needs your choice.** This is the question from my previous message:\n- **Configured limit** (my recommendation): a per-target `max_sessions` setting that `mj doctor` checks against the server's sshd config.\n- **Learning plus a start marker:** every remote command prints a marker byte, so every refusal can be retried safely.\n- **Both:** the configured limit, with learning as a correction for commands that can be retried.\n\nThe push waits for both pieces and one more review. Retrying the Move after that still needs your go-ahead to install.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      3638,
+      3693,
+      3925
+    ],
+    "user_position": 2600,
+    "mjolnir": "worker Jev still-open language classification",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "The cited user request remains open.",
+    "input_rationale": "Review found structural gaps in learning SSH capacity from refusals; the agent stopped work on that part, offered three designs and holds the push until the user picks. The readiness fix proceeds separately.",
+    "label": "required_final",
+    "kind": "blocking_decision"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T20:09:55.264Z",
+        "kind": "user",
+        "text": "I prefer the learning approach"
+      },
+      {
+        "at": "2026-11-06T20:10:23.334Z",
+        "kind": "agent",
+        "text": "Going with learning. To make it safe, every SSH session will tell mj when it has actually started. Here is the design I'm handing to a child:  - **Start marker:** each remote command first prints a fi"
+      },
+      {
+        "at": "2026-11-06T20:12:45.588Z",
+        "kind": "agent",
+        "text": "I've started a child on the learning approach (`ssh-session-start-marker`).  **What it builds:** - **Start marker:** every SSH command first prints a fixed marker. mj strips the marker from all output"
+      },
+      {
+        "at": "2026-11-06T21:05:58.325Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-11-06T21:06:00.227Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task readiness-attempt-and-probe-tasks finished: completed     State: completed     Report directory: /home/jonathan/Projects/mjolnir/.mj/clones/f159941bd0d3f33153b3b4c22b05e"
+      },
+      {
+        "at": "2026-11-06T21:06:00.230Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      }
+    ]
+  }
+}

@@ -1,0 +1,216 @@
+{
+  "id": "L2406",
+  "title": "partial procedure diagnostics",
+  "category": "still-open-none",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "784eb27dbe0a51ea474eb39bb134e95f",
+    "session_title": "itertools-partial-procedure-diag",
+    "reply_position": 4506,
+    "captured_at": "2026-10-22T01:19:49.189Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /workspace/d8443f17cb24506c5ee26277fcf319f4/.mj-agents/784eb27dbe0a51ea474eb39bb134e95f. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Write anything longer (logs, tables, full findings) to files in your report directory and list their paths in the report; never put it in the report itself. Fix mechanical errors yourself (compile errors, lint and format findings, test failures your own change caused) and list each fix in one line of your report. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When a parent decision blocks further progress, hand back the question with the evidence needed to decide. The parent owns consequential design decisions and final acceptance.\n\nRead-only diagnosis in Bifrost (Rust analyzer). Worktree: /workspace/d8443f17cb24506c5ee26277fcf319f4/bifrost/.mj/lanes/itertools-partial-diag, detached at origin/master 27e8dde580. Do not edit tracked files, do not commit.\n\nBackground: a policy-oracle replay of the Rust itertools case (frozen source; see .agents/plans/policy-oracle-expansion-round4.md, search \"itertools\", and .agents/plans/5452-macro-decorated-declarations.md around lines 171-175) on master CLI 281f799fec03 produced 40 per-file diagnostics `branch_relation_derivation_incomplete` with reason `partial_procedure`: any partial procedure blocks that file's branch relations. The diagnostic does not say which capability made each procedure partial. Earlier raw replay evidence was lost; locate the itertools source under /repos (ls /repos | grep -i itertools) or the frozen case input named in the plan / scripts/policy-oracle-campaign.py.\n\nQuestion: for these 40 files, what makes procedures \"partial\"? Find (a) where `partial_procedure` and `branch_relation_derivation_incomplete` are produced in the code, (b) what conditions mark a procedure partial, and (c) by reproducing on the actual itertools source with a CLI built from this worktree (env -u RUSTUP_TOOLCHAIN cargo ...; no --target-dir; BIFROST_OPEN_PACKS_DISABLE=1), which conditions fire for which procedures. Group the causes into families with counts and 2-3 exact source sites each (file:line, construct). Distinguish genuine unsupported Rust constructs from over-broad propagation (for example one partial procedure poisoning a whole file when only its own relations should be blocked). Note whether the diagnostic should carry the capability and where that information is available.\n\nStop at the diagnosis; do not implement fixes. Report: families with counts and sites, decisive code references (file:symbol:line), which ones look like analyzer defects vs. true unsupported constructs, your confidence for each, and log/evidence paths (keep evidence under /tmp/itertools-partial-diag/)."
+        },
+        {
+          "id": "agent:25",
+          "role": "assistant",
+          "text": "I’ll trace how procedures become partial, then replay the frozen itertools case and map the diagnostics to exact procedures and source constructs. I’ll keep the worktree read-only and save evidence under `/tmp/itertools-partial-diag/`."
+        },
+        {
+          "id": "agent:88",
+          "role": "assistant",
+          "text": "The frozen itertools checkout is present at the expected commit. Scalar-condition analysis marks a procedure partial when certain semantic gaps affect control or value flow; it then replaces the underlying gap details with the generic `partial_procedure` reason. I’m checking whether the file-level diagnostic also suppresses relations from unaffected procedures."
+        },
+        {
+          "id": "agent:246",
+          "role": "assistant",
+          "text": "Branch analysis is cached per procedure, while the diagnostic is deduplicated per file, relation and reason. A file-level warning therefore does not by itself prove that every procedure’s relations were blocked. I’m extracting the producer’s gap rows to distinguish the missing semantics from the diagnostic’s coarse attribution."
+        },
+        {
+          "id": "agent:525",
+          "role": "assistant",
+          "text": "The retained policy fixture and `src/repeatn.rs` match the frozen case’s SHA-256 hashes exactly. Two possible sources of overly broad incompleteness stand out: implicit `Drop` gaps can invalidate a procedure even when they concern its exit, and tail `if`/`match` expressions get a value-refinement gap that blocks all guards. I’ll check their actual counts once the build finishes."
+        },
+        {
+          "id": "agent:1326",
+          "role": "assistant",
+          "text": "Scalar-condition analysis does not consult the existing `InertDropGlue` proof used by other flow consumers. I’ve added that proof result to the temporary diagnostic helper so the report can distinguish unknown destructor behavior from gaps the analyzer can already discharge. The helper lives entirely under `/tmp`."
+        },
+        {
+          "id": "agent:1672",
+          "role": "assistant",
+          "text": "The CLI build passed. The first query attempt failed because query files must be inside the analyzed workspace; I’ll use inline query input so the frozen checkout stays untouched. I also found another likely major contributor: unresolved method calls carry a `CallEvaluation` impact, which scalar analysis treats as a whole-procedure blocker."
+        },
+        {
+          "id": "agent:1920",
+          "role": "assistant",
+          "text": "The CLI replay is still building the fresh analyzer cache for the 76-file checkout; the IR dump is waiting on its cache-build lock. Static tracing confirms whole-procedure gating and file-level diagnostic deduplication, but I’ll wait for the replay before assigning cause counts."
+        },
+        {
+          "id": "agent:2170",
+          "role": "assistant",
+          "text": "The default query budget stopped after 18 of the expected 40 files. I’m rerunning with the CLI’s source-scaled limits on an exact `git archive` of the pinned checkout under `/tmp`, which allows the query and policy files to sit inside its workspace. The IR dump is progressing through the original `/repos` checkout and retaining procedure names, gap capabilities, details and source spans."
+        },
+        {
+          "id": "agent:2366",
+          "role": "assistant",
+          "text": "The dump has now covered over 900 procedures. Observed blockers include method receiver evaluation, implicit drops and cleanup, tail-expression result joins, unresolved match bindings, dynamic index identity, closure captures and abort edges. Several procedures have multiple causes, so I’ll report unique procedure/file counts alongside gap counts rather than adding overlapping totals."
+        },
+        {
+          "id": "agent:2446",
+          "role": "assistant",
+          "text": "`repeat_n` itself is now confirmed partial for two independent reasons: its tail `if` result gets a `Values` refinement gap, and dropping generic `element: A` produces cleanup gaps. Neither directly prevents modeling the earlier guard `n == 0`; this is strong evidence that the procedure-wide veto is too coarse for this case. `RepeatN::next` also has receiver, assignment and drop gaps."
+        },
+        {
+          "id": "agent:2761",
+          "role": "assistant",
+          "text": "The dump has reached the test files with no provider failure so far. It also found several procedures whose drops are proven inert but whose gaps scalar analysis still counts as blockers. The final report will separate observed cause counts from assessments of which limitations need broader Rust support and which look like precision defects in the consumer."
+        },
+        {
+          "id": "agent:3006",
+          "role": "assistant",
+          "text": "The complete replay reproduced exactly **40 `partial_procedure` file diagnostics**. The direct query returned 235 branch rows, all open for that reason, with no truncation. The exact frozen policy exited 2 and marked those 40 files inconclusive. The earlier `semantic_provider_failed` error did not recur, so it is not needed to explain the partial-procedure diagnostics on this master."
+        },
+        {
+          "id": "agent:3104",
+          "role": "assistant",
+          "text": "All 235 observed branch rows are individually open; this is broader than one bad procedure causing a file-level warning. The code still gates each procedure separately, while absence assertions conservatively mark the file inconclusive. I’m finishing the procedure-to-cause census and exact-site examples; no repository changes are needed."
+        },
+        {
+          "id": "agent:3183",
+          "role": "assistant",
+          "text": "The remaining census work is in the large test file; the CLI reproduction is complete. One useful distinction is clear: `panic!` and `unreachable!` are blocked by unresolved diverging-macro identity, while `check_specialized!` has genuinely unknown expansion control effects. The report will keep those separate."
+        },
+        {
+          "id": "agent:3269",
+          "role": "assistant",
+          "text": "The census is complete: **235 conditions in 149 partial procedures across 40 files**. Those files contain 1,130 procedures in total, matching the policy replay’s materialization count; 1,095 satisfy the scalar consumer’s partial predicate. Every condition is mapped. I’m saving the final report with overlapping cause counts, exact sites and a procedure-by-procedure TSV."
+        },
+        {
+          "id": "agent:3360",
+          "role": "assistant",
+          "text": "I found a concrete producer-side precision defect: bare `None` match patterns are intentionally counted as possible bindings. That creates synthetic value and Drop gaps, which the scalar consumer turns into a procedure-wide veto. In this census, it occurs at 26 sites in 20 condition-owning procedures across 14 files. The report includes the code comment documenting that choice and exact examples."
+        },
+        {
+          "id": "agent:3527",
+          "role": "assistant",
+          "text": "Diagnosis handed back: reproduced all 40 diagnostics and mapped 235 conditions to 149 partial procedures. Report includes cause counts, exact sites, code references and evidence paths. No worktree changes or commits."
+        },
+        {
+          "id": "user:3597",
+          "role": "user",
+          "text": "Good diagnosis. I filed #6365 (None-as-binding) and #6366 (scalar-condition veto scope). Follow-up measurement, same constraints (read-only for tracked files; your /tmp helper is fine; no fixes):\n\nUsing your dump helper on the same frozen itertools census (235 guards / 149 vetoed procedures / 40 files), compute counterfactual veto results under these candidate consumer rules. For each rule report: guards un-vetoed, procedures un-vetoed, files with no remaining partial_procedure, and the top remaining blocking families. The rules are cumulative unless stated:\nR1: honor discharges that existing proofs already prove (inert_drop_glue_discharges_gap / NonRejoiningExceptionalExitAfterInertDrops, as icfg.rs:1180-1192 does). Use the real proof functions, not a simulation.\nR2: R1 + treat a method-receiver CallSite gap (CallEvaluation impact + CallResolution discharge) as scoped like other call gaps when the existing call resolution resolves that call site uniquely. Use real resolution if reachable; otherwise state how you approximated it.\nR3: R2 + drop the gaps that #6365 creates (match arms whose pattern is a bare identifier that is a unit variant/const in scope, e.g. None). This is a simulation; say how you identified them.\nR4a: R3 + reachability scoping for data gaps only: a gap with capability Assignments/Values/LocalFlow/ParameterFlow/GuardFacts or ValueFlow/CallEvaluation impact vetoes guard G only if its point can reach G's point through the procedure's control edges (forward reachability, including back edges). Control-shape gaps (NormalControlFlow, NonLocalControl, ExceptionalControlFlow, CleanupControlFlow) still veto the whole procedure. Gaps with no point veto the whole procedure.\nR4b: R4a, but ExceptionalControlFlow/CleanupControlFlow gaps whose exits are non-rejoining (cannot return into the procedure body) are scoped by reachability like data gaps. State the evidence you used for non-rejoining.\nFor R4a/R4b also report, if cheap with your helper, how many un-vetoed guards then get decided by derive_scalar_states versus open for another reason (UnsupportedPredicate, UnprovenGuard, PartialGuard, PartialProducer), and whether any decided verdict would produce a contradictory-condition finding (list those sites: they need checking against the frozen expectations). Also list, for R4b, each still-blocked file with its blocking gaps (family + site), so I can see what full-run completeness would still require.\nPut results in your report dir as counterfactual-veto.md and report the table plus key caveats. Stop there."
+        },
+        {
+          "id": "agent:3601",
+          "role": "assistant",
+          "text": "I’ll reuse the frozen census, call the existing proof and resolution paths where accessible, and measure each cumulative rule. I’ll keep the reachability and `None` changes in the temporary helper and document their assumptions."
+        },
+        {
+          "id": "agent:3671",
+          "role": "assistant",
+          "text": "The census has 235 source conditions backed by 249 semantic guard facts; 12 conditions have multiple leaves. I’ll count a condition as un-vetoed only when all its leaves pass the candidate rule. R1 can call the same real language proof used by the private inert-drop wrapper, and R2 has a public prepared-dispatch resolver, so neither needs a simulated result."
+        },
+        {
+          "id": "agent:3861",
+          "role": "assistant",
+          "text": "For R4b, I’ll use two kinds of evidence: Rust panic/abort gaps identified by the producer as leaving the activation, and a conservative CFG terminal region that reaches an exit through completion-only points without another guard or runtime operation. Cleanup that can resume ordinary body work will remain a whole-procedure veto. I’ll document this interpretation because the distinction affects the result."
+        },
+        {
+          "id": "agent:3969",
+          "role": "assistant",
+          "text": "R3 includes two bare `None` aliases as well: `NotYetPopulated` and `ProductEnded`, both explicitly imported from `Option::None` in `multi_product.rs`. I’ll simulate removing their synthetic binding gaps too. Ordinary bindings such as `r` and `some_elt` remain. The resolution results so far are open, with macro-generated-module diagnostics, so I’m checking those limits rather than treating a lone candidate as uniquely resolved."
+        },
+        {
+          "id": "agent:4092",
+          "role": "assistant",
+          "text": "Real resolution is closing some receiver calls: 30 of the first 241 measured call sites have a proven, complete singleton target. The others retain open coverage; I haven’t counted a singleton candidate plus an unresolved boundary as unique. I’m also verifying R1 through the production ICFG exit-profile path, which invokes the private inert-drop wrapper."
+        },
+        {
+          "id": "agent:4181",
+          "role": "assistant",
+          "text": "The production R1 check has returned 138 profiles so far; all match the explicit discharged-gap profiles, with no unavailable results. For the scalar follow-up, I can run a temporary copy of the complete consumer with only its initial veto disabled. That keeps the existing predicate, evidence and composed-condition checks intact, avoiding guessed verdicts for compound conditions."
+        },
+        {
+          "id": "agent:4272",
+          "role": "assistant",
+          "text": "R1 is now verified for all 149 procedures through the production ICFG path, and the scalar follow-up has also completed for all 149. Every profile comparison matched. The temporary scalar run produced no fixed true/false verdict anywhere, so no candidate rule can produce a contradictory-condition finding on this unchanged baseline. The last counterfactual records are finishing in `tests/test_std.rs`."
+        },
+        {
+          "id": "agent:4363",
+          "role": "assistant",
+          "text": "The final counts are: R1–R3 release no source conditions; R4a releases 3, and R4b releases 17. R4b wholly releases 15 procedures and partially releases one more. Only `src/exactly_one_err.rs` loses every `partial_procedure` veto, but its guard remains open as `UnknownScalar`.\n\nOf R4b’s 17 released conditions, 8 are `BothFeasible`, 8 remain `UnsupportedPredicate`, and 1 remains `UnknownScalar`. None produces a finding. The report includes all remaining blocking families and sites for the other 39 files."
+        },
+        {
+          "id": "agent:4506",
+          "role": "assistant",
+          "text": "Saved [counterfactual-veto.md](/workspace/d8443f17cb24506c5ee26277fcf319f4/.mj-agents/784eb27dbe0a51ea474eb39bb134e95f/counterfactual-veto.md) and handed back the results.\n\nR1–R3 free 0 conditions; R4a frees 3; R4b frees 17. R4b yields 8 `BothFeasible` verdicts and 9 still open for other reasons. No findings. No tracked changes."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": ". Control-shape gaps (NormalControlFlow, NonLocalControl, ExceptionalControlFlow, CleanupControlFlow) still veto the whole procedure. Gaps with no point veto the whole procedure.\nR4b: R4a, but ExceptionalControlFlow/CleanupControlFlow gaps whose exits are non-rejoining (cannot return into the procedure body) are scoped by reachability like data gaps. State the evidence you used for non-rejoining.\nFor R4a/R4b also report, if cheap with your helper, how many un-vetoed guards then get decided by derive_scalar_states versus open for another reason (UnsupportedPredicate, UnprovenGuard, PartialGuard, PartialProducer), and whether any decided verdict would produce a contradictory-condition finding (list those sites: they need checking against the frozen expectations). Also list, for R4b, each still-blocked file with its blocking gaps (family + site), so I can see what full-run completeness would still require.\nPut results in your report dir as counterfactual-veto.md and report the table plus key caveats. Stop there.",
+    "assistant_text_tail": "Saved [counterfactual-veto.md](/workspace/d8443f17cb24506c5ee26277fcf319f4/.mj-agents/784eb27dbe0a51ea474eb39bb134e95f/counterfactual-veto.md) and handed back the results.\n\nR1–R3 free 0 conditions; R4a frees 3; R4b frees 17. R4b yields 8 `BothFeasible` verdicts and 9 still open for other reasons. No findings. No tracked changes.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 3597,
+    "input_rationale": "Sub-agent report of a read-only counterfactual measurement the parent requested; the 'still open' guards are analysis results (guards the rule leaves undecided), not questions. The parent said to stop there.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": true,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

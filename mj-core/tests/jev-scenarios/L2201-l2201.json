@@ -1,0 +1,417 @@
+{
+  "id": "L2201",
+  "title": "L2201",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "7ef739874d87ca6674097d7466a8bf73",
+    "session_title": "bifrost via claude4",
+    "reply_position": 3434,
+    "captured_at": "2026-10-09T00:22:53.759Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "prioritize the open tickets by cost:benefit, focusing on issues that look like one-offs rather than pieces of larger campaigns (which probably have agents working through them them already) and wo open PRs. where does that leave us?"
+        },
+        {
+          "id": "user:582",
+          "role": "user",
+          "text": "do it, and explain the #3835 decision pls"
+        },
+        {
+          "id": "user:888",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:1220",
+          "role": "user",
+          "text": "3835: recs accepted\n\n3844: close\n\n3840: go"
+        },
+        {
+          "id": "user:1254",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:1381",
+          "role": "user",
+          "text": "i didn't see an approval request, what tool are you using"
+        },
+        {
+          "id": "agent:1384",
+          "role": "assistant",
+          "text": "I used the Bash tool both times, and you did not decline either call. The denial message most likely came from the harness interrupting the call when a child finished, but I have not confirmed that.\n\n**The two blocked calls:**\n- **The first was read-only.** It printed parts of the import-graph cache file and the core capabilities file, to design the #3840 fix.\n- **The second did the GitHub housekeeping.** It would have commented on #3844, closed it, and claimed #3835, all with the GitHub CLI.\n\n**Why I think it was an interruption:**\n- **The message was a generic stop.** Both times the result was \"The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.\" I took that as your refusal and stopped.\n- **Both blocks coincided with a child finishing.** Your next message each time was the automatic notice that a sub-agent had finished.\n- **A permission rule is unlikely.** The first call only read files, which permission rules usually allow.\n\nThe denial text does not say where it came from, so the interruption is the likely cause, not a confirmed one.\n\nNothing from the second call ran: #3844 is still open and #3835 is unclaimed. Say \"go\" and I'll rerun that housekeeping and continue with #3840, #3773 and #3835 under your earlier approvals."
+        },
+        {
+          "id": "user:1483",
+          "role": "user",
+          "text": "that's odd. both are fine with me, try again?"
+        },
+        {
+          "id": "agent:1485",
+          "role": "assistant",
+          "text": "Retrying the GitHub housekeeping."
+        },
+        {
+          "id": "agent:1493",
+          "role": "assistant",
+          "text": "It worked this time: #3844 is closed with the comment, and #3835 is claimed. I'll continue with the designs, starting with the #3840 code read that was interrupted."
+        },
+        {
+          "id": "agent:1509",
+          "role": "assistant",
+          "text": "I need the exact provider hook signatures and the persisted-snapshot path before I can write the #3840 design. I'll read them directly, since they're in known files."
+        },
+        {
+          "id": "agent:1537",
+          "role": "assistant",
+          "text": "Rust's `mod x;` already goes through a provider hook for direct file dependencies that are not ordinary imports. That is the PHP include case, so I'll check what that type carries and who reads it."
+        },
+        {
+          "id": "agent:1594",
+          "role": "assistant",
+          "text": "The #3773 report narrows the defect to shadow selection running before cfg activation, but the exact selection site is still unconfirmed. I'll ask that child to trace it before I write the design."
+        },
+        {
+          "id": "user:1646",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:1721",
+          "role": "assistant",
+          "text": "Status: the #3840 and #3835 contradictory-condition designs are settled. I'm writing them down for implementation lanes. #3773 and the #3835 activation inventory are still with children."
+        },
+        {
+          "id": "user:1747",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:1803",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:1852",
+          "role": "assistant",
+          "text": "The designs are written. Next I'll create four worktrees on fresh branches from origin/master."
+        },
+        {
+          "id": "agent:1891",
+          "role": "assistant",
+          "text": "Four engine lanes are running. Now the bifrost-packs stopgap: making python-absent-member opt-in. I'll check that repo's rules and how a manifest change is validated."
+        },
+        {
+          "id": "agent:1919",
+          "role": "assistant",
+          "text": "Five lanes are running. Meanwhile I'll record the #3835 decision on the issue, retire the diagnosis children, and work out how to push to bifrost-dev without SSH."
+        },
+        {
+          "id": "agent:1933",
+          "role": "assistant",
+          "text": "The gh snap can't read /tmp; the memory says to keep bodies under ~/triage-pr."
+        },
+        {
+          "id": "agent:1946",
+          "role": "assistant",
+          "text": "The decision is posted. gh is logged in through a token over HTTPS, so I'll test fetching through HTTPS with gh as the credential helper."
+        },
+        {
+          "id": "agent:1960",
+          "role": "assistant",
+          "text": "The HTTPS fetch works, and master has moved ahead. I'll merge it into each branch before opening PRs. Now I'll retire the five finished diagnosis children and wait for the lanes."
+        },
+        {
+          "id": "agent:1997",
+          "role": "assistant",
+          "text": "The packs stopgap lane is done. I'll review its diff before pushing."
+        },
+        {
+          "id": "agent:2007",
+          "role": "assistant",
+          "text": "The diff is correct and minimal. I'll add the attribution line, push the branch, and open the bifrost-packs PR."
+        },
+        {
+          "id": "agent:2020",
+          "role": "assistant",
+          "text": "Pushed. gh wants to run inside a repository; I'll rerun it from the packs clone."
+        },
+        {
+          "id": "agent:2035",
+          "role": "assistant",
+          "text": "The stopgap is open as bifrost-packs PR #67. I'll close that lane and wait for the four engine lanes."
+        },
+        {
+          "id": "agent:2055",
+          "role": "assistant",
+          "text": "Part A is done. I'll review its diff, starting with the solver change."
+        },
+        {
+          "id": "user:2074",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:2125",
+          "role": "assistant",
+          "text": "Bumping the schema for a new completion value follows the precedent of #2435 and the earlier changes. The open question is where the VS Code extension lives and whether this repo can update it."
+        },
+        {
+          "id": "agent:2241",
+          "role": "assistant",
+          "text": "While those run, I'll file the bifrost-lsp follow-up for report schema 6. First I'll confirm where the extension's version constant lives."
+        },
+        {
+          "id": "agent:2268",
+          "role": "assistant",
+          "text": "I filed BrokkAi/bifrost-lsp#11. Now I'll wait for the merges and the two remaining lanes."
+        },
+        {
+          "id": "agent:2288",
+          "role": "assistant",
+          "text": "Part B merged master cleanly, and Clippy and the focused tests pass. I'll push it and open its PR. First I'll write a small landing helper that pushes over HTTPS and opens the PR."
+        },
+        {
+          "id": "agent:2306",
+          "role": "assistant",
+          "text": "Master has not moved, so part B is current. I'll write its PR description and land it."
+        },
+        {
+          "id": "agent:2319",
+          "role": "assistant",
+          "text": "Part B is PR #4733, opened ready for the merge queue. I'll link it from the bifrost-lsp issue and keep waiting for the other lanes."
+        },
+        {
+          "id": "agent:2343",
+          "role": "assistant",
+          "text": "Part A also merged cleanly and passed Clippy and its focused tests. Before landing it, I'll check the golden diff to confirm only parameter guards changed."
+        },
+        {
+          "id": "agent:2375",
+          "role": "assistant",
+          "text": "Part A is PR #4734. I'll close both #3835 lanes and wait for #3773 and #3840."
+        },
+        {
+          "id": "agent:2396",
+          "role": "assistant",
+          "text": "#3840 is done. I'll review the core of the diff: the AST folding, the path resolution, the SQL, and the golden."
+        },
+        {
+          "id": "agent:2491",
+          "role": "assistant",
+          "text": "Master has not moved. Status: both #3835 PRs are open, and I'm opening the #3840 PR now. #3773 is still in progress."
+        },
+        {
+          "id": "agent:2505",
+          "role": "assistant",
+          "text": "#3840 is PR #4736. I'll close that lane and wait for #3773."
+        },
+        {
+          "id": "agent:2551",
+          "role": "assistant",
+          "text": "All four fail on unmodified master too, so #3773 did not cause them. Those tests are not marked ignored, so I'll check whether per-push CI runs them, which would mean master is red."
+        },
+        {
+          "id": "agent:2568",
+          "role": "assistant",
+          "text": "They are not ignored, so per-push CI should run them. I'll check master's latest CI result to see whether this is a real red master or only a local difference."
+        },
+        {
+          "id": "agent:2617",
+          "role": "assistant",
+          "text": "The plumbing adds a `_with_selection_access` twin for each of eight resolver entry points. I'll check that each twin is actually called, then read the core selection change."
+        },
+        {
+          "id": "agent:2710",
+          "role": "assistant",
+          "text": "I'll keep the #3773 lane parked, since its context will help if you choose a fix direction. Last, I'll update today's memory file with the outcomes."
+        },
+        {
+          "id": "agent:2727",
+          "role": "assistant",
+          "text": "Three of your four items are done and in the merge queue. #3773 is not done: a sound fix needs a design decision in the shared resolver.\n\n| Issue | Outcome |\n|---|---|\n| #3844 | Closed as superseded, because the 2026-10-04 removal of the Go data-race analysis left nothing to report |\n| #3835 part A | PR #4734 makes guards on an unconstrained parameter decided in contradictory-condition |\n| #3835 part B | PR #4733 reports python-absent-member as \"not run\" when its Python declaration surface is missing |\n| #3835 stopgap | bifrost-packs#67 makes python-absent-member opt-in until the engine change ships |\n| #3840 | PR #4736 adds PHP include and require import edges and a diagnostic for dynamic targets |\n| #3773 | Not landed; findings posted on the issue |\n\n**#3835.** I posted your decision on the issue.\n- **Part A.** Parameters now start as \"unconstrained\", separate from \"information lost\". Call results and field loads still count as lost. A repeated `x is None` guard is still proven contradictory.\n- **Part B.** A default-selected policy that can't run does not change the exit status. A policy you name explicitly by ID that can't run still exits 2.\n- **Schema change.** The report schema moves to version 6. The VS Code extension, now in bifrost-lsp, accepts only version 5, so I filed bifrost-lsp#11 for the matching change.\n\n**#3840.** Static include paths become file edges for `importers-of` and `imports-of`. That covers literals, `__DIR__`, and `dirname(...)`. A non-static include path, such as a variable, now produces a structured incomplete diagnostic that lists the affected files. It is no longer silent. The change needs one migration and a PHP epoch bump.\n\n**#3773 needs your call.** Removing the inactive cfg item does let the active import win. The answer still stays incomplete, because the inactive item's incompleteness reasons were already merged into shared reason sets that don't record their source. The lane's first fix removed every reason of the same kind. I rejected that, because it would also erase real, independent gaps. Two sound directions exist:\n- **Narrow:** remove only reasons that carry a semantic ID inside the refuted item. Some reasons already carry one. Other reasons would keep the answer incomplete.\n- **General:** record the source of each reason in the shared resolver. That code is the native-engine area other agents are working in.\n\nThe work is on an unpushed branch, and the lane is parked with its context.\n\n**Also worth knowing:**\n- **#3296 and #3192 stay open.** You asked on 2026-09-13 to keep #3296 open. David decided on 2026-10-06 to keep #3192 open for observation.\n- **Four native-point tests fail locally on unmodified master.** Those tests normally run in per-push CI, but I did not check whether they fail there. They are listed on #3773.\n- **Validation per PR:** focused tests, golden reviews, and Clippy on every touched crate after merging master. The local pack drift check fails identically on master because of one file's line endings, so CI is the real check there.\n\n`★ Insight ─────────────────────────────────────`\n- The #3773 problem is a common trap in sound analyzers. Once you merge incompleteness as a plain set of reason kinds, you can't later retract one source's contribution. Retraction needs provenance, either attached to each reason or implied by an ID the reason already carries.\n- #3835 shows the same idea twice. \"Unknown because the input is free\" and \"unknown because we lost track\" must be separate states. So must \"not run\" and \"ran but incomplete\". Merging either pair makes the tool look less reliable than it is.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:2981",
+          "role": "user",
+          "text": "i think we want the general fix for 3773"
+        },
+        {
+          "id": "agent:2983",
+          "role": "assistant",
+          "text": "I'll take the general fix for #3773: record where each incompleteness reason came from, so the resolver can drop an inactive candidate's reasons and keep everyone else's. This is a refactor of the shared resolver, so I'll check the coordination notes for that area before designing."
+        },
+        {
+          "id": "agent:3039",
+          "role": "assistant",
+          "text": "No open PR printed a match. The loop's last check fails when nothing matches, which explains the exit code 1. I'll spot-check the jq filter on one PR to confirm it works."
+        },
+        {
+          "id": "agent:3059",
+          "role": "assistant",
+          "text": "No open PR touches the resolver core files, so a refactor there won't collide with queued work. I'll read the rest of the ExecPlan standard while the inventory runs."
+        },
+        {
+          "id": "agent:3147",
+          "role": "assistant",
+          "text": "API Error: Connection dropped (ECONNRESET)"
+        },
+        {
+          "id": "user:3165",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "agent:3199",
+          "role": "assistant",
+          "text": "I have what I need for the design. I'll write it as an ExecPlan in the #3773 worktree, then hand it to the lane that already knows this code."
+        },
+        {
+          "id": "agent:3215",
+          "role": "assistant",
+          "text": "The plan is written. I'll hand it to the lane, which is parked with full context."
+        },
+        {
+          "id": "agent:3231",
+          "role": "assistant",
+          "text": "The lane is still working after an hour, and it has updated the plan. I'll check its Progress section rather than interrupt."
+        },
+        {
+          "id": "agent:3245",
+          "role": "assistant",
+          "text": "Milestone 1 is in progress. The lane confirmed that both usage-suite tests pass on master, so the final change must keep them passing. I'll keep waiting."
+        },
+        {
+          "id": "agent:3266",
+          "role": "assistant",
+          "text": "Milestone 1 is committed and Milestone 2 is nearly done. One conflict is coming. This lane added migration 0164 for an index, and the #3840 PR also uses 0164. I'll check whether #4736 has landed."
+        },
+        {
+          "id": "agent:3285",
+          "role": "assistant",
+          "text": "All three engine PRs are in the merge queue. The lane should know about the migration number now, so its final merge step plans for it."
+        },
+        {
+          "id": "agent:3348",
+          "role": "assistant",
+          "text": "Production uses the pinned SQL. I'll check whether `PreloadedFactResolutionService`, which holds the per-reason scan, is used outside tests."
+        },
+        {
+          "id": "agent:3389",
+          "role": "assistant",
+          "text": "Everything passes on top of the #3840 branch. I'll check whether #4736 has landed, which decides the PR base, then push and open the #3773 PR."
+        },
+        {
+          "id": "agent:3410",
+          "role": "assistant",
+          "text": "#4736 is still in the queue, so the #3773 PR targets its branch."
+        },
+        {
+          "id": "agent:3421",
+          "role": "assistant",
+          "text": "#3773 is PR #4747. I'll close the lane and record the outcome in memory."
+        },
+        {
+          "id": "agent:3434",
+          "role": "assistant",
+          "text": "The general fix for #3773 is done, validated, and open as PR #4747. It is ready for the merge queue and depends on the #3840 PR, #4736, because each adds a cache migration and they must land in order.\n\n**How the fix records where each reason came from.** I didn't add candidate tags to every place reasons are merged. The investigation showed that would not fix the bug. The reasons that kept the answer incomplete sit on the surviving candidate's path. They are the inner item's \"may or may not exist\" gaps, picked up while proving the outer binding isn't shadowed. Each such reason already has a unique identity built from the code site that produced it. The stored gap records link that site to the declaration it belongs to. So the source is recorded in the reason's identity and the existing tables, not in the merge code.\n\n**What changed.**\n- **Selection.** The shared selector removes winners whose cfg is known inactive, then selects again. Unknown cfg behaves as before.\n- **Ownership lookup.** A new language hook maps a reason to the declaration that owns it. The default returns nothing. The Rust version is one SQL join, with a new index added by migration 0165 and query-plan tests.\n- **Discharge rule.** The shared access step now drops a reason in two cases: its owning declaration is cfg-inactive for this reference, or the reason is that declaration's activation question and activation is decided. Matching is always by identity, never by kind.\n- **Design chapter.** The evidence-and-results chapter states the rule. The ExecPlan I wrote for this work was deleted in the final commit, as the repo requires.\n\n**Validation.**\n- **Witnesses.** Both #3773 regression tests are un-ignored and pass.\n- **Soundness controls.** Three new tests cover the cases that matter. An active local item still keeps its reason. Unknown cfg still stays incomplete. A refuted item's reason is removed while a reason of the same kind at a different declaration stays. That last case is the one the earlier kind-based attempt got wrong.\n- **Suites.** The Rust usage suite passes 153 of 153 tests. That includes two tests that a filter-only version broke and that were first confirmed to pass on master. Schema and migration tests, the query-plan tests, and Clippy on the analysis and core crates also pass.\n\n**Today's other changes, all in the queue:**\n\n| PR | Change |\n|---|---|\n| #4733 | Report a default policy that lacks its workspace capability as \"not run\" |\n| #4734 | Count a guard on an unconstrained parameter as decided |\n| #4736 | Add PHP include/require import edges |\n| #4747 | Stop a cfg-refuted Rust local from hiding the active binding |\n| bifrost-packs#67 | Make the Python absent-member policy opt-in as a stopgap |\n\n**Still open.**\n- **bifrost-lsp#11.** The VS Code extension still accepts only report schema 5. It needs updating before an engine release that includes #4733.\n- **Four native-point tests fail locally on unmodified master.** I did not check whether CI fails them too. They are listed on #3773 and in the PR.\n\n`★ Insight ─────────────────────────────────────`\n- Tracking where a reason came from does not always mean threading tags through every merge. If each reason already has a unique identity tied to its site, a join after the fact recovers the owner exactly, and the hot merge code stays unchanged.\n- \"Remove the losing candidate's reasons\" sounds like a fix but is the wrong question. The leftover reasons belonged to the winner's proof that it was not shadowed. The right question was which declaration each reason is about, not which path carried it.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "continue",
+    "assistant_text_tail": "s that matter. An active local item still keeps its reason. Unknown cfg still stays incomplete. A refuted item's reason is removed while a reason of the same kind at a different declaration stays. That last case is the one the earlier kind-based attempt got wrong.\n- **Suites.** The Rust usage suite passes 153 of 153 tests. That includes two tests that a filter-only version broke and that were first confirmed to pass on master. Schema and migration tests, the query-plan tests, and Clippy on the analysis and core crates also pass.\n\n**Today's other changes, all in the queue:**\n\n| PR | Change |\n|---|---|\n| #4733 | Report a default policy that lacks its workspace capability as \"not run\" |\n| #4734 | Count a guard on an unconstrained parameter as decided |\n| #4736 | Add PHP include/require import edges |\n| #4747 | Stop a cfg-refuted Rust local from hiding the active binding |\n| bifrost-packs#67 | Make the Python absent-member policy opt-in as a stopgap |\n\n**Still open.**\n- **bifrost-lsp#11.** The VS Code extension still accepts only report schema 5. It needs updating before an engine release that includes #4733.\n- **Four native-point tests fail locally on unmodified master.** I did not check whether CI fails them too. They are listed on #3773 and in the PR.\n\n`★ Insight ─────────────────────────────────────`\n- Tracking where a reason came from does not always mean threading tags through every merge. If each reason already has a unique identity tied to its site, a join after the fact recovers the owner exactly, and the hot merge code stays unchanged.\n- \"Remove the losing candidate's reasons\" sounds like a fix but is the wrong question. The leftover reasons belonged to the winner's proof that it was not shadowed. The right question was which declaration each reason is about, not which path carried it.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 3165,
+    "input_rationale": "#3773 is fixed and PR #4747 queued. The still-open items are a tracked follow-up ticket in another repo and unverified local test failures, both listed for information; the reply asks the user for nothing.",
+    "label": "none",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-09T00:23:04.096Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-09T00:58:34.758Z",
+        "kind": "user",
+        "text": "i thought we moved lsp out of bifrost proper"
+      },
+      {
+        "at": "2026-10-09T00:58:39.849Z",
+        "kind": "agent",
+        "text": "You're right that it moved. I'll check what LSP-related code is still in bifrost-dev, so I can answer precisely."
+      },
+      {
+        "at": "2026-10-09T00:59:16.516Z",
+        "kind": "agent",
+        "text": "Yes, it moved, and nothing from today put LSP code back into bifrost-dev. The schema-6 follow-up is in bifrost-lsp because the extension and the server both live there now.  **Confirmed from master's "
+      },
+      {
+        "at": "2026-10-09T01:14:31.514Z",
+        "kind": "user",
+        "text": "pls move the docs pages to the lsp repo"
+      },
+      {
+        "at": "2026-10-09T01:14:38.714Z",
+        "kind": "agent",
+        "text": "I'll move the four pages to bifrost-lsp and fix bifrost-dev's links to them. First I'll look at how bifrost-lsp organizes docs and what in bifrost-dev links to these pages."
+      }
+    ]
+  }
+}

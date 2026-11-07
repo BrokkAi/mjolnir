@@ -1,0 +1,311 @@
+{
+  "id": "L2111",
+  "title": "eval35 3777 haikuxhigh still-open label",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "8d2bf7cbf3cefcbe2166e0ff1b2de12a",
+    "session_title": "eval35 3777 haikuxhigh",
+    "reply_position": 5530,
+    "captured_at": "2026-10-08T20:27:48.158Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3777: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 0722dea6bcb52ef5335695a701631d157c31cbf4\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls (a cargo command that starts no compiler for\nmore than ten minutes), you may run that command through plain cargo\n(/usr/local/cargo/bin/cargo) and say so in your report; do not move target/\nor change shared cache settings.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the reposi\n[... 2693 bytes omitted from the middle of this message ...]\n false\n}\n```\n\n```\nbifrost --root <dir> --policy-id bifrost.correctness.redundant-boolean-branches --evaluation-date 2026-09-22 --fail-on never --format json\n```\n\n**Actual** (dev build at `2232ba72ed`): completion `complete`, 0 findings, diagnostic \"its selection matched no row in the scanned works\". Recovery swallowed the whole `if_expression`, so no `If` fact exists.\n\n**Contrast:** when the error stays inside the `if` (`if (c) { return true + } else { return false }`), the relation sees the `if`, finds `has_error()`, and the run is correctly inconclusive. The Java, JavaScript, TypeScript, Go and C# recovery fixtures all happen to keep the `if`.\n\nChecked: `crates/bifrost-analysis/src/analyzer/structural/{extract,facts}.rs` and `crates/bifrost-core/src/analyzer/structural/` have no `is_error`/`has_error` handling, and the RQL search layer checks recovery only on nodes a seed already matched.\n\n## Options (needs an owner decision)\n\n1. **Any ERROR node makes every structural selection over the file incomplete.** Simple and sound. Cost: many real files contain small recovered regions (syntax a grammar version does not know yet, preprocessor-heavy C), so many runs become inconclusive.\n2. **Record ERROR regions as facts, and make a selection incomplete only when an error region could contain a node of the selected kind.** For example, the region is inside a callable body for statement-level selections. Keeps most runs decidable. Cost: a per-kind containment rule and a new fact row.\n3. **Record ERROR regions and report them as a diagnostic without changing completion.** Cheapest, but leaves a false \"complete\".\n\nRecommendation: option 2, with the region recorded as a structural fact row (a range, not an opaque value) and containment answered in SQL. Option 3 is not enough, because the completion value is what CI gates read.\n\n## Scope note\n\nThe #3543 transport fixture for Kotlin A6 now uses a recovery shape that keeps the `if`, with a comment pointing here. The swallowed-`if` shape stays unqualified until this is decided.\n"
+        },
+        {
+          "id": "user:1350",
+          "role": "user",
+          "text": "Judge note. Your turn ended with \"I have armed the completion monitor and will act on its notification.\" No notification arrives between turns: nothing will wake you, and an ordinary end of turn is not completion. Poll your own background commands in the foreground, in waits of at most five minutes, and keep the turn running until the FINAL REPORT is written. Nothing in your workspace is lost; continue from its current state.\n"
+        },
+        {
+          "id": "agent:4177",
+          "role": "assistant",
+          "text": "Two more unwritable-root failures in the core crate, consistent with uid 0. I'll keep polling for the final tally."
+        },
+        {
+          "id": "agent:4192",
+          "role": "assistant",
+          "text": "The core and RQL libraries pass, except the two unwritable-root tests. Next are the root suites with the new tests. I'll compile them and run the two named tests plus the existing branch-relation tests."
+        },
+        {
+          "id": "agent:4267",
+          "role": "assistant",
+          "text": "The `completion()` accessor on `CodeQueryResult` returns the value, not a reference. I'll remove the borrow in the assertion. The file was reformatted, so I'll read the exact lines first."
+        },
+        {
+          "id": "agent:4310",
+          "role": "assistant",
+          "text": "All 37 targeted tests pass, including the revised Kotlin policy test, the class-scope call-selection test, and the existing branch-relation tests. The change touches every language's structural walk, so I'll run the full root package suites (`brokk-bifrost`), which hold the persistence, cross-language, usage, and analyzer tests."
+        },
+        {
+          "id": "agent:4340",
+          "role": "assistant",
+          "text": "The full run is going. I'll avoid editing source while it compiles and runs. In the meantime, I'll wait on it."
+        },
+        {
+          "id": "agent:4380",
+          "role": "assistant",
+          "text": "The run is at 809 of 10,290. One early failure is a cold-start timing budget in the MCP CLI suite. I'll check it after the run, since timing budgets can be environmental."
+        },
+        {
+          "id": "agent:4403",
+          "role": "assistant",
+          "text": "Several Go policy tests and one CLI test are failing too. Those could share the same missing-pack cause as the Go native-point test, or they could be caused by my Go walk change. I'll wait for the run to finish and read the messages before judging."
+        },
+        {
+          "id": "agent:4442",
+          "role": "assistant",
+          "text": "An external mailbox event arrived announcing a PR. The brief bars me from looking at other PRs or lanes for this issue, so I'm ignoring it and continuing the validation run."
+        },
+        {
+          "id": "agent:4485",
+          "role": "assistant",
+          "text": "The full run finished with 10,285 passed and 5 failed. I'll read each of the five failure messages to classify them."
+        },
+        {
+          "id": "agent:4499",
+          "role": "assistant",
+          "text": "Two of these are latency budgets, which look like load effects. The Go result-contract tests compare full query results and need a closer read. The policy CLI assertion also needs its stdout and stderr. I'll pull the relevant lines."
+        },
+        {
+          "id": "agent:4524",
+          "role": "assistant",
+          "text": "The policy CLI test gets exit code 1 where it expects 2. Changes in completion could move exit codes, so I need to see what that test runs. I'll read the test and rerun all five failures alone to separate load-related flakes from deterministic failures."
+        },
+        {
+          "id": "agent:4563",
+          "role": "assistant",
+          "text": "Four of the five fail deterministically when run alone, so they are not load flakes. I'll check them against the base commit after I commit. First, the required clippy gate on my state, in the background."
+        },
+        {
+          "id": "agent:4621",
+          "role": "assistant",
+          "text": "The workspace clippy gate passes with warnings denied. Next, a format check on the changed Rust files, then the commit."
+        },
+        {
+          "id": "agent:4634",
+          "role": "assistant",
+          "text": "Formatting is clean and the tree holds only my intended files. The repo's rules require plain ASCII in code and comments, so I'll scan my added lines for non-ASCII characters before committing."
+        },
+        {
+          "id": "agent:4653",
+          "role": "assistant",
+          "text": "The added lines are plain ASCII. I'll check the git identity, then commit only the files I changed, staged by name."
+        },
+        {
+          "id": "agent:4672",
+          "role": "assistant",
+          "text": "The repository has a configured identity, so I'll use it as is. Staging the explicit file list and committing on the current detached HEAD."
+        },
+        {
+          "id": "agent:4687",
+          "role": "assistant",
+          "text": "The commit is in place, and the working tree is clean. I'll run the base comparison without moving HEAD. `git archive` extracts the base tree to a scratch directory, and the shared target directory keeps the dependency builds reusable. The base test binaries will rebuild the workspace crates, which takes a while."
+        },
+        {
+          "id": "agent:4720",
+          "role": "assistant",
+          "text": "The run failed before it started. Cargo tried to create `bifrost/target` under the workspace, which suggests this environment routes the target directory somewhere else. I'll check the active target configuration and whether the scratch directory exists."
+        },
+        {
+          "id": "agent:4749",
+          "role": "assistant",
+          "text": "`target` is a symlink into the managed target store, so pointing a scratch build at it is not safe. Before I decide how to run the base comparison, I can answer a cheaper question from the logs I already have. If my change caused these failures, the failing output should contain the new diagnostic code. I'll search for it."
+        },
+        {
+          "id": "agent:4780",
+          "role": "assistant",
+          "text": "The new code appears in both Go failures, so my change is responsible for those two result-contract tests and the Go typestate test. Some Go fixture shapes now produce recovered regions and mark selections incomplete. Before judging the rule, I need to know whether those regions are real parse errors or artifacts of Go's grammar-gap repair, which can rewrite the tree. I'll read one failing fixture and the Go walk's tree source."
+        },
+        {
+          "id": "agent:4819",
+          "role": "assistant",
+          "text": "The fixture is ordinary Go with no unusual syntax, so the regions are suspicious. I'll check whether Go's walk uses a repaired tree and how it obtains `root`."
+        },
+        {
+          "id": "agent:4844",
+          "role": "assistant",
+          "text": "Go repairs only `new(expr)`, so the regions in these fixtures come from some other construct. I'll identify it directly. A temporary debug test will run the exact fixture through Go's structural spec and print each recovered span with its source text."
+        },
+        {
+          "id": "agent:4926",
+          "role": "assistant",
+          "text": "The analysis test rebuild is taking longer than the earlier ones. I'll check that the compiler is still making progress rather than stalled."
+        },
+        {
+          "id": "agent:4962",
+          "role": "assistant",
+          "text": "The debug output identifies the region. It is the function name `fallthrough` in the test fixture. `fallthrough` is a reserved Go keyword, so the fixture is invalid Go, and tree-sitter correctly flags that span as recovered. A `call` selection could in principle hide inside any recovered span, so the new Incomplete answer follows the rule. The fixture itself is the defect. I'll check the channel fixture for the same problem before deciding anything."
+        },
+        {
+          "id": "agent:5000",
+          "role": "assistant",
+          "text": "Both failing Go fixtures name their function `fallthrough`, a reserved keyword, so the fixtures are invalid Go. The assertions index rows by position, not by function name, so renaming the identifier keeps the test's meaning. I'll first remove the debug test from `extract.rs`, confirm that file matches the commit, and then check whether the fixture name appears anywhere that matters."
+        },
+        {
+          "id": "agent:5039",
+          "role": "assistant",
+          "text": "The restored `extract.rs` matches the commit. The keyword-named function appears three times in `go_result_contract.rs`, and the rename is mechanical. I'll rename only the `func` declarations, which makes the fixtures valid Go. The test names and row-position destructuring stay as they are."
+        },
+        {
+          "id": "agent:5069",
+          "role": "assistant",
+          "text": "The rename is in place and rustfmt is clean. I'll rerun the whole Go result-contract module, plus the typestate lifecycle and policy CLI tests that failed."
+        },
+        {
+          "id": "agent:5090",
+          "role": "assistant",
+          "text": "The Go result-contract module passes after the rename. The typestate timing test also passed on this run, so that earlier failure was load-related. The policy CLI test still fails, so I'll rerun it alone with a backtrace to find which call returned exit code 1."
+        },
+        {
+          "id": "agent:5123",
+          "role": "assistant",
+          "text": "This test makes the output directory read-only and expects the CLI to fail on the write. I'm running as uid 0, which ignores directory permissions, so the write succeeds and the status is 1. That is the same environmental cause as the unwritable-root tests. Next I'll rerun the MCP cold-start timing test alone."
+        },
+        {
+          "id": "agent:5151",
+          "role": "assistant",
+          "text": "The MCP cold-start test fails deterministically in this container. Its message is a workspace snapshot that was not ready within the budget, which is a timing result. That could come from my change or from this host, so the base comparison is needed. I'll reuse the real target store behind the symlink, which keeps the dependency builds shared, and run the base tests from the exported tree."
+        },
+        {
+          "id": "agent:5198",
+          "role": "assistant",
+          "text": "The base run has started. The wrapper warnings reference my migration file, which the base export lacks, and they are harmless. I'll poll the run."
+        },
+        {
+          "id": "agent:5221",
+          "role": "assistant",
+          "text": "The base passes this test in 4.5 seconds, and my tree fails it at 4.7 against the same budget. That makes a timing regression from my change likely, though not yet proven. I'll read the test to see what corpus it builds and which code path the budget measures."
+        },
+        {
+          "id": "agent:5248",
+          "role": "assistant",
+          "text": "The test builds the `testcode-java` fixture and times the first `get_summaries` call against the server's budget. Two things in my change could slow that path: the new recovery scan in the Java walk, and the store-wide epoch bump, which would force a republish if this fixture ships a prebuilt cache. I'll check whether the fixture contains a cache directory."
+        },
+        {
+          "id": "agent:5284",
+          "role": "assistant",
+          "text": "The fixture has a checked-in `.bifrost` directory. If it holds a cache built under the old schema or epoch, my migration and salt bump would invalidate it and make the cold start slower. I'll check what it contains and whether it is tracked."
+        },
+        {
+          "id": "agent:5306",
+          "role": "assistant",
+          "text": "The fixture holds only `packs.json`, with no cache, so the cold path is genuinely cold in both trees. The two totals are close to each other: 4.5 seconds on base and 4.7 on my tree, both near a budget that is probably about 4 seconds. Single runs cannot separate a regression from noise, so I'll run this test several times on each tree."
+        },
+        {
+          "id": "agent:5345",
+          "role": "assistant",
+          "text": "On my tree the test failed twice and passed once, so it is flaky at this threshold. I'll take the same three samples on the base export to compare the distributions."
+        },
+        {
+          "id": "agent:5365",
+          "role": "assistant",
+          "text": "The base also fails this test 3 times out of 3 in this run, after one pass earlier. The two distributions overlap, so the cold-start test is a pre-existing timing flake near its budget and not a regression from my change. Next I'll run the Go native-point test and one unwritable-root test on the base export, to confirm those two are pre-existing too."
+        },
+        {
+          "id": "agent:5411",
+          "role": "assistant",
+          "text": "The Go native-point test fails identically on the base, so that failure predates my change. Next, the base unwritable-root result."
+        },
+        {
+          "id": "agent:5426",
+          "role": "assistant",
+          "text": "The base also fails the unwritable-root test, which confirms the uid-0 cause. The policy CLI test uses the same read-only-directory mechanism, and I'll confirm it on the base too. I'll start that run in the background, then commit the fixture rename as its own change."
+        },
+        {
+          "id": "agent:5447",
+          "role": "assistant",
+          "text": "The fixture rename is committed as `bc921c3708`, and the tree is clean. I'll wait for the base policy-CLI result before writing the report."
+        },
+        {
+          "id": "agent:5464",
+          "role": "assistant",
+          "text": "The base also fails the policy CLI test, so all four deterministic failures are pre-existing or environmental. One piece of evidence is still missing: the new class-scope call selection has no measured base result. I'll add a probe to the scratch base copy only. It runs the same query and prints the completion the base produces, so my change's effect is measured rather than inferred."
+        },
+        {
+          "id": "agent:5499",
+          "role": "assistant",
+          "text": "The base probe shows the class-scope recovered `call` selection completes with one match, while the intact control completes too. On my tree the recovered case is `incomplete` with `structural_syntax_recovery`. That is the measured before/after for the RQL mechanism. I'll collect the final commit hashes and confirm the tree is clean."
+        },
+        {
+          "id": "agent:5530",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nThe issue's Kotlin reproducer still reports `complete`. The mechanism the issue describes does not occur in this grammar version, so option 2 cannot make it inconclusive. I implemented the recovered-region fact and the completeness rule anyway. They fix a different case: an ERROR node that sits where a selected kind could hide. That case is verified, and the rule is in place. I need your decision on the reproducer (see section 5).\n\n**1. Confirmed cause**\n\n- Confirmed (base CLI, `target/debug/bifrost` built from `0722dea6bc`): the reproducer reports `completion.type = complete`, 0 findings, and only an `empty_selection` advisory. This matches the issue.\n- Confirmed: the reproducer has no ERROR node. Tree-sitter-kotlin 0.4.6 parses `if (c) return true + else return false` with `root.has_error() == false`. The grammar reads `else` as an identifier inside an infix expression, and `return` as an infix identifier. The `if_expression` survives with no `else` arm. The debug output of the failing unit test lists `kind: If` for the generic path.\n- Likely, not dumped: the canonical Kotlin walk (`bifrost-jvm/src/kotlin/declarations.rs`) produces the same `If` fact. It uses the same kind table and `should_extract`. The `empty_selection` advisory then comes from `redundant-boolean-return` finding no else arm, so no branch row exists. I did not confirm this directly on the canonical path.\n- Confirmed for ERROR shapes: `StructuralFactCollector` now records ERROR spans (`record_recovery_regions`), and the reach test passes. Kotlin ERROR at class scope produces one ERROR node at `(class_body ... (ERROR (integer_literal)))`. Before the change, a `call` selection over that file completed with one match. After the change, it is `Incomplete { codes: [StructuralSyntaxRecovery] }` (base probe in a scratch copy; the intact control completes in both trees).\n- Not a cause: the `if` removal the issue describes did not occur in any ERROR-producing variant I probed. Each variant kept its `If` fact, and the existing `has_error()` on the `if` already made those runs inconclusive.\n\n**2. Changes and reasons**\n\nBase `0722dea6bcb52ef5335695a701631d157c31cbf4`. Final `bc921c3708ec430281c374d00ef89c4895f3d56d`. Commits: `eff156a252` (the change), then `bc921c3708` (fixture rename).\n\n- `bifrost-core` kinds.rs: `RecoveryScope { Anywhere, CallableBody }`, `NormalizedKind::recovery_scope` (38 variants, statement-level kinds are CallableBody), and `selection_recovery_scope` (most permissive scope over the concrete subtypes of the selected kinds). Documented limits.\n- `bifrost-core` facts.rs and collector.rs: `StructuralFactRows` carries sorted, unique `recovery_regions`. `StructuralFactCollector::record_recovery_regions(root)` scans only subtrees with `has_error()`, and every language walk calls it once. This covers nine language walks, the generic extraction path, and the C++ projection.\n- `bifrost-analysis` facts.rs: `RecoveryReach` (`may_hide(scope)`), derived from regions and callable spans with a prefix-max binary search. `FileFacts` stores regions and reach. `STRUCTURAL_FACTS_VERSION` is 28.\n- `bifrost-analysis` index.rs: `StructuralIndexFile.recovery`, so indexed files report the same completeness as scanned files.\n- Store: migration `0138-structural-recovery-regions.sql` (table `source_structural_recovery_regions`, PK `(blob_id, start_byte, end_byte)`, WITHOUT ROWID, STRICT, FK to manifests). Writer inserts regions. Reader loads them ordered. Logical-row accounting includes them. `STORE_EPOCH_SALT` gains `structural-recovery-regions-3777-2026-10-08`. `cache_db.rs` gets version 138 and the migration entry. The schema digest is re-pinned to the value the regression test printed. `generate-cache-schema.py` gets version 138 and `--check` passes.\n- RQL: `CodeQueryDiagnosticCode::StructuralSyntaxRecovery` (`structural_syntax_recovery`, Incomplete). `execute_seed` checks reach before the candidate skip (indexed) and after loading facts (scan), and emits one diagnostic per affected file and seed. Termination maps to `AnalysisIncomplete`. The policy \n[... 6192 bytes omitted from the middle of this message ...]\neport Complete over recovered regions.\n- Containment is in Rust, not SQL, as explained in section 2.\n- The mbx build wrapper printed prediction warnings naming `0138-structural-error-regions.sql` and `0138-structural-recovery-regions.sql`. My migration is `0138-structural-recovery-regions.sql`. I did not investigate the wrapper's cache.\n\n**6. Draft GitHub approach comment**\n\nRecovered syntax now becomes a structural fact, so a selection can tell when it may have missed rows. Tree-sitter's ERROR nodes are recorded as byte-range rows in a new per-blob table, through a single collector hook that each language walk calls with the parse root. A selection is marked incomplete when a recovered region could hold a node of its kind. Statement-level kinds count only when a region overlaps a callable declaration, and other kinds count when any region exists. The rule is one function per kind in the shared kind registry. The run reports a new `structural_syntax_recovery` diagnostic, and the policy layer treats it as a capability gap. The schema, store epoch, and Python models are updated for this. The reproducer from the issue is not fixed yet, because tree-sitter-kotlin 0.4.6 parses it without any error, so a separate decision is needed for that shape. Known gaps are listed in the report.\n\n★ Insight ─────────────────────────────────────\n- The issue's premise is that recovery leaves an ERROR node. For this reproducer the grammar produces a valid but wrong tree, so `has_error()` never fires. Checking `root.has_error()` before designing a fix would have saved most of the time I spent on the ERROR-region path.\n- The collector had two call shapes, a per-node hook and a `ParentIndex` built from the root. A root-level call with `has_error()` pruning fits both, and it keeps the cost of a clean file at one check.\n─────────────────────────────────────────────────"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Judge note. Your turn ended with \"I have armed the completion monitor and will act on its notification.\" No notification arrives between turns: nothing will wake you, and an ordinary end of turn is not completion. Poll your own background commands in the foreground, in waits of at most five minutes, and keep the turn running until the FINAL REPORT is written. Nothing in your workspace is lost; continue from its current state.\n",
+    "assistant_text_tail": "eport Complete over recovered regions.\n- Containment is in Rust, not SQL, as explained in section 2.\n- The mbx build wrapper printed prediction warnings naming `0138-structural-error-regions.sql` and `0138-structural-recovery-regions.sql`. My migration is `0138-structural-recovery-regions.sql`. I did not investigate the wrapper's cache.\n\n**6. Draft GitHub approach comment**\n\nRecovered syntax now becomes a structural fact, so a selection can tell when it may have missed rows. Tree-sitter's ERROR nodes are recorded as byte-range rows in a new per-blob table, through a single collector hook that each language walk calls with the parse root. A selection is marked incomplete when a recovered region could hold a node of its kind. Statement-level kinds count only when a region overlaps a callable declaration, and other kinds count when any region exists. The rule is one function per kind in the shared kind registry. The run reports a new `structural_syntax_recovery` diagnostic, and the policy layer treats it as a capability gap. The schema, store epoch, and Python models are updated for this. The reproducer from the issue is not fixed yet, because tree-sitter-kotlin 0.4.6 parses it without any error, so a separate decision is needed for that shape. Known gaps are listed in the report.\n\n★ Insight ─────────────────────────────────────\n- The issue's premise is that recovery leaves an ERROR node. For this reproducer the grammar produces a valid but wrong tree, so `has_error()` never fires. Checking `root.has_error()` before designing a fix would have saved most of the time I spent on the ERROR-region path.\n- The collector had two call shapes, a per-node hook and a `ParentIndex` built from the root. A root-level call with `has_error()` pruning fits both, and it keeps the cost of a clean file at one check.\n─────────────────────────────────────────────────",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      5530
+    ],
+    "user_position": 1350,
+    "input_rationale": "Work is committed, but option (b) needs sign-off under the no-text-fallback rule and was not implemented; the issue's reproducer stays unfixed until the user chooses. Latest user message (1350) is only a process nudge; the request is the brief at 21.",
+    "label": "required_final",
+    "triggers": [
+      "needs you"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-08T20:28:14.015Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

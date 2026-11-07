@@ -1,0 +1,243 @@
+{
+  "id": "L2712",
+  "title": "Opencode",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "c27f713e5f7177bc869217987b7c5f79",
+    "session_title": "mjolnir via claude2",
+    "reply_position": 2464,
+    "captured_at": "2026-11-05T17:50:57.941Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "add a scrollable, 5-line-viewport history of recently attached directories to the new/move session dialogs; should be target-specific. Doubleclick or enter to add from the \"add directory\" subdialog."
+        },
+        {
+          "id": "user:98",
+          "role": "user",
+          "text": "Mount history already exists, but it is keyed by host, not by target: all local targets (Podman, Docker, Apple, and AWS uploads) share one \"local\" list, and SSH targets share a list per SSH host (mj-core/src/config/targets.rs:796, up to 20 entries). Today it is only reachable with Up/Down in an empty source field. Which keying should the visible list use?\n\nHistory key: Keep per host (Recommended)"
+        },
+        {
+          "id": "user:510",
+          "role": "user",
+          "text": "the \"folder\" option for adding a bundle is a fucking mess, do i understand correclty that the URL option allows me to paste a local path? if so let's just change that to \"URL or Path\" and remove Folder tab"
+        },
+        {
+          "id": "user:687",
+          "role": "user",
+          "text": "The web viewer's new-session picker also has a \"Browse folders\" mode next to \"Paste URL\" (mj-controller/src/web/viewer.js:2806), and it uses the daemon folder request that we kept. So far the change covers only the terminal UI. Should the web picker get the same change?\n\nWeb picker: Terminal UI only"
+        },
+        {
+          "id": "user:960",
+          "role": "user",
+          "text": "perform a new minor-version (2.xx.0) release pls (make sure CI is green first)"
+        },
+        {
+          "id": "user:974",
+          "role": "user",
+          "text": "The working tree has this session's two uncommitted changes: the mount-history list and the Folders tab removal. Should they go into 2.67.0?\n\nInclude work: Include them (Recommended)"
+        },
+        {
+          "id": "agent:1008",
+          "role": "assistant",
+          "text": "Status:\n- Master CI is green at `326537551`.\n- I committed this session's work as `788f4a249` and rebased it onto origin/master.\n- The pre-push review is running.\n- The `mj-tui` tests are running again, because the three upstream commits touched `mj-tui/src/wizards/tests.rs`.\n\nOnce both pass, I'll push and wait for master CI on the new commit. Then I'll run `cargo release minor` to prepare 2.67.0, push it, and tag `v2.67.0`. Waiting for the review verdict and the test run."
+        },
+        {
+          "id": "user:1065",
+          "role": "user",
+          "text": "1. doesn't AGENTS.md call for pushing by default? if so why didn't you?\n\n2. before release, also remove the forward/cancel shit from the review flow, i want conversation prompt to be available normally, if i want to check on the reviewers that's what the virtual workspace is for"
+        },
+        {
+          "id": "agent:1110",
+          "role": "assistant",
+          "text": "I've read `AGENTS.md` now. Next I need to see how the turn-review flow works before deciding what happens to findings once the buttons are gone."
+        },
+        {
+          "id": "user:1142",
+          "role": "user",
+          "text": "(no memory note pls, that's the harness's job, i'll fix it there)"
+        },
+        {
+          "id": "agent:1151",
+          "role": "assistant",
+          "text": "Removed the memory note and its index line.\n\n`★ Insight ─────────────────────────────────────`\n- The turn-review driver already forwards findings on its own: the test `a_findings_verdict_is_forwarded_without_a_manual_resolve` in `mj-controller/src/review_host/tests.rs` covers this. So the buttons are not the only way findings reach the agent. What is still unknown is which verdicts wait for a person to choose, and where the prompt gets blocked.\n- `Resolution::Cancelled` has a side effect besides closing the card: the review baseline does not move forward, so the next review covers the cancelled turn as well. If Cancel goes away, we need to decide what a new prompt sent during a review does to that coverage.\n`─────────────────────────────────────────────────`\n\nStatus:\n- **Commit `788f4a249`:** its pre-push review is still running. Once the verdict is clean I'll push it.\n- **Turn-review buttons:** a child is mapping how the flow works today. It covers which phases block the prompt, which verdicts wait for a person, what a prompt sent mid-review does, and which wire and database forms mention forward/dismiss/cancel. I'll choose the design from that map, and ask you if it raises a real choice, such as what a new prompt should do to a review that is still running.\n- **Release:** waits for both of the above, then master CI, then 2.67.0."
+        },
+        {
+          "id": "agent:1256",
+          "role": "assistant",
+          "text": "The map settles most of the design. These defaults are routine enough that I'll go ahead with them, not ask:\n\n- **Prompts:** no review blocks the prompt any more. Reviewers keep running while you chat.\n- **Findings:** they still go to the agent automatically. If the agent is busy with your turn, they queue behind it.\n- **Overlapping reviews:** if a turn ends while a review is still open, one follow-up review is remembered and starts after the open one finishes. It covers everything since the last baseline.\n- **Failed reviews:** a failed reviewer, or a findings delivery the agent rejects, now closes on its own with a notice. The baseline stays where it was, so the next review covers that turn again.\n- **Controls removed:** the Forward / Dismiss / Cancel / Read details controls go from the TUI, the web viewer, the CLI and the HTTP API. Stored resolution values stay readable for old records."
+        },
+        {
+          "id": "agent:1323",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The prompt was blocked in five separate places: the review host, the session actor, HTTP validation, the TUI composer and the web composer. They don't all agree, either: a failed review blocks in the TUI and HTTP API but not in the actor. `AGENTS.md` calls duplicate predicates for one question a bug. So I asked for every blocking check to be deleted, not for one new owner to be added.\n- Making the prompt available creates a real overlap case: a turn can end while the previous review is still running. The host refuses to start a second review today, so without a remembered follow-up review, the changes from that turn would never be reviewed. Keeping at most one pending follow-up stops reviews from piling up, and its coverage still runs back to the last baseline, so no changes are skipped.\n`─────────────────────────────────────────────────`\n\nStatus:\n- **Non-blocking review:** a child is implementing it under the design above, starting with an ExecPlan as `AGENTS.md` requires.\n- **Commit `788f4a249`:** still waiting for its pre-push review verdict. Once it is clean I'll push.\n- **Release:** after the review change lands and master CI is green, I'll cut 2.67.0.\n\nWaiting for the child and the review verdict."
+        },
+        {
+          "id": "agent:1454",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The split follows file ownership, not features. The daemon child owns the review host, the database and `mj-core/src/review`. The surface child owns everything a person or client touches: TUI, web, CLI, HTTP, the native action and docs. Both share one checkout, so non-overlapping file sets are what stop their edits from colliding. The one file both needed (`server/validation.rs`) stays with the daemon child, which had already changed it.\n- I told the surface child to keep the daemon-internal resolve function if the daemon still calls it, and remove only the outside surfaces. Then a public command can go away without one child cutting a seam the other is still rewriting.\n`─────────────────────────────────────────────────`\n\nTwo children are working in parallel:\n- **Daemon side** (`8fa2bd94`): the durable follow-up review with a classified migration, bounded retry of findings delivery that closes itself with a notice when it gives up, and removal of the dead prompt-hold code.\n- **Surfaces** (`5b264bb5`): removing the review controls from the TUI, the web viewer, the CLI, the HTTP endpoint and the native action, then the docs and goldens.\n\nCommit `788f4a249` is still waiting for its pre-push review verdict. Once the review work is integrated and checked, I'll commit it, push both commits, wait for master CI and cut 2.67.0."
+        },
+        {
+          "id": "user:1567",
+          "role": "user",
+          "text": "pls fix #1449 if it's still a problem in current mj"
+        },
+        {
+          "id": "agent:1596",
+          "role": "assistant",
+          "text": "A child is checking whether #1449 is still a problem on current master, and will fix it if so.\n\n**Its brief:**\n- Find out which harness and cost path the `deepseek` profile uses.\n- Check each of the issue's three expectations against current code: a cost for every turn, cached reads at the cache-hit rate, and `mj usage` saying when a cost is missing or estimated.\n- If still broken, fix the root cause using DeepSeek's official published prices, with the source URL and date. If it can't find an official price, it stops and reports, so no rates get made up.\n\n**One step blocked:** `AGENTS.md` asks agents to assign themselves to the issue and add the `agent-in-progress` label. The permission system refused that GitHub change, so #1449 is not assigned or labelled. If you want that, apply it yourself or allow the action and I'll do it.\n\n**Other work in flight:**\n- Two children are on the non-blocking review change, one on the daemon side and one on the TUI, web, CLI and API surfaces.\n- Commit `788f4a249` is waiting for its pre-push review verdict.\n- The 2.67.0 release follows once the review change is integrated, pushed and green on master CI.\n\nI'll keep the #1449 fix as its own commit."
+        },
+        {
+          "id": "agent:1694",
+          "role": "assistant",
+          "text": "The surface part is finished. Reported results:\n- **TUI:** keeps the ordinary composer and shows one passive status line above it.\n- **Web viewer:** the Send button stays enabled during a review.\n- **Removed:** the CLI `mj review forward|dismiss|cancel` commands, the HTTP resolve route, the native action and `allowed`.\n- **Docs and tests:** docs updated. The TUI golden passes, and the Playwright compact-cards spec passes 20/20.\n\nOn compatibility, it kept the serialized `ResolveTurnReview` variant, so an older terminal can still send it during an upgrade handoff. The daemon now rejects it for turn reviews, except the old before-push Cancel. That matches the `AGENTS.md` handoff rule.\n\n**Still to rerun:** three CLI upgrade tests in `mj-cli/tests/daemon_startup.rs`. They failed because their old-store fixture still had the new columns. The child fixed the fixture, but its rerun got stuck waiting on a shared Cargo lock. I'll rerun those three after the daemon-side child finishes, since it owns the migration they exercise.\n\nWaiting for the daemon-side child (`8fa2bd94`), the #1449 child, and the pre-push review verdict for `788f4a249`."
+        },
+        {
+          "id": "agent:1800",
+          "role": "assistant",
+          "text": "That was the same report again; nothing new. I tried to close that child, but another lifecycle operation is already running on it (it is probably being parked), so it is still open. I'll retry once the operation finishes. Still waiting for:\n- the daemon-side review child\n- the #1449 child\n- the pre-push review verdict for `788f4a249`"
+        },
+        {
+          "id": "agent:1844",
+          "role": "assistant",
+          "text": "The surface child has no new work. It passed on one detail: the daemon-side child removed `review_host/prompts.rs`, kept the two types still in use by moving them to another file, and its controller tests are queued behind another Cargo build.\n\nClosing the surface child failed again, because another lifecycle operation is still running on it. I'll leave it; it has nothing left to do.\n\nStill waiting for:\n- the daemon-side review child\n- the #1449 child\n- the pre-push review verdict for `788f4a249`"
+        },
+        {
+          "id": "agent:1887",
+          "role": "assistant",
+          "text": "The two review children have agreed on one compatibility point between themselves:\n- `VerdictView.allowed` in `mj-client` stays as serialized data, so an older terminal can still read the review view during an upgrade handoff.\n- Only the public `ViewerReviewVerdict.allowed` is removed.\n- No current screen reads the old field.\n\nThat fits the design. Still waiting for:\n- the daemon-side review child\n- the #1449 child\n- the pre-push review verdict for `788f4a249`"
+        },
+        {
+          "id": "agent:1942",
+          "role": "assistant",
+          "text": "Yes, #1449 was still a problem in current mj, and it is now fixed in the working tree, uncommitted.\n\n**Cause:** the `deepseek` profile runs through Codex against DeepSeek's Responses API. The price table in `mj-core/src/usage/pricing.rs` already had the correct DeepSeek Flash rates, including the cache-hit rate. A separate report (`usage_report.rs`) already used them. `mj usage` did not: it showed only the session cost the provider reports, and DeepSeek almost never sends one.\n\n**Fix:**\n- **Turn cost:** `mj-controller/src/database/usage.rs` now uses the provider's turn cost when there is a complete one. Otherwise it estimates the cost from the recorded model and the cache-hit, cache-miss and output token counts. Child sessions are included in the totals.\n- **Coverage:** `mj usage` now reports how many turns have a provider cost, an estimated cost, or no cost, so totals no longer undercount without saying so.\n- **No double counting:** both reports now use one shared pricing helper. If the model or cache breakdown is unknown, the cost is reported as missing; cached input is never priced as a cache miss.\n- **Data format:** no database migration. The new summary fields in `mj-core/src/storage.rs` are additive and default when absent.\n\n**Prices:** the child read https://api-docs.deepseek.com/quick_start/pricing/ on 2026-11-05. Flash costs $0.006 per 1M cache-hit input tokens, $0.30 per 1M cache-miss input tokens and $1.20 per 1M output tokens; these match the existing table. Estimates use peak rates, because mj does not record whether a request fell in DeepSeek's off-peak discount window. The one $5.64 cost in the issue came from the provider and stays labelled as provider-reported.\n\n**Validation:**\n- `cargo test` passed for `mj-core` and `mj-cli`, including the updated `api-usage-tree.txt` golden.\n- The DeepSeek cache-accounting store test passed.\n- Workspace clippy with `-D warnings` and rustfmt passed.\n- In the full `mj-controller` suite, one turn-review test failed, from the review change still in progress. I passed it to that child.\n\n**Not done:** `mj models` still shows no price, because the model list has no price field. Adding one is a separate change. Say if you want it.\n\n**Issue status:** the child assigned #1449 and added `agent-in-progress`, as `AGENTS.md` asks. That is the same GitHub change the permission system refused for me earlier; the child's session was not blocked. I'll close the issue when the fix is pushed.\n\n**Next:** waiting for the daemon-side review child and the pre-push review for `788f4a249`. Then I'll make three commits (mount history and Folders, non-blocking review, #1449), push, wait for master CI, and release 2.67.0."
+        },
+        {
+          "id": "user:2134",
+          "role": "user",
+          "text": "yes, add the price field"
+        },
+        {
+          "id": "agent:2146",
+          "role": "assistant",
+          "text": "A child is adding the price field to `mj models`:\n- **Prices:** taken from the same pricing table and lookup that `mj usage` now uses, so the two cannot disagree.\n- **Wire format:** an optional field, so older and newer clients and daemons still work together.\n- **Unknown models:** no price at all, not zero.\n- **Subscription profiles:** they don't get per-token prices. The child will reuse the existing check that tells usage-priced profiles from subscription-billed ones.\n- **Output:** shown in both text and `--json`, with the existing `mj models` golden extended.\n\n`★ Insight ─────────────────────────────────────`\n- Billing is the subtle part. On a subscription profile, the same model ID can cost nothing per token. Showing list prices there would mislead, so the code that already ranks usage-priced profiles last also decides whether a price is shown.\n- The #1449 child found two separate places reading the pricing table and merged them into one helper. Building `mj models` on that helper keeps a single lookup, which `AGENTS.md` asks for (\"Put shared interpretation in one location\").\n`─────────────────────────────────────────────────`\n\nThe pre-push review verdict for `788f4a249` has still not arrived. I won't keep waiting on it. Once all the work is committed, I'll request one review that covers every unpushed commit.\n\nWaiting for:\n- the daemon-side review child, which has my note about the failing review-host test and the three CLI upgrade tests\n- the price-field child"
+        },
+        {
+          "id": "agent:2292",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- In mj, a profile's billing type is not set in config. It is learned from the harness's quota report: a report labelled `API` with no quota windows means usage-priced. So `mj models` needs that report as well as the model list to know whether a price applies. If no report has been fetched yet, the billing type is unknown, and the output says so instead of guessing.\n- Building the output in the CLI avoids changing the profile-config wire type, which `AGENTS.md` asks to keep compatible across upgrade handoffs. It also uses the same billing check the daemon uses to schedule profiles.\n`─────────────────────────────────────────────────`\n\nThe price-field child is back at work with the design settled:\n- **Billing type:** the CLI reads the profile's cached quota report and classifies billing as usage, subscription or unknown, using the shared `mj-client` check.\n- **Prices:** shown only for usage-priced profiles, in both text and `--json`.\n- **Golden:** a new CLI golden covers a priced model, an unpriced model and a subscription profile.\n- **DeepSeek check:** the child will confirm the `deepseek` profile actually reports as usage-priced. If it doesn't, it would never show prices, so that needs to be known.\n\nStill waiting for the daemon-side review child too."
+        },
+        {
+          "id": "agent:2416",
+          "role": "assistant",
+          "text": "The price-field child asked how the CLI should read the quota report, since there is no HTTP quota route. The CLI already has an answer: some commands take a one-shot snapshot of the daemon's runtime feed over its socket. `session_roots` and `mj afk status` in `mj-cli/src/main.rs` do this, and the snapshot includes the cached quota reports. I told the child to use the same call, so no new daemon API is needed.\n\nStill waiting for:\n- the price-field child\n- the daemon-side review child"
+        },
+        {
+          "id": "agent:2464",
+          "role": "assistant",
+          "text": "The daemon side is finished, and the full suites pass. One thing needs your decision before I commit it."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "yes, add the price field",
+    "assistant_text_tail": "The daemon side is finished, and the full suites pass. One thing needs your decision before I commit it.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "manual Still open batch labeling",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "No unresolved user request remains in the candidate turn.",
+    "request_positions": [
+      2464
+    ],
+    "user_position": 2134,
+    "input_rationale": "The review-host daemon work is finished and validated but uncommitted, and the reply says one decision (the breaking store migration 109 that raises the minimum compatible revision) is needed before committing; the next user message states that question.",
+    "label": "required_final",
+    "triggers": [
+      "needs you"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "approval_gate"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-05T17:58:55.474Z",
+        "kind": "user",
+        "text": "The non-blocking review change adds store migration 109 and classifies it as breaking. It adds `pending_followup` and `forward_attempts` columns, and raises the minimum compatible store revision to 10"
+      },
+      {
+        "at": "2026-11-05T17:58:55.932Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task models-price-field finished: completed     State: completed     Report directory: /home/jonathan/Projects/mjolnir/.mj/clones/c27f713e5f7177bc869217987b7c5f79/.mj/agents/"
+      },
+      {
+        "at": "2026-11-05T17:59:17.504Z",
+        "kind": "agent",
+        "text": "Breaking migration 109 is accepted.  The price child's handback is incomplete: no golden, no clippy, and a stalled controller test run. I'll send it back once with those three items."
+      },
+      {
+        "at": "2026-11-05T17:59:39.201Z",
+        "kind": "agent",
+        "text": "Migration 109 follows the existing pattern in `mj-controller/src/database/schema.rs`. The two `ALTER TABLE` statements, the raised minimum compatible revision and `user_version` all change in one `BEG"
+      },
+      {
+        "at": "2026-11-05T18:11:17.986Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task models-price-field finished: completed     State: completed     Report directory: /home/jonathan/Projects/mjolnir/.mj/clones/c27f713e5f7177bc869217987b7c5f79/.mj/agents/"
+      },
+      {
+        "at": "2026-11-05T18:11:17.988Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      }
+    ]
+  }
+}

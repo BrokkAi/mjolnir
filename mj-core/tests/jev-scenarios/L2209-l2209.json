@@ -1,0 +1,262 @@
+{
+  "id": "L2209",
+  "title": "L2209",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "f8f9c0585c2ea22fadc90ce94016bd3c",
+    "session_title": "eval37 4666 haikuxhigh",
+    "reply_position": 6083,
+    "captured_at": "2026-10-10T01:41:42.721Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #4666: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 53e61919ae07e44c7603e755b9b14e1f29fade7f\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls (a cargo command that starts no compiler for\nmore than ten minutes), you may run that command through plain cargo\n(/usr/local/cargo/bin/cargo) and say so in your report; do not move target/\nor change shared cache settings.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the reposi\n[... 2482 bytes omitted from the middle of this message ...]\n|4666/)'`, clippy and fmt.\n\n# Issue\n\nIssue #4666: FIRD: Rust results may differ between a fresh and a reused persisted analyzer cache\n\nPossible nondeterminism, not yet isolated.\n\n1. Two full FIRD runs of surrealdb__surrealdb at repo head 18971ffba7 had the same run fingerprint and sampled exactly the same 10,000 sites (identity-set SHA-256 `cfe0a811…`). Yet 276 site results differed: 3,850 vs 4,051 forward-resolved, 1,018 vs 1,066 inverse targets, and 466 vs 481 missing. The first run started from a fresh `BIFROST_CACHE_ROOT`; the second reused the persisted cache the first one created. The binaries were the #4459 enum-variant fix uncommitted (on a dirty tree) and then committed (f19adadba7), which is likely the same code but was not verified byte for byte.\n2. Separately, the ripgrep performance investigation (#4501) saw `native_stale: MountInventoryChanged` results vary between two runs of the same old binary (53, then 29). The same binary's runs also produced different classification counts.\n\nNext step: run one binary on surrealdb three times, (a) fresh cache, (b) reused cache, (c) fresh cache again, and diff the per-site results. If (a) and (c) differ, the analysis is nondeterministic. If only (b) differs, cache reuse changes results. Either way, find the first diverging site and trace it.\n\nEvidence: `.mj/agents/d32ec5d4a74ce3dc2e87fe57314e30b5/evidence/fird-record-comparison.md` (and the pre/post-commit `*-results.ndjson` files beside it) in the bifrost-fuzz worktree.\n\n\n---\nComment by jbellis:\nCorrection: this evidence is likely contaminated. During the first (fresh-cache) surrealdb run, another investigation lane mistakenly deleted that run's live ephemeral analyzer database (`bifrost-analyzer-130675-*.db` and its WAL and SHM files) while the run was in progress. The 276-site difference may come from that, not from cache reuse. The reproduction plan in the issue body still applies: same binary, fresh vs reused vs fresh cache, with no other process touching the files. Lower priority until it is reproduced.\n"
+        },
+        {
+          "id": "agent:5051",
+          "role": "assistant",
+          "text": "With the fix, runs A, B, and C agree on every summary counter and on every semantic field across all 10,000 sites. The only remaining differences are 333 sites in `diagnostics` and 13 in `note`. My earlier observation was that the `member_blob` value inside a diagnostic message is a store rowid that varies between fresh stores. I'll test whether all 333 differences are only that."
+        },
+        {
+          "id": "agent:5086",
+          "role": "assistant",
+          "text": "All 299 diagnostic-only differences normalize to equal once the `member_blob` rowid is masked. Another 21 diagnostic differences and 13 combined diagnostic-and-note differences remain unexplained. I'll print the first unexplained one, character by character, to see what changed."
+        },
+        {
+          "id": "agent:5113",
+          "role": "assistant",
+          "text": "These differences are ordering. The same evidence entries appear in a different order, and the order follows the rowid-based `member_blob` values. To confirm that nothing else changed, I'll compare the diagnostics as sorted multisets with rowids masked."
+        },
+        {
+          "id": "agent:5140",
+          "role": "assistant",
+          "text": "After masking rowids, every one of the 333 remaining differences is a reordering of the same diagnostics. Their contents match exactly, so no analysis result differs between fixed fresh runs A and C, or between A and the reused B.\n\nThe verification is in hand. Next is the validation the brief lists: the full analysis lib, the root `reference_differential` lib tests, the persistence, semantic, and issue suites with their filters, then clippy and the pack drift check. I'll put these in one sequential background script with plain cargo, since the wrapper stalled on test builds earlier. Each step writes its own log."
+        },
+        {
+          "id": "agent:5198",
+          "role": "assistant",
+          "text": "While validation runs, I'll run the pack-authoring drift check that AGENTS.md asks for before submitting. It is light and does not touch the cargo target."
+        },
+        {
+          "id": "agent:5218",
+          "role": "assistant",
+          "text": "The drift check passes. Next I'll commit the solution as a checkpoint on the detached HEAD. First I'll check the git identity configured in this checkout, and confirm exactly which files I am staging."
+        },
+        {
+          "id": "agent:5237",
+          "role": "assistant",
+          "text": "The checkout has a configured identity, and I'll use it unchanged. I'll stage exactly the three files of this change, then commit with a plain-language message that carries the Co-Authored-By line the session requires."
+        },
+        {
+          "id": "agent:5263",
+          "role": "assistant",
+          "text": "The checkpoint is committed as `8d968fed0e`, and the working tree is clean. Re-reading the message, I see two claims I have not verified: that the suite check passes on base, and that the fingerprint is \"the authority the design names\". The first overstates the check's coverage. Its fixture has three files, so the forward workers can overlap, and the suite test is not single-threaded. I'll correct the message after validation, since amending my unpublished local commit is safe. Next I'll poll the validation status."
+        },
+        {
+          "id": "agent:5327",
+          "role": "assistant",
+          "text": "The analysis lib finished with 4,691 passing and 12 failing. I need to see which tests failed before deciding whether any of them relate to my change."
+        },
+        {
+          "id": "agent:5342",
+          "role": "assistant",
+          "text": "The failures fall into three groups. Two are Go native-point tests. One is `unwritable_workspace_root_reports_the_ways_out`, which may be environmental, since the process runs as root. The two `production_*_point_statement_..._work_is_repeatable` tests look related to my change, because they count SQL work per point operation and I changed the revalidation path. I'll read the failure messages before deciding anything."
+        },
+        {
+          "id": "agent:5378",
+          "role": "assistant",
+          "text": "The two `production_*` failures are exact SQL-work pins. Their left side is the new count (230 statements, 211 for the second counter) and the right side is the pinned base value (233, 214). The change removes one post-snapshot stamp read per cold acquisition, which is three `PRAGMA` statements, so the 3-statement drop is expected. I'll read the pinned tuple's meaning and the other failure messages before deciding anything."
+        },
+        {
+          "id": "agent:5416",
+          "role": "assistant",
+          "text": "Three of the six failures are environmental, and I'll confirm that before anything else. The Go oracle tests cannot find a `go` executable, and the unwritable-root test assumes a non-root user. The two `production_*` failures are exact SQL pins that moved by exactly three in each counter. That matches removing the three `PRAGMA` reads of the post-snapshot stamp. I'll confirm the environmental causes and read how the pinned tuple is built."
+        },
+        {
+          "id": "agent:5460",
+          "role": "assistant",
+          "text": "Both environmental causes are confirmed: the process runs as root, and `go` is not installed. Next I'll read the Rust pinned tuple to see where the expected values live, and confirm the Go one."
+        },
+        {
+          "id": "agent:5478",
+          "role": "assistant",
+          "text": "The Go pins follow a convention: each changed statement count carries a comment that explains its delta. I'll follow the same convention. Next I'll read the Rust expected tuple and its comment chain, so I can append an entry for this change in the same form."
+        },
+        {
+          "id": "agent:5503",
+          "role": "assistant",
+          "text": "The Go pin is a `(cold_open, cold_search, warm_open, warm_search)` tuple, and the open pair moved by (-3, -3). The Rust pin is the same kind of literal. I'll find the Rust literal and check whether the warm tuples move too, since the warm path also acquires an inventory."
+        },
+        {
+          "id": "agent:5533",
+          "role": "assistant",
+          "text": "The Rust pin is a literal in an `assert_eq!` with a comment chain. I'll update the cold value to `(230, 211, ...)`, and add a comment in the file's existing style that gives the cause and the delta. The warm tuples come later in the test, and I'll rerun to see whether they also move."
+        },
+        {
+          "id": "agent:5561",
+          "role": "assistant",
+          "text": "Now the Go pin. It has two arms, one for definitions and one for types, and both cold-open tuples move by the same three."
+        },
+        {
+          "id": "agent:5582",
+          "role": "assistant",
+          "text": "Both pins are updated. Their tests live in the analysis lib test binary, which the running validation script is not using for its remaining steps, but cargo holds the target lock during builds. I'll check the validation progress to find when the lock frees up."
+        },
+        {
+          "id": "agent:5611",
+          "role": "assistant",
+          "text": "The root library test binary is compiling now, so the sequential validation has a long way to go. I'll keep polling and avoid starting any cargo command in parallel, since that would only queue behind the lock."
+        },
+        {
+          "id": "agent:5644",
+          "role": "assistant",
+          "text": "The root `reference_differential` lib tests pass: 53 of 53. The full `suite_persistence` run is next, and I'll keep polling."
+        },
+        {
+          "id": "agent:5663",
+          "role": "assistant",
+          "text": "`suite_persistence` passes: 79 run and passed, with 11 skipped, which are the scheduled-only tests. Next is the Rust filter of `analyzer_persistence`."
+        },
+        {
+          "id": "agent:5696",
+          "role": "assistant",
+          "text": "The `suite_issues` filter passes: 97 tests. I'll confirm that the new `issue_4666` test is one of them, then look at the clippy step, which is now running."
+        },
+        {
+          "id": "agent:5716",
+          "role": "assistant",
+          "text": "The new suite test ran and passed in 7.4 s. Clippy is checking the workspace now, which will take a while. In the meantime I'll run the light `rustfmt --check` on the file I just edited for the pins."
+        },
+        {
+          "id": "agent:5739",
+          "role": "assistant",
+          "text": "Formatting and ASCII checks pass. I'll wait for clippy."
+        },
+        {
+          "id": "agent:5763",
+          "role": "assistant",
+          "text": "Clippy passes with `-D warnings` across the workspace, all targets, and all features (exit 0, no warnings). Clippy ran after the pin edits, so that result covers them. Next I'll rerun the two edited work-count tests to see whether the warm pins also move."
+        },
+        {
+          "id": "agent:5787",
+          "role": "assistant",
+          "text": "Both pin tests pass with the updated cold values, and the warm tuples did not move. For the environmental failures I'll confirm the base result instead of assuming it. I'll temporarily put the two files back to their base contents, run the six failing tests on base, then restore the fixed versions. The pin edits are uncommitted, so I'll back them up first."
+        },
+        {
+          "id": "agent:5822",
+          "role": "assistant",
+          "text": "On base, the three Go oracle tests and the unwritable-root test fail too. Those failures come from the environment and not from my change. The two pin tests pass on base with the original values, which confirms that my fix produced the pin movement. Now I'll restore the fixed files: the committed fix from HEAD, and the uncommitted pin edits from the backup."
+        },
+        {
+          "id": "agent:5850",
+          "role": "assistant",
+          "text": "The working tree now holds only the pin edits, and `resolution_selection.rs` matches the committed fix. Before amending, I'll make the commit message say only what I verified. I have not run the suite check on base, so the message will say that. I'll also reword the \"fingerprint is the authority\" sentence to match the design text, and fold the pin update into the same commit, since the tests need it."
+        },
+        {
+          "id": "agent:5884",
+          "role": "assistant",
+          "text": "The amended commit is `9cdb2ac271` on top of the base, and the working tree is clean. Because I changed the pins after the first full analysis run, I'll rerun the full analysis lib on the committed state. I expect only the four environmental failures to remain."
+        },
+        {
+          "id": "agent:5907",
+          "role": "assistant",
+          "text": "The final analysis run is in progress. While it runs, I'll recheck the exact trace counts from the debug run before quoting them in the report. Earlier I read approximate tallies, and I want the exact numbers for each event type."
+        },
+        {
+          "id": "agent:5934",
+          "role": "assistant",
+          "text": "The exact counts are now in hand: 5,536 revalidation re-stages, all with matching fingerprints, zero mismatches, zero `Unavailable` re-stages, and zero admission-check failures. There were 1,601 acquisition-stale events and 2,453 new capsule publications, against 45,821 existing-capsule publications. For the report I also need the semantic difference counts for every run pair, using the same field set throughout."
+        },
+        {
+          "id": "agent:5969",
+          "role": "assistant",
+          "text": "The semantic difference counts are now complete. Base run pairs differ at 1,487 to 2,226 sites, and fixed runs differ at zero. The `missing` counts agree with the stderr `actionable` figures for each run. I'll wait for the final analysis-lib run."
+        },
+        {
+          "id": "agent:6010",
+          "role": "assistant",
+          "text": "The final analysis lib run ends with 4,693 passed and 4 failed. The four failures are the three Go oracle tests and the unwritable-root test, and I verified all four fail identically on base. Before the report, I'll fix one imprecise sentence in the commit message. The base compared the data version read after the snapshot with the value read before staging, not with the value read before the snapshot. I'll amend the local commit's text to say that exactly."
+        },
+        {
+          "id": "agent:6047",
+          "role": "assistant",
+          "text": "The final commit is `71940b37c5`, and the working tree is clean. For the report I need current line numbers for the code I cite, so I'll collect them from the committed tree."
+        },
+        {
+          "id": "agent:6066",
+          "role": "assistant",
+          "text": "I have all the line references. I'll take the full hash of the final commit for the report, along with the base hash and the binary hashes, so the report carries exact values."
+        },
+        {
+          "id": "agent:6083",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\n**1. Confirmed cause**\n\nThe nondeterminism is real, and cache reuse also changes results. Both come from one mechanism, which I confirmed with an instrumented copy of the base binary.\n\n- Same binary, same flags, same sampled sites: two fresh runs (A, C) differ at 2,226 sites in their semantic fields (forward status, targets, classification, inverse hit, non-actionable reason). The reused run B differs from A at 2,068 and from C at 1,487.\n- First diverging site, sorted by path and byte range: `language-tests/src/cmd/bench/run.rs` bytes 4–7 (`std`, line 1). Base fresh run A says `unavailable` with `native_stale: MountInventoryChanged`. Fresh run C and reused run B say `unresolvable_import_boundary`, which is the correct answer for an external crate. Confirmed from `full-A.jsonl`, `full-B.jsonl`, and `full-C.jsonl`.\n- Trace. The debug copy (base code plus `eprintln!`, run D, fresh cache) gives these counts, which I confirmed:\n  - 1,601 acquisition-stale events. Each shows `main_data_version` rising by 1 or 2, while `main_schema_version` and `temp_schema_version` stay the same.\n  - 5,536 revalidation re-stages. Every one matched the expected fingerprint. There were 0 mismatches, 0 `Unavailable` re-stages, and 0 admission-check failures.\n  - All 1,219 `native_stale` sites in run D therefore come from the acquisition check. Revalidation never reported a changed inventory.\n  - 2,453 new macro capsules were published during the forward phase, plus 45,821 publications of capsules that already existed. Each publication runs a writer transaction (`resolution_publication.rs:1053`, called from `resolution_operation.rs:2447`).\n- Mechanism. Acquisition (`resolution_selection.rs`, `open_selected_resolution_mount_inventory_with_content_mounts`) compares `main_data_version` read after its snapshot with the value read before staging. A commit from another connection in that window ends the request as `MountInventoryChanged`, even though the inventory is unchanged. Confirmed by the event fields and the fingerprint evidence above.\n- Likely, not captured per event: each stale lookup overlapped a specific capsule commit. I did not record a per-lookup link.\n- Likely, not instrumented: reused run B's 15 stale sites come from the same check, because a reused store publishes far fewer new capsules.\n- Not implicated, likely: the GC thread (`gc.rs:77`). The `cache_state` row in run A's store records `last_gc_at` at 20:40:54, the start of that run, and I found no later GC record.\n- Unknown: the `ripgrep` case in the issue (`native_stale` counts 53 and 29). I did not run it. The same mechanism would produce this kind of run-to-run variance, but I have not shown it.\n\n**2. Changes and reasons**\n\n- Base commit: `53e61919ae07e44c7603e755b9b14e1f29fade7f`. Final commit: `71940b37c58 58ff0ae4cd9f7498e0d396e883735`, which is `71940b37c5858ff0ae4cd9f7498e0d396e883735`. It is local and unpublished. I amended it twice: once to add the pin update and fix the message, and once more to correct one sentence. The first checkpoint was `8d968fed0e`.\n- `crates/bifrost-analysis/src/analyzer/store/resolution_selection.rs`:\n  - Acquisition retains `selection_start_stamp`, read before the snapshot (line 2626). It no longer compares the post-snapshot stamp, so unrelated commits do not end the request. Staleness is decided later by the fingerprint, which is the inventory check the design describes (`name-resolution.md`, \"Revision safety\").\n  - Revalidation re-stages inside one read transaction (line 2138), so the fingerprint describes one committed state.\n  - A `#[cfg(test)]` hook (`INVENTORY_WINDOW_HOOK`) runs between the start stamp and the snapshot, so a test can commit inside that window deterministically.\n  - The regression test `acquisition_does_not_end_on_an_unrelated_commit_but_still_detects_drift` is tagged `#[hardwon(\"#4666: ...\")]`. It also checks that a real change still ends the selection as `MountInventoryChanged`.\n- `crates/bifrost-analysis/src/analyzer/store/resolution_operation_tests.rs`: exact SQL work-count pins moved from 233/214 to 230/21\n[... 6879 bytes omitted from the middle of this message ...]\ny hash. One extra correct group can push an unrelated site into `target_truncated`, so budget effects reach rows whose evidence did not change.\n\n**6. Draft GitHub approach comment**\n\nWe reproduced the reported gap on surrealdb at 18971ffba7 with the runbook budget. In a fresh cache, a Rust lookup could end with `MountInventoryChanged` when another lookup committed a macro capsule during its acquisition, even though the inventory had not changed. That turned the answer into `unavailable`, so fresh runs disagreed with each other, and the reused cache gave different results again. The fix keeps the stamp read before the inventory snapshot and leaves the drift decision to the existing fingerprint check, which now reads in one transaction. With the change, a fresh run, a reused run, and a second fresh run agree on every summary counter and on every semantic field of all 10,000 sampled sites. No run reports `MountInventoryChanged` now. The change alters no persisted facts, so no epoch or store version moves. Two exact SQL work-count pins moved by three statements each, and I updated them with comments. A new regression test fails on the base code and passes with the change. Still open: each lookup that finds a capsule already published still writes a transaction, and diagnostics order entries by internal row ids, so their text can differ between fresh stores.\n\n★ Insight ─────────────────────────────────────\n- The stamp is a fast path, not the authority. The codebase already had the right check: `revalidate` re-stages and compares fingerprints. Acquisition skipped that step and treated any commit as drift.\n- The exact work-count pins are why this fix shows up in tests. Removing one intended read changes the pinned counts by exactly that read's statements, so the pin update is part of the same commit.\n─────────────────────────────────────────────────"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "un one binary on surrealdb three times, (a) fresh cache, (b) reused cache, (c) fresh cache again, and diff the per-site results. If (a) and (c) differ, the analysis is nondeterministic. If only (b) differs, cache reuse changes results. Either way, find the first diverging site and trace it.\n\nEvidence: `.mj/agents/d32ec5d4a74ce3dc2e87fe57314e30b5/evidence/fird-record-comparison.md` (and the pre/post-commit `*-results.ndjson` files beside it) in the bifrost-fuzz worktree.\n\n\n---\nComment by jbellis:\nCorrection: this evidence is likely contaminated. During the first (fresh-cache) surrealdb run, another investigation lane mistakenly deleted that run's live ephemeral analyzer database (`bifrost-analyzer-130675-*.db` and its WAL and SHM files) while the run was in progress. The 276-site difference may come from that, not from cache reuse. The reproduction plan in the issue body still applies: same binary, fresh vs reused vs fresh cache, with no other process touching the files. Lower priority until it is reproduced.\n",
+    "assistant_text_tail": "y hash. One extra correct group can push an unrelated site into `target_truncated`, so budget effects reach rows whose evidence did not change.\n\n**6. Draft GitHub approach comment**\n\nWe reproduced the reported gap on surrealdb at 18971ffba7 with the runbook budget. In a fresh cache, a Rust lookup could end with `MountInventoryChanged` when another lookup committed a macro capsule during its acquisition, even though the inventory had not changed. That turned the answer into `unavailable`, so fresh runs disagreed with each other, and the reused cache gave different results again. The fix keeps the stamp read before the inventory snapshot and leaves the drift decision to the existing fingerprint check, which now reads in one transaction. With the change, a fresh run, a reused run, and a second fresh run agree on every summary counter and on every semantic field of all 10,000 sampled sites. No run reports `MountInventoryChanged` now. The change alters no persisted facts, so no epoch or store version moves. Two exact SQL work-count pins moved by three statements each, and I updated them with comments. A new regression test fails on the base code and passes with the change. Still open: each lookup that finds a capsule already published still writes a transaction, and diagnostics order entries by internal row ids, so their text can differ between fresh stores.\n\n★ Insight ─────────────────────────────────────\n- The stamp is a fast path, not the authority. The codebase already had the right check: `revalidate` re-stages and compares fingerprints. Acquisition skipped that step and treated any commit as drift.\n- The exact work-count pins are why this fix shows up in tests. Removing one intended read changes the pinned counts by exactly that read's statements, so the pin update is part of the same commit.\n─────────────────────────────────────────────────",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "Eval final report; the fix is committed and validated. The 'still open' items and the five 'Separately actionable' findings are the agent's own unmeasured follow-ups listed for the record. No question, approval or action is asked of the judge.",
+    "label": "none",
+    "triggers": [
+      "Still open",
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

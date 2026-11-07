@@ -1,0 +1,226 @@
+{
+  "id": "L2109",
+  "title": "bifrost via claude4 still-open label",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "7ef739874d87ca6674097d7466a8bf73",
+    "session_title": "bifrost via claude4",
+    "reply_position": 897,
+    "captured_at": "2026-10-08T16:57:45.960Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "prioritize the open tickets by cost:benefit, focusing on issues that look like one-offs rather than pieces of larger campaigns (which probably have agents working through them them already) and wo open PRs. where does that leave us?"
+        },
+        {
+          "id": "agent:24",
+          "role": "assistant",
+          "text": "I'll check today's earlier burn-down memory, then pull the open issue and PR lists to rank candidates."
+        },
+        {
+          "id": "agent:37",
+          "role": "assistant",
+          "text": "A burn-down already ran today, so I'll rank what remains. The gh CLI needs an explicit repo here."
+        },
+        {
+          "id": "agent:65",
+          "role": "assistant",
+          "text": "The Lint B–F series, the dependency-behavior series, and the roadmap items are campaign pieces, so I'll drop them. Let me check whether this morning's triage left a ranking to compare against."
+        },
+        {
+          "id": "agent:83",
+          "role": "assistant",
+          "text": "This morning's run wrote briefs for several issues that did not land, including 3435, 3650, 3683, 3684, and 3717. I'll check the earlier session to see why they were skipped."
+        },
+        {
+          "id": "agent:124",
+          "role": "assistant",
+          "text": "Status: I have 167 unowned issues with no open PR. I'm removing the campaign series and then sending the remaining one-offs to three children, who will estimate cost and benefit for each."
+        },
+        {
+          "id": "agent:147",
+          "role": "assistant",
+          "text": "The issue text totals about 400 KB, so I'm handing it to three children with a shared scoring rubric."
+        },
+        {
+          "id": "agent:171",
+          "role": "assistant",
+          "text": "While the children read, I'll check what the 26 open PRs cover."
+        },
+        {
+          "id": "agent:198",
+          "role": "assistant",
+          "text": "Batch 0 mostly yields closures, not one-off fixes. I'll wait for the other two batches."
+        },
+        {
+          "id": "agent:241",
+          "role": "assistant",
+          "text": "The three reports are in. I'll spot-check the closure claims and the top panic claim before giving the ranking."
+        },
+        {
+          "id": "agent:296",
+          "role": "assistant",
+          "text": "Very few cheap one-offs are left. This morning's burn-down took most of them. Of the unowned issues with no open PR that are not pieces of a campaign, most are blocked, need your decision, or are too big to call a one-off.\n\nI started from 167 open issues with no assignee, no agent-in-progress label and no linked PR. I dropped the Lint B–F matrix, the dependency-behavior series, the roadmap epics and the MCP host-docs series. That left 87 issues, which three read-only children scored for cost and benefit.\n\n**Close now (cheap, checked against master):**\n- **#3296 is confirmed fixed.** The fix commit is already on master.\n- **#3192 is confirmed fixed.** The runner-policy commit that sets spot=true and retry=false is on master.\n- **#3480 is confirmed stale.** Its failing ignored test was deleted in a later test audit.\n- **#3283, #3652 and #3816 are likely done.** #3816 needs one recent ARM64 run to confirm the empty-store template removed the slowdown.\n\n**Best remaining one-offs:**\n\n| Issue | Benefit | Cost | Note |\n|---|---|---|---|\n| #3773 Rust cfg import false absence | High | Medium | A pinned ignored test already reproduces it |\n| #3844 explain omits concurrency demand | Medium | Small | Do only the explain part. Leave the host-variance part. |\n| #3840 PHP require/include has no import edge | High | Medium | Silent false negatives in importer queries |\n| #4428 analyze_diff cost follows file size | High | Medium | 262 seconds measured for a 400-line change |\n| #4478 Dioxus attribute bindings | High | Medium | Replay on current master first |\n| #4289 Rust root-route assertion panic | High | Medium | The FIRD run reproduced it today. Your FIRD campaign probably owns it. |\n\n**Cheap probes that decide whether a fix is needed:** #3676 (C macro arity, may already be guarded), #3674 (abort-edge handler) and #3820 (re-measure after #3761).\n\n**Your decisions would unblock the most work:**\n- **#3835 has the highest leverage.** Zero-config scans exit 2 on most code. Making the three policies opt-in is a small change, but the policy defaults live in bifrost-packs.\n- **Smaller decisions:** #3843 (are JS/TS re-exports import edges?), #3650 (Java capture status contract), #3492 (remove dead Go state, or generalize it?), #2320 (MCP authorization after Roots is deprecated).\n- **The Go/JVM freeze holds back 10 issues.** It started 2026-10-05, for the duration of the native-engine refactor. The native engine for Go, Kotlin and Scala merged to master today, without the consumer switch-over. If that ends the refactor for your purposes, these become workable: #3638, #3683, #3684, #3842, #3846, #3790, #3794, #3814, #3811 and #3677. #3683 and #3684 are the most valuable, because Java value flow silently drops writes there.\n\n**Blocked outside the repo:**\n- **Upstream grammar releases:** #4409 is still waiting on the JavaScript grammar fork's PR. #4410 is waiting on the C# grammar fork's PR.\n- **Hosts we lack:** #2809 needs Windows and #4487 needs a Windows x64 runner.\n- **Waiting for #2771 to land:** #3623, #3624, #4452 and #4498 are explicitly deferred until then.\n\n`★ Insight ─────────────────────────────────────`\n- An issue that cites a specific test or commit can be checked for staleness cheaply: run `git merge-base --is-ancestor` on the fix commit, or grep for the pinned test. That check found three closable issues without running a build.\n- The \"finds real bug\" ignored-test convention makes #3773 cheap to start. The failing reproduction is already in the tree, so a lane begins with a red test rather than a reduction.\n`─────────────────────────────────────────────────`\n\nI recommend closing the three confirmed issues and running #3773, #3844 and #3840 as lanes. Lifting the Go/JVM freeze, if the refactor is done, would add the most worthwhile one-offs. I have not changed any issues or code. The full tables are in `/tmp/triage2/report-0.md`, `report-1.md` and `report-2.md`."
+        },
+        {
+          "id": "user:582",
+          "role": "user",
+          "text": "do it, and explain the #3835 decision pls"
+        },
+        {
+          "id": "agent:584",
+          "role": "assistant",
+          "text": "I'll close the three confirmed issues, start lanes for #3773, #3844 and #3840, and read #3835 so I can explain the decision. First I'll load the memories that cover lane and PR procedure."
+        },
+        {
+          "id": "agent:679",
+          "role": "assistant",
+          "text": "Old gh version; posting the comment separately, then closing."
+        },
+        {
+          "id": "agent:690",
+          "role": "assistant",
+          "text": "#3480 is closed. Next I'll send the three diagnosis children. They will not edit anything and will hand back root causes and fix options for me to decide."
+        },
+        {
+          "id": "agent:718",
+          "role": "assistant",
+          "text": "While they diagnose, I'll read #3835 so I can explain it."
+        },
+        {
+          "id": "agent:728",
+          "role": "assistant",
+          "text": "The issue predates the pack move. Since #4475, the default policies ship from bifrost-packs, not from this repo. I'll check where these three policies and their activation settings live now."
+        },
+        {
+          "id": "agent:773",
+          "role": "assistant",
+          "text": "Both causes of incompleteness are still in the code. Before I explain, I'll check how the design chapter defines incomplete results and exit status 2."
+        },
+        {
+          "id": "agent:819",
+          "role": "assistant",
+          "text": "For #3835, the remaining question is whether the engine already skips a policy when a capability it requires is missing. I'll check that before answering."
+        },
+        {
+          "id": "agent:834",
+          "role": "assistant",
+          "text": "The capability list is metadata only. The engine checks that it is not empty and does not use it to decide whether a policy runs. Now I'll collect the diagnoses."
+        },
+        {
+          "id": "agent:861",
+          "role": "assistant",
+          "text": "The #3840 diagnosis is in. Before I design that fix, I'll read how the import graph marks a source unsupported, to see whether a per-source incompleteness channel already exists."
+        },
+        {
+          "id": "user:888",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:897",
+          "role": "assistant",
+          "text": "I've stopped as you asked and made no changes since then. Here is where things stand, followed by the #3835 explanation.\n\n**Done so far:**\n- **#3480 is closed.** I posted a comment saying the test it concerned was deleted on 2026-10-03.\n- **#3296 and #3192 are still open on purpose.** On 2026-09-13 you reopened #3296 and asked to keep it open while the wider Python absent-member recovery was unresolved. David's 2026-10-06 decision on #3192 says to leave it open for observation. I did not want to override either.\n- **#3773, #3844 and #3840 are labeled agent-in-progress and assigned to me.**\n\n**Diagnoses:**\n- **#3844 is superseded.** A later commit removed the concurrency solver, the RQL operation and the concurrency facet, so the explain output has nothing left to report. I recommend closing it as superseded, but I have not posted anything yet.\n- **#3840's root cause is confirmed.** PHP import extraction reads only namespace `use` declarations. The control-flow lowering sees include and require but records no file edge, so importers-of returns an empty result that looks complete. A fix needs two parts: PHP include facts that create file edges, and a way to mark one file's imports as incomplete. The query diagnostics can currently only mark a whole language as unsupported, so the second part is the real design work. I was reading that code when you stopped me.\n- **#3773 is still being diagnosed.** That child is read-only and edits nothing. Tell me if you want it cancelled.\n\n**The #3835 decision**\n\nA zero-config `bifrost scan` exits with status 2 on almost any Python file. Status 2 means \"the analysis is unreliable,\" so `--fail-on never` cannot suppress it, and the scan is useless as a CI gate. Both causes are still in the code. I have not re-run the reproduction.\n\n- **Absent-member policy.** This policy needs a complete Python declaration surface, which only the typeshed stdlib pack provides. That pack activates only when the project declares a Python version and the pack is installed. Without it, the policy reports itself incomplete.\n- **Contradictory-condition policy.** A guard is marked undecided whenever the solver has no fact about its operand. For `if x is None` on a parameter, there is no fact, so every ordinary guard makes the procedure incomplete.\n\nThe issue gives two options:\n1. **Make the policies opt-in.** This is small and fixes the scan now. The policies now live in bifrost-packs, so the change is a manifest edit and a pack release there. The engine already supports opt-in activation, but no shipped policy uses it yet.\n2. **Change what \"complete\" means for these claims.** This keeps the policies on by default but needs a contract decision.\n\nI recommend a split based on the coverage rules in the evidence-and-results design chapter:\n\n- **Contradictory-condition: use option 2.** The policy checks each procedure on its own. Within that scope, a parameter with no constraint really can take either value, so \"both arms possible\" is a complete answer, not missing information. The solver currently treats \"no constraint\" and \"information lost\" the same way. Only the second is truly incomplete. That would happen at an unmodeled call, a gap in the lowered code, or a lossy merge. Separating the two makes ordinary guards complete without weakening the claim.\n- **Absent-member: neither option as written.** The issue's option 2 says to treat a missing declaration surface as \"policy not applicable.\" That would hide a real gap, because the design chapter says absence can be claimed only if the capability was supported for every input. Instead, a policy should activate only when the capabilities it requires are present. When one is missing, the report would list the policy as \"not run: dependency unavailable\" and that would not count as an incomplete run. The manifest already lists each policy's required capabilities, but the engine only checks that the list is not empty. Using it to decide activation is new engine work.\n- **Stopgap.** Until those land, make absent-member opt-in in bifrost-packs. This is a small change that unblocks the zero-config gate quickly.\n\n`★ Insight ─────────────────────────────────────`\n- An abstract fact with no information can mean either \"the input is unconstrained\" or \"the analysis lost track\". For a check limited to one procedure, the first is a valid complete answer and only the second is incomplete. Folding both into one \"unknown\" state is what makes ordinary guards inconclusive.\n- In Bifrost's result rules, \"not run\" and \"ran but incomplete\" make different claims. Activating policies by capability keeps the scan's statement of what it covered honest without hiding a missing dependency.\n`─────────────────────────────────────────────────`\n\nTell me how to proceed. The open decisions are whether to close #3844, whether to keep #3840 going with the design above, and which direction to take on #3835."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "assistant_text_tail": " solver currently treats \"no constraint\" and \"information lost\" the same way. Only the second is truly incomplete. That would happen at an unmodeled call, a gap in the lowered code, or a lossy merge. Separating the two makes ordinary guards complete without weakening the claim.\n- **Absent-member: neither option as written.** The issue's option 2 says to treat a missing declaration surface as \"policy not applicable.\" That would hide a real gap, because the design chapter says absence can be claimed only if the capability was supported for every input. Instead, a policy should activate only when the capabilities it requires are present. When one is missing, the report would list the policy as \"not run: dependency unavailable\" and that would not count as an incomplete run. The manifest already lists each policy's required capabilities, but the engine only checks that the list is not empty. Using it to decide activation is new engine work.\n- **Stopgap.** Until those land, make absent-member opt-in in bifrost-packs. This is a small change that unblocks the zero-config gate quickly.\n\n`★ Insight ─────────────────────────────────────`\n- An abstract fact with no information can mean either \"the input is unconstrained\" or \"the analysis lost track\". For a check limited to one procedure, the first is a valid complete answer and only the second is incomplete. Folding both into one \"unknown\" state is what makes ordinary guards inconclusive.\n- In Bifrost's result rules, \"not run\" and \"ran but incomplete\" make different claims. Activating policies by capability keeps the scan's statement of what it covered honest without hiding a missing dependency.\n`─────────────────────────────────────────────────`\n\nTell me how to proceed. The open decisions are whether to close #3844, whether to keep #3840 going with the design above, and which direction to take on #3835.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      897
+    ],
+    "user_position": 582,
+    "input_rationale": "The user asked for an explanation of the #3835 decision. The reply explains it and leaves three decisions: #3835 direction, closing #3844, and #3840 design. The user answered all three next.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-08T17:01:39.215Z",
+        "kind": "user",
+        "text": "3835: recs accepted  3844: close  3840: go"
+      },
+      {
+        "at": "2026-10-08T17:01:42.570Z",
+        "kind": "agent",
+        "text": "Plan: close #3844, record the #3835 decision on the issue and claim it, then write the designs for #3840 and the two #3835 engine parts. Children will implement those designs. I'll start with the GitH"
+      },
+      {
+        "at": "2026-10-08T17:02:02.846Z",
+        "kind": "system",
+        "text": "Subagent \"diag-3773\" (4757fe98) finished turn 26 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-08T17:02:02.887Z",
+        "kind": "user",
+        "text": "One or more sub-agents finished. Call wait to collect their reports."
+      },
+      {
+        "at": "2026-10-08T17:02:11.876Z",
+        "kind": "agent",
+        "text": "I've stopped. You declined the command that would have closed #3844 and claimed #3835, so nothing in it ran. Both issues are unchanged on GitHub.  **The command you declined would have:** - **Commente"
+      },
+      {
+        "at": "2026-10-08T17:02:15.859Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

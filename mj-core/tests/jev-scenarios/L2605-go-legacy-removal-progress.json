@@ -1,0 +1,328 @@
+{
+  "id": "L2605",
+  "title": "Go legacy removal progress",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "44b46942f128f9411222bc345e99d2fc",
+    "session_title": "bifrost via claude4",
+    "reply_position": 128828,
+    "captured_at": "2026-10-29T00:54:38.693Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:133",
+          "role": "user",
+          "text": "pls ask 61f0abcccf634f1496fc07478093eb5d to review your plan before you start impl"
+        },
+        {
+          "id": "user:2716",
+          "role": "user",
+          "text": "remember that this host is shared so cpu time is useful, wall time is not\n\nif you need wall time, start an ec2 vm"
+        },
+        {
+          "id": "user:3237",
+          "role": "user",
+          "text": "who is working on the table design? pls have the reviewer session weigh in on that as well when you have a draft"
+        },
+        {
+          "id": "user:7043",
+          "role": "user",
+          "text": "What latency bar should block the Go native graph flip? Today native is 30-100x legacy: cli/cli whole about 4 min vs 10 s, zshellcheck whole about 8 min vs 4-9 s, cli rooted depth 3 about 4 min vs 3.7 s (wall on the shared host, rough; CPU on CLIProxyAPI whole 777 s vs 19 s). Constant-factor fixes (wasted Rust/staged queries, freshness PRAGMAs, endpoint renaming, clock checks) look worth 1.5-2x; a package-scoped fact operation is the main structural lever, size unknown until the counters land.\n\nLatency bar: Decide after fixes (Recommended)"
+        },
+        {
+          "id": "user:7082",
+          "role": "user",
+          "text": "god i thought we did a whole week of work to generalize the rust native engine cache for go to use to address latency, i guess it got derailed?"
+        },
+        {
+          "id": "user:7311",
+          "role": "user",
+          "text": "ok. as usual have 61f0abcccf634f1496fc07478093eb5d review your plan when you have more details"
+        },
+        {
+          "id": "user:33214",
+          "role": "user",
+          "text": "The Go flip (#6643) misses the owner's bar: at the 60 s default budget it fails 6 of 10 real Go requests that legacy answers in 1-10 s, and it loses correct cross-module edges (#6665). How should I proceed?\n\nGo flip: Hold; fix #6665, measure parallel (Recommended)"
+        },
+        {
+          "id": "user:37833",
+          "role": "user",
+          "text": "After the fixes the native Go graph is 2-2.7x faster but still 9-41x legacy, and most whole and cli requests still miss the 60 s default. Which latency direction should I take next (the OTel closure blocker gets fixed regardless)?\n\nLatency: Parallelism + counts (Recommended)"
+        },
+        {
+          "id": "user:53345",
+          "role": "user",
+          "text": "M4 is done (native Go graph, 16-vCPU VM, W=8, wall time; legacy in parentheses): zshellcheck whole 15 s (1.5), cli whole 32 s (9.5), cli rooted 21 s (3.3), OTel rooted 13 s (3.2), CLIProxyAPI rooted 33 s (1.6). Two whole graphs miss the 60 s budget: CLIProxyAPI 67 s and OTel 111 s; legacy finishes them in 8 and 13 s. Native finds more edges everywhere (cli whole 13,057 vs 10,900; OTel whole 19,863 vs 16,734) and costs 15-50x legacy CPU. Each miss is capped by one heavy unit (72 s and 77 s) that the byte-based chunking doesn't split. What next for the Go flip?\n\nGo flip: Hold; fix chunk balance (Recommended)"
+        },
+        {
+          "id": "user:56582",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nNested mods: Accept for flip (Recommended)\nOther: what does goland or vscode lsp do?\nBuild config: Keep current (Recommended)\nOther: again, let's follow goland / lsp precedent\nWithheld: Fix before flip (Recommended)"
+        },
+        {
+          "id": "user:59384",
+          "role": "user",
+          "text": "is there anything else we can do productively while waiting?"
+        },
+        {
+          "id": "user:59529",
+          "role": "user",
+          "text": "yes, all 3"
+        },
+        {
+          "id": "user:64766",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nM2 CPU: Land M2 (Recommended)\nFlip: Fix #6979, then flip"
+        },
+        {
+          "id": "user:68597",
+          "role": "user",
+          "text": "the next thing we need for Go is a gap analysis vs CodeQL and then close that gap, primarily for policies but also any engine pieces we need to add for those policies\n\ni'd like you to own this, let's get started while waiting for the sql profiling\n\n(pls spin up EC2 VM(s) as needed if you want to run CodeQL live)"
+        },
+        {
+          "id": "user:70277",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nx/ placement: Public bifrost-packs (Recommended)\nName rules: Port as review findings (Recommended)\nPriority: Taint first (Recommended)\nScope: security-and-quality (Recommended)"
+        },
+        {
+          "id": "user:71212",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nNumeric bar.: Approve (Recommended)\nOther: is this actually useful? we don't need to ape codeql feature-for-misfeature\nBranch sanit.: Approve (Recommended)"
+        },
+        {
+          "id": "user:74560",
+          "role": "user",
+          "text": "did go flip land?"
+        },
+        {
+          "id": "user:76305",
+          "role": "user",
+          "text": "is flip still running or did it die when host restarted?"
+        },
+        {
+          "id": "user:82408",
+          "role": "user",
+          "text": "Native Go dead code (#6567) fails at the product's warm 60 s deadline on cli/cli and zshellcheck, where legacy finishes in 5 s and 10 s. On ttlcache it finishes in 15 s against legacy's 1.3 s. On a timeout the user gets an error, not a report. It adds no false positives and drops none of legacy's true findings. How should I proceed?\n\nDead code: Hold, fix cost first (Recommended)"
+        },
+        {
+          "id": "user:82548",
+          "role": "user",
+          "text": "fix obvious problems but we're optimizing native for incremental, not batch, so when we hit diminishing returns we should just ship it"
+        },
+        {
+          "id": "user:89749",
+          "role": "user",
+          "text": "go flip status?"
+        },
+        {
+          "id": "user:89867",
+          "role": "user",
+          "text": "will 6566 also delete go-legacy then?"
+        },
+        {
+          "id": "user:90242",
+          "role": "user",
+          "text": "> file a separate issue to retire the rest of the legacy Go code\n\ni mean come on this is part of the flip but separate issue is fine ig"
+        },
+        {
+          "id": "user:106673",
+          "role": "user",
+          "text": "go flip status?"
+        },
+        {
+          "id": "user:106847",
+          "role": "user",
+          "text": "is there work we can do in parallel?"
+        },
+        {
+          "id": "user:107031",
+          "role": "user",
+          "text": "launch all zig"
+        },
+        {
+          "id": "user:117257",
+          "role": "user",
+          "text": "How is Go legacy removal"
+        },
+        {
+          "id": "user:117431",
+          "role": "user",
+          "text": "Go ahead"
+        },
+        {
+          "id": "agent:127550",
+          "role": "assistant",
+          "text": "The coordinator assigned #7918's identity:\n\n- **ICFG pair:** v110/v109. Master is at v100/v99.\n- **Policy token:** `-7918-go-field-selector-addressability`.\n- **JVM gate:** the new hook leaves values unchanged by default and adds no JVM reads, so the coordinator may approve it by reviewing the diff instead of running the full JVM gate. I'll send the pushed head and the exact shared changes, and hold #7918 out of ready until the coordinator answers.\n- **PR B:** once #7918 lands and PR B merges it, PR B gets a new ICFG pair from the coordinator at that point.\n\nI've recorded all of this. Still waiting on the #7918 fix and the rest of PR B checkpoint 4."
+        },
+        {
+          "id": "agent:127633",
+          "role": "assistant",
+          "text": "The #7918 fix works: every Go test and the new 12-probe golden pass. But reviewing the shared code turned up two problems that would affect the JVM, so I sent it back before committing:\n\n- **A new read for every language:** the block looks up each field's language by reading from storage, every time a field is projected, in every language. That's new read cost on the JVM path, which would block the diff-review approval the coordinator offered. The language has to come from something already in memory.\n- **Duplicated values:** even when the hook leaves a value unchanged, a field with two recorded receivers gets its value added twice. The shared step will now run only for a language that opts in through a flag that defaults to off, which is just Go. Every other language skips it entirely, with the same values in the same order and no new reads.\n\nThe only test failure is the known #7506 cold-start count, which happens before this code runs.\n\nOnce that's fixed, I'll apply the identity changes (v110/v109 and the token), open the PR, and send the coordinator the exact shared changes.\n\nPR B checkpoint 4 is still working through its remaining items."
+        },
+        {
+          "id": "agent:127768",
+          "role": "assistant",
+          "text": "The #7918 fix is up as draft PR #7925 (head `02eeb50373`).\n\n- **What it fixes:** Go code can now call a pointer-receiver method through a field reached via a pointer or addressable variable, like `p.inner.PtrMethod()` or `s.mu.Lock()`.\n- **JVM side:** I checked the revised shared code myself. The language now comes from what the evaluation already holds, so there are no new reads. Every language except Go skips the new block entirely, and Go's results are de-duplicated.\n- **Identity:** ICFG v110/v109 and the token are applied.\n- **Tests:** the identity tests pass, as do the Go tests and goldens. The new 12-probe golden covers both allowed and rejected calls.\n\nI sent the reviewer the PR and gave the coordinator the exact shared lines (`language_support.rs:167` and `:174`, `fact_resolution.rs:50924-50935` and `:51107-51143`). That's so the coordinator can decide whether its JVM gate result can stand on a review of the diff. #7925 stays a draft until both answer. When it lands, PR B merges it and gets a new ICFG pair.\n\nPR B checkpoint 4 is still working through its remaining items."
+        },
+        {
+          "id": "agent:127871",
+          "role": "assistant",
+          "text": "The coordinator approved #7925 (#7918) for the JVM by reviewing the diff, so it doesn't need a full JVM gate run. It confirmed that every non-Go language skips the new code, with no reads and identical values, and that the identity changes are correct. I added that to the PR description.\n\nThe coordinator flagged one Go-side effect, not a blocker. Go field values that used to appear twice, once per receiver, now appear once. If a Go golden counts values, that's why.\n\nPR B's next ICFG pair will be v116/v115. I'll apply it only when PR B merges master after #7924 lands, so it changes just once.\n\nNext:\n- **#7925:** waiting on the reviewer; I'll mark it ready after their approval.\n- **PR B checkpoint 4:** still working through its remaining items."
+        },
+        {
+          "id": "agent:127946",
+          "role": "assistant",
+          "text": "The reviewer approved the #7925 code change, with five changes to its golden test and description.\n\nI made the description fix myself:\n- **Not a pure move:** the description now says the shared Go rule also carries along extra checks attached to the field and receiver values (\"obligations\"), which the old inline code in the embedded-field walk dropped. That's a behavior change, covered by the PR's ICFG pair and token.\n- **Master pair:** it now gives master's current pair, v109/v108. #7925's v110/v109 is still one above it.\n\nThe agent is handling the rest:\n- **Negative probes:** make the two \"should be rejected\" cases show *why* they're rejected. Right now they look the same as a case that's merely unresolved.\n- **More shapes:** add the remaining Go cases: a slice element, `(&Box{}).inner.Pointer()`, and a composite literal `Box{}.inner.Pointer()`.\n- **Type queries:** all twelve type queries in the new case come back incomplete. The agent will check whether that's normal for this kind of query on master, and either note it or drop them.\n- **Regression tag:** tag the shared navigation test as a regression test for #7918.\n\nAfter that and a rerun, I'll push and mark #7925 ready. PR B checkpoint 4 is still in progress."
+        },
+        {
+          "id": "agent:128069",
+          "role": "assistant",
+          "text": "The #7925 review changes are done and committed:\n\n- **Rejections show their reason:** the three \"should be rejected\" cases now display the actual rejection reason and the method that was rejected.\n- **More shapes:** the new slice-element, pointer-literal and composite-literal cases are in.\n- **Incomplete type queries:** these are normal. Master already answers that way outside this fixture, and a note in the test data says so.\n- **Regression tag:** the shared test now names #7918.\n\nOnly this case's expected output changed.\n\nI then merged current master. Master's ICFG pair moved to v109/v108, and #7925 keeps v110/v109, still one above it. A test run on the merged branch is going now, covering:\n- the navigation golden;\n- the Go libraries;\n- the identity tests;\n- the reach-in gate.\n\nWhen it passes, I'll push, send the reviewer the changes since the version they saw, and mark #7925 ready.\n\nPR B checkpoint 4 is still in progress."
+        },
+        {
+          "id": "agent:128163",
+          "role": "assistant",
+          "text": "PR B checkpoint 4 made progress and raised one design question I've taken to the reviewer.\n\n**Done:**\n- Stdlib imports discovered by the Go toolchain now get model types.\n- The old `Stop` test is narrowed, after I saw its before and after. Its checks for declared members still pass.\n- 3,338 of 3,340 library tests pass, along with 341 of 344 broader tests, Clippy, and the reach-in gate.\n\nI committed the work as a checkpoint marked incomplete, and merged master into it so the agent can use #7872's local-variable lookup for the receiver classification.\n\n**The design question:** routing every Go receiver call through the native path loses answers in three places where today's code gets them by guessing at a model function's result type:\n- **Typestate:** a typestate check goes incomplete, because the type of `f, _ := os.Open(...)` comes from a model function's return value. Typing those natively is the later G1b milestone's job.\n- **Receiver-storage:** the receiver-storage policy loses a finding, because no model type is recorded for `*http.Request` there.\n- **Interface calls:** an interface method call is now named exactly, but the policy query language's rules need a fully proven call target to use it, so they lose precision.\n\n**My proposal to the reviewer:** route natively only where the native engine already knows the receiver's model type, and keep today's path everywhere else until G1b removes it. The plan already keeps that legacy code alive until G1b. This way PR B only adds native answers and doesn't trade lost policy findings for G1b. I'm holding those three areas until the reviewer answers.\n\nAlso running: the post-merge tests for #7925 (the #7918 fix). It becomes ready after that."
+        },
+        {
+          "id": "agent:128308",
+          "role": "assistant",
+          "text": "The reviewer agreed to the narrower PR B routing for two of the three cases, with conditions. They held back on the third. I passed the decisions to the agent:\n\n- **Typestate and receiver-storage:** keep today's answer only when the native result names one of two specific known gaps that the later G1b milestone fills. The first is a receiver type that comes from a model function's return value. The second is a model type behind an import the native engine hasn't indexed. Every other result stays native, because a \"native found nothing, so fall back\" rule would hide bugs like #7918.\n- **Tracking:** each fallback is counted by reason in the differential output, so G1b can show the count reaches zero before deleting both code paths. The PR description will list every site that falls back.\n- **The interface-call case:** no preference for the old answer yet. First establish whether the old \"fully proven\" answer was backed by real data the native engine could read. If so, the native answer is a bug to fix. If not, the native answer is the correction.\n\n#7925 (the #7918 fix) is pushed at `01d83672c6` with all five review changes and master merged. 383 selected tests pass. It's back with the reviewer for a final look, and I'll mark it ready after that."
+        },
+        {
+          "id": "agent:128415",
+          "role": "assistant",
+          "text": "The reviewer approved #7925 (the #7918 fix), and I've marked it ready. The coordinator's earlier JVM approval still applies. Since then, only the test files changed, plus a master merge that touched just the ICFG and token lines.\n\nGitHub now shows one conflict with master, in the policy token line, because two more batches landed. The repo rule for that line is to keep every token from both sides, and the merge queue resolves that kind of conflict itself. So I left it for the queue rather than pulling master into a ready PR again. I also removed the in-progress label from #7918.\n\nPR B checkpoint 4 is still in progress on the narrower routing the reviewer agreed. When the agent reports, I'll also have its evidence on the interface-call question."
+        },
+        {
+          "id": "agent:128477",
+          "role": "assistant",
+          "text": "The coordinator confirmed its JVM approval still holds for #7925. The three shared files are byte-identical to the version it reviewed, and the identity lines are right. It also agreed with leaving the token conflict to the merge queue. #7925 is now in the queue.\n\nWhen #7925 lands, PR B merges it and master and takes ICFG v116/v115. PR B checkpoint 4 is still in progress."
+        },
+        {
+          "id": "agent:128524",
+          "role": "assistant",
+          "text": "Another session (d8443f17) asked how to port its #7351 change now that 3a part 2 rewrote the code it touches. #7351 extends the Go failure-handler policy so it can prove whether a type has an `Error() string` method. My answers:\n\n1. **The method-set walk it used is legacy code #7509 retires**, so it must not add a new caller. The native equivalent is the Go member lookup in the native engine, which already handles embedded fields, pointer versus value receivers, and knowing when a type's method list is complete. PR B extends that lookup to model types and adds a shared entry point for asking about one method on a receiver type. The proof will read: method found with the right signature means an error value; a complete method list without it means not a handler; anything else stays open.\n2. **The native declared-type answer is enough to identify the type**, if the port uses the type's identity from the answer rather than its printed name, and checks completeness first. That keeps unresolved, generic and unindexed library types open.\n3. **Their lane does the port, with my review.** It builds on PR B's branch once I push it as a draft, because the entry point and model support live there. Meanwhile they can move the parts that don't need the method lookup onto master.\n\nPR B checkpoint 4 is still in progress, and #7925 is in the queue."
+        },
+        {
+          "id": "agent:128644",
+          "role": "assistant",
+          "text": "28c4a33b asked whether A3-Go can go ahead of PR B. A3-Go moves Go's dot-import pairing onto a shared step, with no change in behavior.\n\nI said yes. I checked PR B's lane: it changes `go_demand.rs` and `go_named.rs`, and never touches the dot-import code (`go_context.rs`) A3-Go edits. My conditions:\n- Stay out of PR B's two files, or tell me first if the shared step needs a hook there.\n- Keep my four earlier requirements and the existing filter.\n- Show the same dot-import results and SQL counts as before.\n- Send me the head for review before the JVM gate.\n\nStill in progress:\n- **PR B checkpoint 4:** typed fallback, fallback counter, the interface-call evidence.\n- **#7925:** in the merge queue."
+        },
+        {
+          "id": "agent:128726",
+          "role": "assistant",
+          "text": "Before A3-Go starts, the coordinator asked me to confirm two things, and the answer to both is no:\n- **#7918's fix:** it doesn't touch the three files A3-Go edits (`go_context.rs`, `root_bridges.rs`, `imports.rs`), so PR B's merge of it won't either.\n- **My other lanes:** I checked all of them, committed and uncommitted, and none touches those files.\n\nA3-Go can start.\n\nStill in progress:\n- **PR B checkpoint 4:** the typed fallback, the fallback counter, and the evidence on the interface-call case.\n- **#7925:** in the merge queue."
+        },
+        {
+          "id": "user:128799",
+          "role": "user",
+          "text": "how is go-legacy removal progressing? is there additional work we can do in parallel?"
+        },
+        {
+          "id": "agent:128828",
+          "role": "assistant",
+          "text": "**Progress.** About half of #7509 has landed. What remains is mostly the deeper resolver and model-inference families, which come after PR B.\n\n| Status | Work |\n|---|---|\n| Landed earlier | Dead-code removal (#7511, #6566), M1 (#7527), M2 (#7791), the shared model seam G1a-i (#7567), promotion-copy marking (#7597) |\n| Landed today | 3a part 1 (#7808), the type-switch and variadic producer fix (#7819), G1a-ii PR A (#7811), 3a part 2 (#7872), plus the module-cache bound (#7665) and the plan update (#7900) |\n| In the merge queue | #7925, the field-addressability fix (#7918) that PR B depends on |\n| In progress | G1a-ii PR B, checkpoint 4 of 4 (routing). Checkpoints 1-3 are committed. The agent is adding the typed fallback and its counter. |\n| Not started | The last 3a item, 3b, 3c, G1b, M5 and M6/G2 |\n\nPR B has a new result: today's \"fully proven\" answer for `fmt.Stringer.String` had no complete list of implementations behind it. So the native \"family still open\" answer is the correction, and the agent will update that golden with a cause per line rather than keep the old answer.\n\n**Parallel work.** Most of the remaining milestones are blocked by PR B. G1b builds on it, and 3b, the last 3a item and the #7351 port all touch the same Go definition code. A3-Go is already running in 28c4a33b's lane. Four things are not blocked:\n\n1. **M5 census (read-only).** M5 moves import resolution in `go/diagnostics.rs` onto native import facts, migrates two alias checks off the old code, then deletes the import-edge half of the Go workspace index. That index has only two users left (`go/mod.rs` and `bifrost-go/src/graph/resolver.rs`). The map would show which parts avoid PR B's files. The `diagnostics.rs` part probably does; the alias checks partly overlap `get_definition/go.rs`.\n2. **M6 design census (read-only).** The plan requires a query and schema proposal for the coordinator before M6, the milestone that deletes the Go workspace graph and cache. Mapping today's hierarchy and member-family readers is pure reading. I'd write the proposal myself.\n3. **#7920.** This is the follow-up to #7918 for the second code path that still marks fields addressable unconditionally. It needs #7925's hook, so it can start once #7925 lands, or from its head now.\n4. **The declared-type part of #7862.** 28c4a33b took the shortcut for local definitions. The declared-type query's repeated reads are unowned shared engine work.\n\n**Recommendation.** Start items 1 and 2 now as read-only maps; they're cheap and settle the order for after PR B. Start item 3 when #7925 lands. Leave item 4 unless read cost becomes the priority. Say which you want and I'll start them.\n\n`★ Insight ─────────────────────────────────────`\n- What limits parallel work here is file contention: almost every remaining milestone edits `get_definition/go.rs` or the Go native-points path, the same code PR B is rewriting. That's why the read-only maps are the safe parallel work.\n- PR B's fallback to the old code runs only for named reasons (a receiver type that comes from a model function's return, or a model type behind an unindexed import), and each fallback is counted. A bare \"native found nothing\" rule would have hidden bugs like #7918. The counter lets G1b prove the old code is no longer used before deleting it.\n- The fully-proven interface answer was an assumption with no list of implementations behind it, so the native answer is more honest, not a regression. Checking inventory evidence before preferring the old answer is how this effort separates real regressions from corrections.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "how is go-legacy removal progressing? is there additional work we can do in parallel?",
+    "assistant_text_tail": "tly overlap `get_definition/go.rs`.\n2. **M6 design census (read-only).** The plan requires a query and schema proposal for the coordinator before M6, the milestone that deletes the Go workspace graph and cache. Mapping today's hierarchy and member-family readers is pure reading. I'd write the proposal myself.\n3. **#7920.** This is the follow-up to #7918 for the second code path that still marks fields addressable unconditionally. It needs #7925's hook, so it can start once #7925 lands, or from its head now.\n4. **The declared-type part of #7862.** 28c4a33b took the shortcut for local definitions. The declared-type query's repeated reads are unowned shared engine work.\n\n**Recommendation.** Start items 1 and 2 now as read-only maps; they're cheap and settle the order for after PR B. Start item 3 when #7925 lands. Leave item 4 unless read cost becomes the priority. Say which you want and I'll start them.\n\n`★ Insight ─────────────────────────────────────`\n- What limits parallel work here is file contention: almost every remaining milestone edits `get_definition/go.rs` or the Go native-points path, the same code PR B is rewriting. That's why the read-only maps are the safe parallel work.\n- PR B's fallback to the old code runs only for named reasons (a receiver type that comes from a model function's return, or a model type behind an unindexed import), and each fallback is counted. A bare \"native found nothing\" rule would have hidden bugs like #7918. The counter lets G1b prove the old code is no longer used before deleting it.\n- The fully-proven interface answer was an assumption with no list of implementations behind it, so the native answer is more honest, not a regression. Checking inventory evidence before preferring the old answer is how this effort separates real regressions from corrections.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      128828
+    ],
+    "user_position": 128799,
+    "input_rationale": "The user asked about go-legacy progress and parallel work. The reply gives progress, then four possible parallel tasks with a recommendation and waits for the user to pick.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "next_work_menu",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "menu": "solicited",
+    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent."
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-29T01:04:16.876Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-29T01:15:39.282Z",
+        "kind": "user",
+        "text": "recs accepted"
+      },
+      {
+        "at": "2026-10-29T01:15:39.289Z",
+        "kind": "system",
+        "text": "Mailbox events:   - New issue brokkai/bifrost-dev#7948 RQL call bindings: report the query obligations native answers relied on (#7362 follow-up)   - New issue brokkai/bifrost-dev#7949 RQL rule facts:"
+      },
+      {
+        "at": "2026-10-29T01:17:41.610Z",
+        "kind": "agent",
+        "text": "I've started the two read-only maps and set up the #7920 trigger.  - **M5 map:** finds every production reader of the Go import-edge index. Also covers which diagnostics and alias questions already ha"
+      },
+      {
+        "at": "2026-10-29T01:23:03.131Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task 7509-m6-g2-census finished: completed     State: completed     Report directory: /home/jonathan/Projects/bifrost/.mj/clones/44b46942f128f9411222bc345e99d2fc/.mj/agents/b"
+      },
+      {
+        "at": "2026-10-29T01:23:03.134Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      }
+    ]
+  }
+}

@@ -1,0 +1,288 @@
+{
+  "id": "L2807",
+  "title": "Opencode",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "c27f713e5f7177bc869217987b7c5f79",
+    "session_title": "mjolnir via claude2",
+    "reply_position": 11964,
+    "captured_at": "2026-11-06T10:20:37.091Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "add a scrollable, 5-line-viewport history of recently attached directories to the new/move session dialogs; should be target-specific. Doubleclick or enter to add from the \"add directory\" subdialog."
+        },
+        {
+          "id": "user:98",
+          "role": "user",
+          "text": "Mount history already exists, but it is keyed by host, not by target: all local targets (Podman, Docker, Apple, and AWS uploads) share one \"local\" list, and SSH targets share a list per SSH host (mj-core/src/config/targets.rs:796, up to 20 entries). Today it is only reachable with Up/Down in an empty source field. Which keying should the visible list use?\n\nHistory key: Keep per host (Recommended)"
+        },
+        {
+          "id": "user:510",
+          "role": "user",
+          "text": "the \"folder\" option for adding a bundle is a fucking mess, do i understand correclty that the URL option allows me to paste a local path? if so let's just change that to \"URL or Path\" and remove Folder tab"
+        },
+        {
+          "id": "user:687",
+          "role": "user",
+          "text": "The web viewer's new-session picker also has a \"Browse folders\" mode next to \"Paste URL\" (mj-controller/src/web/viewer.js:2806), and it uses the daemon folder request that we kept. So far the change covers only the terminal UI. Should the web picker get the same change?\n\nWeb picker: Terminal UI only"
+        },
+        {
+          "id": "user:960",
+          "role": "user",
+          "text": "perform a new minor-version (2.xx.0) release pls (make sure CI is green first)"
+        },
+        {
+          "id": "user:974",
+          "role": "user",
+          "text": "The working tree has this session's two uncommitted changes: the mount-history list and the Folders tab removal. Should they go into 2.67.0?\n\nInclude work: Include them (Recommended)"
+        },
+        {
+          "id": "user:1065",
+          "role": "user",
+          "text": "1. doesn't AGENTS.md call for pushing by default? if so why didn't you?\n\n2. before release, also remove the forward/cancel shit from the review flow, i want conversation prompt to be available normally, if i want to check on the reviewers that's what the virtual workspace is for"
+        },
+        {
+          "id": "user:1142",
+          "role": "user",
+          "text": "(no memory note pls, that's the harness's job, i'll fix it there)"
+        },
+        {
+          "id": "user:1567",
+          "role": "user",
+          "text": "pls fix #1449 if it's still a problem in current mj"
+        },
+        {
+          "id": "user:2134",
+          "role": "user",
+          "text": "yes, add the price field"
+        },
+        {
+          "id": "user:2478",
+          "role": "user",
+          "text": "The non-blocking review change adds store migration 109 and classifies it as breaking. It adds `pending_followup` and `forward_attempts` columns, and raises the minimum compatible store revision to 109, because an older daemon writing review rows would drop those values. As a result, once 2.67.0 migrates a store, an older daemon such as 2.66 refuses to open it. AGENTS.md says a feature request does not authorize an incompatible upgrade of the live store. Do you accept that for this release?\n\nMigration: Accept breaking 109"
+        },
+        {
+          "id": "user:4379",
+          "role": "user",
+          "text": "The fixes are on master (6c5ea1b36). The failed v2.67.0 tag still points at 9fcbeacce, and nothing was published (no GitHub Release; npm and crates.io are at 2.66.0). RELEASING.md says to delete the unpublished tag and re-tag the fixed commit with the same version, but the permission system refused deleting a remote tag. A nightly macOS/Windows check on 6c5ea1b36 is running now. How should I continue?\n\nRelease tag: Release 2.67.1 instead"
+        },
+        {
+          "id": "user:5070",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:5183",
+          "role": "user",
+          "text": "see if you can fix the timing flake while waiting"
+        },
+        {
+          "id": "user:6016",
+          "role": "user",
+          "text": "revamp review models; isntead of a concurrent reviewrs count that multiples a single reviewer type, allow specifying up to 3 review agents; add an Autoconfigure button (replacing \"auto\" as a per-reviewer choice)\n\nautoconfigure depends on profiles available\n\nonly codex: terra/xhigh + sol/medium\nonly claude: haiku/xhigh + haiku/xhigh\ncodex + claude: terra/xhigh + sol/medium + haiku/high\nonly dsh: dsf/high + dsf/high\nonly grok: grok/high\nonly kimi: k3.1/high\nanything else: autoconfigure disabled\n\nany questions?"
+        },
+        {
+          "id": "user:6143",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nAuto upgrade: Autoconfigure on load (Recommended)\nMatching: Best row, ignore extras\nSame harness: all we care about is model availablity in my list, load balance across all profiles that share them using existing lb code\nAuto-run: Only the button (Recommended)"
+        },
+        {
+          "id": "user:6172",
+          "role": "user",
+          "text": "Should each reviewer slot be just model + effort, with the profile chosen at review time by the sub-agent load balancer, like [subagents] straightforward/subtle?\n\nSlot shape: Model + effort only (Recommended)"
+        },
+        {
+          "id": "user:6276",
+          "role": "user",
+          "text": "push and install when complete"
+        },
+        {
+          "id": "agent:10825",
+          "role": "assistant",
+          "text": "Round 7 has 15 findings, overlapping into 10 issues. This review loop isn't converging. Each round fixes the previous findings and the reviewers find new edge cases, and twice now they've asked for opposite behaviour. I'll fix the clear defects, decide two design questions, and override three findings with stated reasons so the loop can end.\n\n**Fix:**\n- After the first `try_recv` check, a probe that finishes later is ignored until the deadline. It needs to wait on all probes as they finish.\n- A reviewer at default effort waits on effort discovery it doesn't need.\n- Web Autoconfigure probes efforts against the saved profile instead of the draft profile.\n- A single pending profile disables Add and Autoconfigure, even when the profiles that did answer already give a full preset.\n- Web discovery drops the reason when effort discovery fails.\n\n**Design decisions:**\n- **Old Auto config with no matching preset.** Once every profile has answered, the upgrade turns automatic review off, saves an empty list, and says so plainly. AGENTS.md:125-131 allows this (\"the feature that cannot work turned off… say plainly what changed\"), and the round-6 reviewer offered it as an option. Before, reviews just kept failing.\n- **Preset effort not offered** (for example Haiku offers `high` but not `xhigh`). Use the highest offered effort below the requested one, and report the change. Before, it silently fell back to the default.\n\n**Override, with reasons:**\n- **The legacy count edge**, as explained earlier.\n- **Kimi K3.2 counting as the K3.1 preset.** \"K3.1 or newer\" was a deliberate decision I told you about at the start.\n- **\"Finish migration despite an unrelated failed profile.\"** This directly contradicts the round-4 finding \"keep retrying when a profile needed for the best preset is unavailable\". Reviews keep working in memory in the meantime."
+        },
+        {
+          "id": "agent:10968",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- Review loops can stop converging when each fix adds new mechanism, and so new surface to review. Rounds 4 and 7 asked for opposite behaviour on the same point: persist a partial upgrade, or keep waiting. That is a sign the remaining questions are design trade-offs, not defects. Overriding with a written reason is the honest way to settle them.\n- The no-preset decision follows the AGENTS.md \"never leave the user stuck\" rule literally: turn off the feature that can't work and say what changed. Before, a configuration that could never succeed kept failing on every review.\n`─────────────────────────────────────────────────`\n\nTwo children are working on round 7:\n\n1. **reviewers-r7-controller:**\n   - turns review off with a plain notice when an old Auto config has no matching preset\n   - waits on all probes as they finish\n   - skips effort probes for reviewers at default effort\n   - adds an effort fallback to the nearest lower offered effort, with the changes reported\n2. **reviewers-r7-web-tui:**\n   - web Autoconfigure probes the draft profile\n   - Add and Autoconfigure work from the profiles that have answered\n   - web Settings shows effort-discovery failures\n   - both surfaces report effort adjustments\n\nOnce they're done and validated, I'll commit and request review again. I'll override the three findings above with the reasons given.\n\n**Still needs your decision:** may the install apply the breaking store migration (revision 110) to your live store? I'll push when the review is clean, but I won't install without your approval.\n\nWaiting on both children."
+        },
+        {
+          "id": "agent:11080",
+          "role": "assistant",
+          "text": "The web/TUI part of round 7 is done:\n\n- Web Autoconfigure now probes efforts through the draft profile's capability key.\n- Completed profiles' models and efforts are usable even while others are pending.\n- Effort-discovery failures appear as a notice on the web page.\n- Effort adjustments are reported as `model: requested → used` on both surfaces.\n\nThe V2 change was made in the shared `ProfileCapabilitiesSnapshot::options`, so sub-agent settings benefit too. They still poll while efforts are pending. Its checks pass: the client suite, core capabilities, the controller settings route, the TUI suite (568 passed), the web viewer tests and clippy."
+        },
+        {
+          "id": "agent:11122",
+          "role": "assistant",
+          "text": "I've closed the web/TUI child. The controller child is still working on the four fixes: turning review off with a notice when no preset fits, waiting on all probes as they finish, skipping probes for default effort, and the effort fallback. When it reports, I'll run the full validation, commit, request review, and override the three findings I named.\n\n**Still needs your decision:** may the install apply the breaking store migration (revision 110) to your live store? I'll push when the review is clean, but I won't install without your approval.\n\nWaiting on the controller child."
+        },
+        {
+          "id": "agent:11168",
+          "role": "assistant",
+          "text": "The controller part of round 7 is done:\n\n- **N1:** when every profile has answered and none matches a preset, the upgrade turns review off. It posts the message to the daemon's user notice feed (`RuntimeState::push_notice`) and logs it.\n- **N2:** the ready pass handles probe results as they finish.\n- **N3:** reviewers at default effort skip effort probes.\n- **N4:** a preset effort the model doesn't offer drops to the nearest lower one, and the change is reported.\n\nIts suites pass: core 573, controller 2289, and clippy is clean. Next I'm running the full validation on the combined tree."
+        },
+        {
+          "id": "agent:11208",
+          "role": "assistant",
+          "text": "Both round-7 children are closed. Running now: format, workspace clippy, the full default-member test suite (`TZ=UTC`, `--no-fail-fast`) and the web unit tests. If they pass, I'll commit, request review, and override the three findings I named with their reasons.\n\n**Still needs your decision:** may the install apply the breaking store migration (revision 110) to your live store? I'll push when the review is clean, but I won't install without your approval.\n\nWaiting on the validation run."
+        },
+        {
+          "id": "agent:11273",
+          "role": "assistant",
+          "text": "The round-7 fixes are committed as `f71fb8263`, and the eighth review request covers all eight commits (82 files).\n\n**Validation:** format, workspace clippy, all 45 test binaries (`TZ=UTC --no-fail-fast`) and the web unit tests all pass.\n\n**When the verdict arrives,** I'll fix any new defects. If only the three findings I've already decided remain, I'll override them with these reasons:\n\n1. **The legacy count edge.** Rewriting session records together with the config write isn't worth it for a removed flag.\n2. **Kimi \"K3.1 or newer\".** This was a deliberate decision I told you about at the start.\n3. **Persisting while an unrelated profile fails.** This contradicts a finding from round 4, and reviews keep working in memory meanwhile.\n\n**Still needs your decision:** may the install apply the breaking store migration (revision 110) to your live store? After it, older mj builds can't open the store. I'll push once the review is clean, but I won't install without your approval.\n\nWaiting on the review verdict."
+        },
+        {
+          "id": "agent:11335",
+          "role": "assistant",
+          "text": "Round 8 has 17 findings, overlapping into 10 issues. Four are the design questions I've already decided, and two reviewers raised them again. Six are new defects.\n\n**Fix:**\n1. **Web Autoconfigure loses environment edits.** It re-hides newly typed environment values with the stored-secret marker, so saving restores the old value. This is a data-loss bug.\n2. **Stalled probes are re-checked wrongly.** After one stalled candidate's grace period ends, a later probe that already finished is ignored, and the review can time out.\n3. **Ready Muse profiles are probed again.** That probe can stall selection.\n4. **Upgrade effort changes are only logged.** They need a user notice.\n5. **TUI Autoconfigure pressed before discovery finishes** falls back to the default effort with no notice, instead of using the nearest-lower rule.\n6. **TUI manual effort-discovery failures** aren't shown.\n\n**Override with reasons** (the reviewers repeat these):\n- **No preset → review off.** Your table says Autoconfigure is disabled for profile sets it doesn't cover. AGENTS.md:125-131 explicitly endorses turning off a feature that can't work and saying so. Re-adding the old \"any advertised model\" fallback would restore the runtime Auto you removed.\n- **Legacy count edge, Kimi \"K3.1 or newer\", and persisting while an unrelated profile fails:** the same reasons as before."
+        },
+        {
+          "id": "agent:11432",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The worst round-8 finding wasn't about review at all. Web Autoconfigure called `hide` on the whole returned draft, which replaced newly typed secrets with the \"stored value\" marker, so saving would quietly restore the old secret. A new action on a shared draft has to use the same hide/restore rules as ordinary edits.\n- When reviewers raise the same design point in round after round, the problem is that the two sides value things differently: they want old behaviour preserved, while the user's table deliberately limits what Autoconfigure covers. A written override records the reason the code follows the user's spec. Changing the code would quietly undo a decision the user made.\n`─────────────────────────────────────────────────`\n\nOne child is fixing the six round-8 defects, starting with the data-loss bug in web Autoconfigure. After that:\n\n1. Run the full validation and commit.\n2. Request review again.\n3. If only the four decided design points come back, override them with these reasons:\n   - **No preset → review off.** This follows your table and AGENTS.md:125-131.\n   - **Legacy count.**\n   - **Kimi K3.1 or newer.**\n   - **Persisting while an unrelated profile fails.**\n4. Push.\n\n**Still needs your decision:** may the install apply the breaking store migration (revision 110) to your live store? After it, older mj builds can't open the store. I'll push once the review is clean, but I won't install without your approval.\n\nWaiting on the round-8 child."
+        },
+        {
+          "id": "agent:11545",
+          "role": "assistant",
+          "text": "All six round-8 defects are fixed. Controller (2291), TUI (568) and client (51) tests pass, and clippy is clean. F1 was a data-loss bug in secret handling, so I'm reading that change myself before running the full validation."
+        },
+        {
+          "id": "agent:11588",
+          "role": "assistant",
+          "text": "I've closed the round-8 child. Running now: format, workspace clippy, the full default-member test suite (`TZ=UTC`, `--no-fail-fast`) and the web unit tests. If they pass, I'll commit and request review. If only the four decided design points come back, I'll override them with their reasons and push.\n\n**Still needs your decision:** may the install apply the breaking store migration (revision 110) to your live store? I won't install without your approval.\n\nWaiting on the validation run."
+        },
+        {
+          "id": "agent:11624",
+          "role": "assistant",
+          "text": "Everything passes: format, workspace clippy, all 45 test binaries and the web unit tests. I'm committing and requesting review."
+        },
+        {
+          "id": "agent:11640",
+          "role": "assistant",
+          "text": "The round-8 fixes are committed as `b27a5becc`, and the ninth review request covers all nine commits (84 files).\n\n**Validation:** format, workspace clippy, all 45 test binaries (`TZ=UTC --no-fail-fast`) and the web unit tests all pass.\n\n**When the verdict arrives,** I'll fix any new real defects. If only the four decided design points come back, I'll override them with my reasons and push:\n\n1. **No preset → review off.** This follows your table and AGENTS.md:125-131.\n2. **Legacy count.**\n3. **Kimi K3.1 or newer.**\n4. **Persisting while an unrelated profile fails.**\n\n**Still needs your decision:** may the install apply the breaking store migration (revision 110) to your live store? After it, older mj builds can't open the store. I won't install without your approval.\n\nWaiting on the review verdict."
+        },
+        {
+          "id": "agent:11689",
+          "role": "assistant",
+          "text": "Round 9 has 17 findings, overlapping into 12 issues. Four are the design points I've already decided, raised again. One contradicts a round-7 finding. The other seven are new and real, though mostly narrow.\n\n**Fix:**\n1. **Luna fast mode:** reviewers on a Luna model now get `fast_mode` from the shared selection. The old resolver never turned it on. Reviewers should keep it off.\n2. **`mj new --review turn` with no reviewers configured:** this arms a session that can never review. Following AGENTS.md:125-131, create the session with review off and say why.\n3. **Cold-start fallback:** when no matching profile is ready, the fallback waits on discovery of every profile. It should take the first profile that offers the model.\n4. **Grace period:** the 2-second grace should be one window across all earlier candidates, not 2 seconds per candidate.\n5. **TUI efforts:** an unrelated profile's failure makes a model's efforts unknown. Only failures of profiles that offer that model should count.\n6. **TUI Autoconfigure:** a model added to the preset while waiting needs its own effort probe.\n7. **Named-profile upgrade:** when the old effort is dropped, report it in the notice.\n\n**Override:**\n- the four repeated design points (no preset → off, legacy count, Kimi K3.1+, persisting while an unrelated profile fails)\n- \"wait for pending profiles before choosing a preset\", which directly reverses round 7's \"use completed profiles while others are pending\""
+        },
+        {
+          "id": "agent:11789",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- Round 9 contains a direct reversal: \"wait for pending profiles before choosing a preset\" undoes round 7's \"use completed profiles while others are pending\". Independent reviewers each optimize a different property, such as best preset versus responsiveness. Once the code satisfies one, the other gets flagged. A written override is the right way to settle that kind of trade-off.\n- The Luna fast-mode finding comes from reusing the sub-agent selector, which returns `fast_mode` because spawn wants it for Luna. Sharing one mechanism is still right. The caller has to decide which outputs apply to reviewers.\n`─────────────────────────────────────────────────`\n\nOne child is fixing the seven new round-9 defects (G1–G7).\n\n**Where this stands:** this is the ninth review round. The core feature has been done since round 1:\n\n- up to 3 reviewers, each with its own model and effort\n- the load-balanced profile choice\n- Autoconfigure in the terminal and on the web\n- the old-config upgrade\n\nEvery round since has found narrower edge cases, mostly in the one-time upgrade and in partial profile discovery, and now the reviewers' findings contradict each other. After this round, I'll override the repeated and contradicting design findings with their reasons and push, unless a new finding is a real defect of similar weight to the data-loss bug in round 8.\n\n**Two things need your answer:**\n1. **Breaking store migration (revision 110):** may the install apply it to your live store? After it, older mj builds can't open the store. I won't install without your approval.\n2. **If you'd rather I stop iterating sooner** and push after this round no matter what the reviewers say, tell me.\n\nWaiting on the round-9 child."
+        },
+        {
+          "id": "agent:11930",
+          "role": "assistant",
+          "text": "The round-9 child stopped partway. Done: G1 (fast mode off), G2 (the no-reviewers rule), G4 (one shared grace window) and G7 (named-profile effort fallback). G5 needed no change, because the shared options code already attributes effort failures only to profiles that offer the model.\n\nStill open: the legacy part of G3, G6, checking the CLI notice, and the full tests and clippy. I'm asking it to finish."
+        },
+        {
+          "id": "agent:11964",
+          "role": "assistant",
+          "text": "I've asked the child, in the same session, to finish:\n\n- the legacy part of G3: use the profiles that have answered by the deadline\n- G6: request efforts for models newly added to the preset\n- a test showing the \"review is off for this session\" notice reaches `mj new` and `mj import` users\n- the full suite and clippy\n\nWhen it reports, I'll run the full validation, commit, and request review. Then I'll override the repeated and contradicting design findings with their reasons and push.\n\n**Still needs your answer:**\n1. May the install apply the breaking store migration (revision 110) to your live store? I won't install without your approval.\n2. If you'd rather I stop iterating and push after this round no matter what the reviewers say, tell me.\n\nWaiting on the round-9 child."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.",
+    "assistant_text_tail": "I've asked the child, in the same session, to finish:\n\n- the legacy part of G3: use the profiles that have answered by the deadline\n- G6: request efforts for models newly added to the preset\n- a test showing the \"review is off for this session\" notice reaches `mj new` and `mj import` users\n- the full suite and clippy\n\nWhen it reports, I'll run the full validation, commit, and request review. Then I'll override the repeated and contradicting design findings with their reasons and push.\n\n**Still needs your answer:**\n1. May the install apply the breaking store migration (revision 110) to your live store? I won't install without your approval.\n2. If you'd rather I stop iterating and push after this round no matter what the reviewers say, tell me.\n\nWaiting on the round-9 child.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      8576,
+      11789,
+      11964
+    ],
+    "user_position": 6276,
+    "input_rationale": "The user said push and install, but the install applies a breaking store migration, which the agent will not do without explicit approval; it also offers to stop iterating on review rounds. The user approved the migration next.",
+    "label": "required_final",
+    "triggers": [
+      "needs you"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T10:30:41.894Z",
+        "kind": "user",
+        "text": "Breaking migration is fine. Continue to fix legit problems, if any remain, but ignore nitpicks."
+      },
+      {
+        "at": "2026-11-06T10:30:46.386Z",
+        "kind": "agent",
+        "text": "You've approved the breaking migration, so I'll install after pushing. From here I'll fix only real defects and override nitpicks with a short reason. Waiting on the round-9 child to finish its remain"
+      },
+      {
+        "at": "2026-11-06T10:37:53.504Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task reviewers-r9-fixes finished: completed     State: completed     Report directory: /home/jonathan/Projects/mjolnir/.mj/clones/c27f713e5f7177bc869217987b7c5f79/.mj/agents/"
+      },
+      {
+        "at": "2026-11-06T10:37:53.507Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-06T10:37:57.180Z",
+        "kind": "agent",
+        "text": "Round 9 is complete: G1–G7 are done, the full suites for mj-core, mj-controller, mj-tui, mj-client and mj-cli pass, and clippy is clean. I'm running the full default-member validation once on the comb"
+      },
+      {
+        "at": "2026-11-06T10:38:08.851Z",
+        "kind": "agent",
+        "text": "I've closed the round-9 child. The full test suite and web unit tests are running. If they pass, I'll commit and request review. Then I'll fix any real defects and override nitpicks and the repeated d"
+      }
+    ]
+  }
+}

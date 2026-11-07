@@ -159,12 +159,14 @@
   },
   "expected": {
     "failure": "none",
-    "input": "none",
-    "work": "finished",
+    "input": "required",
+    "work": "waiting",
     "quiet": null,
-    "action": "finished",
+    "action": "await_input",
     "wrong_actions": [
-      "await_input"
+      "continue",
+      "finished",
+      "wait"
     ]
   },
   "known_failure": [],
@@ -172,7 +174,8 @@
     "mjolnir": "input-axis real-turn mining sample",
     "judgment": "independent evidence label; Jev verdict retained separately",
     "next": "n/a",
-    "input_rationale": "The user asks for advice on whether and how to change the analysis. The reply answers with a recommendation; applying and rerunning it is a new optional action."
+    "input_rationale": "The user asks for advice on whether and how to change the analysis. The reply answers with a recommendation; applying and rerunning it is a new optional action.",
+    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent. Was input=none, action=finished."
   },
   "context": {
     "after": [

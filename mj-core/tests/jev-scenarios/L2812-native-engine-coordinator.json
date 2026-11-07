@@ -1,0 +1,211 @@
+{
+  "id": "L2812",
+  "title": "Native-engine coordinator",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "5992a2122571ac7c7e303ec069a19314",
+    "session_title": "mjolnir via claude2",
+    "reply_position": 33514,
+    "captured_at": "2026-11-06T12:34:46.385Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:31044",
+          "role": "assistant",
+          "text": "The executor found two run-time defects that my acceptance missed. I will check both against my copy of r2."
+        },
+        {
+          "id": "agent:31107",
+          "role": "assistant",
+          "text": "I withdrew my technical acceptance of the #7314 AD3 packet r2. **Do not approve launching r2.** Nothing was launched, and the executor had not asked you for approval yet.\n\n**What happened.** Before requesting your approval, the executor (47a5ea02) found two defects that would have broken the run, and I confirmed both in the code:\n1. **Remote commands are not quoted.** The operator script passes `bash -lc <command>` to ssh as separate arguments. ssh joins its arguments with spaces into one command line, so the remote `bash` receives only the word `if` as its script and the rest is a syntax error. The script that waits for the run to finish could therefore never see the \"complete\" or \"failed\" marker, and the startup check had the same defect.\n2. **The evidence manifest is incomplete.** The VM writes a checksum file that the evidence manifest does not list, and the operator's check requires every file to be listed. So even a successful run's evidence would have been rejected at fetch time.\n\n**Why my review missed it.** I relied on the 13 fake-AWS test scenarios. Their fake ssh does not join and re-split arguments the way real ssh does. The VM-side rehearsal also never ran the operator's fetch step against the VM's real output. So neither boundary was ever exercised.\n\n**Next steps.**\n- The withdrawal is saved read-only at `/tmp/native-review-receipts/7314-ad3r-r2-WITHDRAWN.md` (sha256 `00294f52…`). It replaces the earlier receipt.\n- The executor will run the standard cleanup, which should find nothing, since only the read-only preflight ran. It will then hold for a corrected release.\n- r3 must quote every remote command as a single string and make the manifest match the VM's output.\n- r3 must also include a rehearsal of the startup, wait, fetch and verify steps against a real ssh server, with its transcript in the packet.\n- I saved this lesson for future EC2 packet reviews: no acceptance without a test against a real ssh server.\n\n`★ Insight ─────────────────────────────────────`\n- ssh joins all of its remote arguments into one string, which the remote shell then splits again. Passing a command as `['bash', '-lc', 'if …; then …']` works locally but breaks over ssh, which is why such commands need `shlex.quote`. A fake ssh that runs the arguments directly cannot show this bug.\n- Having an executor make its own checks before launch is what caught this. The reviewer's static check and the executor's check of the real setup are independent, and that is why the second one mattered.\n`─────────────────────────────────────────────────`\n\nStill waiting on: AD3 packet r3, the #9755 M4 PR packet and the engine PRs, and revised packets for the facade and G8b."
+        },
+        {
+          "id": "agent:31284",
+          "role": "assistant",
+          "text": "Before I confirm the swap, I will check where master's semantic-model schema is now, because the supported list has to stay contiguous in landing order."
+        },
+        {
+          "id": "agent:31302",
+          "role": "assistant",
+          "text": "Master 1850175fcc is at schema 28: #10134 (28) and #10186 (27) have both landed. The facade taking 29 is therefore contiguous, and the swap is safe."
+        },
+        {
+          "id": "agent:31322",
+          "role": "assistant",
+          "text": "I confirmed the schema-number swap. The SQLx facade now takes semantic-model schema 29, and G3's tuple layouts take 30. Nothing here needs your decision.\n\n**Why the swap.** The facade passes its focused tests and is entering final checks. G3 cannot be marked Ready until two earlier migrations land. Schema numbers must land in order with no gaps. Master is at 28, because #10052's 27 and close-match's 28 have both landed. The PR that lands first should therefore hold 29.\n\n**Conditions:**\n- The facade must land before G3's tuple-layout PR. If G3 ends up ready first, the swap reverses.\n- Rust's highest output schema is 29 while only the facade has landed, and 30 once G3 lands. Packs that carry neither new field must read identically under every schema label that actually occurs, including across the earlier threshold at 28.\n- A pack with an older schema number that still contains a new field is rejected.\n- Both lanes update every place the number appears: constants, supported lists, threshold tests, regenerated schema files and docs.\n\nThe next free schema number stays 31.\n\n`★ Insight ─────────────────────────────────────`\n- Schema version numbers act as a sequence that readers check: version N means \"may contain every field up to N\". So numbers have to be given out in landing order. Swapping two unlanded reservations is cheap. Landing out of order would leave a gap or mix up which fields each version allows.\n`─────────────────────────────────────────────────`\n\nStill waiting on: AD3 packet r3, the #9755 M4 PR packet and the engine PRs, and revised packets for the facade and G8b."
+        },
+        {
+          "id": "agent:31435",
+          "role": "assistant",
+          "text": "The executor reports that the r2 cleanup finished with nothing found, deleted or left over. I will confirm that in its report."
+        },
+        {
+          "id": "agent:31452",
+          "role": "assistant",
+          "text": "I confirmed the r2 cleanup report: its hash matches what the executor sent (`3648f065…`). It found no AWS instances, keys, security groups or volumes, deleted nothing, left nothing, and recorded no failures. No AWS resources were ever created for r2, and nothing needs your decision.\n\nThe executor 47a5ea02 has:\n- recorded that my withdrawal replaces the earlier receipt;\n- sent no launch approval request for r2;\n- passed my requirement for a real-ssh-server rehearsal on to the lane preparing r3.\n\nIt noted that the current on-demand price is $1.428 per hour, and that the standing approval from the #9687 census does not extend to this run. So r3, once I accept it, still needs your own approval.\n\nStill waiting on: AD3 packet r3, the #9755 M4 PR packet and the engine PRs, and revised packets for the facade and G8b."
+        },
+        {
+          "id": "agent:31517",
+          "role": "assistant",
+          "text": "bifrost3's reviewers are right, and the point also corrects advice I gave earlier. When a master merge conflicts on the ICFG literals, master's ICFG behavior has changed, so the merged tree is a new behavior combination. Keeping the old pair lets results built from the earlier pushed branch be reused as stale. That is why icfg.rs records \"max of both sides + 1\" at every merge. I told #10196 to keep 715/714 at its merge, and that was wrong. #10215 (#7643) is in the same position. Before allocating, I will scan for any open holders at 716 or above."
+        },
+        {
+          "id": "user:32289",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "agent:32601",
+          "role": "assistant",
+          "text": "The r10 preflight is released. I will send it to the requester and the executor, and answer #10162's narrowing."
+        },
+        {
+          "id": "agent:32645",
+          "role": "assistant",
+          "text": "Next, the #9947 Bat packet frozen-p7. It is on this host, so I can verify it directly against frozen-p6."
+        },
+        {
+          "id": "agent:32750",
+          "role": "assistant",
+          "text": "Next is AD3r r3. I will fetch its SHA256SUMS, the changed files and the real-sshd transcripts."
+        },
+        {
+          "id": "agent:32854",
+          "role": "assistant",
+          "text": "Next is the #7314 C1-5(d) read B delta. It reports a soundness hole, so I will read it."
+        },
+        {
+          "id": "agent:32928",
+          "role": "assistant",
+          "text": "Next is the #9737 cutover r2, which has waited longest. I will read it."
+        },
+        {
+          "id": "agent:33004",
+          "role": "assistant",
+          "text": "Reply sent to every queued request except one: the #9559 M3 DDL review, which an independent reviewer is still working on. Three things need your attention.\n\n**1. I corrected one of my own rules.** When a branch merges master and their ICFG cache-version lines conflict, I had told lanes to keep the branch's version pair. That was wrong. The project's levers document requires a new pair at such a merge. Otherwise a cache built from the branch before the merge would be reused after it, even though the code now behaves differently. bifrost3's reviewers caught this. I told every affected lane and renewed their pairs:\n\n| PR | New pair |\n| --- | --- |\n| #5658 stack | 724/723 |\n| #10146 | 725/724 |\n| #7643 | 726/725 |\n| #7860 | 727/726 |\n| #10106 | 728/727 |\n\n#10196, which landed under my wrong ruling, needs no action: its number had never appeared on master.\n\n**2. Two more PRs took reserved numbers without asking.** #9324 and #9995 landed at 716 and 718 by applying \"+1\" on their own, which used up three of my reservations. This is the same coordination gap I raised earlier about David's PRs. It does no harm on master, but it keeps forcing renumbering.\n\n**3. EC2 runs:**\n\n| Run | Status | Your action |\n| --- | --- | --- |\n| #7314 AD3, packet r3 | Technically accepted. The lane rehearsed against a real ssh server, and a control run reproduced the r2 bug, so the rehearsal can catch that kind of error. | **Needs your approval** through executor 47a5ea02. |\n| #9947 Bat, packet p7 | Technically accepted. Only the source pin changed from p6, which already ran on EC2. | None: you approved this one re-measure on condition of my acceptance. |\n| #9687 census preflight r10 | Released under your standing census authorization. I reproduced its source tree myself. | None. |\n\n**Two soundness holes found before shipping:**\n- #7314's new C# reader would have reported \"complete\" while a global `using` that the producer silently dropped was hidden. The lane stopped on its parity check. The fix adds the producer's own gap evidence to the reader, and moves a version number so old stored rows are re-derived.\n- #10301 is a hole already on master. A Rust call that reads a static from another file is wrongly marked fully covered. 07d292ca is checking whether any answer can reach it while serving stays off.\n\n**Other rulings:**\n- #9737's composed route index was withdrawn: the lane found it would rebuild for the whole workspace on any edit. Per-question lookups over per-crate data replace it.\n- Allocations:\n  - Go v108 (#10162);\n  - C# v45 (#10270);\n  - migration 0287 (#9559 M3);\n  - C# compilation derivation version 13 (#7314);\n  - tokens for #10181, the configuration decoder and #9559 M3.\n\n`★ Insight ─────────────────────────────────────`\n- The merge rule depends on what a version number means. Here an ICFG pair names one exact behavior, not \"this branch\". Once a merge brings in master's behavior changes, the branch's tree behaves differently, so the old number names something that no longer exists. Keeping it trusts any cache built before the merge.\n- Two bugs this round were found only by checking against real data, not by review: the read B parity stop, and the real-sshd rehearsal. Comparing against an independent source is what finds the cases a design review assumes away.\n`─────────────────────────────────────────────────`\n\nWaiting on: the #9559 M3 DDL review (child 7a96a179), your decision on the AD3 launch, the #10301 exposure analysis, and the reply on G8b's advisory-read scope."
+        },
+        {
+          "id": "agent:33291",
+          "role": "assistant",
+          "text": "I accepted G8b's advisory read scope, with one condition. Nothing here needs your decision.\n\n**Why it is safe.** The probe checks whether a depth-limited search stopped early. Its reads are recorded in the enclosing query's read log, so reusing a cached result later still notices when what the probe read has changed. That was my open question.\n\n**The condition.** In \"advisory\" mode, a gap the probe finds is not passed up to make the enclosing query incomplete. So the probe itself must answer safely: whenever its own lookup is incomplete, the depth marker must say \"limit reached\", never \"not reached\". A test pins this, next to the lane's stronger test that the probe's reads land in the outer log.\n\n`★ Insight ─────────────────────────────────────`\n- A scope that keeps its own gaps from reaching the enclosing query moves the job of being safe to whatever uses its result. Here the depth marker has to assume the worst whenever the probe could not finish.\n`─────────────────────────────────────────────────`\n\nWaiting on: the #9559 M3 DDL review (child 7a96a179), your decision on launching AD3 r3, and the #10301 exposure analysis."
+        },
+        {
+          "id": "agent:33384",
+          "role": "assistant",
+          "text": "I accepted G8b marking an incomplete advisory probe as `unknown` instead of `reached`. Nothing here needs your decision.\n\nThe marker now has three values: reached, not reached, and unknown. Unknown is safe in the same way: it is never read as \"not reached\", and policy checks treat it like \"reached\", so the result is reported as inconclusive. It also keeps the fact that the probe could not decide.\n\nOne condition: wherever two marker results are combined, the result must lean toward the cautious value:\n- \"reached\" combined with anything gives \"reached\";\n- \"unknown\" combined with \"not reached\" gives \"unknown\";\n- only two \"not reached\" results give \"not reached\".\n\nA table test pins these rules. The existing #10088 token covers the change in the row format.\n\nWaiting on: the #9559 M3 DDL review (child 7a96a179), your decision on launching AD3 r3, and the #10301 exposure analysis."
+        },
+        {
+          "id": "agent:33447",
+          "role": "assistant",
+          "text": "The review gives clear verdicts and settles one design question for me. Before ruling, I will check whether my r6 ruling required persisted transcripts."
+        },
+        {
+          "id": "user:33497",
+          "role": "user",
+          "text": "btw i can see your messages, you don't need to re-echo everything for my benefit"
+        },
+        {
+          "id": "agent:33514",
+          "role": "assistant",
+          "text": "Understood. From now on I'll end turns with only what you need to act on or watch, and I've saved that as a preference.\n\nThe #9559 M3 review is done and the ruling is sent.\n\nStill open:\n- **Your decision:** launching #7314 AD3 r3 through 47a5ea02.\n- **Waiting on:** 07d292ca's analysis of whether the #10301 hole reaches any answer while serving is off."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "btw i can see your messages, you don't need to re-echo everything for my benefit",
+    "assistant_text_tail": "Understood. From now on I'll end turns with only what you need to act on or watch, and I've saved that as a preference.\n\nThe #9559 M3 review is done and the ruling is sent.\n\nStill open:\n- **Your decision:** launching #7314 AD3 r3 through 47a5ea02.\n- **Waiting on:** 07d292ca's analysis of whether the #10301 hole reaches any answer while serving is off.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      33514
+    ],
+    "user_position": 33497,
+    "input_rationale": "The latest user message was a remark, but the reply hands the user the AD3 r3 launch decision. The user approved the launch next.",
+    "label": "required_final",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T12:35:21.414Z",
+        "kind": "user",
+        "text": "launch approved"
+      },
+      {
+        "at": "2026-11-06T12:35:42.425Z",
+        "kind": "agent",
+        "text": "I passed your approval to the executor, 47a5ea02. It covers one run of AD3 r3 exactly as accepted: no retry after a failure, and no other packet. The executor will first repeat its own pre-launch chec"
+      },
+      {
+        "at": "2026-11-06T12:36:14.507Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-06T12:36:17.699Z",
+        "kind": "agent",
+        "text": "The executor, 47a5ea02, will not treat my relay as your approval. Its rule is that only your direct approval in its own session counts, which is the correct safeguard. So **you need to approve the AD3"
+      },
+      {
+        "at": "2026-11-06T12:36:41.550Z",
+        "kind": "user",
+        "text": "what is the human-readable name associated w that"
+      },
+      {
+        "at": "2026-11-06T12:36:50.629Z",
+        "kind": "agent",
+        "text": "Its messages arrive labelled **\"bifrost via codex\"**, session ID `47a5ea0259e20a09155fe1e73b4c7924`. Don't confuse it with **\"bifrost3 via codex\"** (`0305d10c…`), which is the #5658 lane."
+      }
+    ]
+  }
+}

@@ -1,0 +1,341 @@
+{
+  "id": "L2008",
+  "title": "mjolnir via claude3",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "da87dcd462b28e417d1b68b8df1d6346",
+    "session_title": "mjolnir via claude3",
+    "reply_position": 4968,
+    "captured_at": "2026-10-05T21:34:17.829Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "upgrade mbx on this machine, morannon, and precision-3260 to the latest release; also update the version in the mj container image; push the image change"
+        },
+        {
+          "id": "user:338",
+          "role": "user",
+          "text": "> It downloads a\n│ pinned release into sessions\n\nwouldn't baking it into the image be better? #collaborating"
+        },
+        {
+          "id": "user:575",
+          "role": "user",
+          "text": "would \"just use the host's mbx if it's there, otherwise use the container's\" work?"
+        },
+        {
+          "id": "user:580",
+          "role": "user",
+          "text": "or rather, the container image's"
+        },
+        {
+          "id": "user:808",
+          "role": "user",
+          "text": "> The README's\n│   recommended install, cargo install mbx --locked, produces a binary linked\n│   against the host's glibc\n\nwhose readme is that?"
+        },
+        {
+          "id": "user:873",
+          "role": "user",
+          "text": "ugh\n\ni want to support host-configured mbx\n\nbut i also want to give people an Easy Button\n\nhow about, instead of this, we show an \"install mbx\" button in the machines settings when it's not present and just remove the per-session download shit"
+        },
+        {
+          "id": "user:1111",
+          "role": "user",
+          "text": "i want a \"real\" mbx install with setup"
+        },
+        {
+          "id": "user:2003",
+          "role": "user",
+          "text": "new saved session field? \n\nwe should support zsh since that's default on mac right?"
+        },
+        {
+          "id": "user:2176",
+          "role": "user",
+          "text": "yes"
+        },
+        {
+          "id": "user:2198",
+          "role": "user",
+          "text": "next: i should be able to Move a session wo interrupting mj subagents, are there any pieces that are trickier than they look in my head?"
+        },
+        {
+          "id": "user:2230",
+          "role": "user",
+          "text": "why are mbx processes taking hours?"
+        },
+        {
+          "id": "user:2475",
+          "role": "user",
+          "text": "you misunderstood, i see your subagents working on the mbx changes taking hours"
+        },
+        {
+          "id": "user:2690",
+          "role": "user",
+          "text": "> ask children for focused tests on what they changed\n│ during each round, and run one full validation (workspace clippy and all suites)\n│ once at the end\n\npls enshrine this in AGENTS.md"
+        },
+        {
+          "id": "user:2769",
+          "role": "user",
+          "text": "yes"
+        },
+        {
+          "id": "user:2820",
+          "role": "user",
+          "text": "i see no active subagents"
+        },
+        {
+          "id": "user:3211",
+          "role": "user",
+          "text": "right, yes, I meant for the optimized same-target Move case"
+        },
+        {
+          "id": "agent:3213",
+          "role": "assistant",
+          "text": "Understood: the same-environment Move. I'll ask the two investigators that already know this code to look at that case specifically. One will trace what the in-place path does to the container and the parent's worker. The other will check what the children depend on that the in-place path could break."
+        },
+        {
+          "id": "user:3245",
+          "role": "user",
+          "text": ">  The branch needs a rebase onto the new master before it lands, and I still need\n│ to review this round. Should I do that next?\n\nyes"
+        },
+        {
+          "id": "agent:3248",
+          "role": "assistant",
+          "text": "Doing that now. First, the second in-place Move question to the other investigator, so both run in parallel:"
+        },
+        {
+          "id": "agent:3377",
+          "role": "assistant",
+          "text": "That fallback belongs to the session Restart path, and only after the target has gone missing (`daemon/restart.rs:358`). It doesn't apply to Move, so I've set it aside.\n\n## In-place Move with live children: what's harder than it looks\n\n**Confirmed easy parts**\n- **Children are separate processes.** The in-place reset stops only the parent worker's process group, then removes and recreates the parent's worker directory (`targets/worker_daemon.rs:95-220`). Each child has its own worker, directory and relay (`controller/subagents.rs:480-539`). The container is not stopped.\n- **IDs and records stay the same.** The parent keeps its session ID and worker directory. Child records, handbacks and delegation effects are keyed by session ID (`database/delegation.rs:55-90`). The new parent worker reloads `subagents.json` and rebinds the socket at the same path (`worker_runtime/subagents.rs:197-214,304-348`). `list_agents` reads children from the database, so the new parent doesn't start with an empty list (`server_runtime/api.rs:817-871`).\n- **Handbacks aren't lost.** A child's report is committed to the database even while the parent is down (`server_runtime/api.rs:1110-1183`).\n- **Crash recovery doesn't touch children.** Restarting an interrupted in-place Move retries only the parent (`move_session.rs:1417-1518`).\n\nThe change itself is small: skip `before_move_source_stop` when `operation.in_place` is true (`move_session.rs:1792`). Today it runs before the in-place branch. These are the pieces that need more than that:\n\n1. **The new parent won't know its children exist. This is the main gap.** After the swap, Mjolnir only tells the parent about children that were stopped (`resume/in_place.rs:211-271`, `resume.rs:579-596`). When the harness changes, for example Claude to Codex, the conversation is compacted into a summary. The child IDs may or may not survive that. The new parent needs a notice like \"these children are still yours: ID, task, state; call `wait` or `list_agents`\". The existing stopped-children notice is the model for it.\n\n2. **Tool calls cut off mid-way.** If the old parent was inside `wait` or `send_input` when it was stopped, that call never returns. The underlying action is persisted and may still complete. For `send_input`, the parent can't tell whether its input was delivered. `list_agents` shows pending and delivered inputs, so the notice should tell the parent to check it before sending again. This is likely, based on the report; I haven't verified it.\n\n3. **Swapping to a harness without subagent support.** Harnesses without the parent role get no `mj-agents` tools (`config/harness.rs:556-560`). The children would keep running with nothing able to wait on them or close them. In that case, either refuse the in-place Move or stop the children as today.\n\n4. **Existing children keep their old model.** After a profile or model swap, `send_input`, `wait`, `interrupt` and `close` still work on existing children (`server_runtime/api.rs:873-909,1042-1108`). Only `spawn` checks the fixed model. So the parent ends up with children on the previous model. That's probably fine, but it's a decision to make on purpose.\n\n5. **Parking is delayed while the parent is down.** Auto-parking a child after its handback needs the parent's session handle and retries every second (`daemon/delegation.rs:252-295`). A child that finishes during the swap keeps its process, and its slot in the live-children limit, until the parent returns. That's short-lived and harmless.\n\n**Unverified, worth checking when implementing**\n- **The parent checkpoint while children write.** An in-place Move still checkpoints the parent before the swap (`in_place.rs:4-8`). If that checkpoint also captures the workspace, children writing at the same time could make it fail or come out inconsistent.\n- **Rollback after a failed swap.** On failure, `rollback_failed_resume` runs (`move_session.rs:1496-1498`). I haven't confirmed that it leaves the children alone.\n- **The review sidecar's behavior during the swap** isn't established. That isn't specific to children.\n\n## mbx branch\nThe rebase onto the new `master` is still running. That includes the check against the Podman root-user change (`d7afd671`) and the single full validation run. I'll report when it finishes."
+        },
+        {
+          "id": "user:3659",
+          "role": "user",
+          "text": "1. yes\n2. we should allow send_input to finish first (blocking Move temporarily), but not wait\n3. don't allow moving a session w live subagents to a harness wo parent role\n4, 5. yes, accepted\n\ncheckpoints, rollback: let's just not do them for an in-place Move"
+        },
+        {
+          "id": "agent:3661",
+          "role": "assistant",
+          "text": "Decisions recorded. Before I hand this off, one consequence of \"no checkpoint\": today the in-place swap gets the parent's conversation for the new harness from that checkpoint, and the reset deletes the parent's profile directory. Skipping the checkpoint therefore means taking the conversation from where it already lives. I'm making that the implementer's first step, with an instruction to stop and report if it needs a real redesign.\n\nTwo choices of mine you can override:\n- **Other changing calls also finish first.** `spawn`, `close` and `interrupt` have the same \"did it happen?\" problem as `send_input`, so they finish before the Move too. Only `wait` and `list_agents` are cut off.\n- **Parked children and the refusal.** Parked children don't block a Move to a harness without the parent role. They hold no processes, so they're stopped as today and the parent gets their summaries. Only live children block it."
+        },
+        {
+          "id": "user:3741",
+          "role": "user",
+          "text": "ig we should only skip checkpoint for same-harness Moves, maybe that's not worth special casing"
+        },
+        {
+          "id": "agent:3751",
+          "role": "assistant",
+          "text": "I agree it isn't worth special-casing. The code shows both kinds of in-place swap depend on the checkpoint, and both seem fixable the same way.\n\nIn `resume/in_place.rs`, the in-place swap uses the verified checkpoint archive (line 369) in two ways:\n- **Every swap** reads the parent's conversation, `canonical_session`, from the archive (`in_place.rs:211-212`). A swap to a different harness uses it to build the compacted handoff (`:277-282`).\n- **A same-harness swap** additionally restores the harness's own session files from the archive (`native_continuity_preserved` at `:214`, `restored_archive` at `:302`). It has to, because the reset deletes the old profile directory (`WorkerRootReset::InPlace { previous_profile_root }`, `:317-318`, `:425`).\n\nSo a same-harness swap isn't the easy case. It needs more from the checkpoint than a cross-harness swap does. Either way, the fix is to read the same data from where it lives now:\n- **Conversation:** read it from the live transcript store instead of the archive.\n- **Harness session files:** copy them from the old profile directory before the reset deletes it.\n\nI haven't verified that the live transcript store holds the same conversation the archive does. The implementer's first step is to check exactly that. If either part needs a real redesign, its instructions say to stop and report rather than build around it.\n\nSo I'd keep the instruction as given: no checkpoint for any in-place Move, with that stop condition. The implementer (in-place Move) and the mbx rebase are both still running. I'll report when either finishes."
+        },
+        {
+          "id": "user:3870",
+          "role": "user",
+          "text": "good call, let's do it that way"
+        },
+        {
+          "id": "agent:3872",
+          "role": "assistant",
+          "text": "The in-place Move implementer is already working to exactly that instruction, so nothing changes. Waiting for the two children:"
+        },
+        {
+          "id": "agent:3974",
+          "role": "assistant",
+          "text": "The worktree has an identical copy of the misplaced edits, so I'm restoring those 9 files in the main checkout and telling the child."
+        },
+        {
+          "id": "user:4060",
+          "role": "user",
+          "text": "host restarted, continue"
+        },
+        {
+          "id": "agent:4073",
+          "role": "assistant",
+          "text": "Both children were stopped partway by the restart. Their uncommitted work is still in their worktrees, and the main checkout is clean. Resuming both from where they stopped:"
+        },
+        {
+          "id": "agent:4238",
+          "role": "assistant",
+          "text": "What happened to your mbx config, as far as I can tell:\n\n- **The test.** `legacy_detection_distinguishes_grep_miss_match_and_failure` (`worker_binary/install.rs:1132`) ran the legacy-detection script on this machine using your real `HOME`. The script replaces `~/.config/mbx/config.toml` with a link to a temporary test file. The child says it restored the file afterwards, but it no longer has a record of the commands it ran, so I can't confirm how. The test now uses a temporary `HOME` (fixup `9efbd37c`), so this won't happen again.\n- **The 10TB/2TB difference is probably your own edit.** `config.toml~` is the backup Emacs makes on save. Its change time matches the moment `config.toml` was last written, 11:23:45 today. Your `~/.bash_history` has `emacs -nw ~/.config/mbx/config.toml`. So most likely you changed `max_total_size` from 2TB to 10TB in Emacs after the test incident. That's a strong inference, not certain.\n\n**Did you set 10TB yourself?** If yes, your config is as you left it, and the only other difference from `config.toml~` is that one line. If not, tell me what the value should be.\n\n**Status of the two branches**\n- **mbx:** `mbx-host-session-rebased` is ready to land: two commits, `8c252601` and `619ce1a1`, with full validation passed. Before pushing, I'll check that no other test runs these host scripts with your real `HOME`.\n- **In-place Move:** the child is fixing the review findings:\n  - the gate could stay closed after a failed Move;\n  - the child list in the notice could be out of date by the time it's delivered;\n  - with an older worker (before relay version 31), the Move now falls back to stopping children instead of failing."
+        },
+        {
+          "id": "user:4381",
+          "role": "user",
+          "text": "yes, i made the 10TB edit\n\nwhen your changes are complete, merge + push to origin/master"
+        },
+        {
+          "id": "agent:4384",
+          "role": "assistant",
+          "text": "Thanks, so your config is as you left it. Once both branches are finished and checked, I'll merge and push them. First, the check I promised: other tests that run host scripts on this machine without a temporary `HOME`."
+        },
+        {
+          "id": "agent:4405",
+          "role": "assistant",
+          "text": "That search is too broad to check by hand. I'll give a child a focused audit of the new tests that run host scripts, and have it fix any leaks it finds."
+        },
+        {
+          "id": "agent:4473",
+          "role": "assistant",
+          "text": "`master` has moved a lot since this morning, and the first mbx commit conflicts in `mbx.rs`. Checking what `master` changed there:"
+        },
+        {
+          "id": "agent:4585",
+          "role": "assistant",
+          "text": "The Move child failed partway with a rate-limit error (HTTP 429), and a failed child can't be resumed. Checking what it left in the landing worktree:"
+        },
+        {
+          "id": "agent:4603",
+          "role": "assistant",
+          "text": "Both Move commits were applied (`b6e98a32`, `d2ff89e8`). The protocol renumbering and some fixes are uncommitted. Looking at the uncommitted diff to see how far it got:"
+        },
+        {
+          "id": "agent:4620",
+          "role": "assistant",
+          "text": "The renumbering is almost done, the unused test helper was removed, and a TUI golden file was updated to the new help text. Checking the remaining pieces:"
+        },
+        {
+          "id": "agent:4663",
+          "role": "assistant",
+          "text": "Now folding the two Move commits into one, with a message that says protocol 32:"
+        },
+        {
+          "id": "agent:4676",
+          "role": "assistant",
+          "text": "Three linear commits on top of `origin/master`. Now the single full validation on the combined tree: fmt, workspace clippy, and the full suites of the five crates the work touched."
+        },
+        {
+          "id": "agent:4712",
+          "role": "assistant",
+          "text": "The validation is running in the background. I've closed the children I no longer need. I'll push once all of it passes."
+        },
+        {
+          "id": "agent:4784",
+          "role": "assistant",
+          "text": "The re-run of `checkpoint_only_start…` passed alone. My edit wasn't formatted the way rustfmt wants, which stopped the chain before the other test ran. Formatting, then running that test:"
+        },
+        {
+          "id": "agent:4802",
+          "role": "assistant",
+          "text": "Both pass. I'm folding the test fix into the Move commit, since the version bump there is what broke it. Then I'll check `origin/master` and push:"
+        },
+        {
+          "id": "agent:4818",
+          "role": "assistant",
+          "text": "`master` has moved three more commits. Checking whether they touch the files we changed, then rebasing:"
+        },
+        {
+          "id": "agent:4856",
+          "role": "assistant",
+          "text": "The re-check is running in the background. I'll push when it passes."
+        },
+        {
+          "id": "agent:4952",
+          "role": "assistant",
+          "text": "Both pass alone. The 15-minute load average was about 127 during the suite run. Pushing:"
+        },
+        {
+          "id": "agent:4968",
+          "role": "assistant",
+          "text": "Both changes are merged and pushed to `origin/master` (`e964b4a2..c2107d5c`) as three linear commits:\n\n| Commit | Change |\n|---|---|\n| `90ee42a0` | \"Install mbx\" / \"Upgrade mbx\" in Settings › Setup › Machines. It updates the startup file of the user's login shell: zsh, bash or fish, with `~/.profile` as the fallback. |\n| `6fb245e3` | Container sessions use a copy of the host's mbx inside the cache directory. The per-session download is removed. Containers created before this change keep their old copy until they're recreated. |\n| `c2107d5c` | An in-place Move keeps subagents running. Changing calls finish first, the new parent is told which children it still has, a Move to a harness without the parent role is refused while live children exist, and the relay protocol is now version 32. |\n\n**Changes made while merging**\n- **Protocol version.** `master` had already used relay protocol 31 for project-memory replacement, so the admission request became version 32. One of `master`'s tests assumed project-memory replacement was the newest version. I changed it to check against that feature's own minimum version instead.\n- **Unused test helper.** `automatic_total` lost its last caller when `master` pruned tests, so I removed it.\n\n**Validation**\n\nThe full validation ran on the combined tree: fmt and workspace clippy, plus the full core, controller, worker, TUI and CLI suites. After a final rebase onto three new `master` commits that touched four of the same files, I ran fmt, clippy and the controller and worker suites again.\n\nThe controller suite passed: 1,853 tests. Two worker tests failed during the full run and passed when re-run alone:\n- `dead_bridge_after_session_start_reloads_the_native_session` timed out while the machine's load average was about 127.\n- `checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting_a_harness` has failed in all three full worker runs today. The test starts a worker twice on the same directory, and the second start sees the first one's ownership lock still held. Our changes don't touch that code, so it is likely an existing timing problem that shows up under load. I haven't confirmed that it fails on `master` alone. It's worth its own fix.\n\n**Still open**\n- **The checkpoint during in-place Move is kept.** It selects the harness session files to carry over and leaves out secrets. Removing it would need a new design for carrying over the conversation. The options are in `.mj/agents/fa76726a3f5b068882a3b3c19f3f13cb/in_place_move_review_followup.md`.\n- **Leftover worktrees.** Four worktrees remain under `.claude/worktrees/` (`mbx-install-button`, `mbx-host-session`, `inplace-move-subagents`, `land`), each with its own large `target/` directory. Should I remove them?"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "yes, i made the 10TB edit\n\nwhen your changes are complete, merge + push to origin/master",
+    "assistant_text_tail": "e parent role is refused while live children exist, and the relay protocol is now version 32. |\n\n**Changes made while merging**\n- **Protocol version.** `master` had already used relay protocol 31 for project-memory replacement, so the admission request became version 32. One of `master`'s tests assumed project-memory replacement was the newest version. I changed it to check against that feature's own minimum version instead.\n- **Unused test helper.** `automatic_total` lost its last caller when `master` pruned tests, so I removed it.\n\n**Validation**\n\nThe full validation ran on the combined tree: fmt and workspace clippy, plus the full core, controller, worker, TUI and CLI suites. After a final rebase onto three new `master` commits that touched four of the same files, I ran fmt, clippy and the controller and worker suites again.\n\nThe controller suite passed: 1,853 tests. Two worker tests failed during the full run and passed when re-run alone:\n- `dead_bridge_after_session_start_reloads_the_native_session` timed out while the machine's load average was about 127.\n- `checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting_a_harness` has failed in all three full worker runs today. The test starts a worker twice on the same directory, and the second start sees the first one's ownership lock still held. Our changes don't touch that code, so it is likely an existing timing problem that shows up under load. I haven't confirmed that it fails on `master` alone. It's worth its own fix.\n\n**Still open**\n- **The checkpoint during in-place Move is kept.** It selects the harness session files to carry over and leaves out secrets. Removing it would need a new design for carrying over the conversation. The options are in `.mj/agents/fa76726a3f5b068882a3b3c19f3f13cb/in_place_move_review_followup.md`.\n- **Leftover worktrees.** Four worktrees remain under `.claude/worktrees/` (`mbx-install-button`, `mbx-host-session`, `inplace-move-subagents`, `land`), each with its own large `target/` directory. Should I remove them?",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      4968
+    ],
+    "user_position": 4381,
+    "input_rationale": "Merge and push are done, but the agent asks permission to delete four worktrees. It also lists the kept Move checkpoint as an open design item.",
+    "label": "required_final",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-05T21:38:15.050Z",
+        "kind": "user",
+        "text": "ys, rm the worktrees"
+      },
+      {
+        "at": "2026-10-05T21:38:21.435Z",
+        "kind": "agent",
+        "text": "All four are clean. Removing them:"
+      },
+      {
+        "at": "2026-10-05T21:38:25.670Z",
+        "kind": "agent",
+        "text": "I removed all four worktrees, including their `target/` directories. Each had no uncommitted changes. Only the main checkout is left.  Their local branches still exist: `mbx-install-button`, `mbx-host"
+      },
+      {
+        "at": "2026-10-05T23:02:12.962Z",
+        "kind": "user",
+        "text": "yes, rm the branches"
+      },
+      {
+        "at": "2026-10-05T23:02:19.090Z",
+        "kind": "agent",
+        "text": "These branches were rebased before landing, so git won't see them as merged and `-d` would refuse. I'll use `-D`, after checking that none of them exist on the remote:"
+      },
+      {
+        "at": "2026-10-05T23:02:41.407Z",
+        "kind": "agent",
+        "text": "I deleted all five local branches. None of them existed on `origin`, so nothing remote was affected, and only `master` is left locally. Their final work is in `origin/master` as `90ee42a0`, `6fb245e3`"
+      }
+    ]
+  }
+}

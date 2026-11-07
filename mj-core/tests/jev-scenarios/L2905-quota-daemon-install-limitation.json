@@ -1,0 +1,135 @@
+{
+  "id": "L2905",
+  "title": "quota daemon install limitation",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "8d0ba9fd55f30b04f9c918384ded459b",
+    "session_title": "quota-sweep-owner",
+    "reply_position": 213,
+    "captured_at": "2026-11-06T13:39:51.112Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /home/jonathan/Projects/mjolnir/.mj/clones/41aa17f5e77daa342513b5e1ef6e559d/.mj/agents/8d0ba9fd55f30b04f9c918384ded459b. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nWork only in the git worktree /home/jonathan/Projects/mjolnir/.mj/clones/wt-quota-sweep-owner (branch quota-sweep-owner). Another child is editing `QuotaRuntime::resolve` (the `auto` choice) in mj-controller/src/quota_runtime.rs and its callers in a different worktree; stay out of resolve to keep the merge clean. Commit on your branch when done; do not push.\n\n## Problem\nAll four Codex profiles (codex, codex2, codex3, codex4) show \"quota unavailable\" for long periods although `codex` works from the CLI. Evidence I gathered:\n- Daemon log ~/.local/share/mjolnir/logs/mj-daemon-20261106T114945.619Z-2087559.log: every ~10-30 minutes all four profiles fail together with \"codex quota query failed: Codex app-server protocol error (Closed)\", then succeed after the restart, then fail again. Earlier logs show the same pattern since at least 2026-11-05 17:18Z.\n- The checks run in Podman containers (`mj-quota-*`, labels dev.mj.quota=true, dev.mj.instance=ee30cecc7a8152aa) started by the daemon's `mj node` process (pid 2087561).\n- `podman events` shows the four containers created at 12:30:03Z were ended at 12:46:04-05Z with `stop` events on two and `died` on all four. The ones created 12:59:55Z ended the same way at 13:04:58-13:05:01Z. The probe found the stream Closed at the next poll (12:49:55, 13:09:54). So something outside the check removed live containers.\n- Suspect (likely, NOT confirmed): `sweep_quota_containers` (mj-controller/src/quota_runtime.rs:355) runs `rm --force` on every quota container with this instance's label. It runs when any quota poller starts (`spawn_quota_refresher`, mj-controller/src/pollers/quota.rs:52-60). Instance identity is a hash of the data dir (`instance_identity_for`, mj-core/src/config/loading.rs:307), so any other process sharing the data dir that starts a quota poller (a second daemon/node, a TUI, a CLI command, a test run using the real data dir, `republish_quota_profiles` in mj-controller/src/server_runtime/actions.rs, etc.) would remove the live daemon's containers. Other possibilities to keep open: the daemon itself dropping/re-creating a `QuotaContainer` whose drop removes a container by the wrong name; a profile-batch restart; a different cleanup path (container GC, `mj recover`, orphan sweeps for dev.mj.managed=true) removing quota containers. Note many old `mj node` processes from Nov 4-5 with other instance labels are still alive and also have quota containers; a stray `mj node` or similar sharing ee30cecc might be the stopper.\n\n## Assignment\n1. Diagnose: identify which process/code path issues the stops at 12:46:04Z and 13:04:58Z (2026-11-06). Use `podman events --since ... --until ...` (add `--filter label=dev.mj.instance=ee30cecc7a8152aa`), daemon logs in ~/.local/share/mjolnir/logs (mj-daemon-*, mj-cli-*, mj-tui-* around those times), and the code. Read-only on the live system: do not stop, kill, or remove any process or container, and do not restart the daemon. Report confirmed vs likely.\n2. Fix (decided direction): a cleanup must only remove quota containers whose owning process is dead, never ones a live process is using. Suggested approach: label each quota container with its owner (e.g. pid plus process start time or boot id, so pid reuse cannot fool it) and have the sweep skip containers whose owner is still alive; pick the exact shape yourself. If the diagnosis shows a different code path is the stopper, fix that path to the same rule. Keep the sweep's purpose (removing leftovers of a daemon that died mid-check). Do not add runtime self-audits; prove the rule with tests.\n3. Validation: unit tests for the sweep decision (live owner kept, dead owner removed, unlabeled legacy containers handled sensibly — explain your choice). Run `cargo test -p mj-controller quota` in the foreground; clippy + fmt on changed code. Use cargo normally (mbx caching; do not redirect target/).\n\n## Handback\nShort: diagnosis (who stops the containers, with the evidence lines; confirmed/likely), what changed (files/symbols), how legacy containers are treated, test commands and results, open uncertainty. Details in your report_dir."
+        },
+        {
+          "id": "agent:67",
+          "role": "assistant",
+          "text": "Still diagnosing: I'm checking who else can start a quota poller (callers of `spawn_quota_refresher`) and whether anything else runs `rm` on quota containers."
+        },
+        {
+          "id": "agent:113",
+          "role": "assistant",
+          "text": "Status: diagnosis points at test runs sharing the host's instance identity; now I'm looking for an existing process-identity helper before designing the owner label."
+        },
+        {
+          "id": "agent:161",
+          "role": "assistant",
+          "text": "Status: sweep change is in; now adding the sweep-decision tests."
+        },
+        {
+          "id": "agent:213",
+          "role": "assistant",
+          "text": "I've handed back my report. The fix is committed as `0d441003e` on `quota-sweep-owner` and not pushed.\n\nThe sweep now removes a quota container only when the process that started it has exited. I think the container stops come from test runs sharing the daemon's instance identity, but I haven't confirmed that.\n\n- **Evidence:** Containers were removed at 12:46Z, 13:04Z and 13:21Z. The 13:21Z removals came 8 seconds before a `cargo test -p mj-controller` binary started on this host. Those tests start a quota poller, which runs the sweep. The daemon itself didn't restart in that window. I couldn't find what ran at 12:46 or 13:04, and I didn't run the old code against the live containers.\n- **Fix:** Each quota container now carries an owner label (process id plus its birth identity, so a reused process id doesn't pass as the owner). The change is in `mj-controller/src/quota_runtime.rs` only, and `resolve` is untouched.\n- **Old containers:** Containers with no owner label are kept, because the live daemon's current ones predate this build. They can live for days, so an age cutoff would be unsafe. Leftovers from older builds need a one-time manual `podman rm`.\n- **Tests:** The six new unit tests pass. `cargo test -p brokk-mj-controller quota` gave 78 passed, 0 failed, 1 ignored, and clippy and fmt are clean. No live quota containers were removed during that run.\n- **Still open:** The live daemon runs the old build, so its containers stay exposed until it's reinstalled."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "process is using. Suggested approach: label each quota container with its owner (e.g. pid plus process start time or boot id, so pid reuse cannot fool it) and have the sweep skip containers whose owner is still alive; pick the exact shape yourself. If the diagnosis shows a different code path is the stopper, fix that path to the same rule. Keep the sweep's purpose (removing leftovers of a daemon that died mid-check). Do not add runtime self-audits; prove the rule with tests.\n3. Validation: unit tests for the sweep decision (live owner kept, dead owner removed, unlabeled legacy containers handled sensibly — explain your choice). Run `cargo test -p mj-controller quota` in the foreground; clippy + fmt on changed code. Use cargo normally (mbx caching; do not redirect target/).\n\n## Handback\nShort: diagnosis (who stops the containers, with the evidence lines; confirmed/likely), what changed (files/symbols), how legacy containers are treated, test commands and results, open uncertainty. Details in your report_dir.",
+    "assistant_text_tail": "I've handed back my report. The fix is committed as `0d441003e` on `quota-sweep-owner` and not pushed.\n\nThe sweep now removes a quota container only when the process that started it has exited. I think the container stops come from test runs sharing the daemon's instance identity, but I haven't confirmed that.\n\n- **Evidence:** Containers were removed at 12:46Z, 13:04Z and 13:21Z. The 13:21Z removals came 8 seconds before a `cargo test -p mj-controller` binary started on this host. Those tests start a quota poller, which runs the sweep. The daemon itself didn't restart in that window. I couldn't find what ran at 12:46 or 13:04, and I didn't run the old code against the live containers.\n- **Fix:** Each quota container now carries an owner label (process id plus its birth identity, so a reused process id doesn't pass as the owner). The change is in `mj-controller/src/quota_runtime.rs` only, and `resolve` is untouched.\n- **Old containers:** Containers with no owner label are kept, because the live daemon's current ones predate this build. They can live for days, so an age cutoff would be unsafe. Leftovers from older builds need a one-time manual `podman rm`.\n- **Tests:** The six new unit tests pass. `cargo test -p brokk-mj-controller quota` gave 78 passed, 0 failed, 1 ignored, and clippy and fmt are clean. No live quota containers were removed during that run.\n- **Still open:** The live daemon runs the old build, so its containers stay exposed until it's reinstalled.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      213
+    ],
+    "user_position": 21,
+    "input_rationale": "The fix is committed and the task done. The open item (reinstall the daemon, plus a one-time manual podman rm of old containers) is an action the parent or user must take, but the report does not ask for it or hand over a decision. Informational limitation versus user action cannot be separated from the text.",
+    "label": "ambiguous",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "mjolnir",
+    "is_child": true,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T13:40:37.449Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-11-06T13:40:39.179Z",
+        "kind": "user",
+        "text": "Thanks — I reviewed 0d441003e and accept it. Two follow-ups on the same branch (quota-sweep-owner), as a separate commit each:  1. Bug: a `[quota] runtime` change in config.toml never reaches the quot"
+      },
+      {
+        "at": "2026-11-06T13:41:13.923Z",
+        "kind": "agent",
+        "text": "Status: implementing follow-up 1 (republish when quota requests change, not just profiles) and then follow-up 2 (test isolation)."
+      },
+      {
+        "at": "2026-11-06T13:57:28.190Z",
+        "kind": "agent",
+        "text": "Status: the removed import was needed by the test module; moving it there."
+      },
+      {
+        "at": "2026-11-06T14:02:00.669Z",
+        "kind": "agent",
+        "text": "Clippy and fmt are clean and the tests pass. Committing in two parts."
+      },
+      {
+        "at": "2026-11-06T14:02:25.326Z",
+        "kind": "agent",
+        "text": "Both follow-ups are committed on `quota-sweep-owner` and not pushed. The targeted tests, clippy on `mj-controller` and fmt are clean.  **1. Runtime change not reaching the refresher (`ad408bb68`).** Y"
+      }
+    ],
+    "strict_input_scoring": false
+  }
+}

@@ -1,0 +1,182 @@
+{
+  "id": "L2006",
+  "title": "mjolnir via claude",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "3f9fd0962609fb6f056e76f5d9e5d8e4",
+    "session_title": "mjolnir via claude",
+    "reply_position": 1515,
+    "captured_at": "2026-10-05T14:56:39.145Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "when i use claude code, i see its subagents reporting intermittently what it is that they're working on. \n\n1. how is the sub prompted to do this / what tool does it call?\n2. does the primary session model see those updates or are they harness-only?\n\nhave subs investigate ~/.claude traces"
+        },
+        {
+          "id": "user:41",
+          "role": "user",
+          "text": "2nd question. how does mj memory system resolve concurrent edits to the same project memories? how does our tool-based system sync with claude code's file-based system?"
+        },
+        {
+          "id": "user:451",
+          "role": "user",
+          "text": "how does CC primary agent get information \"what is subagent X doing\" then?"
+        },
+        {
+          "id": "user:696",
+          "role": "user",
+          "text": "it sounds like the conflicts then are \"first write wins?\""
+        },
+        {
+          "id": "agent:704",
+          "role": "assistant",
+          "text": "Mostly yes. For a single file, the version from the first session to reach a checkpoint stays at the original path. Three details change what \"first write wins\" would suggest.\n\n**1. \"First\" means the first checkpoint, not the first write.** Each session edits its own copy and merges only at a checkpoint. The merge runs under a per-project lock, so checkpoints are processed one at a time (`reconcile_into_canonical`, `mj-core/src/project_memory.rs:603`). For each file, `reconcile_snapshots` (`project_memory.rs:474-523`) handles four cases:\n\n| Case | Result |\n|---|---|\n| This session did not change the file | Keep the shared version |\n| Only this session changed it | Take this session's version |\n| Both changed it, with the same content | Same content, no conflict |\n| Both changed it, with different content | Keep the shared version at the path. Save this session's version as `conflicts/<session>-<digest>.md` |\n\nSo if session A edits a file first but session B reaches a checkpoint first, B's version stays at the path. Confirmed from the code.\n\n**2. The losing version is kept, not discarded.** It goes into a conflict file with a header comment that names the session. After the merge, the merged set of files is installed back into the losing session's copy (`mj-controller/src/session_manager/standalone.rs:583-586`). That session's file at the original path is replaced with the winning version, and the conflict file appears beside it. The model is not told. The conflict is only logged with `tracing::warn!`. A model that reads the file again sees content it did not write and gets no explanation.\n\n**3. Deletions follow different rules.**\n- **An edit and a delete of the same file:** the edit wins in either order, and no conflict file is written. In the conflict case, the code keeps whichever version exists (`current.or(local)`).\n- **A delete with no competing edit:** the merge result drops the file. But the shared copy is written with `install_snapshot` (`project_memory.rs:624`), which only creates or replaces files. So the deletion never reaches the shared copy.\n\nIn practice, deletions do not propagate.\n\n**What this means for `MEMORY.md`:** every session that saves a memory rewrites `MEMORY.md`, so two sessions that each add a memory always conflict on that file. The first session to reach a checkpoint keeps its index line. The second session's memory file merges normally, because it has a new path. But its index line exists only in the conflict copy. The memory exists, but `MEMORY.md` does not list it, so a later Claude session will not know about it. This is the most likely way that data is lost in normal use.\n\n`★ Insight ─────────────────────────────────────`\n- The merge compares whole files and has no line-level merge. That works for one-fact-per-file memories, because they rarely collide. It works badly for `MEMORY.md`, which every session appends to.\n- A line-level union merge only for `MEMORY.md` would fix the common case. Concurrent appends would both survive, and true conflicts on other files would still use the conflict-file path.\n`─────────────────────────────────────────────────`\n\nOne thing I did not check: when a session checkpoints more than once, I did not confirm whether its baseline (the version it started from) is updated after each checkpoint. If it is not updated, a session's second checkpoint could conflict with its own first one. I can have a child check that if it matters to you."
+        },
+        {
+          "id": "user:935",
+          "role": "user",
+          "text": "> After the merge\n\nwhat performs merges?"
+        },
+        {
+          "id": "agent:943",
+          "role": "assistant",
+          "text": "The Mjolnir controller process does the merge, using ordinary deterministic Rust code. No model is involved. Confirmed. It runs as part of each session's checkpoint:\n\n1. **Trigger.** The checkpoint code waits until the session's harness is idle. It then calls `sync_project_memory()` once, before it exports the checkpoint (`mj-controller/src/controller/checkpoint/latched.rs:402-410`). The comment there says normal attach and polling never touch memory.\n2. **Collect.** `sync_project_memory` (`mj-controller/src/session_manager/standalone.rs`) asks the worker for two snapshots: the session's baseline (the version it started from) and its current copy (`self.client.project_memory_snapshot()`).\n3. **Merge.** On a blocking thread, the controller calls `mj_core::project_memory::reconcile_into_canonical` (`mj-core/src/project_memory.rs:603-626`). That function:\n   - takes the per-project lock\n   - reads the shared copy from disk\n   - runs `reconcile_snapshots`, the per-file rules I described earlier\n   - writes the result back with `install_snapshot`, which only adds or replaces files\n4. **Install back.** If the merge result differs from the worker's baseline or current copy, the controller sends the result to the worker with `install_project_memory_snapshot` (`standalone.rs:583-586`). This is where the losing session's file is replaced and the conflict file appears.\n\nA limit on the lock: `MEMORY_LOCKS` is a static variable inside one process. It serializes merges between sessions run by the same controller, but not between two controller processes that share one `$MJ_DATA_DIR`. With one controller, which I believe is the usual setup but have not checked, this does not matter.\n\n`★ Insight ─────────────────────────────────────`\n- The merge runs only while the checkpoint keeps the harness idle. That is why the session's own copy can be replaced safely: the model cannot be writing memory files at that moment.\n- The same timing explains why merged changes reach a running session only at its own checkpoint. No other step sends memory changes to the worker.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:1079",
+          "role": "user",
+          "text": "I still don't understand how deterministic Rust code can correctly merge edits to the same memory."
+        },
+        {
+          "id": "agent:1081",
+          "role": "assistant",
+          "text": "You're right: it can't, and it doesn't try. I said \"merge\" too loosely. The Rust code merges only when sessions changed different files. When two sessions change the same file to different content, the code combines nothing. It keeps both whole versions and leaves them for someone else to resolve.\n\nWhat the code does for each file is limited to checks it can make with certainty, by comparing exact content against the version the session started from:\n\n- Only one side changed the file: take that side's version. No judgment is needed.\n- Both sides made the identical change: keep it.\n- Both sides changed it differently: **no merge**. Keep the shared version at the path and save the other version as `conflicts/<session>-<digest>.md` (`mj-core/src/project_memory.rs:500-513`). The code's own comment says it does this \"instead of guessing or silently choosing one.\"\n\nSo the merge is correct only in a narrow sense: it never loses text and never invents text. It does not reconcile meaning. If session A writes \"tests run with `cargo nextest`\" and session B writes \"tests run with `just test`\" in the same memory file, neither the code nor anything else decides which is right.\n\nThe weak point is that nothing resolves the conflict later either. The conflict file is a normal file in the memory directory, but:\n- the model is not told it exists (the conflict is only logged)\n- `MEMORY.md` does not list it, so Claude Code does not load it\n- no step asks a model or a person to reconcile it\n\nIn practice, the conflict file is probably never read again, so for most purposes the losing edit is lost. It is still on disk, so it is not completely gone.\n\n`★ Insight ─────────────────────────────────────`\n- Git's approach to this problem is similar: the computer handles changes that do not overlap and stops at real conflicts. But Git stops and makes someone resolve the conflict. Mjolnir records the conflict and continues, and no one is ever asked to resolve it.\n- Resolving a conflict over what a memory means needs judgment, so a model is the right tool for it. The deterministic code is the right tool for detecting and preserving conflicts.\n`─────────────────────────────────────────────────`\n\n**Recommendation.** Keep the deterministic detection, and add a resolution step:\n\n1. **For `MEMORY.md`:** merge index lines by taking the union of both sides' lines. The index is a list of independent lines, so this merge is safe to do in code, and it fixes the most common conflict.\n2. **For other memory files:** when a conflict file is created, tell the next session that works on the project, and ask its model to reconcile the conflict and delete the conflict file. The installed snapshot or a startup notice could carry this message.\n\nThis touches the paused memory redesign, so I have not changed anything. Tell me if you want to go ahead."
+        },
+        {
+          "id": "user:1278",
+          "role": "user",
+          "text": "we should do this, but we still have same-line conflicts right?"
+        },
+        {
+          "id": "agent:1280",
+          "role": "assistant",
+          "text": "Yes. I overstated it when I called a line union \"safe\": it only handles different sessions adding different lines. Taking the union of `MEMORY.md` lines leaves two kinds of conflict:\n\n1. **Both sessions change the same line differently.** For example, both rewrite the description for `project-x.md`. The union keeps both lines, so the index has two entries for one file with different descriptions.\n2. **One session removes a line and the other keeps it.** The union keeps the line, so the removal is lost. This is the same deletion gap as before, at the line level.\n\n**Better design: a three-way merge keyed by the linked file name.** Each index line links to one memory file (`- [Title](file.md) — description`), so the file name can identify the line. For each file name, compare the line in the starting version, the shared copy and the session's copy, using the same rules as the file-level merge:\n\n| Case | Result |\n|---|---|\n| Only one side added, changed or removed the line | Take that side's change |\n| Both made the same change | Keep it |\n| Both changed the line differently, or one changed and one removed it | **Real conflict.** Keep the shared line and send the conflict to the model reconcile step described above |\n\nLines that do not link to a file, such as headings or free text, have no file name to match on. They would keep the current whole-file behavior. In practice that means headings, which rarely change.\n\nWith this design, the code handles every case it can decide with certainty. The real conflicts that remain are rare, because they need two sessions to edit the description of the same memory. Those conflicts go to a model, which is the same path as conflicts in memory files.\n\n`★ Insight ─────────────────────────────────────`\n- Matching lines by file name, not by line text, means an edited line is matched with its earlier version. That makes conflict 1 detectable. A text-based union can only see two different lines.\n- I considered generating `MEMORY.md` from each memory file's `description:` field. That would remove index conflicts completely. But Claude Code writes `MEMORY.md` itself, and its descriptions often differ from the frontmatter, so Mjolnir would keep overwriting Claude's edits.\n`─────────────────────────────────────────────────`\n\nTwo decisions before I start:\n- **Delete propagation:** the line-level design reports removals correctly, but `install_snapshot` still never deletes files. Should this work include the paused `6a5e162c` deletion change, or should it stay separate?\n- **How the model learns about conflicts:** a notice at the start of the next session on the project, or a notice delivered with the snapshot installed into the conflicting session at its checkpoint?"
+        },
+        {
+          "id": "user:1459",
+          "role": "user",
+          "text": "should we roll our own 3wm, leverage git in a design like ../letta, or just embed letta?"
+        },
+        {
+          "id": "agent:1473",
+          "role": "assistant",
+          "text": "This needs a substantial read of letta-code's memory design (`src/agent/memory-git*`, `memory-conflict-repair.ts`, `memfs-sync.ts`, worktrees). I'm sending a child to do that read."
+        },
+        {
+          "id": "agent:1515",
+          "role": "assistant",
+          "text": "My recommendation: extend our own three-way merge, and copy one idea from Letta, which is to have a model repair conflicts. Do not embed Letta, and do not make git the memory store.\n\n**Embedding Letta: no.** Confirmed by the child's read of `../letta-code`:\n- It is TypeScript and needs Bun ≥1.3.2 and Node ≥22.19 (`package.json:1-7`). Our controller and workers would need that runtime.\n- The git memory code is internal to the CLI. It depends on Letta's login, backend, settings, hooks and task system. The package exports only the validation helpers, not `memory-git` or `memory-worktree` (`package.json:53-81`). There is no library we could call.\n- Its sync model is a local checkout pushing to a git remote on the Letta server. We would have to run that server or emulate it.\n\n**A git-backed design like Letta's: it doesn't fix our main problem.** Git's text merge also reports a conflict when two sides add different lines at the same place. Two sessions that each add a line to the end of `MEMORY.md` would conflict in git just as they do now. Letta has no special handling for index files. Those conflicts go to a model repair step (`memory-constraints.ts`, `memory-task-lifecycle.ts:142-159`). What git would add is history, deletions that propagate, and line-level merges of non-overlapping edits. In exchange, we would take on the problems Letta's code works around:\n- `.git/config.lock` races (`memory-git-config-lock.ts`)\n- commit signing interfering with commits\n- hook runtimes\n- worktree cleanup and retry states\n\nLetta needs git because its changes travel between many devices and a server. Our setup has one hub: a single controller merges each session's copy into the shared copy, one session at a time, under a lock. That is the simple case, and it does not need a version control system.\n\n**Extending our own merge: yes.** The existing code is about 50 lines (`reconcile_snapshots`) and already does per-file three-way decisions correctly. What it lacks:\n\n1. **Deletions that propagate.** Commit `6a5e162c` already exists.\n2. **A merge of `MEMORY.md` keyed by linked file name.** This is the design from my previous answer. Git cannot do this, because it does not know what an index line means.\n3. **Line-level merges for other memory files.** Mjolnir already runs `git` as a command in 49 places. We could call `git merge-file`, which merges three files without a repository, so there are no locks, hooks or worktrees. Or we could use a Rust crate. `similar`, which we already depend on, only compares two versions, so a three-way merge would need a new crate such as `diffy` (likely suitable; I have not checked its API).\n4. **A model to repair conflicts.** This is the part of Letta worth copying. Letta starts a background memory subagent with this prompt: \"Repair only the existing Git conflict in your memory repository. Do not perform unrelated edits or reorganization. If the conflict is already resolved, stop.\" The main agent keeps working. If the same conflict survives a repair attempt, the main agent is told to report it and leave it alone (`reminders/memory-git-sync.ts:39-80`). We could start a similar repair turn when `reconcile_snapshots` reports conflicts.\n\n`★ Insight ─────────────────────────────────────`\n- Git can tell where two edits overlap. It cannot tell whether two descriptions of the same memory disagree. Both Letta and Mjolnir end up needing a model for that case, so the choice is about how many conflicts reach the model, not whether one is needed.\n- The keyed index merge is where our own code beats git. Matching index lines by file name turns git's most common memory conflict, two sessions appending to the index, into a clean merge.\n`─────────────────────────────────────────────────`\n\nIf you agree, the two questions from my previous answer are still open:\n- Should this work include `6a5e162c`?\n- How should a session learn about conflicts? This now also means choosing between a background repair turn, as Letta does, and a notice to the next session."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "should we roll our own 3wm, leverage git in a design like ../letta, or just embed letta?",
+    "assistant_text_tail": "er. Git cannot do this, because it does not know what an index line means.\n3. **Line-level merges for other memory files.** Mjolnir already runs `git` as a command in 49 places. We could call `git merge-file`, which merges three files without a repository, so there are no locks, hooks or worktrees. Or we could use a Rust crate. `similar`, which we already depend on, only compares two versions, so a three-way merge would need a new crate such as `diffy` (likely suitable; I have not checked its API).\n4. **A model to repair conflicts.** This is the part of Letta worth copying. Letta starts a background memory subagent with this prompt: \"Repair only the existing Git conflict in your memory repository. Do not perform unrelated edits or reorganization. If the conflict is already resolved, stop.\" The main agent keeps working. If the same conflict survives a repair attempt, the main agent is told to report it and leave it alone (`reminders/memory-git-sync.ts:39-80`). We could start a similar repair turn when `reconcile_snapshots` reports conflicts.\n\n`★ Insight ─────────────────────────────────────`\n- Git can tell where two edits overlap. It cannot tell whether two descriptions of the same memory disagree. Both Letta and Mjolnir end up needing a model for that case, so the choice is about how many conflicts reach the model, not whether one is needed.\n- The keyed index merge is where our own code beats git. Matching index lines by file name turns git's most common memory conflict, two sessions appending to the index, into a clean merge.\n`─────────────────────────────────────────────────`\n\nIf you agree, the two questions from my previous answer are still open:\n- Should this work include `6a5e162c`?\n- How should a session learn about conflicts? This now also means choosing between a background repair turn, as Letta does, and a notice to the next session.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      1280,
+      1515
+    ],
+    "user_position": 1459,
+    "input_rationale": "Comparison question answered, but the agent's two design questions (include the delete-sync commit; conflict notification mechanism) remain unanswered and gate implementation.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-05T15:04:28.483Z",
+        "kind": "user",
+        "text": "1. we should support syncing deletes yes, no strong feelings about the exact 6a5e162c code 2. defer and create a ticket for this  also i. we should do line-based merging of the memory files as well, n"
+      },
+      {
+        "at": "2026-10-05T15:05:09.620Z",
+        "kind": "agent",
+        "text": "Issue #1222 already proposes \"controller-side git merge\" for project memory. I'm reading it before I answer."
+      },
+      {
+        "at": "2026-10-05T15:06:23.452Z",
+        "kind": "agent",
+        "text": "Before answering, a correction: you already filed this redesign as **#1222** on 2026-10-04, and your comment there moves the git work onto the controller only. I should have checked the issue tracker "
+      },
+      {
+        "at": "2026-10-05T15:10:12.991Z",
+        "kind": "user",
+        "text": "1. yes LWW wins 2. we can throw out 1222, i'm deliberately starting over, i don't want to preclude a multiuser git repo but to start with git-free seems simpler no?"
+      },
+      {
+        "at": "2026-10-05T15:10:52.222Z",
+        "kind": "agent",
+        "text": "Yes. Git-free is simpler to start with, and it doesn't rule out a shared git repository later, as long as we keep two boundaries clean.  **Why git-free is simpler now.** All the sync needs is three st"
+      },
+      {
+        "at": "2026-10-05T15:14:30.198Z",
+        "kind": "user",
+        "text": "yes. close 1222 and then implement git-free"
+      }
+    ]
+  }
+}

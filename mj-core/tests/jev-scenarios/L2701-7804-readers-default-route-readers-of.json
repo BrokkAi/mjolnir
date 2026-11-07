@@ -1,0 +1,129 @@
+{
+  "id": "L2701",
+  "title": "7804-readers: default-route readers of Java root-reference rows and root_prefix_rule",
+  "category": "still-open-none",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "4b9e8ca501c48ea47cc89e9c99bf6d9a",
+    "session_title": "7804-readers: default-route readers of Java root-reference rows and root_prefix_rule",
+    "reply_position": 169,
+    "captured_at": "2026-11-01T20:49:52.853Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /home/jonathan/Projects/bifrost/.mj/clones/05d9cf1a40f2a74086d14d7010497284/.mj/agents/4b9e8ca501c48ea47cc89e9c99bf6d9a. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nRead-only investigation for Bifrost issue #7804 (Java fully qualified expression prefixes, for example `java.io.File.separator` or `javax.crypto.Cipher.getInstance(\"AES\")`). Work in /home/jonathan/Projects/bifrost/.mj/clones/05d9cf1a40f2a74086d14d7010497284. Read source at current origin/master fde903d152, using `git grep origin/master` and `git show origin/master:<path>`. Alternatively read the checked-out worktree .mj/lanes/7804v2 at 2bed77bed4, and for each file you cite check `git log 2bed77bed4..fde903d152 -- <file>`. Another child runs temporary tests in .mj/lanes/7804v2, so do not edit or build there. No edits, commits, cloud or downloads. A build is not expected; if one specific uncertainty needs a run, describe it and stop instead of running it.\n\nWHY. Production Java taint and policy run on the DEFAULT route: the native Java route is used only when the environment variable BIFROST_TRIAL_NATIVE_JAVA is set. The candidate #7804 change edits a shared producer and a shared rule. The coordinator requires proof that the change adds no obligated or changed production finding, and notes that trial-only point routing alone does not prove isolation. I need the map of default-route readers so I can write that proof.\n\nTHE CANDIDATE CHANGE. Read it: `git diff $(git merge-base 7804-java-fqn-expression-prefix origin/master) 7804-java-fqn-expression-prefix -- crates/bifrost-jvm/src/java/resolution.rs crates/bifrost-store/src/analyzer/resolution/fact_lowering.rs`. That is an old WIP; the design may differ in details, but the shape is the same.\n(a) The Java producer emits ResolutionRootReferenceFact and RootReferenceSegment rows for pure identifier/field_access expression chains. Today it emits them only for type syntax, through `record_qualified_type_root` and `record_rooted_type_route` in crates/bifrost-jvm/src/java/resolution.rs, around 4650-4760 at 2bed77bed4. The new prefix site is the head's ValueReference with namespace TypeOrValue. Each chain member keeps its existing site, slot, projection and receiver transfer.\n(b) The shared `root_prefix_rule` for Language::Java \n[... 249 bytes omitted from the middle of this message ...]\nn earlier child: .mj/agents/0300b08ba55c4d86f9777e90a54a9763/7804-design-map.md.\n\nQUESTIONS.\n1. List every reader of: Java root-reference and segment facts, and the store tables or rows they lower into; the positioned routes that `lower_root_reference_paths` builds from `root_prefix_rule`; and anything else the candidate diff changes. Include readers in bifrost-store, the resolution operations, the JVM analysis crates, the semantic/ICFG layer, policy, RQL/CodeQuery, the MCP/LSP tools, and the semantic IR or row export. For each reader give file:line. Say whether it runs for Java on the default route, with the flag unset. Give the evidence: code proves it ignores these rows for Java, or a BIFROST_TRIAL_NATIVE_JAVA gate excludes it, or it does run. Name the product surface it feeds: taint (Icfg and Composition call dispatch, call relations), RQL policy, usages or find-references, default get_definition, hover, dead code, or exported rows.\n2. Identity: does adding rows change a digest, a row hash, an adapter or bundle version input, or a semantic id that default-route products key on? Separate \"caches rotate, answers stay the same\" from \"answers change\".\n3. Goldens and pins that would move: the resolution-facts golden, the manual corpus-sites test, row-count pins, and any golden_java_* case. List the test names and say why each moves.\n4. Other languages: confirm whether the change to `root_prefix_rule` is per-language (Java only), and whether any shared code path changes behaviour for Rust, Go, Kotlin or Scala.\n5. Conclusion: can this change alter any default-route Java taint or policy answer? Name each answer that could change, with evidence, or give the code-backed argument why none can. Use the words confirmed, likely, possible or unknown accurately.\nStop after the map. Do not design the fix.\n\nOUTPUT. Write .mj/agents/<your id>/7804-default-route-readers.md (the report directory Mjolnir gives you). Hand back a short summary: the conclusion, the readers that do run on the default route, and the open uncertainties."
+        },
+        {
+          "id": "agent:25",
+          "role": "assistant",
+          "text": "I’ll trace the candidate rows from the producer through their readers at `origin/master`, then write the default-route impact map in the report directory."
+        },
+        {
+          "id": "agent:77",
+          "role": "assistant",
+          "text": "The candidate changes more than the trial point lookup: the Java rule also changes shared fact lowering. I’m checking where those lowered paths and fact-presence checks reach default-route consumers."
+        },
+        {
+          "id": "agent:169",
+          "role": "assistant",
+          "text": "The read-only audit is complete. The [reader map](/home/jonathan/Projects/bifrost/.mj/clones/05d9cf1a40f2a74086d14d7010497284/.mj/agents/4b9e8ca501c48ea47cc89e9c99bf6d9a/7804-default-route-readers.md) shows that shared Java lowering and reference-edge readers run outside the trial gate. A claim that production taint and policy findings are unchanged remains unproved; the downstream consumer trace is still open."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "bundle version input, or a semantic id that default-route products key on? Separate \"caches rotate, answers stay the same\" from \"answers change\".\n3. Goldens and pins that would move: the resolution-facts golden, the manual corpus-sites test, row-count pins, and any golden_java_* case. List the test names and say why each moves.\n4. Other languages: confirm whether the change to `root_prefix_rule` is per-language (Java only), and whether any shared code path changes behaviour for Rust, Go, Kotlin or Scala.\n5. Conclusion: can this change alter any default-route Java taint or policy answer? Name each answer that could change, with evidence, or give the code-backed argument why none can. Use the words confirmed, likely, possible or unknown accurately.\nStop after the map. Do not design the fix.\n\nOUTPUT. Write .mj/agents/<your id>/7804-default-route-readers.md (the report directory Mjolnir gives you). Hand back a short summary: the conclusion, the readers that do run on the default route, and the open uncertainties.",
+    "assistant_text_tail": "The read-only audit is complete. The [reader map](/home/jonathan/Projects/bifrost/.mj/clones/05d9cf1a40f2a74086d14d7010497284/.mj/agents/4b9e8ca501c48ea47cc89e9c99bf6d9a/7804-default-route-readers.md) shows that shared Java lowering and reference-edge readers run outside the trial gate. A claim that production taint and policy findings are unchanged remains unproved; the downstream consumer trace is still open.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "manual Still open batch labeling",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "No unresolved user request remains in the candidate turn.",
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "The read-only audit was delivered as asked (reader map, conclusion, open uncertainties) and the brief said to stop after the map and not design the fix. The still-open downstream trace is a stated uncertainty in the report, not a decision or action the parent must take to continue.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": true,
+    "kind": null
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-01T22:28:07.118Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-11-01T22:28:11.903Z",
+        "kind": "user",
+        "text": "Thanks, the reader audit is useful. Two of its points I checked myself and corrected: (1) `source_owned_package_references` filters on `identifier.qualifier.is_none()`. Java field-access members alway"
+      },
+      {
+        "at": "2026-11-01T22:28:19.192Z",
+        "kind": "agent",
+        "text": "I’ll correct those two audit claims in the new map, fetch `origin/master`, and trace the selected JVM route’s prefix and terminal handling. I’ll keep the result to source-backed behavior and mark unre"
+      },
+      {
+        "at": "2026-11-01T22:28:45.241Z",
+        "kind": "agent",
+        "text": "The JVM closure already distinguishes a selected prefix with projected type owners from a package start. I’m checking whether that distinction also preserves a value-bound head and its open reasons, a"
+      },
+      {
+        "at": "2026-11-01T22:30:07.518Z",
+        "kind": "agent",
+        "text": "The [JVM route map](/home/jonathan/Projects/bifrost/.mj/clones/05d9cf1a40f2a74086d14d7010497284/.mj/agents/4b9e8ca501c48ea47cc89e9c99bf6d9a/7804-jvm-route-map.md) is complete at fetched `origin/master"
+      },
+      {
+        "at": "2026-11-01T23:26:51.781Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

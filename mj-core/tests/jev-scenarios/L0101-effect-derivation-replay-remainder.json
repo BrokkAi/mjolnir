@@ -1,0 +1,165 @@
+{
+  "id": "L0101",
+  "title": "effect derivation replay remainder",
+  "category": "still-open-none",
+  "harness": "grok",
+  "source": {
+    "kind": "transcript",
+    "session": "43fe404ad6ccf05f0a83abcde9b9505c",
+    "session_title": "eval10 3207 grok",
+    "reply_position": 6685,
+    "captured_at": "2026-09-13T11:19:23.479Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3207: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is /workspace/bifrost in your own container. The judge is Codex.\nBoth competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: c54a638104918c617857ee75e266009b8a41e2c1\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so both configurations have the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitations, and any separately actionable findings.\n6. A draft GitHub approach comment, 5 to 12 plain-language sentences.\n\n# Issue\n\nIssue #3207: Explanations: stale-generation rejection, typestate why, effect derivation nodes (#2439 remainder, part 2)\n\nRemainder of #2439, part 2 (three small items).\n\n1. **Stale-generation rejection.** `ExplainError` (`crates/bifrost-policy/src/explain/model.rs`) has `FindingNotFound` but no stale-generation variant; an explanation request carries no workspace generation. Add the generation (the analyzer generation or the retained run's identity) to `why`/`why-not` requests, reject a mismatch with a typed error through the library, CLI (`--explain-finding`, `--explain-candidate`) and MCP (`explain_policy`) surfaces, and test it. Overlaps the remainder of #2509; close that item there or here, not both.\n2. **`why` for typestate findings.** `WHY_ADAPTER_ANALYSIS_TYPES` is Match, Taint, Assertion and Flow; typestate findings have no adapter. Add one that projects the retained protocol witness (state events and the violating transition) the same way `why_flow.rs` projects flow witnesses.\n3. **Effect derivation nodes.** Effect rows appear only as `source_fact` children of the assertion adapter. Add an `effect_derivation` node kind (direct effect declaration, propagation hop, deferred/callback timing classification) so the effect reference policy's explanation names the chain the ticket describes.\n\n## Validation\n\n`crates/bifrost-policy/src/explain/tests.rs`, `-p brokk-bifrost-policy`, `--test suite_mcp_cli`, `--test suite_smells`, clippy. Bump `POLICY_EXPLANATION_FORMAT` if node kinds are added.\n\n"
+        },
+        {
+          "id": "agent:45",
+          "role": "assistant",
+          "text": "I'll start by reading the repo guidance, verifying a clean checkout, and detaching at the specified commit before investigating #3207."
+        },
+        {
+          "id": "agent:138",
+          "role": "assistant",
+          "text": "Checkout is already at the requested commit. I’ll fetch origin, detach HEAD as specified, and load the routed architecture and policy guidance."
+        },
+        {
+          "id": "agent:215",
+          "role": "assistant",
+          "text": "Detached at `c54a638104918c617857ee75e266009b8a41e2c1`. Next I’ll pull issue #3207 and inspect the explanation surfaces it names."
+        },
+        {
+          "id": "agent:495",
+          "role": "assistant",
+          "text": "Issue #3207 is three remaining explanation items. I’ll inspect generation handling, typestate evidence, and effect rows next so the implementation can match the existing adapters."
+        },
+        {
+          "id": "agent:2561",
+          "role": "assistant",
+          "text": "I’ll start with the explanation schema: a typed stale-generation error, the new node kind, and the format bump."
+        },
+        {
+          "id": "user:5432",
+          "role": "user",
+          "text": "The relay restarted while your turn was in flight; this is an infrastructure interruption, not a new task. Storage is writable again. Continue the existing task and working agreement from your preserved checkout and transcript, retaining your current changes. Check any interrupted background validation before deciding what remains. Do not restart completed work. Keep the original pinned base for an initial solution; if this is an authorized winner correction, keep its existing integration instructions. Finish the required validation, commit your solution, and provide the requested FINAL REPORT.\n"
+        },
+        {
+          "id": "agent:5470",
+          "role": "assistant",
+          "text": "The relay interrupted mid-build. I’ll check the checkout, leftover work, and any interrupted validation before finishing the issue."
+        },
+        {
+          "id": "agent:5554",
+          "role": "assistant",
+          "text": "Disk is free again and the pinned checkout still has the in-progress changes. I’ll compile first, then finish validation from there."
+        },
+        {
+          "id": "agent:5628",
+          "role": "assistant",
+          "text": "The compile was killed, likely by memory pressure. I’ll retry with a tighter job limit."
+        },
+        {
+          "id": "agent:6072",
+          "role": "assistant",
+          "text": "The policy crate compiled. Next I’ll run the explanation tests, then the rest of the required suites."
+        },
+        {
+          "id": "agent:6140",
+          "role": "assistant",
+          "text": "Explanation tests all passed. I’ll run the rest of the required suites and compile the CLI/MCP surfaces next."
+        },
+        {
+          "id": "agent:6245",
+          "role": "assistant",
+          "text": "Policy crate is green and the integration binaries compiled. I’ll run the remaining required suites and clippy next."
+        },
+        {
+          "id": "agent:6329",
+          "role": "assistant",
+          "text": "MCP and integration suites passed, including stale-generation coverage. I’ll run CLI tests, clippy, and the effect-derivation witness next."
+        },
+        {
+          "id": "agent:6459",
+          "role": "assistant",
+          "text": "CLI tests passed. I’ll collapse the nested `if`s clippy flagged, then rerun clippy."
+        },
+        {
+          "id": "agent:6578",
+          "role": "assistant",
+          "text": "Clippy is clean and the P0 effect witness passed. I’ll format once more, then commit."
+        },
+        {
+          "id": "agent:6685",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nDetached checkout `c54a638104918c617857ee75e266009b8a41e2c1`. Solution commit `b684e6eae443ed20f97e7ce3003e70b4a521c27f`.\n\n## 1. Confirmed cause\n\nThree leftover explanation gaps, all visible in the pinned tree:\n\n- `ExplainError` had `FindingNotFound` but no generation check. `explain_policy_inputs`, `--explain-finding` / `--explain-candidate`, and MCP `explain_policy` carried no workspace generation, so a finding or candidate from an older snapshot could be re-explained against a newer one.\n- `WHY_ADAPTER_ANALYSIS_TYPES` was Match, Taint, Assertion, Flow. `explain_finding` dispatched typestate evidence to `adapter_unavailable`. Retained protocol witnesses (state-event steps plus the violating transition or terminal expectation) were never projected.\n- Effect-reference findings are relational assertions over `procedure_effect` rows. The assertion adapter only published `source_fact` children from locations, so a why answer could not name a direct declaration, a transitive hop, or deferred/callback timing.\n\n## 2. Changes and reasons\n\n**Base:** `c54a638104918c617857ee75e266009b8a41e2c1`  \n**Final:** `b684e6eae443ed20f97e7ce3003e70b4a521c27f`\n\n- Added `ExplainError::StaleGeneration { expected, actual }` and `ExplanationGeneration`. Host `explain_policy_inputs` / `rank_policy_near_misses` compare the named generation to the answering snapshot (`analysis_generation()`, or MCP's session counter when supplied).\n- CLI `--explain-generation N` is required with `--explain-finding` or `--explain-candidate`. MCP `explain_policy` takes optional `workspace_generation`; a mismatch is the typed error and a retryable stale-generation transport error. Omitting the field still explains the current snapshot.\n- Added `why_typestate.rs`: protocol subject, violating transition or terminal expectation, retained witness steps, then the same certainty/proof/completeness/coverage obligations as flow. `WHY_ADAPTER_ANALYSIS_TYPES` now includes Typestate.\n- Relational evaluation retains declared `procedure_effect` / `call_effect` fields on assertion evidence. The assertion adapter publishes `effect_derivation` nodes (`direct_effect_declaration`, `propagation_hop` for `classification=transitive`, `timing_classification` for deferred / `deferred_callback`).\n- Bumped `POLICY_EXPLANATION_FORMAT` to `bifrost_policy_explanation/v2` with the new node kind.\n- Stale-generation from #2509 is handled here; join/expansion replay is not.\n\n## 3. Exact validation commands and results\n\nWith `JAVA_HOME` cleared, `BIFROST_PARALLELISM=1`, `RAYON_NUM_THREADS=1`:\n\n| Command | Result |\n| --- | --- |\n| `cargo nextest run --max-fail 100 -p brokk-bifrost-policy --lib explain` | 87 passed, 586 skipped |\n| `cargo nextest run --max-fail 100 -p brokk-bifrost-policy` | 669 passed, 4 skipped |\n| `cargo nextest run --max-fail 100 --test suite_mcp_cli --test suite_smells` | 476 passed, 38 skipped |\n| `cargo nextest run --max-fail 100 -p brokk-bifrost-mcp --lib explain_policy` | 13 passed, including `explain_policy_rejects_a_stale_workspace_generation` |\n| `cargo nextest run --max-fail 100 -p brokk-bifrost --bin bifrost policy_explain` | 14 passed, including stale-generation exit 2 |\n| `cargo nextest run --max-fail 100 --test suite_bench_policy the_effect_finding_explains_its_derivation_chain` | 1 passed (P0 effect fixture) |\n| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |\n| `cargo fmt` on changed files | applied |\n\n## 4. Before/after evidence\n\n- **Stale generation.** Before: no variant, no request field; a mismatched snapshot was silent or became `FindingNotFound`. After: `the_host_rejects_a_stale_workspace_generation` gets `StaleGeneration { expected: 7, actual: 0 }` and accepts matching `0`; CLI `--explain-generation 9` exits unreliable; MCP `workspace_generation: 99` is retryable stale-generation.\n- **Typestate why.** Before: adapter-unavailable. After: `why_explains_a_typestate_finding_from_its_retained_protocol_witness` publishes `typestate_finding`, `protocol_subject`, `terminal_expectation`, and a `witness_path` whose children are the retained `source` / `transition` / `violation` steps.\n- **Effect derivation.** Before: P0 `acme-pure-has-no-network-io` why trees had only `source_fact` rows. After: `the_effect_finding_explains_its_derivation_chain` sees `direct_effect_declaration` and `propagation_hop` on the transitive `@Pure` helper, and `timing_classification` containing `deferred` on the deferred-callback fixture.\n\n## 5. git status, limitations, follow-ups\n\n`git status --short` is empty.\n\n- Generation is optional. Callers that omit it still explain the live snapshot; they must pass the generation they observed to get rejection.\n- CLI disk projects keep `analysis_generation() == 0`. `--explain-generation N` for `N != 0` always mismatches there; MCP uses the session counter.\n- Why-not remains unimplemented for flow, taint, and typestate.\n- #2509 join-level and expansion replay are still open; only stale-generation is closed here.\n\n## 6. Draft GitHub approach comment\n\nWhy and why-not requests can now carry the workspace generation they were observed under. If that generation is not the snapshot that would answer, the library returns a typed stale-generation error, the CLI exits 2, and MCP `explain_policy` reports a retryable stale-generation failure. Omitting the field still explains the current snapshot. Typestate findings now have a why adapter: it projects the retained protocol subject, the violating transition or terminal expectation, and the protocol witness steps, the same way flow why projects witness paths. Effect-reference findings no longer flatten `procedure_effect` rows to generic source facts. The assertion adapter publishes `effect_derivation` nodes for the modeled declaration, a transitive propagation hop, and deferred or callback timing. The explanation document format is `bifrost_policy_explanation/v2` because of the new node kind. This closes the stale-generation remainder of #2509; join and expansion replay stay on that issue."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "grok",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "The relay restarted while your turn was in flight; this is an infrastructure interruption, not a new task. Storage is writable again. Continue the existing task and working agreement from your preserved checkout and transcript, retaining your current changes. Check any interrupted background validation before deciding what remains. Do not restart completed work. Keep the original pinned base for an initial solution; if this is an authorized winner correction, keep its existing integration instructions. Finish the required validation, commit your solution, and provide the requested FINAL REPORT.\n",
+    "assistant_text_tail": "e_finding`, `protocol_subject`, `terminal_expectation`, and a `witness_path` whose children are the retained `source` / `transition` / `violation` steps.\n- **Effect derivation.** Before: P0 `acme-pure-has-no-network-io` why trees had only `source_fact` rows. After: `the_effect_finding_explains_its_derivation_chain` sees `direct_effect_declaration` and `propagation_hop` on the transitive `@Pure` helper, and `timing_classification` containing `deferred` on the deferred-callback fixture.\n\n## 5. git status, limitations, follow-ups\n\n`git status --short` is empty.\n\n- Generation is optional. Callers that omit it still explain the live snapshot; they must pass the generation they observed to get rejection.\n- CLI disk projects keep `analysis_generation() == 0`. `--explain-generation N` for `N != 0` always mismatches there; MCP uses the session counter.\n- Why-not remains unimplemented for flow, taint, and typestate.\n- #2509 join-level and expansion replay are still open; only stale-generation is closed here.\n\n## 6. Draft GitHub approach comment\n\nWhy and why-not requests can now carry the workspace generation they were observed under. If that generation is not the snapshot that would answer, the library returns a typed stale-generation error, the CLI exits 2, and MCP `explain_policy` reports a retryable stale-generation failure. Omitting the field still explains the current snapshot. Typestate findings now have a why adapter: it projects the retained protocol subject, the violating transition or terminal expectation, and the protocol witness steps, the same way flow why projects witness paths. Effect-reference findings no longer flatten `procedure_effect` rows to generic source facts. The assertion adapter publishes `effect_derivation` nodes for the modeled declaration, a transitive propagation hop, and deferred or callback timing. The explanation document format is `bifrost_policy_explanation/v2` because of the new node kind. This closes the stale-generation remainder of #2509; join and expansion replay stay on that issue.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "Final report for the issue brief: fix committed and validated. The still-open items are remaining parts of a different issue (#2509) listed as limitations; the judge needs to do nothing before the report is complete.",
+    "label": "none",
+    "trigger": "still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-13T12:52:39.546Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

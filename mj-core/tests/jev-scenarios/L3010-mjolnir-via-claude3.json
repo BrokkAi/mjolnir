@@ -1,0 +1,250 @@
+{
+  "id": "L3010",
+  "title": "mjolnir via claude3",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "e37236970552b40f48d261ebf8fbd45d",
+    "session_title": "mjolnir via claude3",
+    "reply_position": 3525,
+    "captured_at": "2026-11-06T21:10:45.382Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "read AGENTS.md first\n\nit looks like aaa4c484c285fea5c8760c4e5bc8d48e ended up in \"always ask\" mode instead of guardian mode, why?"
+        },
+        {
+          "id": "user:366",
+          "role": "user",
+          "text": "i'm pretty sure we don't expose mode selection to suers, so the rule should be \"if it's not the correct setting (corresponding to guardian or yolo), set it back to that\""
+        },
+        {
+          "id": "user:597",
+          "role": "user",
+          "text": "How should the policy-owned mode rule treat the user-reachable mode paths?\n\nMode rule: Policy owns mode (Recommended)"
+        },
+        {
+          "id": "user:621",
+          "role": "user",
+          "text": "is there mode-specific code in mj for config? if so we should remove it #collaborating"
+        },
+        {
+          "id": "agent:1889",
+          "role": "assistant",
+          "text": "The reviewer found one real defect. For older Muse bridges, the controller and the worker disagree about which setting the policy owns. I'll fix it by moving the worker's setting-selection logic into `mj-core`, so both sides use the same function."
+        },
+        {
+          "id": "agent:1964",
+          "role": "assistant",
+          "text": "I fixed the reviewer's finding. The function that picks which setting carries the policy mode, `execution_mode_option`, now lives in `mj-core/src/acp.rs`. Both the worker and `ExecutionEnforcement::owned_config_keys` call it. On an older Muse image the policy is on `mode`, so `mode` is now hidden and refused there too. I extended `guardian_permission_mode_is_hidden_and_refused_by_api` to cover Claude and the older Muse layout.\n\nSide effect: if an agent does not offer the policy mode at all, the mode setting is not treated as policy-owned. Today the worker leaves such a session in the agent's own mode and shows a warning. The user can then still choose a mode, so they are not left without a way forward. This matches AGENTS.md's \"never leave the user stuck\" rule.\n\nEverything else the reviewer checked held up:\n\n- Mode changes that arrive during a turn wait until the turn ends.\n- The Auto fallback does not cause a loop of requests.\n- The web viewer still shows Plan state.\n- The protocol version increase is needed.\n- The CLI does not work out the policy itself.\n\nI asked the validation child to rerun whatever ran before my edits. I'm waiting for its results."
+        },
+        {
+          "id": "agent:2059",
+          "role": "assistant",
+          "text": "The validation run overlapped with my edits, so its compile failures come from a half-edited tree. Two of them still need fixing: a lifetime error in my test change, and a check that the moved function is in place. Workspace clippy also needs the desktop crate left out, because this host lacks the GTK development packages. I'll fix these and rerun the checks myself."
+        },
+        {
+          "id": "agent:2101",
+          "role": "assistant",
+          "text": "Clippy is clean for the workspace (`mj-desktop` was not changed). Next, the targeted tests."
+        },
+        {
+          "id": "agent:2222",
+          "role": "assistant",
+          "text": "Rust will not allow those values to be read while the same call is changing them. I'm computing the choice before the call."
+        },
+        {
+          "id": "agent:2248",
+          "role": "assistant",
+          "text": "The worker tests now pass (633 in `acp::`, `relay::` and `worker_runtime::`), and clippy is clean. I'm committing next."
+        },
+        {
+          "id": "agent:2293",
+          "role": "assistant",
+          "text": "The change is committed as `60f44f8a1` on master and is waiting for push review. When it comes back clean, I'll merge the 36 new upstream commits and push.\n\n**What it does:**\n- **One function decides the mode.** The worker's `reassert_execution_policy` sets the policy mode at startup, after a model change, and when the agent reports a different mode. Reports that arrive during a turn wait until the turn ends. Only Plan is left alone.\n- **The original bug is fixed.** A session that fell back to Accept edits on Haiku now gets Auto when you switch to a model that supports it.\n- **Ending Plan returns to the policy mode.** A resumed session or a saved context keeps Plan only if Plan was on.\n- **Users cannot change policy-owned settings.** The controller hides them and refuses changes to them. CLI chats hide and refuse them in `/config`. Plan stays available through plan mode.\n- **The old Plan tracking is gone**, including the Claude-only `mode` branches in the settings code.\n- **The daemon protocol version is now 83.** The new field would break older clients that refuse unknown fields.\n\n**Fixed during integration:**\n- **Older Muse images:** the independent review found that the controller and the worker could disagree about which setting the policy owns. Both now use the same `execution_mode_option` function in `mj-core`.\n- **Resumed sessions:** an existing test showed that resumed sessions had stopped setting the policy. They set it again now, unless the session is in Plan.\n\n**Validation:**\n- Workspace clippy is clean. I left out `mj-desktop`, because this host lacks GTK development files, and the change does not touch it.\n- Targeted tests pass: worker 633 (`acp::`, `relay::`, `worker_runtime::`), controller 4, chat 16, core 3, client 6, CLI dashboard 102.\n- 317 controller `server::` and `pollers::` tests pass. One fails: the golden `viewer-settings-exchange.txt`. It was already failing before this change. Commit `0966a16f3` changed the quota help text without updating the golden file. I did not fix it here.\n- Web unit tests: one test failed once (`every browser spec belongs to exactly one project`) and passed when run alone. It does not cover settings.\n\n**Remaining limits:**\n- If an agent does not offer the policy mode at all, its mode setting stays visible and can be changed. The worker already warns in that case, and this keeps the user from being stuck.\n- I did not run a live test with a real Claude session.\n\n`★ Insight ─────────────────────────────────────`\n- The bug came from the mode having several owners: the policy at startup, the user through `/config`, and a saved pre-Plan mode. With one owner, a model switch is just another event that triggers the same check.\n- Code formatting is not checked inside `tokio::select!`. Code in such a block can stay unformatted even when `cargo fmt --check` passes, which is why I formatted the new command-loop code by hand.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "agent:2481",
+          "role": "assistant",
+          "text": "I'm checking both findings against the code."
+        },
+        {
+          "id": "agent:2556",
+          "role": "assistant",
+          "text": "I'm adding tests for both fixes. The refusal case can reuse the Haiku regression test's setup. Next I'm checking whether the mid-turn test can also hold a second prompt in the queue."
+        },
+        {
+          "id": "agent:2645",
+          "role": "assistant",
+          "text": "All 634 worker tests pass. Next I'm checking that the new refusal test fails without the fix."
+        },
+        {
+          "id": "agent:2657",
+          "role": "assistant",
+          "text": "The test fails without the fix and passes with it. I restored the fix. Next: clippy, commit and review."
+        },
+        {
+          "id": "agent:2674",
+          "role": "assistant",
+          "text": "I fixed both review findings and committed them as `734385ac0`. A new review is running.\n\n1. **The next prompt could start in the wrong mode.** The command loop chose between waiting mode reports and the next command in no fixed order. Now one function, `apply_pending_policy_updates`, applies the waiting reports and corrects the mode before the loop handles any command. I extended `guardian_defers_an_announced_mode_change_until_the_turn_finishes`: after a turn, the policy request must reach the agent before the next prompt. This test cannot reproduce the old failure every time, because it depends on timing. It checks the required order.\n2. **A refusal ended the session.** After a model change, an agent refusing Auto ended the session. Now `reconcile_execution_policy` shows the same warning startup shows, and the model change completes. The new test `a_model_change_keeps_a_session_whose_bridge_refuses_the_policy_mode` is marked Hard-won. I confirmed it fails when the fix is removed.\n\nThe worker tests pass (634 in `acp::`, `relay::` and `worker_runtime::`), and clippy is clean for the worker. I'll push once the review is clean.\n\n`★ Insight ─────────────────────────────────────`\n- `tokio::select!` picks at random among branches that are ready. Making it `biased` would also fix the order, but only inside this one `select!`. Correcting the mode before every command keeps the rule true whatever any `select!` does. That is the \"one decision point\" AGENTS.md asks for.\n- Startup already treated a refusal as \"keep the agent's mode and warn\". The new path calls the same `refused_mode_warning`, so the user sees one message for one situation.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "agent:2787",
+          "role": "assistant",
+          "text": "I checked all three findings against the source, and all three are real:\n\n1. **Muse:** `session.rs:587-590` applies `auto_review` separately only when the policy has no mode. When it has one, `reassert_execution_policy` returns on a refused mode before it applies the setting. Before this change, startup always applied the setting. Also, `mode_refusal` would treat a refusal of the setting as a refusal of the mode.\n2. **Drain:** reports that arrive while a correction is still running stay in the queue after the single drain.\n3. **Plan exit:** if Auto is refused, leaving Plan keeps asking for Auto and fails, so the user cannot leave Plan.\n\nMy fix:\n\n- `reassert_execution_policy` reports a refused mode as an answer instead of an error. It always applies the policy setting, and a failure of the setting stays a hard error.\n- The drain repeats until no new reports arrive, with a limit on the number of rounds.\n- When Auto is refused, leaving Plan falls back to Claude's `default` mode with the usual warning."
+        },
+        {
+          "id": "agent:2893",
+          "role": "assistant",
+          "text": "Next I'm updating startup to use the new result."
+        },
+        {
+          "id": "agent:2906",
+          "role": "assistant",
+          "text": "Clippy is clean. Next I'm running the tests, then adding tests for the new paths."
+        },
+        {
+          "id": "agent:2951",
+          "role": "assistant",
+          "text": "All 636 worker tests pass, including the two new Hard-won tests. Next: clippy, commit and review."
+        },
+        {
+          "id": "agent:2967",
+          "role": "assistant",
+          "text": "I fixed the three second-round findings and committed them as `3d32a376f`. A new review is running.\n\n1. **Muse lost auto-review when its mode was refused.** `reassert_execution_policy` now returns a refusal of the policy mode as its answer, and always applies the policy setting. A failure of the setting stays a hard error, so it is no longer mistaken for a mode refusal. New test: `muse_guardian_keeps_auto_review_when_the_bridge_refuses_its_approval_mode`.\n2. **Plan could not be left when Auto was refused.** `leave_plan_for_policy` now falls back to Claude's `default` mode and shows the warning. That mode asks before every change, so it is never looser than the policy. New test: `leaving_plan_takes_claudes_default_mode_when_auto_is_refused`.\n3. **Reports that arrived during a correction were missed.** `apply_pending_policy_updates` now repeats until a round finds no new report that changes the mode. After four rounds it fails with a clear error. I did not add a test for this, because it depends on timing.\n\nThe worker tests pass (636 in `acp::`, `relay::` and `worker_runtime::`), and clippy is clean.\n\nThere have been two review rounds, and every finding was about how refusals and timing interact with the new reconciler. This matches the memory note about questioning mechanisms I added myself. Here the extra handling comes from your rule, not from leftover state: each fix applies the policy-owns-the-mode rule to a case the first version missed. If the next round finds more of the same kind, I'll stop and check the design with you before patching again."
+        },
+        {
+          "id": "agent:3075",
+          "role": "assistant",
+          "text": "This round found more of the same kind of problem, so I'm stopping to check the design with you as I said I would. First, what I verified:\n\n- **Startup throws away reports (both reviewers):** confirmed. `session.rs:576-577` discards every waiting report. A report the agent sends after its last startup answer is newer than that answer, and it gets lost.\n- **Plan continuation (`session.rs:1431`):** confirmed. After a Plan is approved, the implementation prompt starts inside the same turn. It never passes the check that runs before each command.\n- **Recovery answer:** confirmed. `resolve_session_config_recovery` changes the model directly and skips the policy check.\n- **Waits while publishing the result:** confirmed. Reports that arrive while the two events are being sent stay in the queue.\n- **CLI refresh (P2):** confirmed. `runtime_sessions_changed` compares whole live session updates, which change on almost every update. The dashboard's early return then almost never applies.\n\n**Why this keeps happening:** the design corrects the mode at chosen points, before each command. It reads the mode from a saved copy that is updated two ways: from answers, and from a separate queue of reports. Each new way of starting a prompt (Plan continuation, recovery) and each `await` creates another gap. Some gap will always remain: if the agent changes its mode on its own while a prompt is already on its way, nothing on our side can stop that.\n\n**How much risk the gaps carry:** the only way Claude offers to bypass permissions mid-turn is the Plan approval, and the worker already removes that option on guardian targets (`permission_choices`). Every other mode change Claude can make by itself goes to Accept edits, Manual or Plan. So the gaps can leave a session prompting more than it should until the next correction. I found no path to a looser mode, although the reviewers rated these P1 on that assumption. One partial exception: Accept edits approves file edits without Auto's classifier check."
+        },
+        {
+          "id": "agent:3217",
+          "role": "assistant",
+          "text": "You didn't answer the question. The CLI performance fix is needed under every option, so I'll make it now and leave the reconciler as it is until you choose."
+        },
+        {
+          "id": "agent:3286",
+          "role": "assistant",
+          "text": "Now the worker edits: settle startup reports instead of discarding them, recheck after publishing, check the policy after a recovery answer, and settle before the Plan continuation."
+        },
+        {
+          "id": "agent:3305",
+          "role": "assistant",
+          "text": "Clippy is clean for the worker and the CLI. Next, the tests."
+        },
+        {
+          "id": "agent:3354",
+          "role": "assistant",
+          "text": "I fixed all five third-round findings and committed them as `cbaa6d4a0`. A new review is running.\n\n- **Startup:** reports that arrive while a session opens are now applied and checked instead of thrown away. An outdated report only causes one extra request, and the agent's answer to that request decides the mode.\n- **Plan continuation:** reports from the planning turn are applied before the policy mode is restored. Waiting reports are checked before the implementation prompt starts, the same as for any other prompt.\n- **Recovery answer:** an answer that changes the model now checks the policy, as a normal model change does.\n- **After publishing:** the check repeats until the queue is empty.\n- **CLI:** the dashboard compares only the policy-owned settings, so its quick refresh works again.\n\nThe worker tests pass (636), the CLI dashboard tests pass (102), and clippy is clean.\n\n**One decision is still yours.** The question you didn't answer was about what I do after this round. Some gap will always remain: the agent can change its mode on its own while a prompt is already on its way. If a reviewer reports that again, I recommend overriding the review with this reason: the only looser mode Claude can switch to during a turn is already blocked on guardian targets, and this gap cannot be closed on our side. The other choice is to simplify: drop the reaction to the agent's mode reports and correct the mode only together with commands. Tell me which you prefer. Until then, I'll fix any new finding that is not this gap, and I won't push past an open finding without your answer."
+        },
+        {
+          "id": "agent:3466",
+          "role": "assistant",
+          "text": "This finding is another timing gap, but a specific one I can close. Attachment resolution and the `NativeSessionUsed` event both wait between the check and the prompt being sent. I'll move the check to directly before every point where a prompt is sent."
+        },
+        {
+          "id": "agent:3525",
+          "role": "assistant",
+          "text": "I fixed the finding and committed it as `924914222`. The mode check that runs before each prompt now happens after the last wait in the prompt's setup, such as attachment resolution and the first-use event. Nothing waits between the check and the prompt being sent to Claude. The Plan continuation already did this. The worker tests pass (636) and clippy is clean.\n\nThe previous review was incomplete because one reviewer stopped without reporting, so I requested a new review. The push stays blocked until it is clean.\n\nYour decision is still open. If a reviewer again reports that the agent can change its mode while a prompt is already on its way, should I override the review (my recommendation), or simplify the design?"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "is there mode-specific code in mj for config? if so we should remove it #collaborating",
+    "assistant_text_tail": "I fixed the finding and committed it as `924914222`. The mode check that runs before each prompt now happens after the last wait in the prompt's setup, such as attachment resolution and the first-use event. Nothing waits between the check and the prompt being sent to Claude. The Plan continuation already did this. The worker tests pass (636) and clippy is clean.\n\nThe previous review was incomplete because one reviewer stopped without reporting, so I requested a new review. The push stays blocked until it is clean.\n\nYour decision is still open. If a reviewer again reports that the agent can change its mode while a prompt is already on its way, should I override the review (my recommendation), or simplify the design?",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      3075,
+      3217,
+      3525
+    ],
+    "user_position": 621,
+    "mjolnir": "worker Jev still-open language classification",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "The cited user request remains open.",
+    "input_rationale": "After the third round of reconciler timing findings the agent put a design question (override vs simplify) to the user, was told the user was away, and restates it; it will not push past an open finding without the answer.",
+    "label": "required_final",
+    "kind": "blocking_decision"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T21:10:45.503Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Told the agent you are back"
+      },
+      {
+        "at": "2026-11-06T21:10:45.518Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-06T21:14:29.772Z",
+        "kind": "system",
+        "text": "Review findings sent to the agent"
+      },
+      {
+        "at": "2026-11-06T21:16:28.079Z",
+        "kind": "user",
+        "text": "The single settle gate is now in place (startup, every prompt send incl. plan continuation, config/recovery changes; commits cbaa6d4a0 and 924914222; review running). If a reviewer again flags a bridg"
+      },
+      {
+        "at": "2026-11-06T21:16:28.162Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Review of commits fd04b1b..9249142 in /home/jonathan/Projects/mjolnir/.mj/clones/e37236970552b40f48d261ebf8fbd45d found: Independent reviewer reports may overlap. Check each findin"
+      },
+      {
+        "at": "2026-11-06T21:16:58.120Z",
+        "kind": "agent",
+        "text": "The user asked about the downsides of the simpler design. Before answering, I'll check the one finding from the new review that is not about timing, the relay test."
+      }
+    ]
+  }
+}

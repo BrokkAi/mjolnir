@@ -1,0 +1,145 @@
+{
+  "id": "L0002",
+  "title": "P1 design decisions and open work",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "b77c55f68caf70b180d18e5a49723134",
+    "session_title": "bifrost via claude2",
+    "reply_position": 39910,
+    "captured_at": "2026-08-21T22:00:11.058Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:25520",
+          "role": "user",
+          "text": "ok, that's done (the workflows add)\n\nP1 is now yours"
+        },
+        {
+          "id": "agent:39688",
+          "role": "assistant",
+          "text": "All tests green; two chores remain — the classification inventory needs regeneration (David's new plan file) and the push raced again. Fixing both:All tests green; two chores remain — the classification inventory needs regeneration (David's new plan file) and the push raced again. Fixing both:All tests green; two chores remain — the classification inventory needs regeneration (David's new plan file) and the push raced again. Fixing both:"
+        },
+        {
+          "id": "agent:39706",
+          "role": "assistant",
+          "text": "MCP renderer work is fully landed (master `4da946650`) — the `query_code` description dropped from 1837 to 715 characters with zero marginal cost per future step, both fixes for the crate test composed, and the trailing inventory row repaired. Only the #2546 origin-retention agent remains in flight.\n\nAlso noteworthy from David's stream: he's filed `.agents/plans/issue-2545-discharge-completeness.md`, which suggests he's picked up a discharge-completeness thread adjacent to the #2480/#2538 dispatch work — worth a coordination look when the current agent lands.MCP renderer work is fully landed (master `4da946650`) — the `query_code` description dropped from 1837 to 715 characters with zero marginal cost per future step, both fixes for the crate test composed, and the trailing inventory row repaired. Only the #2546 origin-retention agent remains in flight.\n\nAlso noteworthy from David's stream: he's filed `.agents/plans/issue-2545-discharge-completeness.md`, which suggests he's picked up a discharge-completeness thread adjacent to the #2480/#2538 dispatch work — worth a coordination look when the current agent lands.MCP renderer work is fully landed (master `4da946650`) — the `query_code` description dropped from 1837 to 715 characters with zero marginal cost per future step, both fixes for the crate test composed, and the trailing inventory row repaired. Only the #2546 origin-retention agent remains in flight.\n\nAlso noteworthy from David's stream: he's filed `.agents/plans/issue-2545-discharge-completeness.md`, which suggests he's picked up a discharge-completeness thread adjacent to the #2480/#2538 dispatch work — worth a coordination look when the current agent lands."
+        },
+        {
+          "id": "agent:39754",
+          "role": "assistant",
+          "text": "The #2546 fix landed at the true root: the solver always had the caller-side evidence — an `IncomingCall` table with witness chains back to the caller's entry — but `finish()` dropped the table and its witness roots. Now published and joined at the shared entry seed, interprocedural taint (source in caller, sink in callee — the dominant real-world shape) is decisive, with the unmodeled-callee case still honestly inconclusive. Merging:The #2546 fix landed at the true root: the solver always had the caller-side evidence — an `IncomingCall` table with witness chains back to the caller's entry — but `finish()` dropped the table and its witness roots. Now published and joined at the shared entry seed, interprocedural taint (source in caller, sink in callee — the dominant real-world shape) is decisive, with the unmodeled-callee case still honestly inconclusive. Merging:The #2546 fix landed at the true root: the solver always had the caller-side evidence — an `IncomingCall` table with witness chains back to the caller's entry — but `finish()` dropped the table and its witness roots. Now published and joined at the shared entry seed, interprocedural taint (source in caller, sink in callee — the dominant real-world shape) is decisive, with the unmodeled-callee case still honestly inconclusive. Merging:"
+        },
+        {
+          "id": "agent:39775",
+          "role": "assistant",
+          "text": "The #2546 merge is gating now (full five suites plus the policy crate). Once it pushes I'll close the issue with the fix summary, clean up the last worktree, and mark task #21 complete — which clears everything currently in flight for the epic.The #2546 merge is gating now (full five suites plus the policy crate). Once it pushes I'll close the issue with the fix summary, clean up the last worktree, and mark task #21 complete — which clears everything currently in flight for the epic.The #2546 merge is gating now (full five suites plus the policy crate). Once it pushes I'll close the issue with the fix summary, clean up the last worktree, and mark task #21 complete — which clears everything currently in flight for the epic."
+        },
+        {
+          "id": "agent:39830",
+          "role": "assistant",
+          "text": "All work is landed. One final plan touch-up so the living document matches reality, then push:All work is landed. One final plan touch-up so the living document matches reality, then push:All work is landed. One final plan touch-up so the living document matches reality, then push:"
+        },
+        {
+          "id": "agent:39857",
+          "role": "assistant",
+          "text": "Everything launched today is landed, validated, and pushed — master is at `a58591843` with nothing in flight. Final tally for the day, all behind the five-suite gate (plus crate tests once that hole was found):\n\n**The P1 epic went from zero to all eight child-issue first slices merged** (control relations #2443, heap strong updates #2444, topology envelope #2442+#2448, summary unification #2445, invalidation schema #2449, exception value flow #2446, alias-aware typestate #2447, correspondence schema #2450), **plus the follow-on batch**: topology row domains with a working `.rqlp` architecture policy, the #2544 per-site finding-identity fix, the #2546 interprocedural-origin fix that makes cross-procedure taint decisive, the #2538 reach-in converted to a capability, and the MCP step-doc renderer.\n\n**Cross-cutting outcomes:** two soundness regressions in concurrent work caught and fixed (interface-dispatch false-exhaustive; a branch-merge false clean in typestate), three real defects discovered and either fixed same-day (#2544, #2546) or filed, and taint finding IDs rotated once (the one identity change, unavoidable and documented — any external baselines caching old taint IDs will re-baseline on next run).\n\n**What's next, all needing design before delegation** (recorded in the plan and memory): guard facts (the eleven-adapter IR rotation), re-keying the three global-generation caches, container-grain flow, and the protocol-hash-rotating uncertainty-semantics decision. David is concurrently working a discharge-completeness thread (#2545) adjacent to the dispatch work, so the guard-facts design should coordinate with him.Everything launched today is landed, validated, and pushed — master is at `a58591843` with nothing in flight. Final tally for the day, all behind the five-suite gate (plus crate tests once that hole was found):\n\n**The P1 epic went from zero to all eight child-issue first slices merged** (control relations #2443, heap strong updates #2444, topology envelope #2442+#2448, summary unification #2445, invalidation schema #2449, exception value flow #2446, alias-aware typestate #2447, correspondence schema #2450), **plus the follow-on batch**: topology row domains with a working `.rqlp` architecture policy, the #2544 per-site finding-identity fix, the #2546 interprocedural-origin fix that makes cross-procedure taint decisive, the #2538 reach-in converted to a capability, and the MCP step-doc renderer.\n\n**Cross-cutting outcomes:** two soundness regressions in concurrent work caught and fixed (interface-dispatch false-exhaustive; a branch-merge false clean in typestate), three real defects discovered and either fixed same-day (#2544, #2546) or filed, and taint finding IDs rotated once (the one identity change, unavoidable and documented — any external baselines caching old taint IDs will re-baseline on next run).\n\n**What's next, all needing design before delegation** (recorded in the plan and memory): guard facts (the eleven-adapter IR rotation), re-keying the three global-generation caches, container-grain flow, and the protocol-hash-rotating uncertainty-semantics decision. David is concurrently working a discharge-completeness thread (#2545) adjacent to the dispatch work, so the guard-facts design should coordinate with him.Everything launched today is landed, validated, and pushed — master is at `a58591843` with nothing in flight. Final tally for the day, all behind the five-suite gate (plus crate tests once that hole was found):\n\n**The P1 epic went from zero to all eight child-issue first slices merged** (control relations #2443, heap strong updates #2444, topology envelope #2442+#2448, summary unification #2445, invalidation schema #2449, exception value flow #2446, alias-aware typestate #2447, correspondence schema #2450), **plus the follow-on batch**: topology row domains with a working `.rqlp` architecture policy, the #2544 per-site finding-identity fix, the #2546 interprocedural-origin fix that makes cross-procedure taint decisive, the #2538 reach-in converted to a capability, and the MCP step-doc renderer.\n\n**Cross-cutting outcomes:** two soundness regressions in concurrent work caught and fixed (interface-dispatch false-exhaustive; a branch-merge false clean in typestate), three real defects discovered and either fixed same-day (#2544, #2546) or filed, and taint finding IDs rotated once (the one identity change, unavoidable and documented — any external baselines caching old taint IDs will re-baseline on next run).\n\n**What's next, all needing design before delegation** (recorded in the plan and memory): guard facts (the eleven-adapter IR rotation), re-keying the three global-generation caches, container-grain flow, and the protocol-hash-rotating uncertainty-semantics decision. David is concurrently working a discharge-completeness thread (#2545) adjacent to the dispatch work, so the guard-facts design should coordinate with him."
+        },
+        {
+          "id": "agent:39910",
+          "role": "assistant",
+          "text": "Every step of that finale already ran — this looks like a stale checkpoint instruction from before \"P1 is now yours.\" Confirming each item rather than redoing it:\n\n**Wave 2 finale status (all completed earlier today):**\n- **Validation:** was green at the time — suite_bench_policy 626, suite_cross_language 656, suite_usages 1977, suite_semantic 1048, suite_mcp_cli 142, policy crate 498, MCP 148, with only the two known javac-dependent container failures.\n- **Pushed:** wave 2 landed on `BrokkAi/bifrost-dev` master as `19547d25c` this morning (registry consolidation #2498 with the #2515 enum-domain validation, call-binding slices #2499, near-miss ranking #2500).\n- **Task #14:** marked completed.\n- **Memory:** `issue-2433-local-state.md` was updated to the published state then, and updated again after you pushed the ci.yml one-liner (`6b7f9b718`) — nothing from the P0 epic remains pending.\n- **Summary:** delivered; its one action item (the workflow-file edit) you completed.\n\nRight now the tree is clean and local master equals dev/master at `a58591843` — nothing unpushed, nothing failing.\n\n**What remains open — updated, because the P1 epic has since moved a long way.** The list that was true at wave-2 close (#2505–#2509, #2516–#2524, plus the #2434/#2435/#2438/#2439 remainders) still stands for its untouched items, but today's P1 run has already delivered: all eight P1 child first slices (Milestones A–H: control relations, heap strong updates, topology envelope, summary unification, invalidation schema, exception value flow, alias-aware typestate, correspondence schema), the topology row surface with a working `.rqlp` architecture policy, and fixes for #2544 (two-sink taint failure), #2546 (interprocedural origin retention), and two soundness regressions in concurrent dispatch work. Newly open going forward, each needing design before delegation: guard facts (#2443 slice 2, the eleven-adapter IR rotation), re-keying the three global-generation caches (#2449 slice 2), container-grain flow (#2453), and the protocol-hash-rotating may-finding semantics decision. Also usability-critical and still open from the earlier list: effect-policy budget exhaustion on real repos (#2523). David is concurrently on a discharge-completeness thread (#2545), which the guard-facts design should coordinate with.Every step of that finale already ran — this looks like a stale checkpoint instruction from before \"P1 is now yours.\" Confirming each item rather than redoing it:\n\n**Wave 2 finale status (all completed earlier today):**\n- **Validation:** was green at the time — suite_bench_policy 626, suite_cross_language 656, suite_usages 1977, suite_semantic 1048, suite_mcp_cli 142, policy crate 498, MCP 148, with only the two known javac-dependent container failures.\n- **Pushed:** wave 2 landed on `BrokkAi/bifrost-dev` master as `19547d25c` this morning (registry consolidation #2498 with the #2515 enum-domain validation, call-binding slices #2499, near-miss ranking #2500).\n- **Task #14:** marked completed.\n- **Memory:** `issue-2433-local-state.md` was updated to the published state then, and updated again after you pushed the ci.yml one-liner (`6b7f9b718`) — nothing from the P0 epic remains pending.\n- **Summary:** delivered; its one action item (the workflow-file edit) you completed.\n\nRight now the tree is clean and local master equals dev/master at `a58591843` — nothing unpushed, nothing failing.\n\n**What remains open — updated, because the P1 epic has since moved a long way.** The list that was true at wave-2 close (#2505–#2509, #2516–#2524, plus the #2434/#2435/#2438/#2439 remainders) still stands for its untouched items, but today's P1 run has already delivered: all eight P1 child first slices (Milestones A–H: control relations, heap strong updates, topology envelope, summary unification, invalidation schema, exception value flow, alias-aware typestate, correspondence schema), the topology row surface with a working `.rqlp` architecture policy, and fixes for #2544 (two-sink taint failure), #2546 (interprocedural origin r\n[... 879 bytes omitted from the middle of this message ...]\nte_cross_language 656, suite_usages 1977, suite_semantic 1048, suite_mcp_cli 142, policy crate 498, MCP 148, with only the two known javac-dependent container failures.\n- **Pushed:** wave 2 landed on `BrokkAi/bifrost-dev` master as `19547d25c` this morning (registry consolidation #2498 with the #2515 enum-domain validation, call-binding slices #2499, near-miss ranking #2500).\n- **Task #14:** marked completed.\n- **Memory:** `issue-2433-local-state.md` was updated to the published state then, and updated again after you pushed the ci.yml one-liner (`6b7f9b718`) — nothing from the P0 epic remains pending.\n- **Summary:** delivered; its one action item (the workflow-file edit) you completed.\n\nRight now the tree is clean and local master equals dev/master at `a58591843` — nothing unpushed, nothing failing.\n\n**What remains open — updated, because the P1 epic has since moved a long way.** The list that was true at wave-2 close (#2505–#2509, #2516–#2524, plus the #2434/#2435/#2438/#2439 remainders) still stands for its untouched items, but today's P1 run has already delivered: all eight P1 child first slices (Milestones A–H: control relations, heap strong updates, topology envelope, summary unification, invalidation schema, exception value flow, alias-aware typestate, correspondence schema), the topology row surface with a working `.rqlp` architecture policy, and fixes for #2544 (two-sink taint failure), #2546 (interprocedural origin retention), and two soundness regressions in concurrent dispatch work. Newly open going forward, each needing design before delegation: guard facts (#2443 slice 2, the eleven-adapter IR rotation), re-keying the three global-generation caches (#2449 slice 2), container-grain flow (#2453), and the protocol-hash-rotating may-finding semantics decision. Also usability-critical and still open from the earlier list: effect-policy budget exhaustion on real repos (#2523). David is concurrently on a discharge-completeness thread (#2545), which the guard-facts design should coordinate with."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "ok, that's done (the workflows add)\n\nP1 is now yours",
+    "assistant_text_tail": "te_cross_language 656, suite_usages 1977, suite_semantic 1048, suite_mcp_cli 142, policy crate 498, MCP 148, with only the two known javac-dependent container failures.\n- **Pushed:** wave 2 landed on `BrokkAi/bifrost-dev` master as `19547d25c` this morning (registry consolidation #2498 with the #2515 enum-domain validation, call-binding slices #2499, near-miss ranking #2500).\n- **Task #14:** marked completed.\n- **Memory:** `issue-2433-local-state.md` was updated to the published state then, and updated again after you pushed the ci.yml one-liner (`6b7f9b718`) — nothing from the P0 epic remains pending.\n- **Summary:** delivered; its one action item (the workflow-file edit) you completed.\n\nRight now the tree is clean and local master equals dev/master at `a58591843` — nothing unpushed, nothing failing.\n\n**What remains open — updated, because the P1 epic has since moved a long way.** The list that was true at wave-2 close (#2505–#2509, #2516–#2524, plus the #2434/#2435/#2438/#2439 remainders) still stands for its untouched items, but today's P1 run has already delivered: all eight P1 child first slices (Milestones A–H: control relations, heap strong updates, topology envelope, summary unification, invalidation schema, exception value flow, alias-aware typestate, correspondence schema), the topology row surface with a working `.rqlp` architecture policy, and fixes for #2544 (two-sink taint failure), #2546 (interprocedural origin retention), and two soundness regressions in concurrent dispatch work. Newly open going forward, each needing design before delegation: guard facts (#2443 slice 2, the eleven-adapter IR rotation), re-keying the three global-generation caches (#2449 slice 2), container-grain flow (#2453), and the protocol-hash-rotating may-finding semantics decision. Also usability-critical and still open from the earlier list: effect-policy budget exhaustion on real repos (#2523). David is concurrently on a discharge-completeness thread (#2545), which the guard-facts design should coordinate with.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 25520,
+    "input_rationale": "The reply confirms the wave-2 finale already ran and lists remaining work (guard facts, cache re-keying, container-grain flow, may-finding semantics, #2523) as items 'needing design before delegation', i.e. the agent's own next work. It asks nothing of the user, though the may-finding semantics item is a decision whose owner is not stated (the user asked about that next).",
+    "label": "none",
+    "trigger": "still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-08-21T23:10:35.490Z",
+        "kind": "user",
+        "text": "are all of those design decisions david's? or can we make some ourselves guided by project precedent and domain best practices"
+      },
+      {
+        "at": "2026-08-21T23:11:15.448Z",
+        "kind": "agent",
+        "text": "None of them are David's. He's a reviewer and active contributor, not the owner of these surfaces — decision rights on all four sit with this epic (which you handed me) and ultimately with you. The re"
+      },
+      {
+        "at": "2026-08-21T23:12:03.287Z",
+        "kind": "user",
+        "text": "great. comment on the 4th and cc David, then proceed on the first 3"
+      },
+      {
+        "at": "2026-08-21T23:15:26.245Z",
+        "kind": "agent",
+        "text": "Designs are on master (`2d5e15970`). Launching the three implementation agents:Designs are on master (`2d5e15970`). Launching the three implementation agents:Designs are on master (`2d5e15970`). Launc"
+      },
+      {
+        "at": "2026-08-21T23:17:06.991Z",
+        "kind": "agent",
+        "text": "Done on both fronts:  **The 4th (may-finding semantics):** proposal posted on #2447 with David cc'd — make `ProtocolUncertaintySemantics` authorable per protocol in `.rqlp` with today's `PreserveUncer"
+      },
+      {
+        "at": "2026-08-22T00:40:43.102Z",
+        "kind": "agent",
+        "text": "Milestone K is done and green — both recorded misses flipped, David's region untouched, and the kill-interaction question got a master-verified answer (a whole-object read makes the object `MayEscape`"
+      }
+    ]
+  }
+}

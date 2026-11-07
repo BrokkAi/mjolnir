@@ -1,0 +1,459 @@
+{
+  "id": "L0402",
+  "title": "Reviewed three case sample completes",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "6511b23063bafcc09ce3427b8025d8c0",
+    "session_title": "eval33 3757 opusxhigh",
+    "reply_position": 9607,
+    "captured_at": "2026-10-02T01:55:02.417Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3757: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 0722dea6bcb52ef5335695a701631d157c31cbf4\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls (a cargo command that starts no compiler for\nmore than ten minutes), you may run that command through plain cargo\n(/usr/local/cargo/bin/cargo) and say so in your report; do not move target/\nor change shared cache settings.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn\n[... 11538 bytes omitted from the middle of this message ...]\ndels for Rust std and framework inputs: `std::env::args`/`var`, stdin, HTTP headers, and Axum/Actix handler extractors (`Query<T>`, `Path<T>`, `Json<T>`), including handler parameters as entry points.\n2. **SQL API contracts.** Reviewed models for SQLx, Diesel, rusqlite, postgres, and tokio-postgres. Separate the SQL text operand from bound values, and support generic, async, trait, and callback forms. A complete sink model must let analysis observe the SQL text at the call without the library body, and must leave unrelated effects open.\n3. **Caller completeness at modeled boundaries.** A procedure whose only unknowns are modeled calls should get complete semantics. Confirm or refute the \"likely\" root cause above.\n4. **Rust value construction.** `format!`, `+`/`push_str`, builders, closures, async fns, and trait-object dispatch.\n5. **Shipped policy.** A general Rust request-to-SQL security policy that uses these models, so users do not have to write endpoint models for common libraries.\n\nKeep the sound result contract: missing models stay visibly incomplete, with a diagnostic that names the missing model or capability. An empty result from incomplete discovery is never a clean result.\n\n## Acceptance criteria\n\n- A documented support matrix: the supported Rust sources, SQL sinks, sanitizers, and propagation shapes, and which remain incomplete.\n- Positive fixtures: a proven source-to-SQL-text path with a complete run.\n- Negative fixtures (parameterized, non-reaching, sanitized): proven no-flow with a complete run.\n- The three-case sample above passes as a regression test, plus independent cases for each supported API family.\n- The rerun CodeQL comparison on the sample gives matching complete results. Stretch goal: a real Rust web service with SQL.\n\n## Related\n\n- #3412: declared-storage Rust endpoint contracts (direct overlap on the store-based slice)\n- #3678: Rust sysroot summary binding\n- #1877: external-code activation and completeness\n- #2705: Rust container/std summaries\n- Background: #1871, #2596, #2519, #1951\n\n"
+        },
+        {
+          "id": "agent:6386",
+          "role": "assistant",
+          "text": "Status: rebuilt with the call-evaluation fix and the adjusted ablation assertion. Running the eight regression tests."
+        },
+        {
+          "id": "agent:6422",
+          "role": "assistant",
+          "text": "While the base build runs, I'll format and commit the second checkpoint: zero-argument exact selection, the `&self` and call-evaluation fixes, the reviewed model documents, fixtures and tests."
+        },
+        {
+          "id": "agent:6472",
+          "role": "assistant",
+          "text": "The inventory regenerates against `--ref HEAD`, so the new files must be committed first. Committing checkpoint 2, then I'll regenerate the inventory and add the shard updates."
+        },
+        {
+          "id": "agent:6492",
+          "role": "assistant",
+          "text": "Committed `872c6b2cb2`. Now regenerating the open-core inventory against the new `HEAD`."
+        },
+        {
+          "id": "agent:6559",
+          "role": "assistant",
+          "text": "I committed the inventory update. Next I'm starting the analysis library tests, which will also give me the new IR digest value."
+        },
+        {
+          "id": "agent:6603",
+          "role": "assistant",
+          "text": "I'm checking whether a public unit-test location exists for the engine changes, then I'll write the docs support matrix while the tests build."
+        },
+        {
+          "id": "agent:6648",
+          "role": "assistant",
+          "text": "I'm adding a small public unit test next to the new drop-glue proof, because the release guidance asks for one when a private test exposes an open-core defect."
+        },
+        {
+          "id": "agent:6693",
+          "role": "assistant",
+          "text": "I'm checking that the built CLI matches the committed engine code, so I can probe a few unsupported code shapes for the support matrix."
+        },
+        {
+          "id": "agent:6735",
+          "role": "assistant",
+          "text": "Base build finished. I'm now running the base CLI on the issue's witnesses for the before/after comparison."
+        },
+        {
+          "id": "agent:6781",
+          "role": "assistant",
+          "text": "I'm fixing the evidence summarizer so it reads the same JSON fields as the test."
+        },
+        {
+          "id": "agent:6837",
+          "role": "assistant",
+          "text": "I'm probing four unsupported code shapes (`format!`, `push_str`, a closure, and a cross-file-typed `+` operand) with the current CLI, so the docs matrix states observed behavior rather than guesses."
+        },
+        {
+          "id": "agent:6904",
+          "role": "assistant",
+          "text": "I'm reading how the value-flow plan picks the \"first incomplete cause\", to see why it names the modeled call."
+        },
+        {
+          "id": "agent:6958",
+          "role": "assistant",
+          "text": "Now the edit: refinable causes go into a separate slot, used only when nothing else blocks discovery."
+        },
+        {
+          "id": "agent:7078",
+          "role": "assistant",
+          "text": "I'm replacing the hand-written sibling walk with the shared `outer_attributes` helper from `bifrost-rust`, which reads the grouped `attributes` field."
+        },
+        {
+          "id": "agent:7097",
+          "role": "assistant",
+          "text": "Both drop-glue tests pass now. Checking the base result for the Go test."
+        },
+        {
+          "id": "agent:7108",
+          "role": "assistant",
+          "text": "The Go test fails the same way on the base commit, so it was already failing before my change and is not caused by it. I'm committing the drop-glue fix, its unit tests, and the digest update."
+        },
+        {
+          "id": "agent:7126",
+          "role": "assistant",
+          "text": "Next I'm running the flow, RQL, and policy crate tests, which cover the cause-ordering change and the earlier engine changes."
+        },
+        {
+          "id": "agent:7170",
+          "role": "assistant",
+          "text": "The flow/RQL/policy test build is compiling the analysis crate. I've set up the closure probe to run once the new CLI is built."
+        },
+        {
+          "id": "agent:7241",
+          "role": "assistant",
+          "text": "The flow-state check already handles a `CallSite` gap with a call-evaluation impact (`flow_state.rs:3425`), so only the test's shape assertion is out of date. I'm updating it to the new shape."
+        },
+        {
+          "id": "agent:7267",
+          "role": "assistant",
+          "text": "Flow, RQL, and policy tests: 1906 passed and 1 failed. The failure is the shape assertion I just updated. I'm re-running that test, then starting the integration suites."
+        },
+        {
+          "id": "agent:7291",
+          "role": "assistant",
+          "text": "The flow crate alone resolves dependency features differently, so cargo is rebuilding the analysis crate (a few minutes). Waiting on it."
+        },
+        {
+          "id": "agent:7324",
+          "role": "assistant",
+          "text": "The updated flow test and the cause-selection test pass. Now I'm starting the integration suites: semantic, policy bench, cross-language, and the Rust slices of usages and issues."
+        },
+        {
+          "id": "agent:7340",
+          "role": "assistant",
+          "text": "While the suites build, I'm committing the cause-ordering change with its updated test."
+        },
+        {
+          "id": "agent:7358",
+          "role": "assistant",
+          "text": "I'm adding an `Unreleased` changelog entry for the user-visible behavior change."
+        },
+        {
+          "id": "agent:7376",
+          "role": "assistant",
+          "text": "While the suites build, I'm checking the std-source selector shape so the matrix row describes it correctly."
+        },
+        {
+          "id": "agent:7389",
+          "role": "assistant",
+          "text": "Now I'm making the std-source row state the exact result tier."
+        },
+        {
+          "id": "agent:7414",
+          "role": "assistant",
+          "text": "Suites are running (4586 tests). The CLI is rebuilt, so I'm collecting the \"after\" evidence and re-running the shape probes in parallel."
+        },
+        {
+          "id": "agent:7430",
+          "role": "assistant",
+          "text": "Before/after matches on every witness. Now the shape probes with the new CLI:"
+        },
+        {
+          "id": "agent:7538",
+          "role": "assistant",
+          "text": "The policy pairs each batch with its own retained report (`taint_policy.rs`, the `ProductionTaintAnalysisResult::new` call), so reading the cause from the report is safe. Making the edits:"
+        },
+        {
+          "id": "agent:7573",
+          "role": "assistant",
+          "text": "`SemanticInputStatus` is `Copy`, so I'll use `*status` instead of `.clone()` (clippy would flag it), and add the import in `client.rs`."
+        },
+        {
+          "id": "agent:7590",
+          "role": "assistant",
+          "text": "The suites show five failures so far. I'm reading each one."
+        },
+        {
+          "id": "agent:7698",
+          "role": "assistant",
+          "text": "I'm checking how merged plans combine their causes, since that decides how the list should merge."
+        },
+        {
+          "id": "agent:7711",
+          "role": "assistant",
+          "text": "Merged plans share one snapshot set (`first.snapshot_discoveries`), so I'll merge the cause lists in plan order and drop duplicates with a hash set. Applying the full rework:"
+        },
+        {
+          "id": "agent:7729",
+          "role": "assistant",
+          "text": "That local-rule method takes the plan by value and has no local list, so I'll take the plan's list, append to it, and put it back."
+        },
+        {
+          "id": "agent:7745",
+          "role": "assistant",
+          "text": "Now a compile check of the flow and policy crates. The suite run may still hold the build lock, so this could wait."
+        },
+        {
+          "id": "agent:7761",
+          "role": "assistant",
+          "text": "Compiles cleanly. While the suites finish, I'm updating the `issue_2607` moved-`Vec` test. I'm reading its header first."
+        },
+        {
+          "id": "agent:7775",
+          "role": "assistant",
+          "text": "More failures came in: six in `issue_2833` and one Rust test in `issue_2705`. They ran on the binary with the reverted blocking-first ordering. Reading them:"
+        },
+        {
+          "id": "agent:7860",
+          "role": "assistant",
+          "text": "The rewritten pin matches the gap the lowering emits: `CleanupControlFlow`, text containing \"implicit Drop\", discharge `DeclaredDropGlue` (`semantic.rs:2511`). Checking suite progress:"
+        },
+        {
+          "id": "agent:7928",
+          "role": "assistant",
+          "text": "Now formatting and starting the final root-suite run on the final code."
+        },
+        {
+          "id": "agent:7944",
+          "role": "assistant",
+          "text": "The suite run is building. Meanwhile I'm reviewing the full `plan.rs` diff."
+        },
+        {
+          "id": "agent:8019",
+          "role": "assistant",
+          "text": "The refreshed Go pin passes. Both runs are still going; I'm polling for the Rust #2607, #2640, #2833, #2705 and #3757 results."
+        },
+        {
+          "id": "agent:8053",
+          "role": "assistant",
+          "text": "This test passed in the first run and fails now, so the result-aware selection changed which cause it reports. Reading the test and the diagnostics:"
+        },
+        {
+          "id": "agent:8212",
+          "role": "assistant",
+          "text": "Twelve more tests hit the 600 s timeout during the period when both runs overlapped. I'll re-run every timed-out test alone at the end. While the suites continue, I'm drafting the final report."
+        },
+        {
+          "id": "agent:8247",
+          "role": "assistant",
+          "text": "About 300 tests per 5 minutes now. While waiting, I'm checkpoint-committing the cause-selection rework with its tests, and then the docs and changelog separately."
+        },
+        {
+          "id": "agent:8265",
+          "role": "assistant",
+          "text": "Committed. Polling the suites:"
+        },
+        {
+          "id": "agent:8297",
+          "role": "assistant",
+          "text": "Four Rust semantic conformance tests fail. They check the Rust lowering's gap shapes, which my change altered on purpose, so I'm reading each failure to tell a stale pin from a real regression."
+        },
+        {
+          "id": "agent:8379",
+          "role": "assistant",
+          "text": "`assert_value_gap` exists, so the RAII tests only need to switch to it. Reading the abrupt-exit test and the implicit-trait test:"
+        },
+        {
+          "id": "agent:8440",
+          "role": "assistant",
+          "text": "Now the generic-method ICFG test. I need the full expected/observed difference from the log."
+        },
+        {
+          "id": "agent:8451",
+          "role": "assistant",
+          "text": "The ICFG outcome is now `Complete`, where the test expects `Unproven`. I'm reading the shared helper to see why `Unproven` was expected."
+        },
+        {
+          "id": "agent:8570",
+          "role": "assistant",
+          "text": "The latency test needs a cold debug-build CLI run under 5 s, and it took 5.1 s while about 96 tests ran at once. I'll re-run it alone afterwards. Polling:"
+        },
+        {
+          "id": "agent:8590",
+          "role": "assistant",
+          "text": "#2482 passes now. #2705 still fails, so my explanation for it was incomplete. Reading the message:"
+        },
+        {
+          "id": "agent:8605",
+          "role": "assistant",
+          "text": "I need measurement here rather than guesses. While run 3 continues, I'm reading how a snapshot's `SemanticInputStatus` is derived from its gaps, since that status decides the typed reason."
+        },
+        {
+          "id": "agent:8689",
+          "role": "assistant",
+          "text": "I'm still tracing the #2705 reason change. The status also merges gaps in the two call-binding loops (`value_flow.rs:5474` and `:5528`). Reading those:"
+        },
+        {
+          "id": "agent:8709",
+          "role": "assistant",
+          "text": "Reading the code has not pinned down the #2705 change. I'll measure it directly after run 3 finishes, with a temporary debug print of the selected cause and its status. Polling run 3:"
+        },
+        {
+          "id": "agent:8909",
+          "role": "assistant",
+          "text": "Restored. This changes Rust lowering again, so I'm re-running every Rust-related test in the policy bench, semantic, and cross-language suites, plus #2482."
+        },
+        {
+          "id": "agent:8939",
+          "role": "assistant",
+          "text": "Restoring the base form fixes #2705 but breaks three #3757 tests. That is why I had moved the abort gap. I'm reading the failure to find which rule keeps the `Point`-scoped abort gap open there."
+        },
+        {
+          "id": "agent:9049",
+          "role": "assistant",
+          "text": "Both read sites stay consistent: the flow-state return check and the plan's snapshot classification now treat this abort gap as the base treated the `Point` form. Re-running the Rust-focused suites:"
+        },
+        {
+          "id": "agent:9161",
+          "role": "assistant",
+          "text": "Analysis library: 5139 passed. The two failures are the Go test (fails the same way on the base) and the lock-timing test. Six SQLite store tests timed out. Re-running those seven on their own:"
+        },
+        {
+          "id": "agent:9189",
+          "role": "assistant",
+          "text": "My 290-second shell limit cancelled the last test, `canonical_generic_import_batches_seek_900_oids…`; nextest did not fail it. I'm running it in the background without that limit and polling."
+        },
+        {
+          "id": "agent:9220",
+          "role": "assistant",
+          "text": "It passes on its own (292 s). The analysis library is clean apart from the Go test that already fails on the base. Next, the flow, RQL, and policy crate tests with nothing else running:"
+        },
+        {
+          "id": "agent:9251",
+          "role": "assistant",
+          "text": "Flow, RQL, and policy: 1907 of 1907 pass. Starting the final full root-suite run on the final code (semantic, policy bench, cross-language, plus the Rust slices of usages and issues):"
+        },
+        {
+          "id": "agent:9268",
+          "role": "assistant",
+          "text": "No rebuild is needed for this run. While it runs, I'm regenerating the \"after\" evidence and the shape probes with the final CLI. These are a few short runs."
+        },
+        {
+          "id": "agent:9332",
+          "role": "assistant",
+          "text": "About 916 of 4587 tests are done; this run will take roughly an hour on the loaded host. Meanwhile I'm drafting the final report in the evidence directory."
+        },
+        {
+          "id": "agent:9360",
+          "role": "assistant",
+          "text": "Two Node.js policy tests timed out again. They also timed out in run 2 and passed in run 3, so I'll re-run them alone at the end. Meanwhile I'm writing the report draft."
+        },
+        {
+          "id": "agent:9383",
+          "role": "assistant",
+          "text": "The same `issue_3386` multi-language tests time out under host load again. In run 3 they passed at 470–500 s against the 600 s limit. They'll go on the solo re-run list. Polling:"
+        },
+        {
+          "id": "agent:9443",
+          "role": "assistant",
+          "text": "The final suite run is nearly done (4512 of 4587). So far: the latency test failed and nine slow tests timed out under host load. All of them will be re-run alone."
+        },
+        {
+          "id": "agent:9461",
+          "role": "assistant",
+          "text": "Final run: 4577 passed, 1 failed (latency), 9 timed out. I'm re-running those ten alone, in the background with polling, since some take about 8 minutes each."
+        },
+        {
+          "id": "agent:9483",
+          "role": "assistant",
+          "text": "The latency test passes alone. Seven of ten have passed so far; the remaining three are the long `issue_3386` tests."
+        },
+        {
+          "id": "agent:9497",
+          "role": "assistant",
+          "text": "All ten pass alone, so the final root suites pass in full: 4577 in the run plus these 10 on re-run. Now clippy as the brief specifies:"
+        },
+        {
+          "id": "agent:9521",
+          "role": "assistant",
+          "text": "Clippy was missing for this toolchain, so I installed the component; it lives outside the workspace and goes away with the container. Clippy is now running."
+        },
+        {
+          "id": "agent:9539",
+          "role": "assistant",
+          "text": "Clippy finished with no warnings or errors. Next, the workspace format check:"
+        },
+        {
+          "id": "agent:9553",
+          "role": "assistant",
+          "text": "Formatting is clean. I'm removing my base-commit worktree, which is no longer needed, and checking the final tree state."
+        },
+        {
+          "id": "agent:9587",
+          "role": "assistant",
+          "text": "All required work is committed and validated. I'm saving the report to the evidence directory and then giving it here."
+        },
+        {
+          "id": "agent:9607",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nThe issue's three-case sample now finishes `complete` with the reviewed postgres contract. Case (a) is one definite, complete finding, and cases (b) and (c) are proven clean. Base `0722dea6bcb52ef5335695a701631d157c31cbf4`, final `577f7d4150cc8e8671d091027febf9389b9f5551`. All work is committed and `git status --short` is empty.\n\n## 1. Cause (confirmed, Rust form)\n\nThe issue's \"likely\" cause is confirmed: a modeled sink call did not close its caller's coverage. Evidence comes from the plan's own snapshot classification, which I printed with temporary debug code that has since been removed (`/workspace/evidence/probe-base.txt`, `probe-stmt-model.txt`). Several separate causes stacked:\n\n1. **Receiver-adjustment gap tied to the call point, not the call.** With a call model on `Client::execute`, the gap that still opened the binding was `caller=api.rs.execute cap=Calls subject=Point \"method receiver autoderef and autoref adjustments may invoke Deref...\"`. A model of the call could not close a point-scoped gap.\n2. **Implicit-Drop gaps with no possible discharge.** The base classification held `incomplete: CleanupControlFlow \"a temporary discarded by a wildcard let may require immediate Drop\"` in `api.rs.execute`, and `\"values introduced by direct let bindings may require implicit Drop\"` in the helpers. Their types (`Result<u64, ()>`, `Client`, `&self`) are stated only by declarations in other files.\n3. **`&str` methods in the helpers were unresolved external calls** (`to_owned`, `len`).\n4. **Findings used a stricter edge rule than the run.** Any unproven edge made a finding `possible`, even edges the run itself forgives.\n5. **Zero-argument std sources were rejected by the selector compiler.** On the base, only 3 of 6 source endpoints compiled, with `CallBindingSelectorRejected` for `args`, `args_os` and `stdin`.\n\n## 2. Changes and reasons\n\n- **`e510764f2b`: callers of modeled calls now close.**\n  - The receiver-adjustment gap is now call-site scoped with a `CallResolution` discharge. A proven method target never passes through a user `Deref`; the dispatch resolver keeps only a boundary there.\n  - New `SemanticGapDischarge::DeclaredDropGlue` (IR v40). Its query-time proof is in `crates/bifrost-analysis/src/analyzer/rust/drop_glue.rs`.\n  - A small reviewed `&str` method table in the Rust lowering.\n  - Findings now use the run's own edge discharge (`open_edges_are_derived`).\n  - Terminal call-binding rows are accepted for exact zero-argument calls.\n  - The Rust lowering's adapter version moves to `rust-value-semantics-v15`.\n- **`872c6b2cb2`: reviewed contracts, fixtures and 8 regression tests.**\n  - Contracts in `tests/fixtures/rust-sql-taint/models`. Sinks select only the SQL-text operand by exact qualified identity. Call models are conservative may-propagate closures from the SQL text, bound values and receiver into the result and receiver, with no sanitize and no kill. They state in their review notes that other effects stay open.\n  - The std model and source contracts cover `var`, `var_os`, `args`, `args_os` and `stdin`.\n- **`2bb66fb7f1`**: open-core inventory for the new paths.\n- **`4bf122f618`**: the drop-glue attribute check now reads attributes through the shared `outer_attributes` helper. The old sibling walk accepted `#[derive(Serialize)]`; a new public unit test caught this. Also pins the IR v40 digest.\n- **`331dcf1759`**: an intermediate cause-ordering rule, superseded by `a25f6a6e86`. I left it in the history rather than rebasing, following the repo rule.\n- **`a25f6a6e86`**: the plan now keeps every incomplete cause in input order. The diagnostic names the first cause that keeps the solved result from derived completeness. Before this, it could blame a modeled call (\"no applicable model\").\n- **`7d51789331`**:\n  - The Go IR-digest pin is refreshed for v40.\n  - The `issue_2607` moved-`Vec` pin is updated. The drop is now decided by the declaration, and the unmodeled `Vec::new()` keeps that run open.\n- **`b1f66d07e9`**: support matrix in `docs/src/content/docs/data-flow-and-typestate.md`, plus a CHANGELOG\n[... 3361 bytes omitted from the middle of this message ...]\nound for a user `Add` impl.\n3. Locals typed only by another file are not typed by the Rust lowering.\n4. `format!` is not lowered.\n5. The `CallResolution` diagnostic text is also used for resolved calls whose binding is incomplete.\n6. The `unwrap` diagnostic does not name the missing `Result` model.\n7. Possible follow-up: an engine rule that discharges call effects irrelevant to the query.\n\n## 6. Draft GitHub comment\n\nI reproduced the three-case sample and confirmed the likely cause in its Rust form: a modeled sink call did not close its caller's coverage. Four gaps held the caller open:\n- the method receiver-adjustment gap was tied to the call point rather than the call;\n- implicit-Drop gaps on values whose type another file declares could not be discharged;\n- common `&str` methods were unresolved;\n- findings used a stricter proof rule than the run.\n\nThe fix ties the receiver adjustment to its call and adds a query-time proof that a declared type's drop runs no workspace code. It also lowers a small reviewed table of `&str` methods and lets findings share the run's rule. With reviewed postgres and rusqlite contracts that treat only the SQL text as a sink and leave other effects open, the sample now reports one definite, complete finding for case (a) and proves cases (b) and (c) clean. The issue's original policy has no call contract, so it still stays inconclusive, and it now names the missing contract. Source contracts select `std::env::var`, `var_os`, `args`, `args_os` and `std::io::stdin` exactly; those runs report `proven_by_summary` because an authored model closes the calls. Incomplete runs now name the first input the solved result leaves open, so they no longer blame a call that its model closed. The data-flow guide has a support matrix that names the missing model or capability for each incomplete row, including framework extractors, SQLx, Diesel, async drivers, macros, closures and the shipped policy. The reviewed models are test fixtures, so a shipped policy pack in bifrost-packs is the main follow-up."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "contract: missing models stay visibly incomplete, with a diagnostic that names the missing model or capability. An empty result from incomplete discovery is never a clean result.\n\n## Acceptance criteria\n\n- A documented support matrix: the supported Rust sources, SQL sinks, sanitizers, and propagation shapes, and which remain incomplete.\n- Positive fixtures: a proven source-to-SQL-text path with a complete run.\n- Negative fixtures (parameterized, non-reaching, sanitized): proven no-flow with a complete run.\n- The three-case sample above passes as a regression test, plus independent cases for each supported API family.\n- The rerun CodeQL comparison on the sample gives matching complete results. Stretch goal: a real Rust web service with SQL.\n\n## Related\n\n- #3412: declared-storage Rust endpoint contracts (direct overlap on the store-based slice)\n- #3678: Rust sysroot summary binding\n- #1877: external-code activation and completeness\n- #2705: Rust container/std summaries\n- Background: #1871, #2596, #2519, #1951\n\n",
+    "assistant_text_tail": "ound for a user `Add` impl.\n3. Locals typed only by another file are not typed by the Rust lowering.\n4. `format!` is not lowered.\n5. The `CallResolution` diagnostic text is also used for resolved calls whose binding is incomplete.\n6. The `unwrap` diagnostic does not name the missing `Result` model.\n7. Possible follow-up: an engine rule that discharges call effects irrelevant to the query.\n\n## 6. Draft GitHub comment\n\nI reproduced the three-case sample and confirmed the likely cause in its Rust form: a modeled sink call did not close its caller's coverage. Four gaps held the caller open:\n- the method receiver-adjustment gap was tied to the call point rather than the call;\n- implicit-Drop gaps on values whose type another file declares could not be discharged;\n- common `&str` methods were unresolved;\n- findings used a stricter proof rule than the run.\n\nThe fix ties the receiver adjustment to its call and adds a query-time proof that a declared type's drop runs no workspace code. It also lowers a small reviewed table of `&str` methods and lets findings share the run's rule. With reviewed postgres and rusqlite contracts that treat only the SQL text as a sink and leave other effects open, the sample now reports one definite, complete finding for case (a) and proves cases (b) and (c) clean. The issue's original policy has no call contract, so it still stays inconclusive, and it now names the missing contract. Source contracts select `std::env::var`, `var_os`, `args`, `args_os` and `std::io::stdin` exactly; those runs report `proven_by_summary` because an authored model closes the calls. Incomplete runs now name the first input the solved result leaves open, so they no longer blame a call that its model closed. The data-flow guide has a support matrix that names the missing model or capability for each incomplete row, including framework extractors, SQLx, Diesel, async drivers, macros, closures and the shipped policy. The reviewed models are test fixtures, so a shipped policy pack in bifrost-packs is the main follow-up.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "still-open turn-ending reply labels",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "No user action is pending.",
+    "input_rationale": "Final report for a finished, committed evaluation fix. No still-open item; the match is 'still opened' inside the cause analysis. The shipped-policy-pack follow-up is informational, with no question or decision asked.",
+    "label": "none",
+    "kind": null,
+    "request_positions": [],
+    "user_position": 21
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-02T01:56:31.289Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-02T02:37:29.183Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

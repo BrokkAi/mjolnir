@@ -1,0 +1,251 @@
+{
+  "id": "L2907",
+  "title": "structured child permission answer",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "1e93fe2a764cc9f4234acd2a71795ba9",
+    "session_title": "mjolnir via claude3",
+    "reply_position": 1344,
+    "captured_at": "2026-11-06T14:24:09.512Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "how should we fix #1451?"
+        },
+        {
+          "id": "agent:54",
+          "role": "assistant",
+          "text": "I'm reading the original design for forwarding child questions (commit 8421a0695). Next I'll check why this child's form stayed open."
+        },
+        {
+          "id": "agent:73",
+          "role": "assistant",
+          "text": "Now let me check the child's actual events in the live store."
+        },
+        {
+          "id": "agent:137",
+          "role": "assistant",
+          "text": "The worker code at HEAD cancels the form when the managed-child marker is set. Let me check whether this child's launch file actually had the marker."
+        },
+        {
+          "id": "agent:169",
+          "role": "assistant",
+          "text": "The child's worker files are gone, so I'll check the daemon log and session row instead."
+        },
+        {
+          "id": "agent:183",
+          "role": "assistant",
+          "text": "The worker was 2.68.0 and started fresh at 12:24:19, so it should have had the marker. Checking how the controller decides `subagent.is_some()` at launch."
+        },
+        {
+          "id": "agent:216",
+          "role": "assistant",
+          "text": "Only one code path makes `tool-permission-` ids, and it has the check. But `goal.rs` builds launch specs with `managed_subagent: false` hard-coded. Let me look."
+        },
+        {
+          "id": "agent:323",
+          "role": "assistant",
+          "text": "Still looking: the code in 2.68.0 should have cancelled the form, so I'm checking whether the worker strips the marker from its config before the ACP launch reads it."
+        },
+        {
+          "id": "agent:349",
+          "role": "assistant",
+          "text": "The code looks correct, so I'll check the live store: do other children's questions get cancelled at once, as designed?"
+        },
+        {
+          "id": "user:445",
+          "role": "user",
+          "text": "potentially relevant: when i clicked through to the subagent it was still waiting in elicitation mode"
+        },
+        {
+          "id": "user:474",
+          "role": "user",
+          "text": "with its multiple choice options"
+        },
+        {
+          "id": "agent:490",
+          "role": "assistant",
+          "text": "The marker is in the launch file. Let me look at worker logs of managed children for permission handling."
+        },
+        {
+          "id": "agent:505",
+          "role": "assistant",
+          "text": "Logs don't cover it. Let me look at the child's transcript items around the permission request to see what Claude did."
+        },
+        {
+          "id": "agent:564",
+          "role": "assistant",
+          "text": "There it is. Line 1578 overwrites `config.environment` with the filtered environment that had the marker removed at 1541."
+        },
+        {
+          "id": "agent:586",
+          "role": "assistant",
+          "text": "Your note fits what I found. The form was never closed, so the child sat in elicitation mode with its choices until you answered.\n\n**Cause (confirmed):** the child's worker loses track of the fact that it is a child before it starts the ACP runtime.\n\n- `mj-worker/src/worker_runtime/unix.rs:1541` removes the `MJ_SESSION_MANAGED_SUBAGENT` marker from the harness environment, so the harness never sees it. That line came from f9a3130cf (Oct 7).\n- `unix.rs:1578` then copies that filtered environment back into `config.environment`.\n- `unix.rs:318`, in `build_acp_setup`, runs after that copy. It reads `config.is_managed_subagent()`, gets `false`, and passes it to `LaunchSpec.managed_subagent`.\n- So the \"child\" checks in `drive.rs` that cancel the form (added in 8421a0695, Oct 23) never trigger. The worker opens a normal form that waits for a person.\n- Handback still works because `subagent_role` is computed earlier, at `unix.rs:1441`, before the copy. That is why the child looked correctly set up.\n\nThe evidence:\n- The child's launch file had the marker. Its handback call succeeded, which requires the marker in the launch config.\n- `tool-permission-1` opened at 13:08:13. The person accepted it at 13:14:19. The Bash tool call (transcript item 740) was blocked for that whole time.\n- In the live store, no child question since the feature shipped has an immediate `cancel`. Every one was resolved by `away`, `cleared`, or a person. So the forwarding feature has never worked in a real session, for Codex children either.\n- The test added in 8421a0695 (`managed_children_cancel_questions_and_permissions_at_the_original_responder`, `plan_tests.rs`) sets `LaunchSpec.managed_subagent = true` directly. It skips the launch-config step where the value is lost, so it could not catch this.\n\n**Recommended fix:**\n1. Read `config.is_managed_subagent()` once, before line 1578, next to where `subagent_role` is computed. Pass it through `AcpPreparationSetup` the same way `subagent_role` already travels, and use it at line 318. This keeps the marker out of the harness environment, which f9a3130cf intended.\n   - The other choice is to put the marker back into `config.environment` after line 1578. I advise against it, because later steps (`unix.rs:1604–1673`) build harness environments from `config.environment`, and the marker could reach the harness.\n2. Add a regression test that starts from a `WorkerLaunchConfig` with the marker and checks that the resulting `LaunchSpec` has `managed_subagent == true`. A scripted permission request that comes back cancelled would be even better. Either way, the test must go through the launch-config path, not set the spec field by hand.\n3. Optional follow-ups from the issue:\n   - The forwarded text says \"Its question form is already closed.\" That is true once the fix ships, but still false for questions found by `reconcile_pending_subagent_questions`, which handles older workers that keep forms open. That path could use different wording.\n   - `send_message` reporting \"delivered\" is less of a problem after the fix, because the child is no longer blocked inside the request.\n\n`★ Insight ─────────────────────────────────────`\n- `WorkerLaunchConfig.environment` is used for two things: it holds the private markers that tell the worker it is a child, and it is the environment passed to the harness. Line 1578 overwrites it with the harness version. Any check on `config` after that line answers the wrong question. Only `unix.rs:318` hits this in a way that matters now: the check at line 1793 also tests `handback_tool`, and line 1437 has already cleared the review trigger for children.\n- The live store showed the scale of the problem. One stuck child could have been a race. Zero immediate cancels over two weeks of children meant the feature never worked.\n`─────────────────────────────────────────────────`\n\nDo you want me to make the fix and the regression test?"
+        },
+        {
+          "id": "user:870",
+          "role": "user",
+          "text": "yes. and read AGENTS.md first, its directives are binding"
+        },
+        {
+          "id": "agent:909",
+          "role": "assistant",
+          "text": "Lines 1440 and 1797 also ask the same question of `config`. Line 1797 runs after the overwrite and sees `false` for children, so I'll make them use the one value."
+        },
+        {
+          "id": "agent:928",
+          "role": "assistant",
+          "text": "Now a regression test that goes through the real launch path. I'm looking for the existing worker-level harnesses."
+        },
+        {
+          "id": "agent:1013",
+          "role": "assistant",
+          "text": "First I'll run it against the unfixed code, to confirm the test catches the bug."
+        },
+        {
+          "id": "agent:1028",
+          "role": "assistant",
+          "text": "The test fails without the fix. Now the same test with the fix:"
+        },
+        {
+          "id": "agent:1040",
+          "role": "assistant",
+          "text": "Next, formatting, clippy on the touched crate, and the existing tests that cover this code."
+        },
+        {
+          "id": "agent:1057",
+          "role": "assistant",
+          "text": "Clippy is clean. I'll apply rustfmt, then run the related tests with filters after `--`, since libtest takes several filters."
+        },
+        {
+          "id": "agent:1076",
+          "role": "assistant",
+          "text": "All checks pass. I'll commit only my two files, then request the pre-push review."
+        },
+        {
+          "id": "agent:1093",
+          "role": "assistant",
+          "text": "The fix is committed locally as `91c433d7f` and not pushed yet. The pre-push review is running, and the verdict will arrive as a Mjolnir message.\n\n**What changed**\n- `mj-worker/src/worker_runtime/unix.rs` now reads `is_managed_subagent()` once, at the start of `prepare_and_start_harness`. It passes that value through `AcpPreparationSetup.managed_subagent` to the ACP launch spec.\n- The review-trigger reset and the review-gate check used to ask the same question of the launch config. Those two checks now use the same value, so one place decides it.\n- The marker stays out of the harness environment, as before.\n\n**Test**\n- `mj-worker/tests/managed_child_questions.rs` starts a real `mj-worker` process from a launch file with the marker. A scripted bridge requests permission, and the test checks that the bridge receives a `cancelled` answer.\n- It fails on the unfixed code, with the message \"the permission request stayed open\", and passes with the fix.\n- It carries a `Hard-won: #1451` comment, as AGENTS.md requires.\n\n**Validation**\n- `cargo fmt --all --check` passes.\n- `cargo clippy -p brokk-mj-worker --all-targets -- -D warnings` passes.\n- The filtered lib tests (`managed`, `review_gate`, `subagent`) pass: 65 tests.\n- I have not run the full workspace clippy or the full suites. That follows your preference for targeted tests. Say so if you want them before the push.\n\n**Still open**\n- Children already running an affected worker, such as any started before this build, keep the old behavior until their workers are replaced. This build's existing `reconcile_pending_subagent_questions` sweep (the older-worker recovery path from the original design) forwards their pending questions to the parent. The forwarded text still says \"Its question form is already closed\", which is false for those forms. I did not change the wording.\n- After the push, I'll comment on #1451, close it, and remove the `agent-in-progress` label.\n\n`★ Insight ─────────────────────────────────────`\n- The earlier unit test (`managed_children_cancel_questions_and_permissions_at_the_original_responder`) set `LaunchSpec.managed_subagent = true` by hand. It tested the ACP responder and skipped the step where the value was lost. The new test starts from the launch file, so it covers that step.\n- The two predicate sites differed in effect. The review-trigger reset (line 1440) ran before the overwrite and worked. The review-gate check (line 1797) ran after it and read `false` for children. It was masked by `handback_tool` and the earlier trigger reset, so it did no visible harm.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "agent:1291",
+          "role": "assistant",
+          "text": "The finding is correct, and it points at a design problem in the shipped feature that my fix would expose. I can't settle it without you."
+        },
+        {
+          "id": "user:1308",
+          "role": "user",
+          "text": "With #1451 fixed, a child's tool-permission request is cancelled at once and the parent can only reply with a plain message. That message cannot grant the permission, so a retry is cancelled again and the child is stuck. How should a parent grant a child's tool permission?\n\nPermissions: i want to leave open, answer w send_message, but can we make it less fragile than trying to parse a string?"
+        },
+        {
+          "id": "agent:1311",
+          "role": "assistant",
+          "text": "You want the form kept open, answered through `send_message`, but without string parsing. I'm looking at how `send_message` is defined and how a parent's message reaches a child's worker."
+        },
+        {
+          "id": "agent:1344",
+          "role": "assistant",
+          "text": "Yes. An optional structured argument on `send_message` avoids parsing text. I have not changed any code yet, because this adds a field to the worker-to-daemon message format. The fix commit `91c433d7f` is still local and unpushed, and the P1 finding is still open.\n\n**Proposed design**\n\n1. **Worker (`mj-worker/src/acp/drive.rs`).** For a managed child, a tool-permission request stays open, registered the same way as for a top-level session. Only elicitation questions keep the cancel-and-forward path, because a plain message does answer those. The daemon already forwards the `input_required` event to the parent (`forward_subagent_question_with`), so the parent still hears about the request without any change there.\n2. **Message to the parent.** It names the request id and the exact choices the form offers. The worker alone decides these, as today in `permission_choices`.\n3. **Structured answer.** `send_message` gets an optional `answer` object. It carries the request id and a `choice`, which must be one of the option ids listed in the message to the parent. The text `message` still reaches the child as an ordinary message. Nothing parses the text.\n4. **Daemon.** It checks the choice against the form's offered options. An unknown choice or a stale request id returns an error that lists the valid options. It does not fall back or guess. A valid choice goes to the child's worker through the existing `ElicitationResponse::Accept` relay command, the same command the TUI uses for a person.\n5. **No dead end.** The form stays open, so a person can still approve it in the child's session if the parent never answers or ends.\n\n**Cost and risks**\n- The wire change needs care: `SubagentToolAction::SendMessage` (`mj-core/src/subagent.rs`, with its separate `SubagentToolActionWire`) is shared between worker and daemon versions. The new field must be optional and default to absent, so older workers and daemons keep working. AGENTS.md requires that.\n- The `send_message` tool description grows a little. It is inside a size budget (the 1,800-byte limit from the earlier plan, if it applies here). I would check that.\n- My new test changes. The bridge would see no answer until the daemon-side answer arrives, so the test has to cover both stages. I would add a controller test for the choice check.\n- This reverses part of the \"form closed immediately\" design from 8421a0695 (for permissions only), so I'll update the file-based memory note when it lands.\n\nDo you want me to build this? I would then fix the P1 finding with it, commit, and call `request_review` again."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "With #1451 fixed, a child's tool-permission request is cancelled at once and the parent can only reply with a plain message. That message cannot grant the permission, so a retry is cancelled again and the child is stuck. How should a parent grant a child's tool permission?\n\nPermissions: i want to leave open, answer w send_message, but can we make it less fragile than trying to parse a string?",
+    "assistant_text_tail": "nswer those. The daemon already forwards the `input_required` event to the parent (`forward_subagent_question_with`), so the parent still hears about the request without any change there.\n2. **Message to the parent.** It names the request id and the exact choices the form offers. The worker alone decides these, as today in `permission_choices`.\n3. **Structured answer.** `send_message` gets an optional `answer` object. It carries the request id and a `choice`, which must be one of the option ids listed in the message to the parent. The text `message` still reaches the child as an ordinary message. Nothing parses the text.\n4. **Daemon.** It checks the choice against the form's offered options. An unknown choice or a stale request id returns an error that lists the valid options. It does not fall back or guess. A valid choice goes to the child's worker through the existing `ElicitationResponse::Accept` relay command, the same command the TUI uses for a person.\n5. **No dead end.** The form stays open, so a person can still approve it in the child's session if the parent never answers or ends.\n\n**Cost and risks**\n- The wire change needs care: `SubagentToolAction::SendMessage` (`mj-core/src/subagent.rs`, with its separate `SubagentToolActionWire`) is shared between worker and daemon versions. The new field must be optional and default to absent, so older workers and daemons keep working. AGENTS.md requires that.\n- The `send_message` tool description grows a little. It is inside a size budget (the 1,800-byte limit from the earlier plan, if it applies here). I would check that.\n- My new test changes. The bridge would see no answer until the daemon-side answer arrives, so the test has to cover both stages. I would add a controller test for the choice check.\n- This reverses part of the \"form closed immediately\" design from 8421a0695 (for permissions only), so I'll update the file-based memory note when it lands.\n\nDo you want me to build this? I would then fix the P1 finding with it, commit, and call `request_review` again.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      1344
+    ],
+    "user_position": 1308,
+    "input_rationale": "The agent proposes a structured send_message answer field with a wire-format change and waits for the user's go-ahead. The user rejected it next ('ugh no').",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T14:27:10.477Z",
+        "kind": "user",
+        "text": "ugh no  what else could we do"
+      },
+      {
+        "at": "2026-11-06T14:27:21.655Z",
+        "kind": "agent",
+        "text": "Here are four other ways to fix it. Each one avoids the new `send_message` field.  1. **Permissions go to the person, questions go to the parent.** This is my recommendation.    - In `drive.rs`, a man"
+      },
+      {
+        "at": "2026-11-06T14:31:30.635Z",
+        "kind": "user",
+        "text": "> it could inherit the parent's policy  i thought that's what we're doing, how does it actually work today"
+      },
+      {
+        "at": "2026-11-06T14:32:05.563Z",
+        "kind": "agent",
+        "text": "`launch.rs:957` takes the policy from `target.execution_policy`. I'll trace where a child's target comes from."
+      },
+      {
+        "at": "2026-11-06T14:32:11.709Z",
+        "kind": "agent",
+        "text": "So `execution_policy` is a property of the target template. Now I'll check which target a spawned child gets."
+      },
+      {
+        "at": "2026-11-06T14:32:33.032Z",
+        "kind": "agent",
+        "text": "You are right, children already inherit the parent's policy. I misread the code earlier. The inheritance is a copy made at spawn, which is why I missed it.  **How it works today** - A session's approv"
+      }
+    ]
+  }
+}

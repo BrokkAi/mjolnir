@@ -1,0 +1,423 @@
+{
+  "id": "L2104",
+  "title": "Python rule gaps still-open label",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "31e44e629cb2bbaa225a83cd820af443",
+    "session_title": "bifrost via claude3",
+    "reply_position": 13703,
+    "captured_at": "2026-10-07T21:01:50.689Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "/goal close the gaps to enable effective python rules in #4321. if you disagree with a ticket's premise, or if it turns out to be based on incorrect or obsolete assumptions, comment, mark escalated, and move on. use concurrent subagents where that is useful."
+        },
+        {
+          "id": "user:458",
+          "role": "user",
+          "text": "We can just let the agents have a free for all, but if we find the agents mostly waiting for cargo, let's experiment with tasking one agent to own the build/test queue while you supervise and merge"
+        },
+        {
+          "id": "user:1212",
+          "role": "user",
+          "text": "you can bypass the queue with MBX_SCHEDULER=0 if you think you're being unnecessarily throttled"
+        },
+        {
+          "id": "user:5465",
+          "role": "user",
+          "text": "Yes"
+        },
+        {
+          "id": "user:8996",
+          "role": "user",
+          "text": "did you pull the #4438 directives yet?"
+        },
+        {
+          "id": "agent:9176",
+          "role": "assistant",
+          "text": "The build-activity sampler is left over from the earlier build-queue experiment and is no longer needed, so I'll stop it."
+        },
+        {
+          "id": "agent:9312",
+          "role": "assistant",
+          "text": "The #4340 child failed with the same capacity error. I'll check what it left in its worktree."
+        },
+        {
+          "id": "agent:9325",
+          "role": "assistant",
+          "text": "The lane changed the golden file for re-export routes. Before I hand this over, I need to know whether that change hides the regression or reflects a real fix."
+        },
+        {
+          "id": "agent:9593",
+          "role": "assistant",
+          "text": "The #4340 child failed again with the capacity error. I'll check what it committed before starting another replacement."
+        },
+        {
+          "id": "agent:9607",
+          "role": "assistant",
+          "text": "Slices 1 and 2 and the mixin fix are committed (`39eb4c05aa`). Slice 3 is uncommitted. I'll start a replacement child for slice 3 and, in parallel, gate and land the committed slices myself."
+        },
+        {
+          "id": "agent:9689",
+          "role": "assistant",
+          "text": "The #4340 slices passed the gate, but origin moved by 9 commits in the meantime. I'm merging those and running a compile check before pushing."
+        },
+        {
+          "id": "agent:9925",
+          "role": "assistant",
+          "text": "Pushed `1ec506d411`. All three #4340 rules are now on master. I'll get the exact test names so I can close the issue with evidence."
+        },
+        {
+          "id": "agent:9945",
+          "role": "assistant",
+          "text": "My closing comment made a claim about `sys.exit` pruning that I haven't checked against the code. I'll check it now."
+        },
+        {
+          "id": "agent:9962",
+          "role": "assistant",
+          "text": "The code does not prune edges after never-returning calls or after `sys.exit`. Neither of those CodeQL rules is implemented, so my comment overstated what landed. I'll correct it."
+        },
+        {
+          "id": "agent:10071",
+          "role": "assistant",
+          "text": "While those run, I'll file the stdlib declaration request in `BrokkAi/bifrost-packs`, where the new AGENTS.md rule sends pack content. First I'll read the lane's request notes."
+        },
+        {
+          "id": "agent:10175",
+          "role": "assistant",
+          "text": "The pruning follow-up passes on the merged tree: the compile check and all 19 rule-fact tests. Origin moved again before the push, so I'll merge once more and push."
+        },
+        {
+          "id": "agent:10191",
+          "role": "assistant",
+          "text": "Pushed `4d7b0bb724`. The destructor metric now implements all three of CodeQL's pruning rules. I'll update the closed #4340 comment so its limits section is accurate."
+        },
+        {
+          "id": "agent:10208",
+          "role": "assistant",
+          "text": "I'll close the two finished children. While the #4411 soundness fixes run, I'll look at the nine pins that remain, to see which are independent of the dispatch code and can run in a parallel lane."
+        },
+        {
+          "id": "agent:10280",
+          "role": "assistant",
+          "text": "I'll update the program memory with today's progress while both lanes work."
+        },
+        {
+          "id": "agent:10415",
+          "role": "assistant",
+          "text": "I'm landing the #4411 soundness fixes. Merging origin produced one conflict, in the workspace dispatch oracle, which I'm looking at now."
+        },
+        {
+          "id": "agent:10473",
+          "role": "assistant",
+          "text": "The lane resolved the merge (`d1b729eeb8`). It kept the C# closure and all three Python closures as separate paths. Every gate passes, including the C# policy tests (61/61). Pushing:"
+        },
+        {
+          "id": "agent:10496",
+          "role": "assistant",
+          "text": "Pushed `7cac9ca3e4`. #4411 is on master with the soundness fixes. I'll close #4411 with the evidence, then plan the next wave."
+        },
+        {
+          "id": "agent:10738",
+          "role": "assistant",
+          "text": "The audit mentions uncommitted changes to `csmi/identity.rs` and `csmi/import.rs` in the main checkout. Lanes must never write there. I'll check what those changes are and where they came from."
+        },
+        {
+          "id": "agent:10787",
+          "role": "assistant",
+          "text": "Reverted. Next I'll read the audit's tables for the close candidates (#4336, #4338) and for #4331, where no rule is proven yet."
+        },
+        {
+          "id": "agent:10984",
+          "role": "assistant",
+          "text": "No numbering clash: origin is still at migration 0019 and schema v15. The epoch conflict is the usual one, and I'll resolve it to the union of both sides' salts. Now the two test files:"
+        },
+        {
+          "id": "agent:11158",
+          "role": "assistant",
+          "text": "The failure also happens on plain origin (`79782dad02`), so the factory-origin change didn't cause it. I'll wait for the policy step of the gate and then push."
+        },
+        {
+          "id": "agent:11395",
+          "role": "assistant",
+          "text": "py-shadow-default adds no policy failures beyond the 13 known ones. But `code_query_tutorials::python_tutorial` fails after the merge, even though it passed on the lane's own tree. I'll look at why."
+        },
+        {
+          "id": "agent:11445",
+          "role": "assistant",
+          "text": "Only one `target_id` hash differs. I'll check the commit just before my factory-origin push (`6036d04130`) to see whether my push or an origin commit changed it."
+        },
+        {
+          "id": "agent:11490",
+          "role": "assistant",
+          "text": "While that runs, I'll push py-shadow-default. Its merged tree shows only failures that also occur on plain origin."
+        },
+        {
+          "id": "agent:11504",
+          "role": "assistant",
+          "text": "Pushed `4507a8f2fe`, which completes the last open rule in each of #4322 and #4323. I'll find the test file paths and close both tickets with the corrected premise."
+        },
+        {
+          "id": "agent:11875",
+          "role": "assistant",
+          "text": "The crypto lane's merged tree passes the gate: policy filter 199/199. The one semantic failure is the known origin one, so I'll push."
+        },
+        {
+          "id": "agent:11922",
+          "role": "assistant",
+          "text": "Origin master itself doesn't compile at `f8112de829`; another session pushed a broken merge. I'll see whether the fix is trivial."
+        },
+        {
+          "id": "agent:12027",
+          "role": "assistant",
+          "text": "Origin is still broken at the same commit, and nothing newer has landed. A master that doesn't compile blocks every session, so I'll look at how big the fix is."
+        },
+        {
+          "id": "user:12084",
+          "role": "user",
+          "text": "master breakage you noticed is repaired (there are others but that's the big\none)"
+        },
+        {
+          "id": "agent:12089",
+          "role": "assistant",
+          "text": "Thanks. I'll merge the crypto and SSRF lanes onto the repaired master, check that they compile, run the Python policy filter, and push."
+        },
+        {
+          "id": "agent:12121",
+          "role": "assistant",
+          "text": "Policy filter 203/203. The one semantic failure is the same `value_flow_client` test that fails on origin, so I'm pushing."
+        },
+        {
+          "id": "agent:12136",
+          "role": "assistant",
+          "text": "Local `master` has diverged from the tree I gated, so I'll find out what is on it."
+        },
+        {
+          "id": "agent:12198",
+          "role": "assistant",
+          "text": "`05608a5804` itself is not in `915a9e8fba`, but both of its parents are: the crypto commit and an origin commit. Dropping that merge commit therefore loses nothing."
+        },
+        {
+          "id": "agent:12215",
+          "role": "assistant",
+          "text": "Origin moved again. I'll merge the new commits and push straight away."
+        },
+        {
+          "id": "agent:12297",
+          "role": "assistant",
+          "text": "PR #4527 is open and ready, so the queue will land it. I'll tell the remaining lane about its second stray write to the main checkout, and record the new landing process in memory."
+        },
+        {
+          "id": "agent:12335",
+          "role": "assistant",
+          "text": "CI on PR #4527 reports two failures: `quick policy` and `PR verification`. I'll check whether these are caused by the PR or also fail on other PRs."
+        },
+        {
+          "id": "agent:12357",
+          "role": "assistant",
+          "text": "The `quick policy` failure is the open-core path classification check: some new paths have no public/private classification. I'll run the check locally on the branch to list every unclassified path."
+        },
+        {
+          "id": "agent:12481",
+          "role": "assistant",
+          "text": "My script treated the `# mode decision path` column header as a data row. I'll redo the edit from the committed files and keep every `#` line in the header."
+        },
+        {
+          "id": "agent:12498",
+          "role": "assistant",
+          "text": "The five unclassified paths are resolved. What remains are 53 paths that policy already classifies, for which regenerating the inventory is the documented fix."
+        },
+        {
+          "id": "agent:12518",
+          "role": "assistant",
+          "text": "The check passes. I'll commit this on the PR branch and merge the latest origin, as the new process requires, then push."
+        },
+        {
+          "id": "agent:12537",
+          "role": "assistant",
+          "text": "The PR comment has a typo (\"2d-classification\"). I'll correct it."
+        },
+        {
+          "id": "agent:12557",
+          "role": "assistant",
+          "text": "The return-class-set generalization is committed (`03df04e77b`). But the Python filter on its tree shows 10 failures, and I need to know whether those are inherited from its base or new."
+        },
+        {
+          "id": "agent:12729",
+          "role": "assistant",
+          "text": "All 16 failures also occur on master, so the PR causes none of them. Whether the queue accepts a PR while master has baseline failures is up to MergeMarshall, so I'll check the PR's queue status."
+        },
+        {
+          "id": "agent:12817",
+          "role": "assistant",
+          "text": "The same 13 baseline failures, and no new ones. I'll open the stacked PR."
+        },
+        {
+          "id": "agent:12828",
+          "role": "assistant",
+          "text": "Opened PR #4545, stacked on #4527. Closing the finished children:"
+        },
+        {
+          "id": "agent:12852",
+          "role": "assistant",
+          "text": "The Python engine work for #4321 is finished, but its last two PRs can't land yet. Both are open and blocked: master now accepts changes only through the MergeMarshall queue (#4507), and the queue hasn't posted a verdict on either. Nothing has merged since #4516.\n\n**Waiting in the queue**\n- **#4527:**\n  - #4342: weak crypto key, weak cryptographic algorithm, explicit insecure SSL/TLS constants, and PAM.\n  - #4331: full and partial SSRF, using a new Python fact that records the constant URL prefix before each tainted part of a built-up URL string.\n  - A fix to the open-core path classification check. That check was failing on master too, and it stops CI before the Rust test suites run.\n- **#4545** (stacked on #4527): factory calls can now declare a closed set of exact return classes. For example, `open()` returns one of five `io` classes, so `f.write(...)` resolves to all five `write` methods.\n\n**Remaining CI failures are master's, not ours.** All 16 failures on #4527 also fail when run locally on master `d94104b1e0`: 13 cross-language goldens and tutorials (C#, Rust, JS/TS, PHP, Python, `language_reach_in_gate`), two Rust reverse-inventory tests, and one value-flow test. These are probably the \"others\" you mentioned. If the queue needs a green CI run, neither PR can land until master is fixed.\n\n**Already on master**\n- #4411: exact method calls on objects built by a direct constructor call. An independent review found five soundness bugs before it landed, and all five were fixed.\n- The four #4340 rules: missing-docstring, useless-class, overly-complex-delete, and all three CodeQL rules for pruning unlikely edges.\n- `attribute-shadows-method` and `modification-of-default-value`. Neither needed #3745, contrary to the earlier comments.\n- Factory calls can declare that their result is exactly a given class.\n- Inline tuple arguments now get the same element facts as assigned tuples, which fixed socket `bind` detection.\n- Test expectations updated after #4499.\n\nClosed: #4322, #4323, #4336, #4340, #4411.\n\n**Wrong blockers.** Several tickets named blockers that didn't apply, and each rule was implemented without them:\n- #3658 (lxml): the real causes were two runtime-binding bugs.\n- #3745 (#4322/#4323): no absent-member work was needed.\n- Rust tickets #4312 and #4314 (SSRF, crypto): Python needed neither.\n\n**What remains is mostly pack content, which by the new AGENTS.md rule is authored outside this repository.** The NoSQL, LDAP, Flask and logging cases are proven only with test fixtures. The real packs need entries such as the PyMongo `__getitem__` chain, `ldap.initialize`, `make_response`, `getLogger`, and the `open()` return set. I filed those as BrokkAi/bifrost-packs#37 and BrokkAi/bifrost-premium-packs#38.\n\n**Needs a decision from others**\n- **Two #3463 tests vs #4499:** #4499 requires a summary to be explicitly accepted before it can support a definite finding, which conflicts with those tests' zero-configuration setup. I pinned the two tests and set out three options on PR #4499.\n- **TLS option state:** checking `context.options` across several statements stays with #3800/#3801, and is reported as typed incomplete until then.\n- **Editor grammar:** the RQL highlighting grammar in BrokkAi/bifrost-lsp lacks 281 of the 486 RQL form labels, including all the Python ones. I haven't touched it.\n\nOnce the queue lands the PRs, I'll close #4324, #4327, #4331, #4338 and #4342 with their evidence."
+        },
+        {
+          "id": "user:13105",
+          "role": "user",
+          "text": "great. how about the actual policy work?"
+        },
+        {
+          "id": "agent:13107",
+          "role": "assistant",
+          "text": "I'll check what Python policy content exists today in the engine test fixtures and in the pack repositories, so the answer rests on facts."
+        },
+        {
+          "id": "agent:13131",
+          "role": "assistant",
+          "text": "None of the actual Python CodeQL-parity policies exist yet. All the work so far has been engine work: making each rule expressible in RQL and proving it with test policies. No product rule has been written.\n\n**What exists**\n- **27 test-only policies** in `tests/fixtures/policies/python/`. They exercise engine features, so they are minimal and not product quality.\n- **172 draft `.rqlp` files** from the campaign under `.agents/records/codeql-parity-2026-10/python/verification/`. Most were written before the new facts existed, so they would mostly need rewriting against the new RQL forms. Their positive and near-miss fixtures can be reused as test cases.\n- **BrokkAi/bifrost-packs** has a few older Python rules (absent-member, process-input-to-`os.system`, declared storage, network effects) but no CodeQL-parity Python pack.\n- **The premium packs repository** has only Python research notes.\n- **A precedent to copy:** \"Add public C# CodeQL parity rules and BCL authoring model\" created `rules/bifrost.csharp-codeql-quality/` in bifrost-packs, with a manifest and one `.rqlp` per rule.\n\n**Constraints**\n- Since #4438, rules are authored in the pack repositories, not in bifrost-dev.\n- Placement follows `release-and-open-core.md`:\n  - rules that use only the language and the standard library go in bifrost-packs;\n  - rules that depend on third-party library models (Flask, Django, Requests, PyMongo, LDAP, lxml, Jinja, Paramiko, `cryptography`) go in the premium repository. AGENTS.md says \"never publish premium content by inference\", so any exception needs a maintainer's classification decision.\n- Many rules depend on facts in #4527 and #4545, which haven't landed. The packs also gate on engine versions, so those rules can't ship until a released engine contains the facts.\n- The third-party rules also need the model content from bifrost-packs#37 and premium-packs#38. Without it they stay inconclusive on real code.\n\n**Recommendation:** run an authoring campaign in the pack repositories, in three groups:\n1. **`bifrost.python-codeql-quality` in bifrost-packs:** structural and quality rules that are already on master. Examples are MRO and hierarchy, bindings and unused variables, comparisons and `is`, raise and exceptions, format strings, iterators, call arity, docstrings and useless classes, destructor complexity, attribute shadowing, and mutable default values. This is the largest group, with no third-party dependencies, so it can start now.\n2. **Stdlib security rules in bifrost-packs:** socket `bind`, hardcoded credentials (HMAC, SMTP, FTP), ReDoS and regex rules, insecure SSL protocols, URL substring sanitization, and full and partial SSRF over `urllib`. Some need #4527 and #4545 to land first.\n3. **Third-party security rules in premium:** web sources and responses, cookies and CSRF, NoSQL, LDAP, XXE, template injection, Paramiko, weak crypto, and SSRF over Requests. These follow the model content in #38.\n\nEach rule would come from its campaign fixture, be rewritten against the current RQL, and be checked against a pinned engine build, with one positive case and the CodeQL near misses. The work can be split across children by rule group, as the engine lanes were.\n\nShould I start with group 1 in bifrost-packs? And do you agree that groups 2 and 3 are placed public and premium as above?"
+        },
+        {
+          "id": "user:13353",
+          "role": "user",
+          "text": "172 draft .rqlp files from the campaign under .agents/records/codeql-parity-2026-10/python/verification/\n\nthe fuck, we did a big campaign and then didn't generate actual rules?"
+        },
+        {
+          "id": "agent:13362",
+          "role": "assistant",
+          "text": "Yes, that's right, and I should have flagged it in my summary instead of leaving it for you to find.\n\n**What each phase was scoped to do**\n- **The campaign (2026-10-02/03) was a gap analysis.** For each of the 187 Python CodeQL rules it built a fixture and a probe policy and ran the probe on the 0.12.0 release. The probe's job was to show whether Bifrost could express the rule; it was never meant to be a rule to ship. The output was verdict rows, `disposition.tsv`, and the PY01-PY22 tickets. Many probes were written against facts that didn't exist yet, so they fail on purpose, use stand-ins, or approximate the rule. That's why I call them drafts.\n- **This program's goal was \"close the gaps to enable effective python rules.\"** I read that as the engine gaps the campaign found, and that's what the lanes did. Writing the rules was never a step in either plan. Each issue comment I posted said \"Pack rules are not yet authored\", but I never raised it with you as unfinished work.\n\n**What carries over**\n- Each probe's positive and near-miss fixture works as test data for the real rule.\n- Each verdict report names the CodeQL query and the behavior it needs.\n- The engine facts the rules need are now on master, or in #4527 and #4545.\n\nSo the remaining step is to rewrite each probe against the current RQL forms, validate it on a pinned engine build, and publish it in a pack. That is real work, though much less than the campaign itself. There was a precedent I should have followed: the Rust mined-rules campaign ended with a rule PR to bifrost-packs.\n\nIf you want, I'll start the authoring now, using the grouping from my last message: the quality pack first in bifrost-packs, then the stdlib security rules, then the third-party rules in premium."
+        },
+        {
+          "id": "user:13496",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:13506",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:13509",
+          "role": "assistant",
+          "text": "I checked `list_agents`: no child is running, and every child is either parked or stopped. The notification refers to children I had already collected (the CI investigation for #4527 and the return-class-set lane). There are no new reports.\n\nNothing is in progress. Two things are waiting:\n- **PRs #4527 and #4545:** open and blocked, waiting on the MergeMarshall queue and the master baseline failures.\n- **Your decision on the policy authoring:** whether to start group 1, the Python quality pack in bifrost-packs, and whether you agree that groups 2 and 3 are placed public and premium."
+        },
+        {
+          "id": "user:13551",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "agent:13553",
+          "role": "assistant",
+          "text": "The notification keeps repeating, so I'll call `wait` on the most recently finished children to clear it."
+        },
+        {
+          "id": "agent:13703",
+          "role": "assistant",
+          "text": "There were no new reports. The `wait` call returned 37 old handbacks, which I read in full with `jq`. They came from the triage children, the engine lanes, and the pack lanes of earlier waves, and I had already collected all of them. I've now closed all 37, so the repeated \"sub-agents finished\" notifications should stop.\n\nNothing is running now:\n- **PRs #4527 and #4545:** still open and blocked, waiting on the MergeMarshall queue and the master baseline failures.\n- **Your decision on the Python rule authoring:** whether to start group 1, the quality pack in bifrost-packs, and whether you agree that groups 2 and 3 are placed public and premium."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "assistant_text_tail": "There were no new reports. The `wait` call returned 37 old handbacks, which I read in full with `jq`. They came from the triage children, the engine lanes, and the pack lanes of earlier waves, and I had already collected all of them. I've now closed all 37, so the repeated \"sub-agents finished\" notifications should stop.\n\nNothing is running now:\n- **PRs #4527 and #4545:** still open and blocked, waiting on the MergeMarshall queue and the master baseline failures.\n- **Your decision on the Python rule authoring:** whether to start group 1, the quality pack in bifrost-packs, and whether you agree that groups 2 and 3 are placed public and premium.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      13362,
+      13509,
+      13703
+    ],
+    "user_position": 13353,
+    "input_rationale": "The user asked about the missing actual rules; the agent explains the gap and holds authoring until the user says go and agrees the public/premium split. Restated in all three replies; user said 'yes, start the authoring'.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-08T00:48:05.904Z",
+        "kind": "user",
+        "text": "the PRs are merged I think. yes, start the authoring. follow the pack authoring guidelines on public/premium pls"
+      },
+      {
+        "at": "2026-10-08T00:48:16.740Z",
+        "kind": "agent",
+        "text": "I'll start by confirming the PRs merged, then read the pack-authoring and public/premium guidance in this repository and in both pack repositories before planning any rules."
+      },
+      {
+        "at": "2026-10-08T00:49:22.579Z",
+        "kind": "agent",
+        "text": "I detached the main checkout by mistake. I'll put it back on `master`, fast-forwarded to origin. The campaign's `disposition.tsv` is gone from the current tree, so I'll get it from git history."
+      },
+      {
+        "at": "2026-10-08T00:50:40.839Z",
+        "kind": "agent",
+        "text": "I'm building the `bifrost` CLI in release mode from master `d1bdc11850`. Every authoring lane will validate against that one pinned binary, which is what the pack guidance asks for."
+      },
+      {
+        "at": "2026-10-08T00:52:19.167Z",
+        "kind": "agent",
+        "text": "The binary is still building. Meanwhile I'll check whether any of the 79 COVERED rules are now authorable too: if their owning issues have closed, they can join the campaign."
+      },
+      {
+        "at": "2026-10-08T01:03:04.682Z",
+        "kind": "agent",
+        "text": "While the binary builds, I'll create a worktree per lane in each pack repository, each on its own branch from `main`. I'll integrate them into one branch per repository before opening PRs."
+      }
+    ]
+  }
+}

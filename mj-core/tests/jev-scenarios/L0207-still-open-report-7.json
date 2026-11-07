@@ -1,0 +1,274 @@
+{
+  "id": "L0207",
+  "title": "Still open report 7",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "3c90bcb1b366a074b457d71ec1c8f295",
+    "session_title": "eval22 3631 grok",
+    "reply_position": 8814,
+    "captured_at": "2026-09-24T20:40:26.917Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:24",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3631: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 971393a3af610f82db95fb8e031da15b0c66bf72\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitations, and any separately actionable findings.\n6. A draft GitHub approach comment, 5 to 12 plain-language sentences.\n\n# Issue\n\nIssue #3631: C++ exact-name lookup does not map the source spelling Top::Only to the canonical nested identity Top$Only\n\nNoted by two lanes while solving #3520 at base 18fa60ee98f92a8dca58ffbd3a5d949adb30ee19, and left out of that ticket's scope.\n\nFor `struct Top { struct Only { int b; }; };`, extraction persists the nested type as `[(\"Top\", Type), (\"Only\", Nested)]`, rendered `Top$Only`. A caller who types the source spelling `Top::Only` gets nothing from `IAnalyzer::definitions`: `parse_symbol_path` splits `::` into two `Unknown` segments, so the exact seek asks parent `Top` / identifier `Only` (which is the stored row), but the final retain compares the request's native rendering against the persisted `Top$Only` and drops it. One lane's kernel probe at the base shows `definitions(\"Top::Only\") = []` beside `definitions(\"Top$Only.b\") = [\"Top$Only.b\"]`.\n\nThis is distinct from closed #2246, which corrected raw `::` in the extracted identity of out-of-line definitions; here the identity is canonical and only the lookup's spelling comparison is at fault. #3520 fixes the `$`-spelled query; the `::`-spelled query for a nested type remains unresolved.\n"
+        },
+        {
+          "id": "agent:208",
+          "role": "assistant",
+          "text": "The checkout is clean and detached at `971393a3af610f82db95fb8e031da15b0c66bf72`. Next I’ll read the architecture and testing guidance, then trace the exact-name lookup that drops `Top::Only`."
+        },
+        {
+          "id": "agent:3410",
+          "role": "assistant",
+          "text": "The nested type is stored as `Top$Only`, while a `Top::Only` query is re-rendered with `.` and then dropped. I’ll add a regression that shows that miss, then fix the lookup."
+        },
+        {
+          "id": "agent:3875",
+          "role": "assistant",
+          "text": "The regression is confirmed: every `::` query returns nothing, while the canonical `$` and `.` names already resolve. I’ll teach exact-name lookup to ask for those persisted kind patterns."
+        },
+        {
+          "id": "agent:6162",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nC++ exact-name lookup now maps a `::` source spelling such as `Top::Only` onto the stored nested identity `Top$Only`. The fix is committed on the detached base.\n\n1. Confirmed cause with structured evidence.\n\nFor `struct Top { struct Only { int b; }; };`, extraction stores `[(\"Top\", Type), (\"Only\", Nested)]`, rendered `Top$Only`. `IAnalyzer::definitions(\"Top::Only\")` goes through `cpp_rendered_name_fq`, which uses `parse_symbol_path`. That splitter does not treat `$` as a separator and records both `::` components as `Unknown`. `Unknown` re-renders with `.`, so the request's native spelling is `Top.Only`. The exact seek still asks parent `Top` / identifier `Only`, which is the stored row, and `unit_matches_requested_name` then compares native spellings and drops `Top$Only`. A second retain, `unit.fq_name() == \"Top::Only\"`, drops anything that survived. This is query-side only. The persisted identity is already canonical, unlike closed #2246. #3520 fixed the `$` spelling and left the `::` spelling alone.\n\nBefore the fix, `cargo nextest run --max-fail 100 -p brokk-bifrost --test suite_issues issue_3631` failed both new tests. Every `::` query was empty, including `Top::Only`, `Top::Only::b`, `ns::Outer::Inner`, `ns::Outer::method`, `absl::base::Foo`, and both `AudioSink::AudioDevice_t` plugins. The canonical controls in the same test (`Top$Only`, `Top$Only.b`, `ns.Outer`, `Buck$Stop`, `Top.Only`) already matched and were not in the mismatch list.\n\n2. Changes and reasons, including full base and final commit hashes.\n\nBase: `971393a3af610f82db95fb8e031da15b0c66bf72`. Final: `509d66c8578806862285167440ed0dd57b1133f4`.\n\n`cpp_colon_source_aliases` builds the kind placements extraction actually stores for a `::`-only spelling: leading packages, one type plus nested types, and an optional terminal member. `CppAnalyzer::definitions` asks each of those as an exact-name query. Those names contain no `Unknown` segment, so the store keeps a hit by structural equality instead of native-spelling comparison. Canonical spellings that already contain `.` or `$`, including `Top$Only` and `base::android.ScopedJavaGlobalRef`, stay on the existing single parse. Persisted facts are unchanged, so the C++ extraction epoch is not bumped.\n\n3. Exact validation commands and results.\n\n`JAVA_HOME` was unset. `BIFROST_PARALLELISM=1` and `RAYON_NUM_THREADS=1`. Nextest kept its own concurrency. `--max-fail 100` was set.\n\n- Before: `cargo nextest run --max-fail 100 -p brokk-bifrost --test suite_issues issue_3631` — 2 failed, as above.\n- After: `cargo nextest run --max-fail 100 -p brokk-bifrost --test suite_issues -E 'test(/issue_3631/) | test(/issue_3520/)'` — 4 passed.\n- `cargo nextest run --max-fail 100 -p brokk-bifrost-cpp colon_source_aliases` — 1 passed.\n- `cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib definitions_reach_nested` — 1 passed.\n- `cargo nextest run --max-fail 100 -p brokk-bifrost --test suite_analyzers -E 'test(/nested_namespace_definition/) | test(/a_reference_resolves_identically/)'` — 2 passed.\n- `cargo clippy --workspace --all-targets --all-features -- -D warnings` — finished with no warnings. Changed Rust files were formatted with `rustfmt --edition 2024`.\n\n4. Before/after evidence on the issue's named repositories or witnesses.\n\nThe issue names no external repository commit. The witnesses are the nested struct and the two-plugin `AudioSink` shape.\n\nBefore: `definitions(\"Top::Only\") = []`, `definitions(\"Top::Only::b\") = []`, `definitions(\"AudioSink::AudioDevice_t\") = []`, while `definitions(\"Top$Only\")` and `definitions(\"Top$Only.b\")` already returned those canonical names.\n\nAfter: `definitions(\"Top::Only\")` is `nested.cpp#Top$Only`, `definitions(\"Top::Only::b\")` is `nested.cpp#Top$Only.b`, and `definitions(\"AudioSink::AudioDevice_t\")` returns both `new_portaudio/main.cpp#AudioSink$AudioDevice_t` and `portaudio/main.cpp#AudioSink$AudioDevice_t`. The same run also resolves `ns::Outer::Inner` to `ns.Outer$Inner`, `ns::Outer::method` to `ns.Outer.method`, and `absl::base::Foo` to `absl::base.Foo`. `definitions(\"Top.Only\")` stays empty, so a dot spelling does not become the nested-class identity.\n\n5. git status --short, limitations, and any separately actionable findings.\n\n`git status --short` is empty. The work is one commit on detached HEAD and was not pushed.\n\n`AnalyzerDefinitionLookup::fqn` still compares the rendered string with the canonical name, so an internal canonical lookup is unchanged. Source `::` queries go through `IAnalyzer::definitions`. A `::`-only query returns every stored kind placement with those segment texts, so a namespace `Top::Only` and a nested class `Top$Only` both come back when both exist. Spellings that already mix `::` with `.` or `$` are not reinterpreted.\n\n6. A draft GitHub approach comment, 5 to 12 plain-language sentences.\n\n`definitions(\"Top::Only\")` was empty even though the nested struct was indexed as `Top$Only`. The lookup split `Top::Only` into two untyped name pieces, and those pieces print back as `Top.Only`. The search did find the nested type under parent `Top` and name `Only`, then threw it away because `Top.Only` is not `Top$Only`. The `$` spelling fixed in #3520 was already working. This change teaches a `::`-only query to also ask for the namespace, nested-type, and member shapes C++ extraction stores. `definitions(\"Top::Only\")` now returns `Top$Only`, and `definitions(\"Top::Only::b\")` returns `Top$Only.b`. The same path covers `ns::Outer::Inner` and `ns::Outer::method`. Names that are already written with `.` or `$`, including `Top$Only` and `base::android.ScopedJavaGlobalRef`, keep their previous answers. Nothing stored in the index changed, so the C++ extraction epoch is the same."
+        },
+        {
+          "id": "user:7767",
+          "role": "user",
+          "text": "Series 22 #3631 landing. The lead accepted your frozen solution `509d66c8578806862285167440ed0dd57b1133f4` (base `971393a3af610f82db95fb8e031da15b0c66bf72`) as the overall winner at 4.5. The judge's acceptance record is `judge-review/lead-acceptance-review.json` for this ticket. The review found your cause statement the only one that names the whole chain (the `Unknown` parse, the `.` re-rendering, the seek pair, the store matcher and the adapter retain), and your fix the one that repairs the seek itself with fully kinded persisted identities, so depth two resolves at the seek. It deducted for the missing inventory row, the unfixed `AnalyzerDefinitionLookup::fqn` route, the enumerated placement set and its extra queries, the missing depth-two and ambiguity tests, and the missing MCP-route test. All but the enumeration are required corrections below; the enumeration is a stated limit. Land it in this same session, with the reconciliation and corrections below. Your initial score, report, bundle and usage stay frozen; everything below is a separate landing continuation and earns no initial credit. The session now runs on a different model and effort for the landing, and may run under a different agent harness; that is expected.\n\nWork without subagents. Read the repository AGENTS.md and its routed architecture, testing and publication guidance again before changing anything. Do not write to any memory directory or MEMORY.md. The harness fails a turn after 10 minutes without activity: never block on one command for more than 5 minutes; run long builds and suites in the background or with a timeout of at most 300000 ms and poll them to completion. Do not end the turn while a gate is still running.\n\n## Merge\n\nConfirm the tree is clean and `HEAD` is `509d66c8578806862285167440ed0dd57b1133f4`. Fetch origin and record the full hashes of `origin/master` and of the frozen solution. The lead last saw `origin/master` at `216b4b826352fabcfd376dde85ff38b18bb615b0` (the lead's local reading in a judge clone after a fetch at 2026-09-24T13:02:49Z, not a fresh fetch); use what you fetch. Master changes since the base that touch the same area: In the lead's reading, master has gained the #3528 abort-route landing (`d4bbca7c81097490ae986913fe0002b94208c3bd` through `43dc1a87d60533fb4b18f3da3872229722e21751`: C#, JavaScript, TypeScript and Python semantics, `tests/suite_bench_policy` modules, a `tests%2Fsuite_bench_policy.tsv` inventory change, one CHANGELOG entry and two `tests/suite_semantic` files), Java lint A5 work (`cec25e718` through `1fd08d41f`), the #3648 landing (merged at `32ded2f634b41d66a950534dd48e2c8a7968376b`, then `216b4b826352fabcfd376dde85ff38b18bb615b0`: Scala adaptation files, the Scala `ADAPTER_VERSION`, `tests/suite_semantic` and a `tests%2Fsuite_semantic.tsv` row) and the #3518 landing (merged at `0bdd62a66bd30968fdb58f1701a95dfea856ce9f`, then `50fb4a0dad7a325d56b64e1bba4ccd1cbb7ec4dd` and `0bb21b85b8864bdb22b7cfa75d169e194a0cc05a` for the inventory: `get_definition/scala.rs`, one `mod` line in `tests/suite_issues/main.rs` and one row in `.open-core/public-paths.d/tests%2Fsuite_issues.tsv`). Of the files your solution changes, two have moved on master: `CHANGELOG.md` (the #3528 entry) and `tests/suite_issues/main.rs` (the #3518 line, in a later block of that file, not next to yours); the inventory file your correction 1 edits also gained the #3518 row, just above the `issue_3520` row. None of it touches `crates/bifrost-cpp`, `analyzer/cpp`, `analyzer_definition_lookup.rs` or `store/epoch.rs`; the C/C++ salt there still ends at `cpp-source-member-prototype-units-2026-09`. The #3507 landing was dispatched at 2026-09-24T12:47Z and may push before you do. Its frozen solution changes `crates/bifrost-analysis/src/analyzer/cpp/mod.rs` (C++ member dispatch, in `impl CppAnalyzer` near base lines 1228 to 1339 and 2088 to 2104, away from your hunks near 1010 to 1059), `crates/bifrost-cpp/src/declarations.rs` (dispatch extensibility near base lines 8664 to 12523 and tests near 20775, away from your hunks near 301 and 17467), `cra\n[... 33860 bytes omitted from the middle of this message ...]\n       \"p9: under the cap both rows are returned\"\n    );\n}\n\n/// Every location of a one-symbol response, without its `symbol` field (the\n/// tool renders the canonical name there, whichever spelling was asked).\nfn locations_of(response: &Value) -> Vec<Value> {\n    response[\"locations\"]\n        .as_array()\n        .map(|locations| {\n            locations\n                .iter()\n                .map(|location| {\n                    let mut location = location.clone();\n                    if let Some(object) = location.as_object_mut() {\n                        object.remove(\"symbol\");\n                    }\n                    location\n                })\n                .collect()\n        })\n        .unwrap_or_default()\n}\n\n/// The sheet says \"on the P1 fixture\", but `Top::Only` / `Top$Only` name the\n/// one-level fixture (`struct Top { struct Only { int b; }; };`), which is\n/// what this probe uses.\n#[test]\nfn judge_3631_p10_mcp_get_symbol_locations_parity() {\n    let project = InlineTestProject::with_language(Language::Cpp)\n        .file(\"nested.cpp\", \"struct Top { struct Only { int b; }; };\\n\")\n        .build();\n    let colon = call_tool(&project, \"get_symbol_locations\", r#\"{\"symbols\":[\"Top::Only\"]}\"#);\n    let dollar = call_tool(&project, \"get_symbol_locations\", r#\"{\"symbols\":[\"Top$Only\"]}\"#);\n    let missing = call_tool(&project, \"get_symbol_locations\", r#\"{\"symbols\":[\"Top::Missing\"]}\"#);\n    let colon_locations = locations_of(&colon);\n    let dollar_locations = locations_of(&dollar);\n    let missing_locations = locations_of(&missing);\n    println!(\n        \"JUDGE3631 OBS case=p10 colon={} dollar={} missing={}\",\n        colon.to_string(),\n        dollar.to_string(),\n        missing.to_string()\n    );\n    assert_eq!(colon_locations.len(), 1, \"p10: one location for Top::Only: {colon}\");\n    assert_eq!(\n        colon_locations, dollar_locations,\n        \"p10: Top::Only reports the same file and lines as Top$Only\"\n    );\n    assert!(missing_locations.is_empty(), \"p10: no location for Top::Missing: {missing}\");\n}\n```\n"
+        },
+        {
+          "id": "agent:7802",
+          "role": "assistant",
+          "text": "Tree is clean at `509d66c85`; fetched `origin/master` is `6d3d5b316…` (#3507 has landed). I'm reading the routed guidance now, then I'll merge."
+        },
+        {
+          "id": "agent:7839",
+          "role": "assistant",
+          "text": "Now the merge. First I'll look at the authored diff (frozen vs base), then merge into fetched master."
+        },
+        {
+          "id": "agent:7861",
+          "role": "assistant",
+          "text": "Clean automatic merge. Now I'll inspect each auto-merged file."
+        },
+        {
+          "id": "agent:7907",
+          "role": "assistant",
+          "text": "The regenerated inventory differs by exactly the one expected row. Replacing it and committing."
+        },
+        {
+          "id": "agent:7926",
+          "role": "assistant",
+          "text": "Correction 1 is committed as `789d10d00…`. Next is correction 2: I need to understand `AnalyzerDefinitionLookup` and the `forward_rendered_name` hook."
+        },
+        {
+          "id": "agent:7957",
+          "role": "assistant",
+          "text": "Let me read the C++ side: `definitions`, the provider hook implementation, and `cpp_rendered_name_fq`."
+        },
+        {
+          "id": "agent:8001",
+          "role": "assistant",
+          "text": "Let me look at the existing #3520 unit test in `cpp/tests.rs`, which likely already exercises `fqn` and the prefetch routes for the `$` spelling."
+        },
+        {
+          "id": "agent:8073",
+          "role": "assistant",
+          "text": "I'm checking which `cargo` the environment provides so I use the same setup as the initial run, then I'll run the new assertions against the merged tree."
+        },
+        {
+          "id": "agent:8126",
+          "role": "assistant",
+          "text": "While that builds, I'll read the existing #3631 integration test for corrections 3 and 4."
+        },
+        {
+          "id": "agent:8162",
+          "role": "assistant",
+          "text": "Now I'll add correction 3's four shapes and correction 4's MCP-route test to the #3631 integration file."
+        },
+        {
+          "id": "agent:8182",
+          "role": "assistant",
+          "text": "Now the production change for correction 2. First the provider hook on the trait:"
+        },
+        {
+          "id": "agent:8196",
+          "role": "assistant",
+          "text": "Now the shared helpers and the three exact routes. `exact_for_language` first:"
+        },
+        {
+          "id": "agent:8257",
+          "role": "assistant",
+          "text": "Now `prefetch_fqn_in_language`:"
+        },
+        {
+          "id": "agent:8287",
+          "role": "assistant",
+          "text": "Before I add the C++ provider impl, let me check the pre-fix run."
+        },
+        {
+          "id": "agent:8298",
+          "role": "assistant",
+          "text": "The compile is still running. I'll hold the C++ provider edit until the pre-fix test binary is built, so the \"before\" evidence stays clean. Let me wait on it."
+        },
+        {
+          "id": "agent:8334",
+          "role": "assistant",
+          "text": "While waiting, I'll update the CHANGELOG entry so it describes the merged tree, including the `fqn` and prefetch routes."
+        },
+        {
+          "id": "agent:8355",
+          "role": "assistant",
+          "text": "The pre-fix run failed exactly at the new `fqn` assertion (`cpp/tests.rs:779`: `left: []`, `right: [\"Top$Only\"]`). Now the C++ side of the hook:"
+        },
+        {
+          "id": "agent:8378",
+          "role": "assistant",
+          "text": "I'll also point `definitions`' own alias step at the same provider method, so one C++ function defines the names for every route."
+        },
+        {
+          "id": "agent:8396",
+          "role": "assistant",
+          "text": "The freshly installed toolchain lacks rustfmt (and likely clippy). Installing those components for the pinned 1.97.1 toolchain:"
+        },
+        {
+          "id": "agent:8421",
+          "role": "assistant",
+          "text": "Formatting is clean. Now the focused post-fix runs: the unit test (fqn + prefetch) and the #3631/#3520 issue tests."
+        },
+        {
+          "id": "agent:8440",
+          "role": "assistant",
+          "text": "While that builds, I'll review the full correction-2 diff."
+        },
+        {
+          "id": "agent:8477",
+          "role": "assistant",
+          "text": "The `fqn` and prefetch assertions now pass. Next, the #3631 and #3520 integration tests, including the new depth-two, ambiguity, negative, and MCP tests:"
+        },
+        {
+          "id": "agent:8497",
+          "role": "assistant",
+          "text": "Meanwhile, I'll commit correction 2 with exactly its four files."
+        },
+        {
+          "id": "agent:8535",
+          "role": "assistant",
+          "text": "All 8 pass. Now I'll split the test file: correction 3 (four shapes) first, then correction 4 (MCP route)."
+        },
+        {
+          "id": "agent:8583",
+          "role": "assistant",
+          "text": "While the gates run, I'll prepare the judge probe outside the repository and check its SHA-256 before installing it later."
+        },
+        {
+          "id": "agent:8602",
+          "role": "assistant",
+          "text": "The probe file's SHA-256 matches `9811ef8b…` exactly. I'll poll the gate chain."
+        },
+        {
+          "id": "agent:8632",
+          "role": "assistant",
+          "text": "Clippy (no warnings), fmt, open-core, and the bifrost-cpp lib (239/239) have passed. Continuing to poll."
+        },
+        {
+          "id": "agent:8649",
+          "role": "assistant",
+          "text": "Core lib (435 passed) and analysis lib (3135 passed, 123 skipped as ignored) are green. Next are the integration suites."
+        },
+        {
+          "id": "agent:8673",
+          "role": "assistant",
+          "text": "Usage C++ (276), issues filter (370), and suite_symbols (794) all pass. Waiting for cross-language and the focused runs."
+        },
+        {
+          "id": "agent:8694",
+          "role": "assistant",
+          "text": "All 13 gates exit 0. For the two unfiltered suites I'll confirm that the skipped counts are exactly the `#[ignore]` tests, not something filtered out."
+        },
+        {
+          "id": "agent:8713",
+          "role": "assistant",
+          "text": "The skipped counts match the ignored-test counts exactly (672 and 66). Now the judge probe: I'll record the pre-probe hash of `main.rs`, install the probe byte-for-byte, and append the `mod` line."
+        },
+        {
+          "id": "agent:8766",
+          "role": "assistant",
+          "text": "The tree is clean and `main.rs` matches its pre-probe hash. Every required gate has passed, so I'll fetch and push."
+        },
+        {
+          "id": "agent:8794",
+          "role": "assistant",
+          "text": "Pushed on the first attempt. Before writing the report, I'll check a few facts I will cite: the inventory rows, the `mod` lines, and that the landing leaves `epoch.rs` untouched."
+        },
+        {
+          "id": "agent:8814",
+          "role": "assistant",
+          "text": "LANDING REPORT\n\nThe #3631 fix is on `origin/master` at `f3611aaeab3a9f40c24f111439c1891b002fe654`. The push succeeded on the first attempt, and every required gate passed on that exact tree. On the probe run, all eight scored judge probes pass under the rulings. The raw result is the same as on the frozen solution: 7 passed, 3 failed (P6, P8, P9).\n\n**1. Hashes**\n- Base: `971393a3af610f82db95fb8e031da15b0c66bf72`\n- Frozen solution: `509d66c8578806862285167440ed0dd57b1133f4`\n- Fetched `origin/master`: `6d3d5b31676132360fe105ed2ba712f9eb7f9351` at 2026-09-24T20:02:50Z. It was unchanged at the pre-push fetch at 20:39:37Z.\n- Merge: `70f382d142ad92fad3999b7e95d969605a5a44bf`\n- Correction 1 (inventory row): `789d10d00e66c25f12995beb4c8e6c29f7376516`\n- Correction 2 (`fqn` and prefetch routes): `6ef058ad5a9a9f29b2bfad818afae64a166147ed`\n- Correction 3 (four shapes): `877c40f1868fb60afaee503be1badd5380d1f9ee`\n- Correction 4 (MCP-route test): `f3611aaeab3a9f40c24f111439c1891b002fe654`\n- Fully gated tree and pushed head: `f3611aaeab3a9f40c24f111439c1891b002fe654`\n\n**2. Merge**\n- `git merge --no-ff 509d66c85` onto the fetched master merged automatically with no conflicts. #3507 had landed; #3535 had not.\n- Four files merged automatically: `CHANGELOG.md`, `cpp/mod.rs`, `bifrost-cpp/src/declarations.rs` and `tests/suite_issues/main.rs`. I checked each one in both directions, ignoring hunk headers:\n  - The diff from master to the merge equals the frozen solution's authored diff from the base.\n  - The diff from the frozen solution to the merge equals master's diff from the base.\n  - So both sides survive intact in all four files.\n- `main.rs` keeps #3507's line (397), the #3631 line (401) and #3518's line (436).\n- The inventory keeps the #3507, #3518 and new #3631 rows, in file order.\n- Identity and epoch: nothing moves. The landing does not touch `store/epoch.rs`, and no `lang_epoch!` or `ADAPTER_VERSION` line changes. Master's C/C++ salt still ends with `cpp-member-dispatch-extensibility-2026-09`. The change is query-time only: the stored `FqName`, parent/identifier pair and renderings are unchanged, so there is no reason to bump the epoch.\n\n**3. Corrections**\n1. **Inventory row (`789d10d00`).** I ran the baseline-preserving inventory command (`snapshot.mjs inventory --baseline-inventory …`). The regenerated shard differed only by the new `100644 private tests/suite_issues/issue_3631_…rs` row. The open-core check now passes.\n2. **`fqn` and prefetch routes (`6ef058ad5`).**\n   - `ForwardQueryProvider` gains a sibling hook, `forward_source_spelling_names`, which returns nothing by default. The C++ provider returns `cpp_colon_source_aliases`, and `definitions` now takes its alias list from the same method.\n   - `exact_for_language`, `prefetch_fqns` and `prefetch_fqn_in_language` send those names in the same exact-name batch as the rendered name, so there is no extra round trip.\n   - A row is kept when its structured `FqName` equals one of those names or its rendering equals the request. There is no `Language::Cpp` branch in the shared code.\n   - Proof: the test asserts `fqn(\"Top::Only\")` returns `Top$Only`, and that fresh lookups answer `Top$Only` after `prefetch_fqns` and `ns.Outer$Inner` after `prefetch_fqn_in_language`. On the merged tree before this change it failed at `cpp/tests.rs:779` with `left: []`, `right: [\"Top$Only\"]`; after the change it passes. That \"before\" build started while I was editing the shared lookup file. The C++ provider method did not exist until after it compiled, so C++ behavior in that build was the merged tree's.\n   - The CHANGELOG entry now names these routes.\n3. **Four shapes (`877c40f18`).** New tests pin depth two, namespace/class ambiguity, the literal-`$` negative (`Buck::Halt`) and the wrong-owner negative (`Other::Only`).\n4. **MCP route (`f3611aaea`).** A test calls `get_symbol_locations` through `InlineTestProject` and `call_tool`. `Top::Only` returns one location with the same path and lines as `Top$Only`. `Top::Missing` returns no location and is listed in `not_found`.\n\n**4. Gates** (logs, comman\n[... 5341 bytes omitted from the middle of this message ...]\n `::`-only spelling now also asks for the namespace, nested-type and member forms that C++ extraction stores. A row is kept only when its full structured name matches one of those forms. The C++ provider gives those forms to the shared lookup, so `definitions`, the lookup's `fqn`, its batched prefetches and `get_symbol_locations` all give the same answers, and the shared code has no C++ branch. Stored names and renderings do not change, so the C++ extraction epoch stays the same. Tests show that `Top::Only`, `Top::Mid::Only`, `Top::Only::b` and `ns::Outer::Inner` resolve to `Top$Only`, `Top$Mid$Only`, `Top$Only.b` and `ns.Outer$Inner`. When a namespace and a class share a spelling, both rows come back, and `Buck::Halt`, `Other::Only` and `Top::Missing` return nothing. Spellings that mix `::` with `.` or `$` are not reinterpreted, and a row with a kind chain outside the listed forms is not found this way. A `::` request asks up to about 2n extra exact questions for n segments. `Top::Only::run` also returns an out-of-line body stored under a second identity, and the canonical spellings `Dollar$Buck$Stop` and `storages::postgres.Portal$Impl` still return nothing, as before; those are separate defects.\n\n`★ Insight ─────────────────────────────────────`\n- The #3520 hook `forward_rendered_name` returns one name, and the shared lookup keeps a row by comparing its rendering with the request string. That comparison can never match a spelling that uses different separators, which is why correction 2 added a second hook that supplies structured names instead of changing how requests are parsed.\n- Putting the extra names in the same `query_values` batch keeps the existing memo and prefetch store-read tests valid: the number of round trips stays the same, and only the number of questions per round grows.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "nguage::Cpp)\n        .file(\"nested.cpp\", \"struct Top { struct Only { int b; }; };\\n\")\n        .build();\n    let colon = call_tool(&project, \"get_symbol_locations\", r#\"{\"symbols\":[\"Top::Only\"]}\"#);\n    let dollar = call_tool(&project, \"get_symbol_locations\", r#\"{\"symbols\":[\"Top$Only\"]}\"#);\n    let missing = call_tool(&project, \"get_symbol_locations\", r#\"{\"symbols\":[\"Top::Missing\"]}\"#);\n    let colon_locations = locations_of(&colon);\n    let dollar_locations = locations_of(&dollar);\n    let missing_locations = locations_of(&missing);\n    println!(\n        \"JUDGE3631 OBS case=p10 colon={} dollar={} missing={}\",\n        colon.to_string(),\n        dollar.to_string(),\n        missing.to_string()\n    );\n    assert_eq!(colon_locations.len(), 1, \"p10: one location for Top::Only: {colon}\");\n    assert_eq!(\n        colon_locations, dollar_locations,\n        \"p10: Top::Only reports the same file and lines as Top$Only\"\n    );\n    assert!(missing_locations.is_empty(), \"p10: no location for Top::Missing: {missing}\");\n}\n```\n",
+    "assistant_text_tail": " `::`-only spelling now also asks for the namespace, nested-type and member forms that C++ extraction stores. A row is kept only when its full structured name matches one of those forms. The C++ provider gives those forms to the shared lookup, so `definitions`, the lookup's `fqn`, its batched prefetches and `get_symbol_locations` all give the same answers, and the shared code has no C++ branch. Stored names and renderings do not change, so the C++ extraction epoch stays the same. Tests show that `Top::Only`, `Top::Mid::Only`, `Top::Only::b` and `ns::Outer::Inner` resolve to `Top$Only`, `Top$Mid$Only`, `Top$Only.b` and `ns.Outer$Inner`. When a namespace and a class share a spelling, both rows come back, and `Buck::Halt`, `Other::Only` and `Top::Missing` return nothing. Spellings that mix `::` with `.` or `$` are not reinterpreted, and a row with a kind chain outside the listed forms is not found this way. A `::` request asks up to about 2n extra exact questions for n segments. `Top::Only::run` also returns an out-of-line body stored under a second identity, and the canonical spellings `Dollar$Buck$Stop` and `storages::postgres.Portal$Impl` still return nothing, as before; those are separate defects.\n\n`★ Insight ─────────────────────────────────────`\n- The #3520 hook `forward_rendered_name` returns one name, and the shared lookup keeps a row by comparing its rendering with the request string. That comparison can never match a spelling that uses different separators, which is why correction 2 added a second hook that supplies structured names instead of changing how requests are parsed.\n- Putting the extra names in the same `query_values` batch keeps the existing memo and prefetch store-read tests valid: the number of round trips stays the same, and only the number of questions per round grows.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 7767,
+    "input_rationale": "LANDING REPORT: fix pushed with all gates passing. The still-open item is a known unrelated ticket; the three raw probe failures are explained as ruled-on.",
+    "label": "none",
+    "trigger": "still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

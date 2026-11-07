@@ -1,0 +1,136 @@
+{
+  "id": "L2607",
+  "title": "Prepared context snapshot slice B",
+  "category": "still-open-none",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "f5cd472372bd3deeabbd7ac22cf1d53b",
+    "session_title": "8127p2-sliceB: store-side JVM prepared-context snapshot primitives (not yet called)",
+    "reply_position": 716,
+    "captured_at": "2026-10-30T13:49:30.366Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /home/jonathan/Projects/bifrost/.mj/clones/05d9cf1a40f2a74086d14d7010497284/.mj/agents/f5cd472372bd3deeabbd7ac22cf1d53b. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nIssue #8127 phase 2, slice B. You work in the lane worktree you start in (.mj/lanes/8127p2, branch 8127-jvm-import-context-snapshot, head 25e81b73fe = slice A commit 72fea9dabd merged with current origin/master). You cannot write .git; do not commit; I review and commit.\n\nRead first, fully: /tmp/java-parity/8127p2/design.md (the approved design: Proposal, the coordinator ruling, 61f0abcc's review with its four identity inputs, the count that put the snapshot at request scope, the Final implementation conditions, and the Layering decision). Then read slice A: `git show 72fea9dabd` (PreparedContextSnapshot<P>, PreparedContextPayload, PreparedContextIdentityPolicy {Allow, Remap, Refuse}, assert_snapshot_fields, and Go's payload in go_named.rs). Repo rules: CLAUDE.md at the lane root, especially Design philosophy, Coding conventions and the heap-residency rule (.agents/docs/architecture-and-analyzer-store.md, heap-residency section).\n\nGoal of slice B: the store-side JVM primitives that slice C will call from bifrost-jvm-analysis's prepare_context. Nothing calls them in production yet. Slice B must not change any answer.\n1. A JVM payload type implementing PreparedContextPayload for the base (lookup=None) composed JVM import context plus its JVM peers and side effects: provider owner and boundary identity registrations into operation maps, jvm_on_demand_type_ranks, and both jvm_file_contexts and jvm_context_preparations (so the first named lookup after restore performs no preparation build). Classify every identity-table field the JVM fills as Allow, Remap or Refuse through the slice A mechanism (assert_snapshot_fields), replacing any global refuse list for this payload. Shared-name ids in the table and in the payload's gap fields (source_token, source_reference, lookup, nominal_type_identity, scoped_gaps, selected_targets) are request-scoped (StoreSharedNames::intern): record a digest for each and re-intern on restore. Slice A noted that restore must also remap Remap-classified table fields; make sure that happens.\n2. Interior-mutable memos behind Arc<JvmContextPreparat\n[... 703 bytes omitted from the middle of this message ...]\nd) and put each in the key or show it is covered by publication or routing; write the audit to /tmp/java-parity/8127p2/sliceB/key-audit.md with file:line for each input. If you find an input that is neither keyable nor covered, or a payload value that is not a pure function of the key, stop and report.\n4. Operation methods (doc-hidden pub so slice C can call them from bifrost-jvm-analysis): one that takes the snapshot after a base build, returning None unless the build is Ready, not cancelled, began on an empty table, is at staged epoch (0,0), and carries no execution-dependent incompleteness (budget, cancellation, provider failure: the #8184 rule; a stable typed incomplete reason is retained); and one that restores into an operation, asserting an empty table and staged epoch (0,0), then remaps shared names and replays the side effects before any demand runs. Also an `estimated_heap_bytes` on the snapshot for the request memo's weigher.\n5. Keep jvm_context.rs edits inside the preparation region (~1356-1600 on master and nearby type definitions); #8222 is editing jvm_on_demand_type (~3198-3446), the bridges (~4515-5220) and ~630/~3083-3104 in another branch, so stay out of those.\nOut of scope: QueryRequestMemos, read-ledger capture and replay, the certificate test, the classification row (slice C). Go's behavior and storage stay unchanged.\n\nValidation (env: `env -u RUSTUP_TOOLCHAIN -u CARGO_MANIFEST_DIR nice -n 10 eatmydata cargo ...` with JAVA_HOME= BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1 BIFROST_OPEN_PACKS_DISABLE=1, --profile measure / nextest --cargo-profile measure --max-fail 100; no cloud; do not redirect target/): cargo clippy --all-targets -D warnings on brokk-bifrost-store; brokk-bifrost-store --lib whole; brokk-bifrost-tools --lib filtered to test(jvm) | test(go) to show no answer change. Logs to /tmp/java-parity/8127p2/sliceB/.\nReport: the type and method names with file:line, the field classification table, the key audit path, any input you could not cover, results with log paths. Stop after slice B."
+        },
+        {
+          "id": "agent:25",
+          "role": "assistant",
+          "text": "I’ll read the approved design and slice A, then audit the JVM preparation inputs before implementing the store primitives."
+        },
+        {
+          "id": "agent:114",
+          "role": "assistant",
+          "text": "The base preparation retains several lazy memo contents as well as the returned context. I’m checking their identity dependencies so the audit covers everything a snapshot would restore for later named lookups."
+        },
+        {
+          "id": "agent:215",
+          "role": "assistant",
+          "text": "Slice B remains incomplete. No code changed or tests run. Preliminary audit saved to `/tmp/java-parity/8127p2/sliceB/key-audit.md`; findings handed back to the parent."
+        },
+        {
+          "id": "user:284",
+          "role": "user",
+          "text": "Thank you for the census (/tmp/java-parity/8127p2/sliceB/key-audit.md); it is the right starting point, but slice B is the implementation, not the audit alone. Please continue now and implement items 1-4 of the original brief in the same lane, using your findings: (a) finish the audit rows you listed as outstanding (JVM provider inventory identity and JDK authority coverage, the publication identity accessor, the assembly helper reads, retained-byte accounting) as you implement the key type; (b) add the isolated deep copies for the four ContextPlanMemos, the ContextPlanCell and JvmExternalProviderBlueprint.registered (new copy methods on those types are fine; take them at the same instant as the table clone); (c) since envelope restore (:1126) delegates remapping to the payload, make the JVM payload's remap_shared_names walk the identity-table fields you classify as Remap (SelectedContextIdentities :910 and the nested JVM fields :1030) as well as the payload gap fields, and keep the existing context-set remap (:2396) for bridges and Go bindings; (d) the snapshot-taking and restore methods with the preconditions in the brief; (e) estimated_heap_bytes. Commit points: when it compiles with Clippy clean and the store lib passes, stop and report, even if a detail is open; list open details explicitly. Stop earlier only for an input that is neither keyable nor covered, or a payload value that is not a pure function of the key, with the file:line evidence. Same env, validation and no-commit rules as the original brief."
+        },
+        {
+          "id": "agent:288",
+          "role": "assistant",
+          "text": "I’ll continue with the implementation in this lane, then run Clippy and the store lib tests. I’ll report any remaining details at that checkpoint."
+        },
+        {
+          "id": "agent:373",
+          "role": "assistant",
+          "text": "The preparation can now clone its memo maps, cell and provider-registration set into independent locks. The shared plan values contain immutable data. I also confirmed that assembly reads the analyzer’s model authority, so the key audit must cover that authority alongside the selected source rows. Clippy and the store lib tests are running on the copy changes."
+        },
+        {
+          "id": "agent:526",
+          "role": "assistant",
+          "text": "Clippy is clean after adding `Clone` to `ImportBinder`. The store lib build is still running. The copy support is in place; snapshot publication, remapping, the key and the weigher remain unimplemented."
+        },
+        {
+          "id": "agent:585",
+          "role": "assistant",
+          "text": "The store lib executable is still building. The pack drift check also failed before it could inspect files: Node’s `spawnSync git` returned `EPERM`. Its log is saved for the handback."
+        },
+        {
+          "id": "agent:637",
+          "role": "assistant",
+          "text": "Clippy, formatting and the diff check pass. The store lib build has not reported a result yet; I’m waiting for it to finish."
+        },
+        {
+          "id": "agent:678",
+          "role": "assistant",
+          "text": "The store lib tests are now running: 797 of 973 selected tests have passed so far. No failures have appeared in the log."
+        },
+        {
+          "id": "agent:716",
+          "role": "assistant",
+          "text": "Added independent-lock cloning for the preparation memos, cell and provider-registration set. Clippy is clean; store lib tests passed: 973 passed, 2 skipped.\n\nSlice B remains incomplete: the key, snapshot payload, remapping, capture/restore methods and weigher are still open. Report handed back; no commits made."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "ated deep copies for the four ContextPlanMemos, the ContextPlanCell and JvmExternalProviderBlueprint.registered (new copy methods on those types are fine; take them at the same instant as the table clone); (c) since envelope restore (:1126) delegates remapping to the payload, make the JVM payload's remap_shared_names walk the identity-table fields you classify as Remap (SelectedContextIdentities :910 and the nested JVM fields :1030) as well as the payload gap fields, and keep the existing context-set remap (:2396) for bridges and Go bindings; (d) the snapshot-taking and restore methods with the preconditions in the brief; (e) estimated_heap_bytes. Commit points: when it compiles with Clippy clean and the store lib passes, stop and report, even if a detail is open; list open details explicitly. Stop earlier only for an input that is neither keyable nor covered, or a payload value that is not a pure function of the key, with the file:line evidence. Same env, validation and no-commit rules as the original brief.",
+    "assistant_text_tail": "Added independent-lock cloning for the preparation memos, cell and provider-registration set. Clippy is clean; store lib tests passed: 973 passed, 2 skipped.\n\nSlice B remains incomplete: the key, snapshot payload, remapping, capture/restore methods and weigher are still open. Report handed back; no commits made.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 284,
+    "input_rationale": "The parent's brief said to stop at the first compiling, clippy-clean, store-lib-passing commit point and list open details. The agent stopped there and the open items are its own remaining implementation, with no input requested from the parent.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": true,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

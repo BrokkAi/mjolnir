@@ -1,0 +1,429 @@
+{
+  "id": "L0205",
+  "title": "Still open report 5",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "cc8f93b4868d4ea79fdaaec1e4a6ed89",
+    "session_title": "eval20 3457 opus55",
+    "reply_position": 2989,
+    "captured_at": "2026-09-23T05:37:53.044Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3457: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 18fa60ee98f92a8dca58ffbd3a5d949adb30ee19\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confi\n[... 2287 bytes omitted from the middle of this message ...]\nte must bind the exact API identity through the language's own resolver, and an unbound callee reports an unmet obligation, never a clean verdict.\n\nReference rows: JavaScript and TypeScript landed in 3f4c2eabf (`tests/fixtures/network-effect-boundary/{javascript,typescript}/`, `semantic-packs/web-network/{javascript,typescript}/`, `crates/bifrost-policy/policy-packs/bifrost.effects/policies/{javascript,typescript}/selected-boundary-no-network-io.rqlp`, `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs`). Copy their structure.\n\nDeliver, for this language:\n\n1. Fixture set under `tests/fixtures/network-effect-boundary/<language>/`: a finding tree (selected root -> helper chain across files -> concrete network API), a corrected tree (the caller owns the effect, the root is clean), a same-name near miss (a local or unrelated function with the API's name that must not become a proven effect by spelling), a recursion case (the helper reaches the effect exactly once and terminates), and an unresolved-helper case (coverage stays open, no clean verdict).\n2. Reviewed model under `semantic-packs/web-network/<language>/` (or the language's existing reviewed pack tree) declaring `bifrost.network_io` on the exact API identity at the arity the fixture writes.\n3. Policy specialization in `crates/bifrost-policy/policy-packs/bifrost.effects/` with the stable id `bifrost.effects.<language>.selected-boundary-no-network-io`, a documented declaration-selection block, and the manifest row.\n4. Acceptance: tests in `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs` covering all five fixtures, a CLI run through `--policy-file` (exit 1 finding, 0 corrected, 2 unresolved), and one MCP `run_policy` run.\n5. Update this language's row in the matrix doc with the evidence.\n\nIf the language cannot bind the exact API identity or cannot key its workspace callees (compare #3451 for Python), stop, file the focused capability-gap issue, link it on the row, and leave this ticket open. Do not fill the gap with text matching.\n\n"
+        },
+        {
+          "id": "agent:24",
+          "role": "assistant",
+          "text": "I'll start by checking the checkout state and moving to the pinned base commit."
+        },
+        {
+          "id": "agent:46",
+          "role": "assistant",
+          "text": "Now the routed guidance files that this task enters (testing, RQL/policy, architecture)."
+        },
+        {
+          "id": "agent:61",
+          "role": "assistant",
+          "text": "Let me look at the existing delivered rows' files, starting with the Rust row (closest shape to C: free functions and a standard-library API)."
+        },
+        {
+          "id": "agent:95",
+          "role": "assistant",
+          "text": "Now the acceptance test file, focused on its structure and the Rust section."
+        },
+        {
+          "id": "agent:378",
+          "role": "assistant",
+          "text": "No build exists yet, so I'll start compiling the policy suite in the background while I keep reading."
+        },
+        {
+          "id": "agent:398",
+          "role": "assistant",
+          "text": "While that builds, I'll check how a C workspace function is keyed, since the near miss depends on a workspace `connect` keying differently from the reviewed one."
+        },
+        {
+          "id": "agent:462",
+          "role": "assistant",
+          "text": "I'm reading the JavaScript global-function route next, because `fetch(url)` is the closest existing shape to C's `connect(fd, ...)`: a receiverless call whose owner is not written at the call site."
+        },
+        {
+          "id": "agent:511",
+          "role": "assistant",
+          "text": "Still investigating: the next step is an empirical probe with a small C fixture once the build finishes, to see exactly what the analyzer reports for `connect` today. Checking the build."
+        },
+        {
+          "id": "agent:534",
+          "role": "assistant",
+          "text": "`--max-fail` isn't allowed with `--no-run`; restarting the build without it."
+        },
+        {
+          "id": "agent:696",
+          "role": "assistant",
+          "text": "Build finished. Next I'll check which RQL language label selects C declarations, then run the CLI on a probe C tree to see today's verdict."
+        },
+        {
+          "id": "agent:734",
+          "role": "assistant",
+          "text": "There's a C declared-storage precedent (`c-stored-request-to-sql`). Let me see how its C fixture and reviewed model name a C function identity."
+        },
+        {
+          "id": "agent:769",
+          "role": "assistant",
+          "text": "I have enough context to probe. I'll write a first draft of the C finding tree and run the real CLI against it with no production changes, to get the baseline verdict and diagnostics."
+        },
+        {
+          "id": "agent:789",
+          "role": "assistant",
+          "text": "The host has no `sys/socket.h`, which is useful: the route must work from the reviewed model and the call site's own include directive, not from host headers. Writing the probe tree now."
+        },
+        {
+          "id": "agent:847",
+          "role": "assistant",
+          "text": "Every procedure above `sum_lines` is open with `dispatch_unresolved`. I need the per-call answer to separate the helper hops from the `connect` call. Looking up the call-level relation name."
+        },
+        {
+          "id": "agent:964",
+          "role": "assistant",
+          "text": "Writing the candidate reviewed model for POSIX `connect` (declared by `<sys/socket.h>`, written arity 3)."
+        },
+        {
+          "id": "agent:1080",
+          "role": "assistant",
+          "text": "Now the edits in `bifrost-cpp`: the public method, the shared in-prepared helper, and the existing unit-test adapter."
+        },
+        {
+          "id": "agent:1117",
+          "role": "assistant",
+          "text": "Now the proof constructor in `get_definition/mod.rs`, next to the JavaScript global-function one."
+        },
+        {
+          "id": "agent:1137",
+          "role": "assistant",
+          "text": "There is also a `resolve_cpp_bounded` route. I need to know which route feeds the effect relation, so the refinement lands on the path the policy actually uses."
+        },
+        {
+          "id": "agent:1162",
+          "role": "assistant",
+          "text": "The call-target batch goes through `resolve_one_with_evidence`, so the refinement belongs in its `Language::Cpp` arm. Checking what `get_definition/cpp.rs` already imports."
+        },
+        {
+          "id": "agent:1199",
+          "role": "assistant",
+          "text": "Now the C proof itself, placed right after `resolve_cpp_call`, whose unqualified free-call arm produces the boundary it refines."
+        },
+        {
+          "id": "agent:1246",
+          "role": "assistant",
+          "text": "Now compiling the analysis crate to catch missing imports."
+        },
+        {
+          "id": "agent:1290",
+          "role": "assistant",
+          "text": "Type-check passes. Rebuilding the CLI binary to rerun the probe."
+        },
+        {
+          "id": "agent:1378",
+          "role": "assistant",
+          "text": "Status: next I'm checking the two remaining touch points from the Rust row (`builtin.rs` and `bifrost_policy_cli.rs`), then I'll write the C fixture trees."
+        },
+        {
+          "id": "agent:1405",
+          "role": "assistant",
+          "text": "Now writing the C fixture set. First the finding tree, with comments that state what each file proves (matching the Rust row's style)."
+        },
+        {
+          "id": "agent:1420",
+          "role": "assistant",
+          "text": "Next the corrected tree (the caller owns the effect) and the recursion tree."
+        },
+        {
+          "id": "agent:1431",
+          "role": "assistant",
+          "text": "Now the two near misses: a workspace `connect` whose call text is byte-for-byte the finding tree's call, and a same-named `static` helper in another translation unit."
+        },
+        {
+          "id": "agent:1448",
+          "role": "assistant",
+          "text": "Now the configured fixture policy for C, then a quick CLI sweep over every tree to see the verdicts before writing the acceptance tests."
+        },
+        {
+          "id": "agent:1518",
+          "role": "assistant",
+          "text": "Now writing the shipped C specialization with its ship-time empty selection and the documented selection block."
+        },
+        {
+          "id": "agent:1530",
+          "role": "assistant",
+          "text": "I claimed in the header that a selection can be narrowed by file. I'll verify RQL has such a predicate before keeping that sentence."
+        },
+        {
+          "id": "agent:1571",
+          "role": "assistant",
+          "text": "Now registering the policy in `builtin.rs` (source list, count, and id list) so the hash printer can compute its manifest hashes."
+        },
+        {
+          "id": "agent:1599",
+          "role": "assistant",
+          "text": "Now computing the new policy's hashes with the repository's ignored hash-printer test."
+        },
+        {
+          "id": "agent:1633",
+          "role": "assistant",
+          "text": "Each row landing bumped the pack's minor version, so this one goes 1.4.0 to 1.5.0 along with the new manifest row."
+        },
+        {
+          "id": "agent:1647",
+          "role": "assistant",
+          "text": "Manifest row and version bump are in. Now the acceptance tests. I'll add the C constants, dialect, and ecosystem mapping to the shared harness first."
+        },
+        {
+          "id": "agent:1669",
+          "role": "assistant",
+          "text": "Now the in-process C tests, placed after the Rust row's tests."
+        },
+        {
+          "id": "agent:1680",
+          "role": "assistant",
+          "text": "Now the CLI acceptance test (exit 1/0/0/2) and the shipped-specialization vacuous-clean test, after the Rust equivalents."
+        },
+        {
+          "id": "agent:1695",
+          "role": "assistant",
+          "text": "Now the MCP `run_policy` test for the C row."
+        },
+        {
+          "id": "agent:1712",
+          "role": "assistant",
+          "text": "Only my import ordering differs. Formatting just that file."
+        },
+        {
+          "id": "agent:1722",
+          "role": "assistant",
+          "text": "Formatting is clean. Now building and running the C row tests in the policy suite (including the scheduled-only CLI test), in the background with polling."
+        },
+        {
+          "id": "agent:1738",
+          "role": "assistant",
+          "text": "While that builds, I'll write the documentation. First the public policy docs section for the network-effect family."
+        },
+        {
+          "id": "agent:1773",
+          "role": "assistant",
+          "text": "Now the CHANGELOG entry under Unreleased, next to the Rust row's entry."
+        },
+        {
+          "id": "agent:1805",
+          "role": "assistant",
+          "text": "While it compiles, the open-core inventory. The Rust row regenerated it with `snapshot.mjs inventory` plus explicit approvals; checking that tool's usage."
+        },
+        {
+          "id": "agent:1822",
+          "role": "assistant",
+          "text": "The inventory tool classifies tracked paths at a commit, so I'll regenerate it after the main commit, as the Rust row did. Checking the test run."
+        },
+        {
+          "id": "agent:1848",
+          "role": "assistant",
+          "text": "While the build finishes, I'll check whether `--query-file` can activate workspace models (for a census on a real C repository) by setting the workspace-models switch the MCP route uses."
+        },
+        {
+          "id": "agent:1876",
+          "role": "assistant",
+          "text": "`--query-file` does not activate workspace models, so a real-repository census will go through a policy run instead. Checking the test run."
+        },
+        {
+          "id": "agent:1957",
+          "role": "assistant",
+          "text": "While the Redis census runs, I'll update the matrix doc's C row and add a section for the C header route."
+        },
+        {
+          "id": "agent:1975",
+          "role": "assistant",
+          "text": "The limits paragraph makes a claim about the transitive-include shape that I inferred from code. I'll verify it on real code (hiredis `net.c`) before keeping that wording. Checking the census."
+        },
+        {
+          "id": "agent:2110",
+          "role": "assistant",
+          "text": "While the base build runs, I'll identify the C/C++ usage and issue suites required by the brief."
+        },
+        {
+          "id": "agent:2123",
+          "role": "assistant",
+          "text": "The C/C++ usage tests live in the `suite_usages` binary and the issue tests in `suite_issues`. I'll run the crate library suites first (analysis, cpp, policy), in the background."
+        },
+        {
+          "id": "agent:2141",
+          "role": "assistant",
+          "text": "While the library suites run, I'll review the full production diff before committing."
+        },
+        {
+          "id": "agent:2182",
+          "role": "assistant",
+          "text": "`resolve_cpp` already builds and caches the visibility index for the file, so passing it to the C proof costs nothing extra. Now the lazy shared walk in `resolver.rs`."
+        },
+        {
+          "id": "agent:2208",
+          "role": "assistant",
+          "text": "`paths` is already a `&mut` iterator, so the `mut` bindings are unnecessary. Removing them."
+        },
+        {
+          "id": "agent:2301",
+          "role": "assistant",
+          "text": "Status: final validation and the base-commit build are both running in the background. I'll poll them."
+        },
+        {
+          "id": "agent:2450",
+          "role": "assistant",
+          "text": "Rather than trace the coordinator further, I'll compare empirically: the delivered Rust row's finding tree versus the C finding tree, both with the current binary."
+        },
+        {
+          "id": "agent:2506",
+          "role": "assistant",
+          "text": "Before the fix, the finding and recursion trees exit 2 with no finding; after, both exit 1 with the full witness. The final-code library run has finished; reading its summary."
+        },
+        {
+          "id": "agent:2524",
+          "role": "assistant",
+          "text": "Library suites on the final code: 4028 passed, 0 failed. While the integration suites build, I'll remove the base worktree (its isolated target was already removed by the helper)."
+        },
+        {
+          "id": "agent:2541",
+          "role": "assistant",
+          "text": "I'll verify the details of the four non-POSIX census members before writing them into the doc."
+        },
+        {
+          "id": "agent:2555",
+          "role": "assistant",
+          "text": "Verified. Adding the Redis evidence to the C section of the matrix doc."
+        },
+        {
+          "id": "agent:2567",
+          "role": "assistant",
+          "text": "Now waiting on the integration suites (usages, issues, policy)."
+        },
+        {
+          "id": "agent:2603",
+          "role": "assistant",
+          "text": "4321 integration tests are running (about 1800 done). I'll keep polling."
+        },
+        {
+          "id": "agent:2628",
+          "role": "assistant",
+          "text": "Usage, issue and policy suites: 4321 passed, 0 failed. Now the 3387 module run with scheduled tests (in-process, CLI, MCP) across all delivered rows."
+        },
+        {
+          "id": "agent:2707",
+          "role": "assistant",
+          "text": "While clippy runs, I'll check every new and changed file for non-ASCII characters, as the coding rules require plain ASCII."
+        },
+        {
+          "id": "agent:2740",
+          "role": "assistant",
+          "text": "Clippy isn't installed for this toolchain; installing the component and rerunning."
+        },
+        {
+          "id": "agent:2751",
+          "role": "assistant",
+          "text": "While clippy runs, I'll write the commit message to a file."
+        },
+        {
+          "id": "agent:2785",
+          "role": "assistant",
+          "text": "Clippy passes with `-D warnings` (the `mbx[warning]` lines come from the build cache wrapper, not the compiler). Committing only my files."
+        },
+        {
+          "id": "agent:2850",
+          "role": "assistant",
+          "text": "Approvals must name rows that already exist (as `review`) in the baseline, so this is a two-step regeneration: first produce the inventory with the two review rows, then approve them against that."
+        },
+        {
+          "id": "agent:2901",
+          "role": "assistant",
+          "text": "I'll verify that a fresh regeneration against the new HEAD now matches the tracked inventory with nothing left to review."
+        },
+        {
+          "id": "agent:2932",
+          "role": "assistant",
+          "text": "`suite_symbols/get_definition_test.rs` also covers #3466, and get_definition is exactly the surface I changed, so I'll run `suite_symbols` and `suite_analyzers` too."
+        },
+        {
+          "id": "agent:2958",
+          "role": "assistant",
+          "text": "`suite_symbols` and `suite_analyzers`: 1620 passed, 0 failed. Last checks: whether the matrix doc states a landed-row count that needs updating, and the final hashes and status."
+        },
+        {
+          "id": "agent:2977",
+          "role": "assistant",
+          "text": "All work is committed and the tree is clean. Getting the full hash of the first commit for the report."
+        },
+        {
+          "id": "agent:2989",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nThe C row is delivered and validated. C could not bind the API before this change. A small, structured resolver refinement closes that gap: the calling file's own `#include <sys/socket.h>` now keys a bare `connect(...)` call on the reviewed header identity `sys/socket.connect`.\n\n## 1. Cause (confirmed with structured evidence)\n\n- **Keying already worked.** #3493 had fixed callable keying, and the two cross-file helper hops (prototype in a header, definition in a `.c` file) already resolved with exhaustive coverage. On the probe tree, the dispatch-outcome query returned `resolved` for both hops and `unknown/open` only for `connect`.\n- **The identity was missing.** `resolve_cpp_call` (`get_definition/cpp.rs`) sends `connect` to an include boundary once the workspace has no declaration for it (#3466). The only callee text it kept was the bare name `connect`, which has no owner, so `canonical_external_callee` created no identity.\n- **Resulting failures:**\n  - Every procedure above the call reported `derivation: incomplete`, `reason: dispatch_unresolved`.\n  - The CLI report showed the model active but unused at the same time: `bifrost.web-network-c` selected, `summary_matches: [{symbol: \"connect\", match_count: 0}]`, run `inconclusive`, exit 2.\n- **The #1872 generated header packs do not help.** `CppDependencyPackAdapter` drops every global-namespace free function (`cpp.member_owner_unavailable`), and a C library function is exactly that.\n\n## 2. Changes and reasons\n\n- Base: `18fa60ee98f92a8dca58ffbd3a5d949adb30ee19`\n- Final: `1768aa2e08065c5371808f42d001fcf3fbea3f64`, made of two commits: `f5e06d3b3aaeeb57a1d4fd139dee441a9dbf4189` (the row) and `1768aa2e0…` (open-core inventory rows).\n\n**Include list (`bifrost-cpp` `resolver.rs`).** New `VisibilityIndex::unresolved_includes_visible_before` returns the calling file's tree-sitter include paths that are visible before the call and match no workspace header. It shares one lazy walk with `has_unresolved_include_visible_before`, which still stops at the first match, so the existing hot path costs the same.\n\n**The C proof (`get_definition/cpp.rs`).** New `exact_c_header_function_call`:\n- It turns each header into an owner with the existing `module_identity_owner` helper (`sys/socket.h` gives `sys/socket`). That is the same owner an authored summary with a `path` and a bare `symbol` already keys on, so no new string convention is needed.\n- It keeps only headers whose active `cpp-c` model declares a function of that name, with no receiver, at the written arity. The arity comes from `call_arity_evidence`, which refuses a count a macro could change.\n- It succeeds only if exactly one header survives.\n- One name lookup rules out unmodeled names (for example `printf`) before the include walk.\n\n**The route is C only.** C has no overloading and no argument-dependent lookup, so the call can only name the one external function its headers declare. C++ unqualified calls can also reach namespace functions through their arguments' types, which the include set does not decide; that belongs to #3458.\n\n**Proof plumbing (`get_definition/mod.rs`).**\n- New constructor `ExactExternalCallProof::c_header_function`.\n- The Cpp arm of `resolve_one_with_evidence` now applies the proof.\n- JavaScript, Python and Ruby repeated the same five lines to apply their proofs; with C as a fourth user, those lines are now one helper, `record_exact_external_call`.\n\nThe change affects only lookups, not stored facts, so no extraction epoch was bumped.\n\n**Row contents.**\n- Reviewed model `semantic-packs/web-network/c/bifrost.web-network-c.json` (language `cpp-c`, ecosystem `posix`).\n- Shipped policy `bifrost.effects.c.selected-boundary-no-network-io` with an empty selection at ship time; manifest row added and pack version 1.4.0 → 1.5.0.\n- Six fixture trees: finding, corrected, recursion, unresolved, `near-miss/workspace-connect`, `near-miss/unrelated-same-name` (a `static` helper in another translation unit).\n- Tests, matrix row and section, public docs, CHANGELOG entry.\n\n**API choice.** I chose POSIX `conn\n[... 4101 bytes omitted from the middle of this message ...]\nsion for you to review.\n\n**Separate findings you may want to file as issues:**\n- **(a) Transitive include through a workspace header.** Supporting it would bind the 3 hiredis `net.c` calls; it needs conditional visibility inside the included header.\n- **(b) Misleading `workspace-model-inert` warning.** It fires for every external-API workspace model, even when the model binds. I confirmed this on the delivered Rust row. It counts only workspace declarations.\n- **(c) Generated header packs drop global C functions.** The #1872 packs drop global-namespace free functions, so real system headers can never supply this route without a reviewed model.\n\nI did not edit issue labels or post anything to GitHub.\n\n## 6. Draft GitHub approach comment\n\nThe C row is ready for review in two commits. C could not bind `connect` before: the resolver kept only the bare name at the include boundary, so the reviewed model was active but matched nothing and every tree was inconclusive. Callable keying from #3493 and the cross-file helper hops already worked. The new route reads the calling file's own unresolved include directives from tree-sitter and turns each header into an owner such as `sys/socket`. A call binds only when exactly one included header's reviewed model declares that function at the written arity. It is limited to C files, because C++ calls can also reach functions through argument types, which is #3458's problem. The finding tree now reports `total -> audit_record -> audit_send -> sys/socket.connect/3` with exhaustive coverage. A workspace `connect` and a same-named `static` helper stay clean, and the unresolved tree stays open. With no model, with the wrong header, or with a different include at the call site, the run reports nothing and does not conclude. On Redis 7.2.4 the two direct POSIX calls in `anet.c` now bind. The three hiredis calls that reach `<sys/socket.h>` through a workspace header stay open, and I suggest a follow-up for transitive includes. No persisted facts changed, so no extraction epoch was bumped."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "lper case (coverage stays open, no clean verdict).\n2. Reviewed model under `semantic-packs/web-network/<language>/` (or the language's existing reviewed pack tree) declaring `bifrost.network_io` on the exact API identity at the arity the fixture writes.\n3. Policy specialization in `crates/bifrost-policy/policy-packs/bifrost.effects/` with the stable id `bifrost.effects.<language>.selected-boundary-no-network-io`, a documented declaration-selection block, and the manifest row.\n4. Acceptance: tests in `tests/suite_bench_policy/issue_3387_network_effect_boundary.rs` covering all five fixtures, a CLI run through `--policy-file` (exit 1 finding, 0 corrected, 2 unresolved), and one MCP `run_policy` run.\n5. Update this language's row in the matrix doc with the evidence.\n\nIf the language cannot bind the exact API identity or cannot key its workspace callees (compare #3451 for Python), stop, file the focused capability-gap issue, link it on the row, and leave this ticket open. Do not fill the gap with text matching.\n\n",
+    "assistant_text_tail": "sion for you to review.\n\n**Separate findings you may want to file as issues:**\n- **(a) Transitive include through a workspace header.** Supporting it would bind the 3 hiredis `net.c` calls; it needs conditional visibility inside the included header.\n- **(b) Misleading `workspace-model-inert` warning.** It fires for every external-API workspace model, even when the model binds. I confirmed this on the delivered Rust row. It counts only workspace declarations.\n- **(c) Generated header packs drop global C functions.** The #1872 packs drop global-namespace free functions, so real system headers can never supply this route without a reviewed model.\n\nI did not edit issue labels or post anything to GitHub.\n\n## 6. Draft GitHub approach comment\n\nThe C row is ready for review in two commits. C could not bind `connect` before: the resolver kept only the bare name at the include boundary, so the reviewed model was active but matched nothing and every tree was inconclusive. Callable keying from #3493 and the cross-file helper hops already worked. The new route reads the calling file's own unresolved include directives from tree-sitter and turns each header into an owner such as `sys/socket`. A call binds only when exactly one included header's reviewed model declares that function at the written arity. It is limited to C files, because C++ calls can also reach functions through argument types, which is #3458's problem. The finding tree now reports `total -> audit_record -> audit_send -> sys/socket.connect/3` with exhaustive coverage. A workspace `connect` and a same-named `static` helper stay clean, and the unresolved tree stays open. With no model, with the wrong header, or with a different include at the call site, the run reports nothing and does not conclude. On Redis 7.2.4 the two direct POSIX calls in `anet.c` now bind. The three hiredis calls that reach `<sys/socket.h>` through a workspace header stay open, and I suggest a follow-up for transitive includes. No persisted facts changed, so no extraction epoch was bumped.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "FINAL REPORT: the C row is delivered. The still-open calls are a documented analysis limit, and the suggested follow-up for transitive includes is a note, not a request for the judge.",
+    "label": "none",
+    "trigger": "Still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

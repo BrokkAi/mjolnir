@@ -1,0 +1,173 @@
+{
+  "id": "L2012",
+  "title": "CI fixes",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "c4ff1d5f483a43b8c1513de718ef27c3",
+    "session_title": "bifrost via claude3",
+    "reply_position": 348,
+    "captured_at": "2026-10-06T21:37:47.653Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "Master has not compiled since cbc1b1e5f8 (\"Target pointer invalidations by value or origin\"). It removed `PointerInvalidation.origin`, but `bifrost-flow/src/value_flow/pointer.rs:215` still reads that field\n\nfix that first via PR, then check for other CI failures\n\nuse \"eatmydata\" when running tests to speed things up"
+        },
+        {
+          "id": "user:41",
+          "role": "user",
+          "text": "(add the eatmydata guidance to AGENTS.md -- unless we're trying to do realistic performance timings we should use that)"
+        },
+        {
+          "id": "agent:99",
+          "role": "assistant",
+          "text": "Glob re-exports cover it. Making the edit:"
+        },
+        {
+          "id": "agent:109",
+          "role": "assistant",
+          "text": "Flow crate compiles. While I run a workspace-wide check and the flow tests, I'll hand the CI survey to a child so the two run in parallel."
+        },
+        {
+          "id": "agent:133",
+          "role": "assistant",
+          "text": "Now the `eatmydata` guidance. Let me check the testing guidance file for anything on timing runs so the new rule points at the right exception."
+        },
+        {
+          "id": "agent:192",
+          "role": "assistant",
+          "text": "The Lane B worktree has no edits yet and I can't message that session, so I'm continuing with the fix. I'm waiting for the workspace-wide `cargo check` before I run tests and open the PR."
+        },
+        {
+          "id": "agent:211",
+          "role": "assistant",
+          "text": "The whole workspace now type-checks, tests included. Next: flow crate tests and the semantic IR contract suite under `eatmydata`, plus Clippy and fmt on the touched crate."
+        },
+        {
+          "id": "agent:228",
+          "role": "assistant",
+          "text": "While tests run, I'll commit the fix on its own branch (only `pointer.rs` staged; the AGENTS.md edit goes in a separate PR)."
+        },
+        {
+          "id": "agent:257",
+          "role": "assistant",
+          "text": "The drift check fails, but not because of my change: it flags `semantic-packs/node/runtime-values/notices/node-v22.11.0.txt`, which I didn't touch. Quick look at when that file changed:"
+        },
+        {
+          "id": "user:332",
+          "role": "user",
+          "text": "jesus christ we're 30+ minutes in for what i thought was a one line change"
+        },
+        {
+          "id": "agent:334",
+          "role": "assistant",
+          "text": "You're right, sorry. The workspace already type-checks, so I'll open the PR now and let CI run the tests."
+        },
+        {
+          "id": "agent:348",
+          "role": "assistant",
+          "text": "I opened PR #4516 with the build fix: https://github.com/BrokkAi/bifrost-dev/pull/4516. It is marked ready, so the merge queue will pick it up. The whole workspace now passes `cargo check --workspace --all-targets`, tests included. I opened the PR before the flow-crate tests, contract tests and Clippy finished, so CI is the first full test run.\n\n**The fix:** in `crates/bifrost-flow/src/value_flow/pointer.rs`, the solver now checks which kind of target an invalidation has:\n- **Origin targets** behave as before.\n- **Pointer targets** mark the procedure as unsupported, so any results it touches are reported as incomplete. The real handling for this case is still open under #3858. No language adapter produces invalidations yet, so current results don't change.\n\n**Still open:**\n- **`eatmydata` guidance:** the new bullet is written in the \"Running tests\" section of `AGENTS.md`, but it isn't committed. I planned to put it in a separate small PR. If you'd rather, I can add it to #4516 instead.\n- **Other CI failures:** I asked a child agent to survey failing CI jobs on master. You stopped me while I was waiting for its result, so I don't have it yet.\n- **Pack drift check:** `scripts/check-pack-authoring-drift.mjs` fails on your machine for a reason unrelated to this change. Your `~/.gitconfig` sets `core.autocrlf=input`, which changes the hash of `node-v22.11.0.txt` because that file has mixed line endings. CI doesn't use that setting, so it shouldn't fail there. Passing `--no-filters` to `git hash-object` in the script would fix it locally.\n- **Possible overlap:** another session's worktree, `/home/jonathan/Projects/bf-3858-b`, is on branch `3858-pointer-invalidation-target` with no edits yet. It may be about to make the same fix. I couldn't message that session.\n\nShould I commit the guidance as its own PR, and then look at the CI survey result?"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "jesus christ we're 30+ minutes in for what i thought was a one line change",
+    "assistant_text_tail": "I opened PR #4516 with the build fix: https://github.com/BrokkAi/bifrost-dev/pull/4516. It is marked ready, so the merge queue will pick it up. The whole workspace now passes `cargo check --workspace --all-targets`, tests included. I opened the PR before the flow-crate tests, contract tests and Clippy finished, so CI is the first full test run.\n\n**The fix:** in `crates/bifrost-flow/src/value_flow/pointer.rs`, the solver now checks which kind of target an invalidation has:\n- **Origin targets** behave as before.\n- **Pointer targets** mark the procedure as unsupported, so any results it touches are reported as incomplete. The real handling for this case is still open under #3858. No language adapter produces invalidations yet, so current results don't change.\n\n**Still open:**\n- **`eatmydata` guidance:** the new bullet is written in the \"Running tests\" section of `AGENTS.md`, but it isn't committed. I planned to put it in a separate small PR. If you'd rather, I can add it to #4516 instead.\n- **Other CI failures:** I asked a child agent to survey failing CI jobs on master. You stopped me while I was waiting for its result, so I don't have it yet.\n- **Pack drift check:** `scripts/check-pack-authoring-drift.mjs` fails on your machine for a reason unrelated to this change. Your `~/.gitconfig` sets `core.autocrlf=input`, which changes the hash of `node-v22.11.0.txt` because that file has mixed line endings. CI doesn't use that setting, so it shouldn't fail there. Passing `--no-filters` to `git hash-object` in the script would fix it locally.\n- **Possible overlap:** another session's worktree, `/home/jonathan/Projects/bf-3858-b`, is on branch `3858-pointer-invalidation-target` with no edits yet. It may be about to make the same fix. I couldn't message that session.\n\nShould I commit the guidance as its own PR, and then look at the CI survey result?",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      348
+    ],
+    "user_position": 332,
+    "input_rationale": "The PR is open, but the agent asks whether to commit the uncommitted AGENTS.md guidance as its own PR; it also notes a possible overlap with another session and a local drift-check fix.",
+    "label": "required_final",
+    "triggers": [
+      "Still open",
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-06T21:38:23.709Z",
+        "kind": "user",
+        "text": "new small pr for AGENTS pls  and how should we update guidance so small changes get appropriately small test effort"
+      },
+      {
+        "at": "2026-10-06T21:38:36.870Z",
+        "kind": "agent",
+        "text": "My `pkill` pattern matched its own shell and killed the command. Checking where it stopped:"
+      },
+      {
+        "at": "2026-10-06T21:38:48.370Z",
+        "kind": "agent",
+        "text": "The new branch was tracking `origin/master`, so the push tried to go to master and the ruleset rejected it. Pushing to the branch name explicitly:"
+      },
+      {
+        "at": "2026-10-06T21:39:10.054Z",
+        "kind": "agent",
+        "text": "I opened PR #4517 with the `eatmydata` rule: https://github.com/BrokkAi/bifrost-dev/pull/4517. It changes only `AGENTS.md`.  ## Making test effort match change size  **What happened here.** The edit i"
+      },
+      {
+        "at": "2026-10-06T21:40:02.954Z",
+        "kind": "system",
+        "text": "model set to fable"
+      },
+      {
+        "at": "2026-10-06T21:40:34.256Z",
+        "kind": "user",
+        "text": "reasonable but agents won't know what 10m of CI is unless they've already been burned, let's do one more round of improvements"
+      }
+    ],
+    "strict_input_scoring": false
+  }
+}

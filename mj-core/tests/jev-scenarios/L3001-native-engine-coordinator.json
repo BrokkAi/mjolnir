@@ -1,0 +1,289 @@
+{
+  "id": "L3001",
+  "title": "Native-engine coordinator",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "5992a2122571ac7c7e303ec069a19314",
+    "session_title": "mjolnir via claude2",
+    "reply_position": 36424,
+    "captured_at": "2026-11-06T16:03:49.692Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:32289",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:33497",
+          "role": "user",
+          "text": "btw i can see your messages, you don't need to re-echo everything for my benefit"
+        },
+        {
+          "id": "user:33550",
+          "role": "user",
+          "text": "launch approved"
+        },
+        {
+          "id": "user:33647",
+          "role": "user",
+          "text": "what is the human-readable name associated w that"
+        },
+        {
+          "id": "agent:34687",
+          "role": "assistant",
+          "text": "I accepted the AD3 r4 packet, so it will launch under your standing authorization once the executor has run its own checks.\n\nThe r3 failure came from the harness, not the product. The VM puts the downloaded .NET packages inside each cloned repository, and r4 tells git to ignore that folder again, as AD2 did. r4 also stops a corpus with the exact list of changed files if anything else changes. I re-ran the lane's clone test myself: r3 fails with the same message seen on EC2, and r4 passes.\n\nOne risk remains. The real .NET package restore has never run locally. If it changes anything other than the package folder, those corpora will fail and name the files, without producing a wrong answer. AD2 ran with the same restore and passed.\n\nWaiting on: the AD3 r4 run and the #9687 r10 run."
+        },
+        {
+          "id": "agent:34769",
+          "role": "assistant",
+          "text": "Master has a regression. #10167, a Python change that landed in batch #10330, broke three descriptor tests in `suite_issues`, which the lane never ran. I approved the fix's cache lever, so it can land quickly, and asked for `suite_issues` to be added to that lane's standard validation.\n\nWaiting on: the AD3 r4 run and the #9687 r10 run."
+        },
+        {
+          "id": "agent:34814",
+          "role": "assistant",
+          "text": "bifrost3 has applied both conditions: the regression fix is committed and running the full suites, and `suite_issues` is now standard validation for Python type-flow work. Nothing here needs your decision.\n\nWaiting on: the AD3 r4 run and the #9687 r10 run."
+        },
+        {
+          "id": "agent:34847",
+          "role": "assistant",
+          "text": "AD3 r4 launched at 13:45 UTC, and its cleanup deadline is 17:43 UTC. I passed the observer's start event to the executor.\n\nWaiting on: the AD3 r4 and #9687 r10 runs to finish."
+        },
+        {
+          "id": "agent:34870",
+          "role": "assistant",
+          "text": "The executor has confirmed that AD3 r4 is running. Before launch, it checked the clean-clone fix itself against a real git repository, and it passed. Nothing needs your decision.\n\nWaiting on: the AD3 r4 and #9687 r10 runs to finish."
+        },
+        {
+          "id": "agent:34922",
+          "role": "assistant",
+          "text": "I confirmed that #9737 step a' changes no answers today, and allocated version 2 of its Rust source-listing derivation. I attached one condition to the later step c. Rows stored under the old rule can wrongly mark a crate as complete in workspaces with directory symlinks. That is harmless now, because nothing reads them yet, but it would affect answers once step c starts using them. So step c must either reject rows from the old version or take a Rust epoch bump.\n\nWaiting on: the AD3 r4 and #9687 r10 runs to finish."
+        },
+        {
+          "id": "agent:34980",
+          "role": "assistant",
+          "text": "AD3 r4 has finished, and every step reported success. The VM ran for about 25 minutes. That is well past r3's quick failure, but shorter than the 45 to 75 minutes expected, so some corpora may still have failed. The results table will show which.\n\nWaiting on: the executor's cleanup proof, 28c4a33b's r4 results table, and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35029",
+          "role": "assistant",
+          "text": "That note needed no reply. #10187's first cut would have written a new kind of read key that the database rejects, so storing that key is now forbidden until the later #10325 work adds a migration for it. #10181 has landed.\n\nWaiting on: the AD3 r4 cleanup proof, 28c4a33b's results table, and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35062",
+          "role": "assistant",
+          "text": "AD3 r4 produced real data this time. All six legs completed, and so did the membership, source-evidence and summary steps. For each corpus, the step that compares the old and new C# readers exited with code 1. That most likely means it found differences between them, which is what AD3 is meant to measure, not that the run failed. 28c4a33b's frozen qualification will settle whether each corpus counts. AWS cleanup is confirmed, apart from the executor's final quiet-period check.\n\nWaiting on: 28c4a33b's r4 results table and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35116",
+          "role": "assistant",
+          "text": "The AD3 r4 cleanup is now confirmed, so nothing from that run is left on AWS. I passed the executor's final proof back to it.\n\nWaiting on: 28c4a33b's r4 results table and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35148",
+          "role": "assistant",
+          "text": "The AD3 r4 run itself was clean. All three corpora passed qualification, the earlier Jellyfin readiness timeout did not happen again, and none of the #9180 database errors appeared.\n\nThe headline is the comparison itself. On every sampled request, across all three corpora, the native C# route gave a different answer from the legacy route or no answer at all. Not one answer matched.\n\nThat is extreme enough that I asked the lane to rule out a comparison artifact first. Both routes might be naming the same symbol in different ways, such as a path, location or name format. If not, the native route is far from matching the legacy route on real code. The lane's AD3 report will decide which it is.\n\nWaiting on: the AD3 report and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35207",
+          "role": "assistant",
+          "text": "The executor has formally closed AD3 r4. Cleanup is proven, and the full evidence archive is saved at `/tmp/7314-ad3r-r4-terminal-evidence.tar.xz`. Nothing needs your decision.\n\nWaiting on: the AD3 report and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35241",
+          "role": "assistant",
+          "text": "AD3's stated target was closing the Root membership regions, and the report shows that done on all three corpora. Every native loss is a structured \"incomplete\": no native answer claims completeness while losing a target. So I can accept AD3 as scoped. I must also record plainly that the native route is not close to matching the legacy route's answers."
+        },
+        {
+          "id": "agent:35273",
+          "role": "assistant",
+          "text": "I accepted AD3 for what it was meant to show. The native C# route now knows which files belong to which project in all three test repositories, which was AD3's target.\n\nAD3 does not show that native C# matches legacy. Of 50 sampled requests, native matched legacy on 8, improved on none, and lost targets on 23. Every native answer was marked incomplete. That is the correct, cautious outcome: native never claimed a complete answer while missing targets. But the switch to the native route (Milestone 11) cannot cite AD3 as evidence of matching legacy. Most losses come from member and receiver access that native C# does not model yet, which belongs to the existing Milestone 6.\n\nTwo other results:\n- **New work.** MudBlazor's main library uses the Razor SDK, which generates declarations native C# does not track yet, so 770 files stay unresolved. That is far more than the brief guessed, and it needs its own work item.\n- **#9180 can close.** The duplicate-row database error did not recur on any of the three real repositories.\n\nWaiting on: the end of the #9687 r10 run, with its cleanup deadline at 20:49 UTC."
+        },
+        {
+          "id": "agent:35357",
+          "role": "assistant",
+          "text": "The fix for the #10167 Python regression is ready as PR #10348. It passes the full `suite_issues`, including the three descriptor tests that broke, and the other full suites. The one timeout in the policy benchmark suite passes when run alone. Nothing needs your decision.\n\nWaiting on: the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35406",
+          "role": "assistant",
+          "text": "The #9947 slowdown is confirmed and explained. When reuse is refused, master recomputes every result it has just computed, which costs about 45 seconds per Bat run. A small fix that keeps the first results changes no answer and can land now, with no cache token.\n\nThe deeper reason Bat reuses nothing is that one test file anywhere in the repository has a parse error. That marks every stored result as depending on how the run went, rather than on the code, so none can be reused. I approved the lane's next design, which labels each gap by its actual cause, under strict rules. A gap counts as code-determined only if the stored result records the file it came from, so fixing that file invalidates the result. Any cause not on an explicit list stays run-dependent.\n\nWaiting on: the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35490",
+          "role": "assistant",
+          "text": "Mapping the #9947 work turned up a possible soundness bug already on master. Some stored taint results built from a cached lookup may not record what that lookup read. If so, an edit that changes those inputs would not invalidate the stored result, and a stale \"complete\" answer could be reused. 07d292ca is building a test case to check. If the bug is real, the fix lands first, as its own change with a cache token, so that results already stored under the old code are invalidated too.\n\nWaiting on: that test result and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35549",
+          "role": "assistant",
+          "text": "The #9947 speed fix is now narrower and safe. It keeps the first computed results only when reuse was refused because of the answers themselves. If the refusal came from the run, such as a failed read or a change to the workspace during the solve, it recomputes as before. The Bat savings are unchanged.\n\nWaiting on: the result of the test for the possible stored-result bug, and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35612",
+          "role": "assistant",
+          "text": "**Master has a serious performance regression.** With the Rust standard-library pack enabled, registering policies takes over 1,500 seconds even on a two-file test repository. Without that pack it takes 57 seconds, and an earlier master finished the same check. c2a66e1c is bisecting it, and the suspects include two close-match commits, #10134 and #10144. I will see the fix before it touches anything that affects caching.\n\nI also ruled on a close-match bug. A pack built for one version of a dependency could also be activated for other versions of that dependency in the same graph. The matcher gets fixed first. At run time, a version outside the pack's range is reported as missing evidence. Filtering per version is allowed only if lookups are scoped by package; otherwise the whole pack is refused.\n\nWaiting on: the bisection result and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35693",
+          "role": "assistant",
+          "text": "I agreed that the existing XML adapter bump to version 2 covers two more changes to stored XML text positions. That holds as long as nothing stored under version 2 before those changes. Nothing here needs your decision.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35724",
+          "role": "assistant",
+          "text": "079c08c9 confirmed the condition: neither branch was ever pushed, and its tests used throwaway stores. So XML adapter version 2 stands. Nothing needs your decision.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35761",
+          "role": "assistant",
+          "text": "I approved #9559's plan to cache hashes of the JDK's module files instead of re-hashing about 336 MB on every reuse. Nothing here needs your decision.\n\nA cached hash is trusted only while the file's identity is unchanged: device, inode, size, and modification and change times. I added safeguards borrowed from how git handles the same problem:\n- re-hash any file that changed within the file system's timestamp precision of when its hash was cached;\n- use the cache only on local disks;\n- if the system cannot report a complete identity, always re-hash.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35830",
+          "role": "assistant",
+          "text": "Rust looks up packs by crate name only, so the close-match lane is refusing the whole pack when a resolved dependency version falls outside its range. The refused version appears in the external inventory output under the existing `missing_evidence` status, with a new reason, so clients see no new status value. It needs no cache version, because the inventory is recomputed for each request. Nothing here needs your decision.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35897",
+          "role": "assistant",
+          "text": "Two rulings from this round matter beyond the lane involved.\n\n- **The #10301 fix may cost precision broadly.** The first version of the fix is sound: Rust code that reads a name it cannot resolve in its own file gets refused. But if that refusal shows up as an ordinary gap, then every Rust function that reads an imported constant or function would turn its taint and policy answers partial, not only the protocol publication the lane described. I required either that the refusal stay inside the coverage check, or a count of how many answers become partial before it lands.\n- **Refused close-match versions use an existing status.** A dependency version refused by its close-match pack shows as `incompatible`, the existing status for a pack whose version requirement does not match, with the new reason text. So client output gains no new status value. My first ruling assumed an external `missing_evidence` status that does not exist.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:35991",
+          "role": "assistant",
+          "text": "I accepted #9559's design that ties its JDK checks to the files' actual bytes. It also closes an old gap where a cached JDK pack could be reused based only on file metadata. One cost to know about: on Windows, every JVM request will re-hash the JDK's module files, about 1.6 seconds each time, until a follow-up adds the Windows file identity it needs. I asked for that follow-up and a Windows measurement before the later 3d step.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36042",
+          "role": "assistant",
+          "text": "One limit to know about, and it needs no decision now. Even after the JDK work, Java projects whose dependencies come from the Gradle cache will still not reuse stored results, because any listing of the Gradle cache marks the dependency selection unverified. Maven projects and projects with explicit jar paths are not affected. The lane will file a separate issue for Gradle.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36094",
+          "role": "assistant",
+          "text": "I accepted how the #9947 speed fix is tested. The rule for when to fall back to recomputing is tested where it is implemented, with a deliberately broken version showing the test catches it. I saw no reason to add a test-only hook to production code just to test that case end to end. Nothing here needs your decision.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36149",
+          "role": "assistant",
+          "text": "I accepted #9559's narrower handling of cancellation. When a Java read is cancelled, the lane records that on the query, using a flag that already exists and that tools already report, instead of adding an error return through 14 layers of wrappers. The main condition: a result from a cancelled read must never be cached, so the next request gets a full answer. Nothing here needs your decision.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36204",
+          "role": "assistant",
+          "text": "For #10301, I accepted a narrow rule for recognizing a call to a function declared in the same module, with one Rust-specific catch. Code can declare a function and a static under the same name, each enabled by a different build configuration. The syntax tree shows both at once, so a rule that reads only the syntax tree could take the function where the active build actually reads the static. Declarations gated on a build configuration, names also brought in by an import, and names declared more than once therefore do not count as proof. Nothing here needs your decision.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36275",
+          "role": "assistant",
+          "text": "I approved moving one G3 token to the PR that actually changes the answers. As planned, a later G3 step would have changed answers while carrying a version string identical to the step before it, so it could have reused stale cached results. M1a can now be marked Ready. Nothing here needs your decision.\n\nWaiting on: the G3 lane's answer on the generated-pack version, the bisection of the standard-library regression, and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36323",
+          "role": "assistant",
+          "text": "The SQLx facade PR introduces the Rust pack producer version, so every cached Rust pack generated from rustdoc will be rebuilt once after it lands. If G3 also changes the generated packs, it will bump that version and cause a second one-time rebuild. That is the expected cost of correct cache keys. Nothing here needs your decision.\n\nWaiting on: G3's evidence on its generated packs, the bisection of the standard-library regression, and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36371",
+          "role": "assistant",
+          "text": "There is a temporary cost in containers, and I have no objection to it. #9559's JDK hash cache cannot prove that an overlay file system is local, since one of its layers could be a network mount. So inside containers, every Java request will re-hash the JDK, about 1.6 seconds, until #10380 lands. That issue will check each layer and includes a container measurement before the later 3d step.\n\nWaiting on: G3's generated-pack evidence, the bisection of the standard-library regression, and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36424",
+          "role": "assistant",
+          "text": "G3's next step, M1b1, needs no cache version. It neither changes any existing answer nor alters the packs generated from rustdoc. The version bump moves to the later G3 step that will start writing the new data. Nothing here needs your decision.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "what is the human-readable name associated w that",
+    "assistant_text_tail": "G3's next step, M1b1, needs no cache version. It neither changes any existing answer nor alters the packs generated from rustdoc. The version bump moves to the later G3 step that will start writing the new data. Nothing here needs your decision.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 33647,
+    "mjolnir": "worker Jev still-open language classification",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "No user input is needed.",
+    "input_rationale": "The reply reports a cache-version ruling and lists two waits (another lane's bisection and an EC2 run) as the agent's own pending inputs; no earlier reply since the user's naming question left a decision for the user. The user's follow-up says those waits belong to finished or dead agents, a correction of the agent's tracking, not an open request.",
+    "label": "none",
+    "kind": null
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T16:10:43.509Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-06T16:11:05.923Z",
+        "kind": "user",
+        "text": "> Waiting on: the bisection of the standard-library regression and the end of the #9687 r10 run.  if these are your subagents, they are finished or dead"
+      },
+      {
+        "at": "2026-11-06T16:11:50.352Z",
+        "kind": "agent",
+        "text": "Neither is one of my subagents. All of mine are stopped. Those two waits belong to other sessions:  - **#9687 r10 is still running.** I checked this host: its controller, watchdog and observer process"
+      },
+      {
+        "at": "2026-11-06T16:12:44.185Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-06T16:12:46.894Z",
+        "kind": "agent",
+        "text": "The bisection is narrowed to one merge batch, #10222, of 12 PRs. The commit before it registers policies in 60 seconds, and the batch itself times out at 30 minutes. The current suspect is #10175, the"
+      },
+      {
+        "at": "2026-11-06T16:13:19.701Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      }
+    ]
+  }
+}

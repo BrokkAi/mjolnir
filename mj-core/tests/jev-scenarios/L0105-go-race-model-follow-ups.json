@@ -1,0 +1,264 @@
+{
+  "id": "L0105",
+  "title": "Go race model follow-ups",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "0deac1a301592eb01696fd55a6e4b6db",
+    "session_title": "eval15 2903 opus",
+    "reply_position": 2102,
+    "captured_at": "2026-09-17T10:43:15.614Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:19",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #2903: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 3427b2ad84cc0d6ebacd963182cd4f1fed8f88c8\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitati\n[... 5677 bytes omitted from the middle of this message ...]\ncalar derivation prunes infeasible countdown arms, and recursive channel transport closes only after a source-backed certificate proves one strictly decreasing self-recursive chain with exactly one reachable terminal `ChannelSend`. The exact certified call is then eligible for a second reference-identity pass; omitted recursive calls are not pre-bound generally.\n\nThe unbuffered pointer fixture is Proven/exhaustive. Its struct-value pair has no proven conflict. Unknown roots, non-decreasing recursion, scalar mutation, unrepresented arithmetic, two sends, and repeated sends remain Open with `RecursiveExpansion`. Disabling only cardinality acceptance returns the positive to Open with `UnknownLocation`, `AliasSetTruncated`, and `RecursiveExpansion` (nextest `3dea0c88-fd13-45cb-967e-af32bb6b6cbf`).\n\nThe first exact-build corpus attempt exposed a production workspace-oracle panic on the new `IntegerOffset` flow. The projector and retained-snapshot validator now preserve it as a non-identity `LanguageDefined` dependency, covered by an oracle-level Go regression (`73ce3698-1693-4718-bb19-270115e8e37d`). The corrected six-crate gate passes 4,732/4,732 with 200 skipped (`0afa9131-c3a7-4e35-ba39-541d07556b36`); affected all-target/all-feature Clippy, formatting, and diff checks pass.\n\nMatching products built in 8m24s. The fresh twelve-record corpus report `/tmp/go-2903-2be2b-corpus.977TwsrM/run-20260911T135227Z.json` passes exact build/revision, endpoint, envelope, truncation, stderr, and policy-output audits (`/tmp/go-2903-2be2b-corpus-audit.json`). Every case remains Inconclusive with grouped=0. Evidence counts are unchanged: bbolt 0/0, cache2go 10/10, pond 56/56, ants 59/55, workerpool 4/2, and go-playground/pool 31/31. Cache2go retains the Open unprotected buggy endpoint and Open compatible-lock fixed endpoint, both still blocked by unresolved target and recursive expansion.\n\nThis closes the planned countdown/channel-cardinality increment. It does not complete the wider #2903 loop/index/path inventory or parent #2900.\n\n"
+        },
+        {
+          "id": "agent:22",
+          "role": "assistant",
+          "text": "I'll start by orienting myself in the repository and setting up the exact base commit required by the brief."
+        },
+        {
+          "id": "agent:42",
+          "role": "assistant",
+          "text": "The working tree is clean. Let me fetch and check out the required base commit."
+        },
+        {
+          "id": "agent:62",
+          "role": "assistant",
+          "text": "Base commit confirmed: `3427b2ad84cc0d6ebacd963182cd4f1fed8f88c8`. Now let me read the ExecPlan referenced in the issue and the routed guidance."
+        },
+        {
+          "id": "agent:504",
+          "role": "assistant",
+          "text": "The build is warm. Now let me probe the current behavior with a temporary test covering the issue's acceptance criteria."
+        },
+        {
+          "id": "agent:592",
+          "role": "assistant",
+          "text": "Let me check whether widening is actually wired into the fixed point, and probe more shapes."
+        },
+        {
+          "id": "agent:630",
+          "role": "assistant",
+          "text": "The gap is confirmed precisely. Let me look at the re-projection function that owns the final index identity."
+        },
+        {
+          "id": "agent:660",
+          "role": "assistant",
+          "text": "Now let me implement. First, the widening in the scalar fixed point."
+        },
+        {
+          "id": "agent:686",
+          "role": "assistant",
+          "text": "Now wire widening into the worklist:"
+        },
+        {
+          "id": "agent:697",
+          "role": "assistant",
+          "text": "Now the concurrency side. First the index range type:"
+        },
+        {
+          "id": "agent:706",
+          "role": "assistant",
+          "text": "Now update `canonicalize_access` and `exact_index_location`:"
+        },
+        {
+          "id": "agent:716",
+          "role": "assistant",
+          "text": "Now the derivation cache and the projection that decides the final element identity:"
+        },
+        {
+          "id": "agent:738",
+          "role": "assistant",
+          "text": "Now the overlap gate, which must reject proven-disjoint ranges:"
+        },
+        {
+          "id": "agent:750",
+          "role": "assistant",
+          "text": "Now wire the derivation pass into the solve and fix the call sites:"
+        },
+        {
+          "id": "agent:817",
+          "role": "assistant",
+          "text": "The seeding is the missing link — the caller's local must be resolved by the caller's own derivation. Let me restructure:"
+        },
+        {
+          "id": "agent:863",
+          "role": "assistant",
+          "text": "Let me diagnose at the scalar-derivation level with a focused unit probe."
+        },
+        {
+          "id": "agent:923",
+          "role": "assistant",
+          "text": "The IR dump shows the real blocker: a plain assignment lowers its value through `LanguageDefined`, erasing the constant. Let me find that in the Go producer."
+        },
+        {
+          "id": "agent:982",
+          "role": "assistant",
+          "text": "Now I can see the loop-induction blocker. Let me look at how Go lowers `i++`:"
+        },
+        {
+          "id": "agent:1038",
+          "role": "assistant",
+          "text": "Now the Go producer change: publish `x++`/`x--`/`x += n` as structured integer steps instead of opaque flows."
+        },
+        {
+          "id": "agent:1081",
+          "role": "assistant",
+          "text": "The loop induction range now resolves to `[0,1]`. Let me check the end-to-end behavior with a fuller fixture set."
+        },
+        {
+          "id": "agent:1106",
+          "role": "assistant",
+          "text": "Strong results. Let me confirm the diagnostics so the negative fixtures are meaningful rather than bail-outs."
+        },
+        {
+          "id": "agent:1128",
+          "role": "assistant",
+          "text": "The behavior is right. Let me now remove the probes and write the real regression tests."
+        },
+        {
+          "id": "agent:1141",
+          "role": "assistant",
+          "text": "Now let me add the production-shaped regression fixtures to the shared Go workspace:"
+        },
+        {
+          "id": "agent:1185",
+          "role": "assistant",
+          "text": "All 10 pass. Let me run the flow crate's own tests including the new widening tests."
+        },
+        {
+          "id": "agent:1236",
+          "role": "assistant",
+          "text": "The widening drops through to `Unknown` (an offset applied to a non-exact integer is unknown). Let me correct the expectations:"
+        },
+        {
+          "id": "agent:1261",
+          "role": "assistant",
+          "text": "Now the before/after demonstration: revert only the implementation files and run the new tests against the base behavior."
+        },
+        {
+          "id": "agent:1292",
+          "role": "assistant",
+          "text": "Base behavior confirmed: 5 of 10 new tests fail before the fix, and the 5 conservative controls pass both before and after. Restoring the implementation:"
+        },
+        {
+          "id": "agent:1309",
+          "role": "assistant",
+          "text": "Now the required validation suites. Let me run the Go usage/issue suites and the analysis lib in the background:"
+        },
+        {
+          "id": "agent:1587",
+          "role": "assistant",
+          "text": "4611/4611 integration tests pass. Now full clippy plus the release build for the corpus benchmark:"
+        },
+        {
+          "id": "agent:1614",
+          "role": "assistant",
+          "text": "Clippy is clean. Let me re-verify the changed crates after the refactor, then commit a checkpoint."
+        },
+        {
+          "id": "agent:1649",
+          "role": "assistant",
+          "text": "Let me commit this checkpoint."
+        },
+        {
+          "id": "agent:1657",
+          "role": "assistant",
+          "text": "Now the external-evidence validation on the issue's pinned Go repositories. Let me build the benchmark binary:"
+        },
+        {
+          "id": "agent:1859",
+          "role": "assistant",
+          "text": "Now the baseline run. Reverting the implementation to the base commit and rebuilding:"
+        },
+        {
+          "id": "agent:1928",
+          "role": "assistant",
+          "text": "Now let me compare the two corpus reports with the harness's own comparison:"
+        },
+        {
+          "id": "agent:1959",
+          "role": "assistant",
+          "text": "Let me verify the reach of the change on real code rather than only the case verdicts."
+        },
+        {
+          "id": "agent:2058",
+          "role": "assistant",
+          "text": "The evidence is complete. Let me commit the ExecPlan update and clean up scratch artifacts."
+        },
+        {
+          "id": "agent:2070",
+          "role": "assistant",
+          "text": "Final confirmation on the committed tree:"
+        },
+        {
+          "id": "agent:2102",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\nThe gap turned out not to be where the acceptance criterion pointed. The criterion asked for dynamic-index equality and disjointness, but exact-value index machinery already existed. Measuring ten Go shapes before writing code found the real blockers one layer down: the Go producer erased exact arithmetic at binding updates, and the flow layer never called its own widening operator. Reading the criterion alone would have led to reimplementing working code.\n`─────────────────────────────────────────────────`\n\nFINAL REPORT\n\nIssue #2903, bounded path and scalar reasoning for Go race candidates. Base commit `3427b2ad84cc0d6ebacd963182cd4f1fed8f88c8` (detached). Final commit `1fced533d02d65b726bee9fadce1ad1ca0919404`.\n\n## 1. Confirmed cause with structured evidence\n\nI measured ten paired Go shapes against the base commit before changing anything. The result was that **every index reaching the concurrency solver through a local integer variable stayed open**, even when its value was a compile-time constant:\n\n| fixture | base behaviour |\n|---|---|\n| `i := 2; go indexWriter(values, i)` twice | `conflict siblings unordered open open loc=index reasons=[\"unknown_location\"]` |\n| `i := 0; j := 1` over one slice | same open row (a false positive kept open) |\n| `i := 0; i += 3` vs literal `3` | open |\n| two counted loops over disjoint halves | open |\n| literal `2` in both children | already `proven exhaustive` |\n\nThe literal case already worked, so the defect is not the overlap gate. Three structured causes, each confirmed by dumping the IR or reading the call graph:\n\n**Cause 1 — the index resolver stops at a memory load.** `canonicalize_bound_accesses` in `crates/bifrost-flow/src/concurrency.rs` resolved a dynamic index only through `invocation_scalar_integer`, which calls `direct_scalar_source` (`crates/bifrost-flow/src/typestate/production.rs:3190`). That walks `ValueFlowKind::Local | Parameter | Receiver | IntegerOffset` edges and returns `None` at any other producer and at any reassignment. A Go local read is none of those, so the chain never reached the literal.\n\n**Cause 2 — a Go binding update erases exact arithmetic.** Dumping the semantics of `for index := 0; index < 2; index++` showed the increment lowering to `ValueFlow { kind: LanguageDefined, source: ValueId(11), target: ValueId(12) }` at point 27, immediately beside `GuardFact { predicate: OrderedIntegerComparison { LessThan, constant: ValueId(5) } }` at point 16. The ordered guard the earlier #2903 slice added had nothing to refine, because `increment_statement` (`crates/bifrost-analysis/src/analyzer/go/semantic.rs:8447`) published an opaque flow and ended the value's history at the update.\n\n**Cause 3 — the scalar lattice has no finite height.** `ScalarIntegerInterval::widen` existed in `crates/bifrost-flow/src/scalar_state.rs:242` but was referenced only by its own unit test. The worklist joined with `hull` and relied on a `debug_assert` update bound. No production code constructs a finite `ScalarIntegerDomain::Signed` or `Unsigned`, so every interval is mathematical and a counting loop grew one value per iteration without converging. This had to be fixed before the derivation could run on arbitrary procedures.\n\nA fourth observation explains why the existing closed-cell path did not help: `closed_scalar_cells` returned the empty set for every probe, because Go does not lower a plain local integer to a `LexicalCell`. A `:=` binding is an `Assignment` plus a `ValueFlow::Local`.\n\n## 2. Changes and reasons\n\nBase `3427b2ad84cc0d6ebacd963182cd4f1fed8f88c8` → final `1fced533d02d65b726bee9fadce1ad1ca0919404`, two commits:\n\n- `c1e0d9df36ec93b3cfb6a11badf809f844df33a2` — the implementation and tests.\n- `1fced533d02d65b726bee9fadce1ad1ca0919404` — the living ExecPlan update.\n\n**`crates/bifrost-flow/src/scalar_state.rs`** — `ScalarFact::widen` lift\n[... 10702 bytes omitted from the middle of this message ...]\n the work was connecting it rather than building it. Three things had to change. First, the flow layer never called its own widening operator, so the integer lattice had no finite height and a counting loop would have grown its interval one value per iteration; widening now applies once a program point has joined sixteen incoming states. Second, `x++`, `x--`, `x += n`, and `x -= n` published an opaque flow that ended the value's history at the update, which left every loop induction variable unknown and gave the ordered guard at the loop head nothing to refine; they now publish the same structured integer-offset relation the IR already carries for `x - 1`, which moves the Go adapter fingerprint to v76 without touching the IR schema. Third, the solver derives one scalar solution per invocation that owns an undecided element access, seeding each callee's formals from its caller's own derivation so a local passed as an argument crosses the call. An index that resolves to one element now names its location exactly as a literal index does, two element ranges that cannot meet reject the conflict, and an undecided index keeps its open result. Backing identity remains a separate proof, so equal index syntax over two slices stays separate and distinct syntax over one slice still races. Ten paired fixtures cover the decided element, disjoint elements, a stepped local, address mutation, an unknown index, disjoint and overlapping loop ranges, a loop past the widening limit, and both object near misses; five fail before the change and the five conservative controls pass on both sides. All twelve pinned revisions of the six-repository Go race corpus produce identical verdicts, identical scanned-file and byte census, and identical finding counts before and after. Still open on this issue: task-pairing exclusion beyond the existing sibling-spawn rule, exact WaitGroup and conditional protocol counts, a plain `name = <literal>` update, and finite Go integer widths, without which an interval cannot carry machine overflow semantics."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "ency, covered by an oracle-level Go regression (`73ce3698-1693-4718-bb19-270115e8e37d`). The corrected six-crate gate passes 4,732/4,732 with 200 skipped (`0afa9131-c3a7-4e35-ba39-541d07556b36`); affected all-target/all-feature Clippy, formatting, and diff checks pass.\n\nMatching products built in 8m24s. The fresh twelve-record corpus report `/tmp/go-2903-2be2b-corpus.977TwsrM/run-20260911T135227Z.json` passes exact build/revision, endpoint, envelope, truncation, stderr, and policy-output audits (`/tmp/go-2903-2be2b-corpus-audit.json`). Every case remains Inconclusive with grouped=0. Evidence counts are unchanged: bbolt 0/0, cache2go 10/10, pond 56/56, ants 59/55, workerpool 4/2, and go-playground/pool 31/31. Cache2go retains the Open unprotected buggy endpoint and Open compatible-lock fixed endpoint, both still blocked by unresolved target and recursive expansion.\n\nThis closes the planned countdown/channel-cardinality increment. It does not complete the wider #2903 loop/index/path inventory or parent #2900.\n\n",
+    "assistant_text_tail": " the work was connecting it rather than building it. Three things had to change. First, the flow layer never called its own widening operator, so the integer lattice had no finite height and a counting loop would have grown its interval one value per iteration; widening now applies once a program point has joined sixteen incoming states. Second, `x++`, `x--`, `x += n`, and `x -= n` published an opaque flow that ended the value's history at the update, which left every loop induction variable unknown and gave the ordered guard at the loop head nothing to refine; they now publish the same structured integer-offset relation the IR already carries for `x - 1`, which moves the Go adapter fingerprint to v76 without touching the IR schema. Third, the solver derives one scalar solution per invocation that owns an undecided element access, seeding each callee's formals from its caller's own derivation so a local passed as an argument crosses the call. An index that resolves to one element now names its location exactly as a literal index does, two element ranges that cannot meet reject the conflict, and an undecided index keeps its open result. Backing identity remains a separate proof, so equal index syntax over two slices stays separate and distinct syntax over one slice still races. Ten paired fixtures cover the decided element, disjoint elements, a stepped local, address mutation, an unknown index, disjoint and overlapping loop ranges, a loop past the widening limit, and both object near misses; five fail before the change and the five conservative controls pass on both sides. All twelve pinned revisions of the six-repository Go race corpus produce identical verdicts, identical scanned-file and byte census, and identical finding counts before and after. Still open on this issue: task-pairing exclusion beyond the existing sibling-spawn rule, exact WaitGroup and conditional protocol counts, a plain `name = <literal>` update, and finite Go integer widths, without which an interval cannot carry machine overflow semantics.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 19,
+    "input_rationale": "FINAL REPORT with fix committed and validated; the open items are limitations of the partial fix, listed as a record. Nothing is asked of the judge.",
+    "label": "none",
+    "trigger": "Still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

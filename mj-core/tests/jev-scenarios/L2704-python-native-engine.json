@@ -1,0 +1,325 @@
+{
+  "id": "L2704",
+  "title": "Python native engine",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "0305d10cd40fb1342e5ad6171d6ae993",
+    "session_title": "bifrost3 via codex",
+    "reply_position": 516943,
+    "captured_at": "2026-11-04T21:06:03.747Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:256602",
+          "role": "user",
+          "text": "fable, pls review the plan's changes so far, especially wrt python; what are we doing suboptimally / how can we simplify"
+        },
+        {
+          "id": "user:257206",
+          "role": "user",
+          "text": "great. let's clean this shit up before piling on more"
+        },
+        {
+          "id": "user:257377",
+          "role": "user",
+          "text": "ask 8a4e703ed8cb3c1d6878e1d73ee7a3ce to review your simplifications when complete (and PR'd)"
+        },
+        {
+          "id": "user:264047",
+          "role": "user",
+          "text": "did go flip land?"
+        },
+        {
+          "id": "user:264231",
+          "role": "user",
+          "text": "what's next here after cleanup? can we start it now?"
+        },
+        {
+          "id": "user:264385",
+          "role": "user",
+          "text": "agreed"
+        },
+        {
+          "id": "user:277420",
+          "role": "user",
+          "text": "what is the s-w issue"
+        },
+        {
+          "id": "user:277603",
+          "role": "user",
+          "text": "yes, good idea, do it"
+        },
+        {
+          "id": "user:280061",
+          "role": "user",
+          "text": "1. yes, fine, add it to the list of fucking slow native languages\n2. 0bf0983d553751026807d97d54857ede is not closed, but i moved it to a new profile, maybe we need a harness fix, what error did you get"
+        },
+        {
+          "id": "user:282237",
+          "role": "user",
+          "text": "so python is done? otherwise why are you idle?"
+        },
+        {
+          "id": "user:282523",
+          "role": "user",
+          "text": "who owns dedup?"
+        },
+        {
+          "id": "user:282624",
+          "role": "user",
+          "text": "yes, that is what i want. dedup is p0 (so run python builds + tests at nice 10) but where we can make progress concurrently we should do so"
+        },
+        {
+          "id": "user:283418",
+          "role": "user",
+          "text": "pls give to coordinator"
+        },
+        {
+          "id": "user:295924",
+          "role": "user",
+          "text": "For native Python 'certain' results, should a read through an import be judged relative to the selected analysis environment, as the JVM and Go already are? With this rule, an import binds the provider our environment selected, and a name with a single import writer has fixed identity provided the import succeeds. Runtime sys.path or meta_path changes and unacquired external packages stay as query-level obligations, not per-read blockers. Today these reads are always potential. Legacy reports 22 of the 23 M4-0 native-potential reads as proven.\n\nPy certainty: Selected env (Recommended)"
+        },
+        {
+          "id": "user:303865",
+          "role": "user",
+          "text": "Once #6954 lands, the Python production-switch blockers are all closed except #6509's small remainder: slice B, a shared member-prerequisite fix worth about 3 M4-0 reads, and slice C, worth 1 reverse read. The rest is genuine uncertainty that should stay open. The switch turns on production Python native publication and native find-usages. #6108's acceptance first requires re-measuring the PyTorch cold index with every Python producer that has landed. You've held the Java and Go switches during dedup. What should I do next?\n\nPy switch: Prepare switch, hold land (Recommended)"
+        },
+        {
+          "id": "user:304970",
+          "role": "user",
+          "text": "The Python switch is bigger than the 'publication plus native find-usages' draft I described. Even find-usages first needs the production environment lifecycle: profile selection, cold and edit reconcile on the real store, and replacing the validation-only staging. That alone is about 5-10 days. A find-usages-only switch would also leave two engines answering Python questions, which is what you held Java for. Every native surface except the usage graph has the building blocks. Native call relations, type flow and the usage graph do not exist yet (weeks). Which scope should the draft switch PR target?\n\nSwitch scope: All surfaces at once (Recommended)"
+        },
+        {
+          "id": "user:304995",
+          "role": "user",
+          "text": "we have ~no activity on localhost so don't be afraid to scale out"
+        },
+        {
+          "id": "user:311969",
+          "role": "user",
+          "text": "My session's permission check now blocks `gh pr ready`, which submits a reviewed PR to the merge queue. It allowed the same command for four PRs earlier today. The coordinator (0bf0983d) offered to run it for me whenever I report a PR as fully approved with a passing gate. I won't do that without your say-so, because it would get around your permission control. How should reviewed PRs get marked ready from now on?\n\nMark ready: Allow me (Recommended)"
+        },
+        {
+          "id": "user:358911",
+          "role": "user",
+          "text": "so what's actually on the python critical path and why is it blocked by jvm gates"
+        },
+        {
+          "id": "user:359098",
+          "role": "user",
+          "text": "do it"
+        },
+        {
+          "id": "user:359338",
+          "role": "user",
+          "text": "not sure if this is already a memory but python build and test activity should run at nice 10"
+        },
+        {
+          "id": "user:369757",
+          "role": "user",
+          "text": "The auto-mode check blocks `gh pr ready` as 'Merge Without Review', even though earlier in this session you let me mark PRs ready after the reviewer, the coordinator and the gates. Right now #7701 (Python decorator owners) is reviewer-approved, needs no JVM gate, and its head 4248318511 matches the remote and merges cleanly. #7702, #7703 and #7706 are reviewer-approved and waiting only on their JVM gates. How should I handle the ready step?\n\nReady step: Allow it (add a rule)"
+        },
+        {
+          "id": "user:369783",
+          "role": "user",
+          "text": "i explicitly allow gh pr ready"
+        },
+        {
+          "id": "user:442461",
+          "role": "user",
+          "text": "we need to\n\n1. profile and fix obvious dumbassery\n2. make sure we're not hitting issues that have been fixed in other native engines, especially rust, if we are, those fixes need to be properly generalized"
+        },
+        {
+          "id": "user:482989",
+          "role": "user",
+          "text": "1. yes? not sure why this needs me to weigh in\n\n2. what is 8152 / what are pros / cons"
+        },
+        {
+          "id": "user:495572",
+          "role": "user",
+          "text": "yes to both"
+        },
+        {
+          "id": "user:502109",
+          "role": "user",
+          "text": "PR #9077 is ready to push (4cbbe26d1a, gate green, independent review done), but Mjolnir's pre-push review gate blocks it. Its review tool only reviews the clone's ROOT checkout, which is on go-correctness-bbolt-checkpoint-20260903 and has an uncommitted change to crates/bifrost-rust/src/usage_walks.rs. To review my commit, the root has to point at 4cbbe26d1a. How should I handle your root change?\n\nRoot change: Stash, review, restore\nOther: file a bug report in brokkai/mjolnir pls and I'll fix the harness asap"
+        },
+        {
+          "id": "user:502477",
+          "role": "user",
+          "text": "did you get the mj bug reported?"
+        },
+        {
+          "id": "user:502563",
+          "role": "user",
+          "text": "okay, fixing, just stash away the dirty root in the meantime so you can work there more easily without juggling things for the review"
+        },
+        {
+          "id": "user:507221",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nPR 1 ready: Yes, mark ready (Recommended)\nM8 holds: None"
+        },
+        {
+          "id": "user:507292",
+          "role": "user",
+          "text": "#9077 regressed a scheduled-only test (red in Hourly since the merge). A precise query on `os.getcwd()` now returns the module root `python.os` instead of the stdlib pack member `python.os.getcwd`, because native Python has no external-owner member inventory yet (#7857: the shared external-owner relations are still JVM-only). MergeMarshall escalated: implement #7857 now, revert #9077, or accept a known gap. Which?\n\n#7857 gap: Known gap, then #7857 (Recommended)"
+        },
+        {
+          "id": "agent:515885",
+          "role": "assistant",
+          "text": "PR 2a is waiting on a scope decision from you. The store-row audit changed the picture.\n\n**What the audit found** (`/tmp/5658-m8/pr2a3/store/ROWS.md`): store rows can change while the snapshot ID stays the same. This happens through:\n- generation rotation;\n- later blob publication;\n- derived reconciliation;\n- Python acquisitions written under the existing snapshot.\n\nReads also span separate transactions.\n\n**Why that matters:** the coordinator's standard requires proof that no input changed while a lowering ran. Meeting it would mean every store write that changes selected data joins the publication protocol, which amounts to snapshot isolation for the store. That holds even for reuse within one request, and it is far bigger than PR 2a.\n\n**The choice I asked you** (Mjolnir answered it while you were away):\n- **No reuse, measure first (my recommendation).** Key Python and C++ artifacts by a digest of their lowered content. Equal content then gives equal keys and handles, and no selection proof is needed. Nothing is reused, so every build recomputes. I'd measure that cost on a real Python corpus against master before landing.\n- **Isolation first.** Build store snapshot isolation as its own project. PR 2a waits, and master keeps today's stale-artifact bug meanwhile.\n- **Existing memo rules.** Allow reuse under the analyzer's existing memo assumptions plus a serialized publication counter, and document the remaining gaps. This is fastest, but it overrides the coordinator's standard.\n\nI sent the audit to the coordinator and asked whether content-addressed keys with no reuse are acceptable as PR 2a's contract. The selection-counter work stays on hold.\n\nStill running:\n- the census extension (28002696), kept as evidence for a later reuse design;\n- the focused tests on checkpoint c410e35c55, which currently recomputes every Python and C++ artifact."
+        },
+        {
+          "id": "agent:515997",
+          "role": "assistant",
+          "text": "The coordinator's independent review holds my premise 7 about derived memos, and names concrete examples I need to answer for:\n- **C++.** `imported_code_units_of` (`cpp/imports.rs:103`) returns a hit keyed by file path before rebuilding from its include inputs.\n- **Python replay.** `read_memo` replays receipts, but replay only records keys; it does not check that they are current (`i_analyzer.rs:3949`).\n- **Python `module_spellings`.** It reads file membership and markers.\n- **Live mounts.** `LivePathMap` is forked per language delegate (`multi_analyzer.rs:177`).\n- **File listing.** The refill after an invalidation walks the filesystem.\n\nThe running census extension (28002696) covers this area, so I'll pass these on with the row format the coordinator wants."
+        },
+        {
+          "id": "agent:516060",
+          "role": "assistant",
+          "text": "The coordinator's independent review rejected my assumption about derived memos (premise 7), and I withdrew it. I'm waiting on the coordinator and on you for PR 2a's direction.\n\n**What the review asks for.** Each memo the lowering reaches needs concrete evidence that it is invalidated when its inputs change. Otherwise that path gets no reuse. The review names specific cases:\n- a C++ include memo keyed by file path;\n- Python memo replay, which records keys but does not check that they are current;\n- Python `module_spellings`;\n- the per-language fork of `LivePathMap`;\n- the file-listing refill, which walks the filesystem.\n\nIt does not claim any of these is actually returning stale values today. I passed all of them to the running census extension (28002696), with the one-row-per-memo format the coordinator wants.\n\n**What I asked the coordinator.** Its review crossed my content-addressing proposal, so I asked again with a narrower contract. Under content addressing, the key would state only what an artifact contains, never that it is current. The reason is the coordinator's own point: a fresh lowering is only as fresh as the memos it reads. Checks that ask whether a Python or C++ artifact is current would keep refusing until memo validity is shown.\n\n**Still open:**\n- Your scope choice for PR 2a: no reuse and measure first (my recommendation), isolation first, or the existing memo rules.\n- The coordinator's answer on the narrower contract.\n- The census extension.\n- The focused tests on checkpoint c410e35c55."
+        },
+        {
+          "id": "agent:516164",
+          "role": "assistant",
+          "text": "The census extension found more gaps:\n- **File listing.** `update_path` changes the cached listing without advancing its generation (`project.rs:1148`).\n- **No common owner.** No existing object spans all the writer paths.\n- **Live model reads.** Python and C++ helpers read the live model instead of the pinned one.\n- **Memo currency.** Whether the reachable memos are current remains unproven.\n\nSo the reuse construction cannot be completed inside PR 2a, which supports the no-reuse path. I'll check the checkpoint tests."
+        },
+        {
+          "id": "agent:516231",
+          "role": "assistant",
+          "text": "PR 2a can't safely reuse Python or C++ artifacts without much larger work, and I need your scope decision to go further.\n\n**What the census extension found** (`/tmp/5658-m8/pr2a3/census/CENSUS-2.md`):\n- **File listing.** `update_path` changes the cached listing without advancing its generation (`project.rs:1148`). So the listing cannot be checked the way overlays are.\n- **No common owner.** No existing object owns all the writer paths: language delegates each fork their own live-mount map, while analyzer clones share snapshots. A shared writer lock would need a new owner.\n- **Live model reads.** Python and C++ helpers (type flow, resolvers, hierarchy) read the live model instead of the pinned one.\n- **Memos.** Recording or replaying a memo's inputs does not show its cached values are current, and nothing else shows it either.\n\n**Where that leaves PR 2a.** Combined with the store-row audit, certified reuse would need four separate projects:\n- snapshot isolation for the store;\n- a new owner for the writer lock;\n- changing helper model reads to use the pinned handle;\n- memo repairs.\n\nI sent this to the coordinator. I'm holding the selection-counter work (D14 r2) and recommending the narrower contract instead: keys that name an artifact by its content, with no reuse and no claim that it is current.\n\n**Checkpoint c410e35c55**, where every Python and C++ build recomputes, passes the bifrost-core, bifrost-semantic and bifrost-analysis libs: 1664 of 1664. `suite_semantic` is still running.\n\n**Decision needed.** Which way should PR 2a go?\n- **No reuse, measure first (my recommendation).** Content-addressed keys, nothing reused. I'd measure the recompute cost on a real Python corpus against master before landing.\n- **Isolation first.** Build store snapshot isolation as its own project; PR 2a waits.\n- **Existing memo rules.** Allow reuse under the analyzer's existing assumptions and document the gaps. This is fastest, but it overrides the coordinator."
+        },
+        {
+          "id": "agent:516358",
+          "role": "assistant",
+          "text": "The coordinator agrees the content-derived direction is viable and has sent it for a limited review of four specific questions:\n1. The content digest must cover every observable field of the artifact, but not the lineage or handles that are derived from the key itself.\n2. The content identity must flow through the public fingerprint, lineage and every return path, while the lookup address stays only an address.\n3. No downstream memo may treat content equality or the lookup address as a way around the currency refusal.\n4. If one file produces different content twice in one request, consumers must either keep the versions coherently separate or stop with a typed stale outcome before combining them.\n\nIt dropped the store-wide seqlock idea, and it is not releasing a corpus measurement yet. These four are answerable with a read-only map, which is the input I need to write the contract."
+        },
+        {
+          "id": "agent:516419",
+          "role": "assistant",
+          "text": "The coordinator has accepted content-based keys with no reuse as a viable direction for PR 2a, and dropped the store-wide sequence-number idea. Before any implementation, it wants answers to four specific questions:\n1. Does the content digest cover everything observable in an artifact, without hashing in the lineage or handles that are derived from the key itself?\n2. Does the content-based key reach the public fingerprint, lineage and every return path, with the lookup address used only to find work?\n3. Can any downstream memo use content equality or the lookup address to get around the \"not current\" refusal?\n4. What do consumers do if one file produces different content twice in one request? Do they keep the versions separate, or stop with a typed stale outcome before mixing them?\n\nA read-only child (09441b44) is mapping these at commit c410e35c55. I'll write the contract from its findings and send it to the coordinator. The coordinator is not releasing a measurement on a real Python corpus until the contract is settled.\n\nThis matches the option I recommended, but your answer on PR 2a's scope is still open: no reuse and measure first, isolation first, or the existing memo rules. The `suite_semantic` run on the checkpoint is also still going."
+        },
+        {
+          "id": "agent:516496",
+          "role": "assistant",
+          "text": "The coordinator approved the narrowed contract with five binding amendments. Once the map accounts for the seams, implementation can proceed without further routine approval:\n1. **Content digest.** It must be computed over the frozen payload before the final key exists, and must not depend on the key. The existing `materialization_id` hashes `key.fingerprint()` first, so it cannot be used as is.\n2. **No reuse paths.** Python and C++ artifacts bypass every pre-lowering cache, persisted row and flight return. Every returned artifact gets a final key, including partial ones. The key flows into fingerprints, lineage, durable keys and read receipts.\n3. **Currency refusals.** Every check that asks whether a Python or C++ artifact is current returns the existing typed refusal. That includes `verify_artifact`'s source-only calculation (`read_verification.rs:1802`).\n4. **Request guard.** A request-owned guard is keyed by selected authority and source coordinate. The first final key binds; a later, different final key gives a typed stale stop before outputs are combined.\n5. **Acceptance tests.** Deterministic and nonvacuous tests for each of these.\n\nThis is the option I recommended to you. I'll record it as D15 and write the implementation brief once the map arrives."
+        },
+        {
+          "id": "agent:516700",
+          "role": "assistant",
+          "text": "Job 5B can start now. Job 5A needs the Python commit merged into the main lane first, which waits for the background test run to finish."
+        },
+        {
+          "id": "agent:516760",
+          "role": "assistant",
+          "text": "The coordinator approved PR 2a's narrowed contract (D15), and implementation is now running as two parallel jobs. The contract is the \"no reuse, measure first\" option I recommended to you:\n- Python and C++ artifacts are keyed by their lookup address plus a digest of their lowered content. The digest does not depend on the key.\n- Nothing is reused across requests.\n- Every check that asks whether such an artifact is current refuses.\n- A guard inside each request catches the case where one file produces a different artifact twice in the same request.\n\n**My decisions from the seam map** (D15a), plus the coordinator's correction (D15b):\n- The digest includes the outcome (complete, or partial with its cause). Identical rows with different outcomes get different keys.\n- RQL inventory IDs for Python and C++ files must match the final artifact's IDs. Inventory either builds the file within its budget or refuses it.\n- A prepared dispatch session is reused only for the exact same allocated artifact, not just an equal key.\n- The lookup-flight cache and the parts of the verification context built for reuse now have no users, so they come out.\n- The guard is keyed by the file's mount, path, language and parse variant, not by its full lookup address. If the guard included the source revision or configuration, a change in either would open a second entry instead of being caught. A required test covers that case.\n\n**The two jobs:**\n- **Job 5A (00da4591)**, in the main lane at 74ef2d00c9. That commit merges the Python change; the C++ change was already in. 5A builds the content digest, the service flow with no reuse paths, the request guard, the removals, and the identity and guard tests.\n- **Job 5B (a4b7d901)**, in a separate worktree. 5B makes every currency check and every cache that outlives a request refuse Python and C++ artifacts. It also restricts dispatch-session reuse to the same artifact allocation and fixes the RQL inventory IDs.\n\n**Checkpoint tests.** The `suite_semantic` run on the superseded checkpoint is about halfway, with 14 failures so far. They are in Python and C++ composition tests, the problem the content-based keys are meant to fix. I'll use that list as the baseline for job 5A.\n\nThe coordinator has not released the measurement on a real Python corpus yet; it comes after implementation. Your scope answer is still open. If you'd prefer isolation first or the existing memo rules instead, tell me and I'll redirect."
+        },
+        {
+          "id": "agent:516943",
+          "role": "assistant",
+          "text": "The `suite_semantic` run on the superseded checkpoint finished: 204 failures among 2137 tests run. Nextest stopped early after reaching the failure limit, so 380 tests did not run. The core libraries passed.\n\nMost failures are Python `type_flow_client` tests. The rest are in:\n- `type_flow_answer_boundaries`\n- ICFG contracts\n- C++ value contracts\n- partial-flow differentials\n- the Python dependency pack\n\nThe likely cause is the checkpoint's per-build keys. Callers that skip `WorkspaceAnalyzer` got a fresh key on every build, so two builds of the same file never matched, and consumers dropped the targets that crossed between them. Under the approved contract, equal content gives equal keys, so these should pass again. I sent job 5A (00da4591) this baseline and asked it to give a reason for every failure that remains after its changes.\n\nI'm waiting on job 5A (content identity, no-reuse flow, request guard) and job 5B (a4b7d901, refusals at every currency check and cache).\n\nYour PR 2a scope answer is still open. The coordinator has approved the \"no reuse, measure first\" contract, and that is what is being built."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.",
+    "assistant_text_tail": "The `suite_semantic` run on the superseded checkpoint finished: 204 failures among 2137 tests run. Nextest stopped early after reaching the failure limit, so 380 tests did not run. The core libraries passed.\n\nMost failures are Python `type_flow_client` tests. The rest are in:\n- `type_flow_answer_boundaries`\n- ICFG contracts\n- C++ value contracts\n- partial-flow differentials\n- the Python dependency pack\n\nThe likely cause is the checkpoint's per-build keys. Callers that skip `WorkspaceAnalyzer` got a fresh key on every build, so two builds of the same file never matched, and consumers dropped the targets that crossed between them. Under the approved contract, equal content gives equal keys, so these should pass again. I sent job 5A (00da4591) this baseline and asked it to give a reason for every failure that remains after its changes.\n\nI'm waiting on job 5A (content identity, no-reuse flow, request guard) and job 5B (a4b7d901, refusals at every currency check and cache).\n\nYour PR 2a scope answer is still open. The coordinator has approved the \"no reuse, measure first\" contract, and that is what is being built.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "manual Still open batch labeling",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "The open request is recorded in the reply sequence.",
+    "request_positions": [
+      515885,
+      516231,
+      516943
+    ],
+    "user_position": 507292,
+    "input_rationale": "The agent asked the user to choose PR 2a's scope (no reuse / isolation first / existing memo rules) and the case reply says that answer is still open, though work proceeds on its recommended option under the coordinator's approval. The only user message after 507292 is an automated continue prompt.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "approval_gate"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-04T21:13:52.532Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Told the agent you are back"
+      },
+      {
+        "at": "2026-11-04T21:13:52.535Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-04T21:16:45.665Z",
+        "kind": "user",
+        "text": "M8 PR 2a: certified reuse of Python/C++ semantic artifacts would need store snapshot isolation, because store rows can change under an unchanged snapshot ID. While you were away the coordinator approv"
+      },
+      {
+        "at": "2026-11-04T21:17:04.115Z",
+        "kind": "agent",
+        "text": "All three options are more correct than master. Master reuses Python and C++ artifacts by a key that covers only the file itself, so an edit to another file can return a stale artifact. They differ in"
+      },
+      {
+        "at": "2026-11-04T21:17:41.499Z",
+        "kind": "user",
+        "text": "don't we already have this built for Rust, maybe Go?"
+      },
+      {
+        "at": "2026-11-04T21:17:55.195Z",
+        "kind": "agent",
+        "text": "I'll check rather than guess. Job 2 classified every lowerer, so that evidence comes first."
+      }
+    ]
+  }
+}

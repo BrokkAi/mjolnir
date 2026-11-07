@@ -1,0 +1,230 @@
+{
+  "id": "L0004",
+  "title": "Fuzzer issue closeout",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "f542e9f1906cb576bc333f82b1feac03",
+    "session_title": "bifrost via claude2",
+    "reply_position": 833,
+    "captured_at": "2026-08-28T13:44:16.790Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:8",
+          "role": "user",
+          "text": "how do we solve https://github.com/BrokkAi/bifrost-dev/issues/2753 ?"
+        },
+        {
+          "id": "agent:11",
+          "role": "assistant",
+          "text": "I'll start by fetching the issue and looking for local references to it in the repo."
+        },
+        {
+          "id": "agent:23",
+          "role": "assistant",
+          "text": "The issue is well-specified: it's a checker-side bug in the fuzzer's i2-grading (Rule 2), which I recently re-dispositioned to this issue in commit 1d7b4edc2. Let me read the actual code."
+        },
+        {
+          "id": "agent:84",
+          "role": "assistant",
+          "text": "Let me see how `aux_constructor` is decided at fact-extraction time — that determines whether the root cause is there or in the grading."
+        },
+        {
+          "id": "agent:93",
+          "role": "assistant",
+          "text": "`aux_constructor` detection is same-file-scoped — that looks like the gap. Let me confirm how `class_names_by_path` is built and check the I1(b) skip at mod.rs:968."
+        },
+        {
+          "id": "agent:131",
+          "role": "assistant",
+          "text": "## Answer\n\n#2753 is a false positive in the fuzzer's own grading, not a product bug. I recommend fixing it inside Rule 2's partition logic in `service_probes.rs`, resolution-aware, rather than touching probe generation. Here is the full picture and the design.\n\n**Confirmed diagnosis** (from the code, matching the issue text):\n\n- Rule 2 (`src/mcp_property_fuzzer/service_probes.rs:3142-3274`) requires every declaration a more specific spelling names to be contained in the baseline spelling's answer. Comparisons run within partitions, but the partition function `names_companion` (`service_probes.rs:2460`) only knows the Scala `$`-companion split.\n- For a C++ out-of-line constructor (`PipeDescriptor.PipeDescriptor`), the bare spelling `PipeDescriptor` legitimately resolves to the **class** declaration (ed.h:370) while the qualified spelling resolves to the **constructor** (pipe.cpp:30). Those are two different symbols, so containment can never hold and `spelling-resolves-to-different-declaration` fires falsely.\n- The existing escape hatch doesn't trigger: `aux_constructor` detection (`mod.rs:631`) marks a callable only when a class with the same identifier is declared **in the same file**. Out-of-line ctors live in the .cpp while the class is declared in the header, so detection misses and `spelling_set` (`service_probes.rs:1488`) emits all four spellings instead of the qualified pair. This same-file scoping is the likely reason all 13 exemplars are out-of-line-defined; I have not rerun the eventmachine corpus to verify that last step.\n\n**Recommended fix — extend the partition to a resolution-confirmed \"owner class\" slot in Rule 2** (the first of the issue's two directions):\n\n1. Detect a constructor-shaped group: the qualified spelling's terminal segment equals its owner segment (reuse `terminal_of`; owner = qualified spelling minus the terminal).\n2. Widen the partition from 2 slots to 3 (primary / companion / owner-class). A bare-terminal leg (orders 0 and 2) of a ctor-shaped group moves to the owner-class partition **only when its resolution confirms it landed on the owner's own declaration** — every `EntryIdentity` canonical selector's symbol part equals the owner fq (small shared helper to read the `path#fq` fragment; precedent for reading selectors this way at `service_probes.rs:3487-3492`).\n3. If the landing is unconfirmed (no canonical selector) or elsewhere, the leg stays in the primary partition and is still graded — this preserves the genuine #1057 shape the issue insists on: a bare ctor spelling landing on a *different* class's declaration still fires.\n4. The existing baseline table then does the right thing with no further changes: fq (order 1) baselines path#fq (order 3), which is exactly the comparison `aux_constructor` symbols already get; bare baselines path#bare inside the owner partition; a path#bare leg that lands on the ctor simply has no baseline in its partition and goes ungraded, consistent with the documented form-2 rules.\n5. Rule 3 (`service_probes.rs:3284`) uses the same partition function, so it inherits the split for free; its existing exemptions already keep this shape mostly quiet there.\n\n**Why not the alternatives:** making `aux_constructor` detection cross-file would either over-match (a global class-name census flags any callable sharing a name with any class anywhere) or need the same terminal==owner logic anyway — and generation-time reduction deletes the bare probe entirely, losing exactly the cross-class-drift signal the issue says must survive. Grading-time keeps the probe and grades it correctly.\n\n**Tests and close-out:** add Rule 2 tests next to `service_probes.rs:5071` — the eventmachine shape (bare → `ext/ed.h#PipeDescriptor`, fq → `ext/ed.h#PipeDescriptor.PipeDescriptor` at pipe.cpp:30) expecting silence, and a guard where bare lands on a different class expecting the fire to remain. Then rerun the tier-14 eventmachine window, confirm all 13 signatures are gone, and re-disposition the `m4-tier14.jsonl` ledger line, per the close-out procedure from the recent t14 commits.\n\nThe change is contained to `service_probes.rs` (partition widening plus one selector helper and tests) — a good Sonnet-sized task; I'd review the result. Say the word and I'll dispatch it."
+        },
+        {
+          "id": "user:170",
+          "role": "user",
+          "text": "yes pls"
+        },
+        {
+          "id": "agent:172",
+          "role": "assistant",
+          "text": "I'll dispatch the implementation. First, one quick accuracy check for the hand-off prompt — whether `get_definitions_by_reference` outcomes carry identities (that decides how Rule 3 shares the partition helper)."
+        },
+        {
+          "id": "agent:194",
+          "role": "assistant",
+          "text": "While Sonnet implements, I'll check whether the close-out rerun (tier-14 eventmachine window) is feasible in this container — that needs the corpus on disk and the fuzz harness invocation."
+        },
+        {
+          "id": "agent:216",
+          "role": "assistant",
+          "text": "The tier-14 rerun ran NFS-direct against a corpus mount. Let me check whether the ledger and the eventmachine corpus are reachable from this container."
+        },
+        {
+          "id": "agent:306",
+          "role": "assistant",
+          "text": "Correction delivered. While the agent works, let me verify the close-out rerun is feasible here: is the NFS corpus mounted, and can we build the fuzzer binary in this container?"
+        },
+        {
+          "id": "agent:326",
+          "role": "assistant",
+          "text": "Clone staged at the pinned head. Let me look at the ledger's triage-line format (for the post-fix re-disposition) and the fuzzer CLI's `--rerun` flag."
+        },
+        {
+          "id": "agent:334",
+          "role": "assistant",
+          "text": "The triage line to re-disposition is ledger line 238 (`escalated`, issue 2753). Now let me confirm the fuzzer binary's CLI flags for the rerun."
+        },
+        {
+          "id": "agent:357",
+          "role": "assistant",
+          "text": "Implementation is underway. Status:\n\n- **Sonnet agent** is implementing the Rule 2 fix in `service_probes.rs` (3-way partition with a resolution-confirmed owner-class exemption). I sent it two mid-flight corrections after checking the real t14 ledger evidence: the bare class leg carries no canonical selector in practice, so the owner-landing confirmation must read the `label`/`fqn` fields the product actually emits; and bare-terminal detection must check the spelling's symbol part, not probe order alone (aux-constructor groups reuse orders 0/1 for qualified forms).\n- **Close-out prep** is done: the NFS corpus isn't mounted in this container, so I staged a fresh eventmachine clone at the ledger-pinned head `e4f5508` under `/tmp/local-clones/`, and a warm release build of the fuzzer binary is running in the background. Once the fix lands and I've reviewed it, I'll `--rerun` the four violating eventmachine ledger lines (shards 1-4) and expect the I2 signature to report MISSING, then re-disposition triage line 238 in `m4-tier14.jsonl` from `escalated` to `fixed` and commit.\n\nI'll report back when the agent finishes and I've reviewed the diff."
+        },
+        {
+          "id": "agent:369",
+          "role": "assistant",
+          "text": "The warm release build finished cleanly, so the dependency cache is hot — the post-fix rebuild of the fuzzer binary will only need to recompile the leaf crate. Still waiting on the implementation agent; nothing to act on yet."
+        },
+        {
+          "id": "agent:494",
+          "role": "assistant",
+          "text": "The agent paused waiting on its own background test run. I'll nudge it to collect the results and deliver its final report."
+        },
+        {
+          "id": "agent:503",
+          "role": "assistant",
+          "text": "Nudged the agent to collect its test results and finish the report. Waiting on that."
+        },
+        {
+          "id": "agent:544",
+          "role": "assistant",
+          "text": "Told the agent to stop polling and finish synchronously. Waiting for its final report."
+        },
+        {
+          "id": "agent:563",
+          "role": "assistant",
+          "text": "The agent finished with all 36 module tests green and a clean clippy. Now I'll review the diff myself before committing anything."
+        },
+        {
+          "id": "agent:619",
+          "role": "assistant",
+          "text": "Cargo lives at `/usr/local/cargo/bin` (my earlier read attributed the listing to the wrong directory). Verifying the tests now:"
+        },
+        {
+          "id": "agent:651",
+          "role": "assistant",
+          "text": "`--rerun` only reads the ledger (no writes), so pointing it at the tracked file is safe. Full fuzzer module suite: 48 passed. Rebuilding the release binary from the fixed tree:"
+        },
+        {
+          "id": "agent:696",
+          "role": "assistant",
+          "text": "The prior commit only touched the ledger, so the plan doc's \"Known-issue\" line is stale and I'll correct it in the close-out. Committing the code fix first (only the file the agent changed):"
+        },
+        {
+          "id": "agent:704",
+          "role": "assistant",
+          "text": "Fix committed as `8af29d01e`. Now the close-out: re-disposition ledger line 238 and correct the stale plan-doc line."
+        },
+        {
+          "id": "agent:725",
+          "role": "assistant",
+          "text": "Both commits are in. Let me confirm the tree is clean and save the environment facts worth remembering."
+        },
+        {
+          "id": "agent:745",
+          "role": "assistant",
+          "text": "#2753 is fixed, rerun-confirmed, and closed out in the ledger. Two commits on master, working tree clean:\n\n- **`8af29d01e`** — the checker fix in `src/mcp_property_fuzzer/service_probes.rs`. Rule 2 (and Rule 3) now partition three ways: primary, Scala companion, and a new ctor-family owner-class partition. A bare-terminal spelling of a ctor-shaped group (fq terminal == owner segment) is exempted from baselining the qualified spellings only when its resolution confirms it landed on the owner class's own declaration. `EntryIdentity` gained an evidence-only `symbol` field (`fqn`/`label`) because a class's own declaration entry carries no canonical selector — that field is what makes the confirmation possible on real payloads.\n- **`d59148ad4`** — close-out: ledger triage line re-dispositioned `escalated` → `fixed` with the commit hash, and the plan doc's stale \"Known-issue: eventmachine (#1092)\" line corrected.\n\nVerification (I reran everything myself, not just the agent's claims): 48 module tests pass including 6 new ones covering the eventmachine shape, the #1057 different-class guard, unconfirmed-stays-graded, fq-vs-anchored drift, Mapper_t overload narrowing, and aux-constructor non-diversion; clippy clean. Against a fresh eventmachine clone at the ledger-pinned head `e4f5508`, all four violating t14 ledger lines report **MISSING**, and a full 5/5-shard window completes with **zero violations** — so the x13 signature is gone and nothing new surfaced.\n\nTwo things worth knowing about the implementation round: Sonnet did the coding, but I sent it two mid-flight corrections after checking the real ledger evidence — the original design's canonical-selector-only confirmation would have left the false positive firing (class entries are physical-only), and order-based bare-terminal detection would have misclassified aux-constructor groups. Both are covered by dedicated regression tests.\n\nNot done, deliberately: nothing was pushed, and I didn't comment on or close the GitHub issue — say the word if you want either."
+        },
+        {
+          "id": "user:802",
+          "role": "user",
+          "text": "push to origin/master"
+        },
+        {
+          "id": "agent:810",
+          "role": "assistant",
+          "text": "The remote has new commits I don't have. Let me see what's there before deciding how to integrate."
+        },
+        {
+          "id": "agent:833",
+          "role": "assistant",
+          "text": "Pushed. `master` is now at `1e74b5093` on origin:\n\n- The remote had gained ~28 commits (the DFD differential-harness campaign and policy work) since we started, with no file overlap with our changes, so I merged rather than rebased (project rules forbid rebasing without explicit instruction, and the remote history already uses merge commits).\n- On the merged tree, the fuzzer module tests still pass (48/48), then the push went through cleanly: `8af29d01e` (the fix), `d59148ad4` (ledger close-out), plus the merge commit.\n\nOne loose end: the commit messages reference #2753 but don't use a closing keyword, so the GitHub issue is still open — close it whenever you're satisfied, or I can post a summary comment and close it for you."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "push to origin/master",
+    "assistant_text_tail": "Pushed. `master` is now at `1e74b5093` on origin:\n\n- The remote had gained ~28 commits (the DFD differential-harness campaign and policy work) since we started, with no file overlap with our changes, so I merged rather than rebased (project rules forbid rebasing without explicit instruction, and the remote history already uses merge commits).\n- On the merged tree, the fuzzer module tests still pass (48/48), then the push went through cleanly: `8af29d01e` (the fix), `d59148ad4` (ledger close-out), plus the merge commit.\n\nOne loose end: the commit messages reference #2753 but don't use a closing keyword, so the GitHub issue is still open — close it whenever you're satisfied, or I can post a summary comment and close it for you.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      833
+    ],
+    "user_position": 802,
+    "input_rationale": "The push is done; the reply leaves the GitHub issue #2753 open and asks whether the user wants it closed, offering to comment and close. Closing an issue is an approval step the agent did not take on its own.",
+    "label": "required_final",
+    "trigger": "still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-08-28T13:45:36.077Z",
+        "kind": "user",
+        "text": "close it"
+      },
+      {
+        "at": "2026-08-28T13:45:52.370Z",
+        "kind": "agent",
+        "text": "Closed #2753 with a summary comment covering the fix (`8af29d01e`), the preserved #1057 guard, and the rerun confirmation (4 ledger lines MISSING, full 5/5 window at zero violations)."
+      }
+    ],
+    "strict_input_scoring": false
+  }
+}

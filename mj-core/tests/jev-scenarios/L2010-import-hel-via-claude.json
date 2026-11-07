@@ -1,0 +1,171 @@
+{
+  "id": "L2010",
+  "title": "import-hel via claude",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "aa77bbd5c5be8ba45c90c74d7a5891ca",
+    "session_title": "import-hel via claude",
+    "reply_position": 809,
+    "captured_at": "2026-10-06T11:30:38.642Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "doex tmux work to test mj here as the runbook intends?"
+        },
+        {
+          "id": "agent:36",
+          "role": "assistant",
+          "text": "Partly. tmux itself works here, but I have not yet shown that `mj` runs under it, because no `mj` binary is built in this checkout.\n\n**Confirmed:**\n- tmux 3.5a is installed at `/usr/bin/tmux`, and no tmux server was already running.\n- I tried the same pattern the runbook uses (`.agents/docs/luna-reliability-runbook.md:33-39`): `tmux -L <name> -f /dev/null new-session -d -x 140 -y 40`, then `send-keys`, then `capture-pane -p`. It worked. The pane reported 140×40, and the command output came back in the capture.\n- Inside the pane, `TERM` is `tmux-256color` and its terminfo entry exists. Outside tmux this shell has `TERM=dumb`, but that does not affect a program running inside tmux.\n- The tools the lab needs are present: Python 3.13.5 for `prepare-luna-lab.py`, and Node 24 with npx for the browser lane.\n\n**Not yet checked:**\n- `target/debug/mj` does not exist. Before the lab can start, someone has to run `cargo build -p brokk-mjolnir`, which uses mbx caching. So I don't yet know whether the `mj` TUI draws and takes input correctly under this tmux.\n- I did not check the Playwright Chromium install for the browser lane.\n\n**Limits of doing this as an agent:**\n- The runbook ends its setup with `tmux attach`, which needs an interactive terminal. An agent can't do that. It has to drive the panes with `send-keys` and read them with `capture-pane`. `.agents/docs/tmux-verification-2026-09-19.md:48-52` describes that method and its timing problems.\n- tmux can't click, so the mouse-selection step in the runbook's M-series resize and clipboard mission (line 71) can't be done this way. The keyboard parts can.\n- The clipboard step expects a failure when `DISPLAY` and `WAYLAND_DISPLAY` are unset. This container probably has no display at all, so you would likely see only the failure case, not a working clipboard.\n\n`★ Insight ─────────────────────────────────────`\n- Every tmux command in the runbook uses `-L <name> -f /dev/null`. That starts a separate tmux server with its own socket and no user config, so the test can't touch someone's own tmux sessions or be changed by their settings. My test used the same pattern.\n- `send-keys` sends keys straight to the pane, skipping tmux's own prefix handling. That is why `send-keys C-b g` reaches `mj` as its prefix shortcut, even though tmux also uses Ctrl+B as its prefix.\n`─────────────────────────────────────────────────`\n\nIf you want a full answer, the next step is to build `mj`, prepare a lab with seed 1, and start the dashboard in a private tmux server, then capture the first screen. That would show whether the TUI draws and accepts keys here. Do you want me to do that?"
+        },
+        {
+          "id": "user:242",
+          "role": "user",
+          "text": "build mj, do the final tmux tests, and then deploy the subagents per the runbook"
+        },
+        {
+          "id": "agent:244",
+          "role": "assistant",
+          "text": "I'll start the build now and read the orchestration guide while it runs."
+        },
+        {
+          "id": "agent:287",
+          "role": "assistant",
+          "text": "Build and web dependency install are both running. While they run, I'm reading the notes on running Playwright in this container and checking the fake-ACP tooling the labs need."
+        },
+        {
+          "id": "agent:357",
+          "role": "assistant",
+          "text": "The build finished, but `target/debug/mj` isn't where I expected. I'm locating the actual target directory (mbx may redirect it) and stopping the stale wait loop."
+        },
+        {
+          "id": "agent:471",
+          "role": "assistant",
+          "text": "The binary is built and copied. Now the tmux smoke test: prepare a disposable lab and launch the dashboard inside a private tmux server."
+        },
+        {
+          "id": "agent:583",
+          "role": "assistant",
+          "text": "The smoke lab finished cleanly. Now a second smoke lab with the worker in place, to confirm a fake session actually launches."
+        },
+        {
+          "id": "agent:600",
+          "role": "assistant",
+          "text": "Session launch works (the \"Installing Codex\" stage is the lab's seeded fake install). I'll wait for it to come live, send a prompt, and check the reply arrives after the 15 s fake delay."
+        },
+        {
+          "id": "agent:742",
+          "role": "assistant",
+          "text": "All four lanes finished and every finisher exited 0. Before I report, I'm verifying the cleanup independently and reading the decisive evidence for the one product finding (M2) and the M7 blocker."
+        },
+        {
+          "id": "agent:764",
+          "role": "assistant",
+          "text": "Cleanup is confirmed: no lab processes, no runtimes, all three databases `integrity_check=ok`, working tree clean. Now the decisive evidence for the M2 product finding and the M7 blocker."
+        },
+        {
+          "id": "agent:809",
+          "role": "assistant",
+          "text": "The campaign ran end to end. Summary first, then what needs your decision.\n\n## Result\n\n**Build and smoke test (confirmed).** `mj 2.30.0` and `mj-worker` built from 321e440a3 in the dev profile. Under a private tmux server, the dashboard rendered at 140×40, the help overlay opened, a fake session went from `Starting` to live in ~40 s, and a prompt got `reliability reply: hello fake` after the 15 s fake delay. Both smoke labs finished with `integrity_check=ok`.\n\n**Campaign 1100 (four `gpt-6-luna` workers, three labs, seeds 1101–1103).** All four lanes finished; all three finishers exited 0; I independently confirmed no lab process, runtime, or nested tmux server remained and the working tree is clean.\n\n| Mission | Result |\n|---|---|\n| M1 | shared-tui BLOCKED / shared-web PASS (browser was offline for M5 when the TUI prompt was sent) |\n| M2 | shared-tui **FAIL** / shared-web BLOCKED (no true overlap proven) |\n| M3 | BLOCKED (resume cancellation never reached the peer's in-flight stage) |\n| M4 | BLOCKED (keyboard transcript selection is mouse-only; everything else behaved) |\n| M5, M6, M8 | PASS |\n| M7 | BLOCKED (no signal sent — see below) |\n\nFull details: `target-campaign/artifacts/parallel-1100/summary.md`, per-lane `workers/<role>/{result,notes,actions}.md`.\n\n## The one product-level finding needs your call\n\n**M2:** TUI 1 held an unsent draft; TUI 2 ran `Suspend…`. TUI 1 immediately showed \"No conversation open\", and after Resume neither dashboard reopened the chat within 15 s. Reopening manually restored the draft. The controller log says `session feed closed because the session is being retired`, and the comment at `mj-chat/src/chat/active/io.rs:466` says a deliberate stop is \"neither a lost connection nor a reason to chase a replacement actor … The transcript stays readable.\" So no auto-reconnect is current design, and the runbook's 15 s reconnect expectation is stale. The open question is the mismatch between \"the transcript stays readable\" (code comment) and \"No conversation open\" (observed). I'd classify it **likely stale runbook expectation, possibly a product defect**, and would reproduce it in a two-TUI lab before touching code.\n\n## Runbook defects the campaign exposed (confirmed)\n\n1. `cargo build -p brokk-mjolnir` alone yields a daemon with no worker; every launch failed until I built `mj-worker` and set `MJ_WORKER_BINARY`.\n2. `target/` is mbx-managed and gc evicted the first build within minutes. I put binaries and evidence in `target-campaign/` (gitignored by `target*/`) via `MJ_RELIABILITY_ARTIFACTS`.\n3. Stale keys: web viewer is `ctrl+b u` not F4; \"Stop\" is \"Suspend…\" with Cancel as default; lifecycle cancel is `ctrl+b shift+c` not `Ctrl+X`; resume is `ctrl+b g` → Mjolnir tab.\n4. M7's exact `/proc/<pid>/environ` gate can never pass: the worker re-execs with a cleared environment (`tests/e2e/reliability_lab.py:935` already uses runtime-root path as the ownership rule).\n\n`★ Insight ─────────────────────────────────────`\n- The lab's `MJ_RELIABILITY_ARTIFACTS` override exists precisely because `target/` \"may be a managed build directory that the build cache evicts\" (`reliability_lab.py:316`); the runbooks never mention it, so campaign evidence under `target/reliability-artifacts/` could silently disappear.\n- The worker lookup for LocalHost (`binary_source.rs:74-87`) checks `<target>/worker/<profile>/mj-worker` first, then `mj-worker` beside `mj`, then `MJ_WORKER_BINARY`. CI builds the worker with a separate `--target-dir target/worker`, which is why the first path exists.\n`─────────────────────────────────────────────────`\n\n## Recommendation\n\nNext phase per the guide is triage → repair → original-seed rerun, plus \"Campaign lessons\" entries. I did not start it: the M2 finding needs your design decision (should the waiting chat stay open and reconnect after Suspend/Resume, or is closing it correct?), and the runbook fixes are documentation changes I'd rather make once that decision is known. Tell me which way and I'll proceed."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "build mj, do the final tmux tests, and then deploy the subagents per the runbook",
+    "assistant_text_tail": "two-TUI lab before touching code.\n\n## Runbook defects the campaign exposed (confirmed)\n\n1. `cargo build -p brokk-mjolnir` alone yields a daemon with no worker; every launch failed until I built `mj-worker` and set `MJ_WORKER_BINARY`.\n2. `target/` is mbx-managed and gc evicted the first build within minutes. I put binaries and evidence in `target-campaign/` (gitignored by `target*/`) via `MJ_RELIABILITY_ARTIFACTS`.\n3. Stale keys: web viewer is `ctrl+b u` not F4; \"Stop\" is \"Suspend…\" with Cancel as default; lifecycle cancel is `ctrl+b shift+c` not `Ctrl+X`; resume is `ctrl+b g` → Mjolnir tab.\n4. M7's exact `/proc/<pid>/environ` gate can never pass: the worker re-execs with a cleared environment (`tests/e2e/reliability_lab.py:935` already uses runtime-root path as the ownership rule).\n\n`★ Insight ─────────────────────────────────────`\n- The lab's `MJ_RELIABILITY_ARTIFACTS` override exists precisely because `target/` \"may be a managed build directory that the build cache evicts\" (`reliability_lab.py:316`); the runbooks never mention it, so campaign evidence under `target/reliability-artifacts/` could silently disappear.\n- The worker lookup for LocalHost (`binary_source.rs:74-87`) checks `<target>/worker/<profile>/mj-worker` first, then `mj-worker` beside `mj`, then `MJ_WORKER_BINARY`. CI builds the worker with a separate `--target-dir target/worker`, which is why the first path exists.\n`─────────────────────────────────────────────────`\n\n## Recommendation\n\nNext phase per the guide is triage → repair → original-seed rerun, plus \"Campaign lessons\" entries. I did not start it: the M2 finding needs your design decision (should the waiting chat stay open and reconnect after Suspend/Resume, or is closing it correct?), and the runbook fixes are documentation changes I'd rather make once that decision is known. Tell me which way and I'll proceed.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      809
+    ],
+    "user_position": 242,
+    "input_rationale": "The campaign ran, but the agent did not start repair and runbook fixes because the M2 behavior needs the user's design decision.",
+    "label": "required_final",
+    "triggers": [
+      "needs you"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-06T11:38:25.095Z",
+        "kind": "user",
+        "text": "M2: if the Q is, should a session that's suspended by another UI stay open/visible, the answer is no"
+      },
+      {
+        "at": "2026-10-06T11:38:43.076Z",
+        "kind": "agent",
+        "text": "Decision recorded: a chat for a session suspended elsewhere closes by design, so the M2 finding is a stale runbook expectation, not a product defect. That leaves no confirmed product defect, and the n"
+      },
+      {
+        "at": "2026-10-06T11:41:05.652Z",
+        "kind": "agent",
+        "text": "Documentation-only change, so validation is a diff review. Reviewing it and updating the memory note's open item at the same time."
+      },
+      {
+        "at": "2026-10-06T11:41:18.465Z",
+        "kind": "agent",
+        "text": "The diff reads as intended. Committing the two runbook files (the campaign evidence under `target-campaign/` is gitignored and stays in the workspace checkpoint)."
+      },
+      {
+        "at": "2026-10-06T11:41:48.462Z",
+        "kind": "agent",
+        "text": "Done. With your decision, campaign 1100 closes with **no confirmed product defect**, and the follow-up the guide calls for — runbook corrections plus \"Campaign lessons\" — is committed as `9e76429cf` o"
+      },
+      {
+        "at": "2026-10-06T11:44:10.233Z",
+        "kind": "user",
+        "text": "pls merge the lessons into the mainline runbook to keep things simple so future-you doesn't have to read a massive log to understand what's up  is there triage + repair + rerun work to do? if so, chop"
+      }
+    ]
+  }
+}

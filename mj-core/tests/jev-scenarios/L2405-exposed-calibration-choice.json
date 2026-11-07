@@ -1,0 +1,571 @@
+{
+  "id": "L2405",
+  "title": "Exposed calibration choice",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "c4ff1d5f483a43b8c1513de718ef27c3",
+    "session_title": "bifrost via claude3",
+    "reply_position": 31338,
+    "captured_at": "2026-10-21T20:18:40.635Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "Master has not compiled since cbc1b1e5f8 (\"Target pointer invalidations by value or origin\"). It removed `PointerInvalidation.origin`, but `bifrost-flow/src/value_flow/pointer.rs:215` still reads that field\n\nfix that first via PR, then check for other CI failures\n\nuse \"eatmydata\" when running tests to speed things up"
+        },
+        {
+          "id": "user:41",
+          "role": "user",
+          "text": "(add the eatmydata guidance to AGENTS.md -- unless we're trying to do realistic performance timings we should use that)"
+        },
+        {
+          "id": "user:332",
+          "role": "user",
+          "text": "jesus christ we're 30+ minutes in for what i thought was a one line change"
+        },
+        {
+          "id": "user:484",
+          "role": "user",
+          "text": "new small pr for AGENTS pls\n\nand how should we update guidance so small changes get appropriately small test effort"
+        },
+        {
+          "id": "user:710",
+          "role": "user",
+          "text": "reasonable but agents won't know what 10m of CI is unless they've already been burned, let's do one more round of improvements"
+        },
+        {
+          "id": "user:722",
+          "role": "user",
+          "text": "also i do want to err on the side of letting smart agents be smart instead of overconstraining them (but clearly current is suboptimal, don't err that far :)"
+        },
+        {
+          "id": "user:898",
+          "role": "user",
+          "text": "isn't that just a simple gh query? why is it taking 20m?"
+        },
+        {
+          "id": "user:1117",
+          "role": "user",
+          "text": "no\n\nyou can let agents root cause and give you a hypothesis but you need to plan the fix and then review it, not just turn them loose and hope they git lucky"
+        },
+        {
+          "id": "user:1439",
+          "role": "user",
+          "text": "is pull 4520 a duplicate of 4516?"
+        },
+        {
+          "id": "user:1794",
+          "role": "user",
+          "text": "i don't like either of those fixes, create a ticket for David and mark Escalated"
+        },
+        {
+          "id": "user:1806",
+          "role": "user",
+          "text": "others lgtm"
+        },
+        {
+          "id": "user:2721",
+          "role": "user",
+          "text": "i think you create a ticket and then investigate the timeouts right?"
+        },
+        {
+          "id": "user:2734",
+          "role": "user",
+          "text": "also it's 4h later so check what's changed since"
+        },
+        {
+          "id": "user:2911",
+          "role": "user",
+          "text": "just land your own work and investigate the timeouts (if still relevant), i'm going to give new-regression investigation to your twin in another session"
+        },
+        {
+          "id": "user:3608",
+          "role": "user",
+          "text": "bah. okay, do so"
+        },
+        {
+          "id": "user:3720",
+          "role": "user",
+          "text": "go ahead and start going through https://github.com/BrokkAi/bifrost-dev/issues/4519. there is another agent helping so follow the self-assign rules."
+        },
+        {
+          "id": "user:4419",
+          "role": "user",
+          "text": "make another pass pls"
+        },
+        {
+          "id": "user:5088",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:5241",
+          "role": "user",
+          "text": "I want to stand up Bifrost-as-a-service, and the SQLite database is turning out to be a major pain point. It's large enough, tens of gigabytes, that moving it to and from S3 in fresh Kubernetes containers is a major pain point. But when I look around for stateful alternatives, I'm not seeing a ton of options. Turso, for instance, tops out at $500 a month for 50 gigabytes, and that would be just one or two databases for me. So I don't know. This is probably going to be expensive one way or the other. But what options should I consider?"
+        },
+        {
+          "id": "user:5767",
+          "role": "user",
+          "text": "also what are our most recent notes on exactly how large the db gets? specificaly the \"native\" engine which only Rust supports rn, so a build of bifrost itself would answer the question, but if we've done that in the last week or so then we don't need to redo it"
+        },
+        {
+          "id": "user:6350",
+          "role": "user",
+          "text": "> The storage chapter says GC reclaims \"superseded versioned stores,\" but these have not been reclaimed\n\nexpected, or bug?"
+        },
+        {
+          "id": "user:6628",
+          "role": "user",
+          "text": "i think we should keep at most one db besides current"
+        },
+        {
+          "id": "user:7095",
+          "role": "user",
+          "text": "take a pass at updating failed PRs (tag automerge-rejected), making a new commit signals \"retry this\"; follow assignment rules, and check to make sure no other agent has already made add'l commits"
+        },
+        {
+          "id": "user:7358",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:7366",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:7414",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:7515",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:7688",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:7692",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:7712",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:7719",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:7730",
+          "role": "user",
+          "text": "pls mark 4544 escalated, assign to David"
+        },
+        {
+          "id": "user:8087",
+          "role": "user",
+          "text": "there's more rejected PRs to tackle now, i think the tag is different, but open PR count is low enough you can figure it out"
+        },
+        {
+          "id": "user:8294",
+          "role": "user",
+          "text": "i also see 4577 4529 rejected"
+        },
+        {
+          "id": "user:8369",
+          "role": "user",
+          "text": "also 4631 + 4540 i think got quietly rejected for being modified while they were in the merge queue, ptal, fix any bugs, and mark ready for review"
+        },
+        {
+          "id": "user:9112",
+          "role": "user",
+          "text": "can you fix 4672?"
+        },
+        {
+          "id": "user:9306",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:9576",
+          "role": "user",
+          "text": "what's up with the remaining rejected PRs"
+        },
+        {
+          "id": "user:9706",
+          "role": "user",
+          "text": "pls address the 4"
+        },
+        {
+          "id": "user:9830",
+          "role": "user",
+          "text": "#4544: postgres `Client.execute`, RustCrypto `Md5.update` and `Stdin.read_line` have the same model shape: a complete summary, no transfers, and an allocated return value. Two existing tests disagree about such a summary at a finding's endpoint. CQ10 and CQ06 require it to be recorded as a proof dependency, and for MD5 it keeps certainty at 'possible'. issue_3757 (line 277) requires that the postgres `execute` summary is not a dependency. The PR's postgres finding stays 'definite'; only the dependency list changes. Which contract should hold?\n\n#4544: Endpoint model counts (Recommended)"
+        },
+        {
+          "id": "user:9852",
+          "role": "user",
+          "text": "hmm your message was malformed"
+        },
+        {
+          "id": "user:9957",
+          "role": "user",
+          "text": "Correction on #4544: after merging current master (which now includes #4603), counting the postgres `execute` model as a dependency also lowers that finding from 'definite' to 'possible'. This matches what CQ10 already does for MD5, whose pack metadata is the same (complete, review_required=false). I told you before that certainty would stay definite; that was based on the old base. What should happen?\n\n#4544: Escalate to David"
+        },
+        {
+          "id": "user:9993",
+          "role": "user",
+          "text": "we need to fix https://github.com/brokkAi/bifrost-dev/issues/4613, see the last comment, how do we unfuck master"
+        },
+        {
+          "id": "user:10080",
+          "role": "user",
+          "text": "merge queue is good about not blocking merges that don't make existing problems worse, but it's still affecting ~every agent"
+        },
+        {
+          "id": "user:10737",
+          "role": "user",
+          "text": "pls make another pass against rejected PRs"
+        },
+        {
+          "id": "user:11003",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:11880",
+          "role": "user",
+          "text": "yes, please take that on"
+        },
+        {
+          "id": "user:12264",
+          "role": "user",
+          "text": "are there any other rejections to address?"
+        },
+        {
+          "id": "user:12719",
+          "role": "user",
+          "text": "go ahead on #4544"
+        },
+        {
+          "id": "user:13072",
+          "role": "user",
+          "text": "if it's easier to just shitcan that worktree and start over, let's do that"
+        },
+        {
+          "id": "user:13814",
+          "role": "user",
+          "text": "pull, then start remediating the blocked open PRs"
+        },
+        {
+          "id": "user:13861",
+          "role": "user",
+          "text": "pull, then start remediating the blocked open PRs"
+        },
+        {
+          "id": "user:14816",
+          "role": "user",
+          "text": "what should we do about #5350"
+        },
+        {
+          "id": "user:15428",
+          "role": "user",
+          "text": "recs accepted"
+        },
+        {
+          "id": "user:15619",
+          "role": "user",
+          "text": "One or more sub-agents finished. Call wait to collect their reports."
+        },
+        {
+          "id": "user:18556",
+          "role": "user",
+          "text": "The Windows ARM tests stall on disk flushes when eight run at once. About 60% of the extra time is one throwaway per-session SQLite database that commits about 46 durable transactions per session; the rest is other durable writes (template seeding, store open, go env). Which fix should I implement?\n\nFix: Both (Recommended)"
+        },
+        {
+          "id": "user:19440",
+          "role": "user",
+          "text": "what open PRs got rejected that are not in-progress already to remediate"
+        },
+        {
+          "id": "user:20171",
+          "role": "user",
+          "text": "is 5732 still orphaned?"
+        },
+        {
+          "id": "user:20289",
+          "role": "user",
+          "text": "pls take over PR 5682"
+        },
+        {
+          "id": "user:22984",
+          "role": "user",
+          "text": "JDK: what does the most general buy us, over the simpler member lists for kotlin + string?\n\n\"don't touch resolution\" still broadly in force, but go ahead and make those fixes"
+        },
+        {
+          "id": "user:23189",
+          "role": "user",
+          "text": "rec accepted"
+        },
+        {
+          "id": "user:23990",
+          "role": "user",
+          "text": "Which delivery channel should the new Kotlin collection and String member lists use? The generated data is done (committed locally as 744bbc117d) and works with either; only the resolver side differs.\n\nCancelled"
+        },
+        {
+          "id": "user:24012",
+          "role": "user",
+          "text": "what are the pros and cons? where are you proposing the potential schema column?"
+        },
+        {
+          "id": "user:25147",
+          "role": "user",
+          "text": "1. accelerator warmup is fine\n\n2. relucatant to add rust-side state here, why isn't this a stdlib \"pack\"? what does session 0bf0983d553751026807d97d54857ede think of your sql idea (that session owns the jvm piece of the native engine work)"
+        },
+        {
+          "id": "user:25780",
+          "role": "user",
+          "text": "very well, recs accepted, proceed"
+        },
+        {
+          "id": "user:27002",
+          "role": "user",
+          "text": "what call do you need?"
+        },
+        {
+          "id": "user:27092",
+          "role": "user",
+          "text": "yeah we should correct it, obviously \"package\" means something else in java (are there two bugs?)"
+        },
+        {
+          "id": "agent:29932",
+          "role": "assistant",
+          "text": "#6225 (K2) has merged, in the batch with #6231 (#6214) and others.\n\nThat changes K3's validation plan. K2 changed shared applicability code that K3 also relies on. Before K3's PR, I'll merge master again and rerun the whole suites and the KotlinPoet attribution on a tree that contains both. Its KotlinPoet numbers so far were measured without K2.\n\nWaiting on the interleaved timing runs, and on your approval for the lexical fix."
+        },
+        {
+          "id": "agent:29977",
+          "role": "assistant",
+          "text": "#6214 closed automatically, but it still carries `agent-in-progress`. I'll remove that label, since the work is done:"
+        },
+        {
+          "id": "agent:29990",
+          "role": "assistant",
+          "text": "#6231 has merged, which closed #6214. I've removed its `agent-in-progress` label.\n\nWaiting on two things: the interleaved timing runs, before the K3 merge, revalidation and PR; and your approval for the lexical fix."
+        },
+        {
+          "id": "agent:30018",
+          "role": "assistant",
+          "text": "The 4.2× slowdown didn't reproduce. Four interleaved runs put the candidate at 0.95× master's time, and the first measurement ran under a host load near 146. So there's no performance concern.\n\nNext, K3 has to absorb master, which now contains K2 (#6225) and #6231. Both K2 and K3 change `fact_resolution.rs`, so I'll merge and check for conflicts first."
+        },
+        {
+          "id": "agent:30052",
+          "role": "assistant",
+          "text": "The merge is clean. Both K2 and K3 change `epoch.rs`: K2 bumps the Kotlin salt, and K3 adds the inventory hash. I'll confirm both survived, then start the whole-suite run on the combined tree:"
+        },
+        {
+          "id": "agent:30092",
+          "role": "assistant",
+          "text": "There's no K3 slowdown. Four interleaved runs put the candidate at 0.95× master's time; the first 4.2× measurement had run under heavy host load.\n\nK3 now includes master with K2 (#6225) and #6231 merged in (`121b7ae24e`), with no conflicts. Both changes to `epoch.rs` survived: K2's Kotlin salt bump and K3's inventory hash. Two runs are going on the combined tree:\n- **Whole suites:** the three suite binaries.\n- **Final attribution:** the census and the JVM owner's answer replay, rerun against the new master. This produces the changed-response list the JVM owner wants at publication.\n\nWhen both are green, I push K3, open its PR with the attribution, and send the list to the JVM owner.\n\nStill waiting on you: approval for the narrowed shared JVM lexical fix."
+        },
+        {
+          "id": "agent:30154",
+          "role": "assistant",
+          "text": "The new attribution run found something more urgent than K3. Two KotlinPoet requests, `JvmAnnotations.kt:35:3` and `:40:3`, now crash current master with a strictly-sorted-targets assertion in `fact_resolution.rs` (~30643, ~30707). They returned `ambiguous` on the previous master. The regression arrived in batch #6267, which included my K2 (#6225). K2 publishes Kotlin value binders in the Callable namespace too, so one declaration could plausibly appear twice in a target list. That makes it the prime suspect, and a crash on master is mine to fix first if it's mine. Checking my notes on the procedure for a master failure caused by my own PR:"
+        },
+        {
+          "id": "agent:30338",
+          "role": "assistant",
+          "text": "My K2 change (#6225, merged in batch #6267) crashes current master on real Kotlin code, and the fix is under way.\n\n- **The crash:** `get_definitions_by_location` on KotlinPoet `JvmAnnotations.kt:35:3` and `:40:3` panics with `targets.windows(2).all(|pair| pair[0] < pair[1])` in `apply_call_applicability`. Those sites are overloaded `addAnnotation` members called bare inside `FileSpec.Builder` extensions. The pre-batch master answers them correctly, and a binary built from K2 alone crashes too, so the cause is confirmed.\n- **Likely mechanism:** K2's new target prioritization (functions before callable properties) reorders the canonical, sorted target list when several overloads survive. The code downstream asserts that the list stays sorted.\n- **Fix:** the K2 implementer is fixing it in a fresh branch from current master (`6141-sorted-call-targets`). The rules are to restore the invariant where the list is built, not to weaken the assertion. It also adds a hard-won regression test and runs the whole suites plus the KotlinPoet sites. It goes up as an ordinary PR against master. No existing issue tracks it, and I've told the CI-monitor session.\n- **How it was found:** the K3 KotlinPoet census, not any test suite. Shared resolver changes need a real-corpus definition sweep before they're marked ready.\n\nK3 is otherwise ready, and its KotlinPoet attribution is final. I'll publish it after this crash fix, because its validation tree contains the crash. Still waiting on you: approval for the narrowed shared JVM lexical fix.\n\n`★ Insight ─────────────────────────────────────`\n- The test suites passed both times K2 was validated, 3,145 tests and then 3,145 again after the merge. They missed the crash because none had several overloads surviving applicability inside an extension. A census of real call sites covers shapes that hand-written tests don't. That's why the JVM owner made the KotlinPoet replay a gate for its own work.\n- The assertion did its job. It's a cheap invariant check at the point of use, so a broken ordering failed loudly instead of silently producing a wrong ranking. The fix must restore the ordering where the list is built, not remove the check.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "agent:30489",
+          "role": "assistant",
+          "text": "The CI-monitor session is right that the claim should be explicit somewhere an automated fixer can see. I'll file an issue for the crash, claim it immediately, and point the regression test at it instead of the broader #6141:"
+        },
+        {
+          "id": "agent:30519",
+          "role": "assistant",
+          "text": "I filed the master crash as #6276 and claimed it, with both reproductions in the body: the pre-batch master answers correctly, and the K2-only binary crashes. That keeps an automated fixer from duplicating the work. The regression test will be tagged #6276, and the fix PR will say `Fixes #6276`.\n\nThe fix is in progress (child `c0a8d299`). K3 is published after it. Still waiting on you: approval for the narrowed shared JVM lexical fix."
+        },
+        {
+          "id": "agent:30559",
+          "role": "assistant",
+          "text": "The crash fix is committed as `178ab08419`, and the cause is confirmed. `call_applicability.rs:572` sorted the canonical target list in place by function/value priority. That non-canonical order then reached the assertion, and also a `binary_search` in witness filtering, a second latent bug. The fix computes the priority as a separate evaluation order, assembles results back through the canonical sequence, and leaves the assertion untouched. The new #6276 fixture crashes on unmodified master and passes with the fix. KotlinPoet's two sites answer `ambiguous` with the overload families again. Reviewing the diff before publishing:"
+        },
+        {
+          "id": "agent:30643",
+          "role": "assistant",
+          "text": "While that runs, I'll check K3's suite run on its combined tree, which finished earlier in the background:"
+        },
+        {
+          "id": "agent:30740",
+          "role": "assistant",
+          "text": "The crash fix for #6276 is committed and merged with current master. Its validation is running on the merged tree: the whole suites, then a rebuilt CLI against the two KotlinPoet sites. Master moved 88 commits, including about 900 changed resolution lines, so the earlier pass doesn't carry over. When it's green I'll open the PR with `Fixes #6276`.\n\nK3 passed all 3,146 tests on its previous combined tree. Merging the latest master hit the #4452 crate split:\n- The generator moved into the new `bifrost-jvm-analysis` crate.\n- The file holding K3's String-provider test was deleted after its tests moved elsewhere.\n\nThe consumer child is finishing that merge. It also has to prove that every K3 change landed in the moved files, then rerun the suites.\n\nStill waiting on you: approval for the narrowed shared JVM lexical fix."
+        },
+        {
+          "id": "agent:30807",
+          "role": "assistant",
+          "text": "On the merged tree, all 3,149 suite tests pass, and both KotlinPoet sites answer `ambiguous` with the `addAnnotation` overload families instead of crashing. Pushing and opening the fix PR, ready:"
+        },
+        {
+          "id": "agent:30836",
+          "role": "assistant",
+          "text": "The master crash fix is published as PR #6285, ready for the queue at `bd891ae3d0`, and says `Fixes #6276`.\n- **Cause, confirmed:** #6225's `prioritize_call_targets` sorted the canonical target list in place by function/value priority. With several overloads surviving, that order reached a strict-ordering assertion and a `binary_search`.\n- **Fix:** the priority is computed as a separate order, results are assembled in canonical order, and the assertion is unchanged.\n- **Validation:** all 3,149 suite tests pass on the merged tree. KotlinPoet's two crashing sites answer `ambiguous` again with the overload families. The hard-won regression case crashes on unmodified master and passes with the fix.\n\nThe CI-monitor session has the PR number.\n\nStill running: the K3 merge across the crate split. Still waiting on you: approval for the narrowed shared JVM lexical fix."
+        },
+        {
+          "id": "agent:30900",
+          "role": "assistant",
+          "text": "The CI-monitor session independently verified #6285 and reviewed its diff. It will treat #6276 as fixed once it confirms the fix on master. No reply is needed, and I won't push to that branch again.\n\nStill running: the K3 merge across the crate split. Still waiting on you: approval for the narrowed shared JVM lexical fix."
+        },
+        {
+          "id": "agent:30931",
+          "role": "assistant",
+          "text": "The K3 merge across the crate split is complete (`e3ebecffcc`). All 3,150 suite tests pass, and the child audited every K3 hunk against its moved location. The String-provider test now lives beside its relocated neighbours in `bifrost-tools`, and the generator reproduces its output byte for byte in its new crate. The Exposed probe is unchanged: the correct candidate, plus the three known lexical-gap reasons.\n\nBefore publishing, I'll find the attribution file for the JVM owner. The child's report paths have pointed at two different locations."
+        },
+        {
+          "id": "agent:30970",
+          "role": "assistant",
+          "text": "The TSV is complete. Its two \"shared resolver assertion\" rows are the #6276 crash, which exists on master too and is fixed by #6285. Pushing K3 and opening its PR:"
+        },
+        {
+          "id": "agent:31001",
+          "role": "assistant",
+          "text": "The stdlib member lists (K3) are now in the queue as PR #6287, ready at `e3ebecffcc`. The Exposed selector still doesn't resolve, because of the shared lexical lookup gap that is waiting on your approval.\n\nThe PR body covers the design, the JVM owner's acceptance conditions, the hard-won tests and the KotlinPoet attribution. All 3,150 suite tests pass on the tree merged with current master, and every K3 change was checked at its moved location after the crate split. I sent the JVM owner the changed-response list for its J4 lane. I also told the CI-monitor session not to treat #6287 as fixing the Exposed calibration failure.\n\nThe rest of the Kotlin and visibility work for this calibration:\n\n| Item | State |\n|---|---|\n| #6209, external-receiver reason label | merged |\n| #6225, invoke-property shadowing | merged |\n| #6231, visibility label (fixes #6214) | merged |\n| #6285, crash caused by #6225 (fixes #6276) | ready in the queue |\n| #6234, bare value references skip the receiver check | filed, not started |\n\nThe one decision still with you is the narrowed lexical fix. The JVM owner agreed with the diagnosis and asked me to do it, with its review. The change makes \"the lookup was answered\" mean \"it selected a binding\", including selected external and intrinsic identities, not only source declarations. Real shadowing, unknown parents and unresolved imports stay open. Its gates are a Java and a Kotlin shadowing control, the J/K/S goldens, and the KotlinPoet replays with every changed site explained. It is the last piece needed for the Exposed calibration selector to resolve.\n\n`★ Insight ─────────────────────────────────────`\n- The attribution list is what lets two lanes change the same shared resolver concurrently. J4 compares its answers against master, so any K3 change it can't explain looks like its own regression. A per-site list with causes lets whichever lands second absorb the other's changes without rerunning the analysis.\n- The crate split added real risk at merge time: git's rename detection usually moves a hunk to the relocated file, but not always. Auditing every hunk against its new path is what makes a clean-looking merge trustworthy.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "agent:31155",
+          "role": "assistant",
+          "text": "The CI-monitor session caught a mistake in my #6287 description. \"This PR does not close #6141\" contains the phrase \"close #6141\", and GitHub reads that as a closing keyword despite the negation. Merging #6287 would have closed #6141 while the Exposed selector is still unresolved. The CI-monitor session is rewording that one sentence. I'm leaving the PR body alone meanwhile. My other PR descriptions in this series use \"Part of #6141\" or an intended \"Fixes #6276\".\n\nStill waiting on you: approval for the narrowed shared JVM lexical fix."
+        },
+        {
+          "id": "agent:31203",
+          "role": "assistant",
+          "text": "The #6287 description is fixed. GitHub no longer lists #6141 as an issue it would close, and the PR is still ready at `e3ebecffcc`.\n\nIn the queue: #6285 (the master crash fix) and #6287 (K3). Still waiting on you: approval for the narrowed shared JVM lexical fix, the last piece the Exposed calibration selector needs."
+        },
+        {
+          "id": "agent:31250",
+          "role": "assistant",
+          "text": "#6285 merged, in batch #6294 alongside #6287. I'll check both PRs and tidy the #6276 claim:"
+        },
+        {
+          "id": "agent:31273",
+          "role": "assistant",
+          "text": "Both #6285 (the crash fix) and #6287 (K3) have merged. #6276 closed, and I removed its claim label. #6141 stays open as intended.\n\nEvery PR from this Kotlin and calibration work has now landed: #6209, #6225, #6231, #6285 and #6287. One piece is left for the Exposed calibration selector: the narrowed shared JVM lexical fix. The JVM owner agreed with it and will review it, and it's waiting only on your approval."
+        },
+        {
+          "id": "user:31334",
+          "role": "user",
+          "text": "what am i being asked to approve?"
+        },
+        {
+          "id": "agent:31338",
+          "role": "assistant",
+          "text": "You're being asked to approve one more change to JVM name resolution: a small fix in the shared Java/Kotlin/Scala lookup code, `fact_resolution/java_lexical.rs`. It needs your approval because you said the \"don't touch resolution\" rule for JVM languages is still broadly in force. Your exception covered only the three Kotlin fixes (K1–K3), and this is a fourth, in code all three JVM languages share.\n\n**The bug.** Exposed's `Table` is declared as `open class Table(...) : ColumnSet(), DdlAware`, and it contains `private fun MutableList<Column<*>>.addColumn(...)`.\n- To work out what `MutableList` means there, Kotlin first checks that `ColumnSet` and `DdlAware` don't declare a nested type with that name.\n- Bifrost does prove that neither declares one. But it only drops those checked branches when the lookup ended at a type declared in source.\n- `MutableList` comes from the Kotlin standard library, which has no source declaration, so the branches stay open.\n- That leaves the receiver type undetermined, so the call inside stays `incomplete`.\n\nThe bug was already on master before my work, and it affects any extension on a stdlib type declared inside a class that has supertypes.\n\n**The change.** Treat a lookup as answered when it selected a binding: either a source declaration, or a selected library or built-in type such as the default-imported `MutableList`. Today only the first counts. The same definition applies at the two other places that test it (~551, ~1063, ~1330 in that file). Nothing else changes:\n- A source declaration that really shadows still keeps its branch open, per Java's rule (JLS 6.4.1).\n- Unknown parents and unresolved imports stay open.\n\n**Who agrees.** The JVM owner session (`0bf0983d`) agreed with the diagnosis. It proposed this narrower version of my original fix and will review the change.\n\n**What you get.** The Exposed calibration selector should finally resolve. About 80 KotlinPoet extension call sites of the same shape will likely move from `incomplete` to resolved.\n\n**How it's checked:**\n- the Java, Kotlin and Scala goldens and the resolution-facts golden;\n- a Java control where an inherited nested type really shadows, which must stay open;\n- a Kotlin control where a supertype's nested `MutableList` really exists and must win over the default import;\n- the KotlinPoet replays, with every changed answer explained, so the JVM owner's J4 lane can account for them.\n\n**If you say no:** the Exposed calibration case stays red. The alternatives would be to wait for the JVM owner to fix it in their own work, or to change that benchmark expectation to `incomplete`, which would also need your approval."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "what am i being asked to approve?",
+    "assistant_text_tail": "re, Kotlin first checks that `ColumnSet` and `DdlAware` don't declare a nested type with that name.\n- Bifrost does prove that neither declares one. But it only drops those checked branches when the lookup ended at a type declared in source.\n- `MutableList` comes from the Kotlin standard library, which has no source declaration, so the branches stay open.\n- That leaves the receiver type undetermined, so the call inside stays `incomplete`.\n\nThe bug was already on master before my work, and it affects any extension on a stdlib type declared inside a class that has supertypes.\n\n**The change.** Treat a lookup as answered when it selected a binding: either a source declaration, or a selected library or built-in type such as the default-imported `MutableList`. Today only the first counts. The same definition applies at the two other places that test it (~551, ~1063, ~1330 in that file). Nothing else changes:\n- A source declaration that really shadows still keeps its branch open, per Java's rule (JLS 6.4.1).\n- Unknown parents and unresolved imports stay open.\n\n**Who agrees.** The JVM owner session (`0bf0983d`) agreed with the diagnosis. It proposed this narrower version of my original fix and will review the change.\n\n**What you get.** The Exposed calibration selector should finally resolve. About 80 KotlinPoet extension call sites of the same shape will likely move from `incomplete` to resolved.\n\n**How it's checked:**\n- the Java, Kotlin and Scala goldens and the resolution-facts golden;\n- a Java control where an inherited nested type really shadows, which must stay open;\n- a Kotlin control where a supertype's nested `MutableList` really exists and must win over the default import;\n- the KotlinPoet replays, with every changed answer explained, so the JVM owner's J4 lane can account for them.\n\n**If you say no:** the Exposed calibration case stays red. The alternatives would be to wait for the JVM owner to fix it in their own work, or to change that benchmark expectation to `incomplete`, which would also need your approval.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      31338
+    ],
+    "user_position": 31334,
+    "input_rationale": "The user asked what they are being asked to approve; the reply explains a fourth JVM resolution fix and says it needs their approval, with a stated consequence of refusal. The approval stays unresolved.",
+    "label": "required_final",
+    "triggers": [
+      "needs you"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "approval_gate",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-21T20:24:34.164Z",
+        "kind": "user",
+        "text": "approved"
+      },
+      {
+        "at": "2026-10-21T20:24:41.362Z",
+        "kind": "agent",
+        "text": "Approved. I'll record the decision, tell the JVM owner, and start the lane from current master."
+      },
+      {
+        "at": "2026-10-21T20:25:01.444Z",
+        "kind": "system",
+        "text": "Mailbox events:   - New PR brokkai/bifrost-dev#6315 Merge batch: #6311"
+      },
+      {
+        "at": "2026-10-21T20:25:41.010Z",
+        "kind": "agent",
+        "text": "My message to the JVM owner used a placeholder instead of the child's real id. Correcting that, and recording the approval on #6141:"
+      },
+      {
+        "at": "2026-10-21T20:25:58.004Z",
+        "kind": "agent",
+        "text": "I've started the lexical fix. It's in a new lane from current master (child `6da77149`, branch `6141-lexical-selected-binding`), built to the JVM owner's narrowed design. The file moved with the store"
+      },
+      {
+        "at": "2026-10-21T21:02:30.280Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task lexical-selected-binding finished: completed     State: completed     Report directory: /home/jonathan/Projects/bifrost/.mj/clones/c4ff1d5f483a43b8c1513de718ef27c3/.mj/a"
+      }
+    ]
+  }
+}

@@ -1,0 +1,142 @@
+{
+  "id": "L2001",
+  "title": "bifrost via claude2",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "b77c55f68caf70b180d18e5a49723134",
+    "session_title": "bifrost via claude2",
+    "reply_position": 26120,
+    "captured_at": "2026-08-21T14:01:19.156Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:25515",
+          "role": "assistant",
+          "text": "Compacting...\n\nCompacting completed."
+        },
+        {
+          "id": "user:25520",
+          "role": "user",
+          "text": "ok, that's done (the workflows add)\n\nP1 is now yours"
+        },
+        {
+          "id": "agent:25522",
+          "role": "assistant",
+          "text": "P1 it is. Let me pull the epic and sync with master first.P1 it is. Let me pull the epic and sync with master first.P1 it is. Let me pull the epic and sync with master first."
+        },
+        {
+          "id": "agent:25537",
+          "role": "assistant",
+          "text": "Master synced (the ci.yml one-liner is in as `6b7f9b718`, plus David's PHP sigil fix). Now let me read all nine P1 children to plan the epic.Master synced (the ci.yml one-liner is in as `6b7f9b718`, plus David's PHP sigil fix). Now let me read all nine P1 children to plan the epic.Master synced (the ci.yml one-liner is in as `6b7f9b718`, plus David's PHP sigil fix). Now let me read all nine P1 children to plan the epic."
+        },
+        {
+          "id": "agent:25560",
+          "role": "assistant",
+          "text": "The head cut off the last issues — fetching the remainder.The head cut off the last issues — fetching the remainder.The head cut off the last issues — fetching the remainder."
+        },
+        {
+          "id": "agent:25958",
+          "role": "assistant",
+          "text": "All six recon agents are running. While they work, I'll re-read the ExecPlan standard and start the epic plan skeleton.All six recon agents are running. While they work, I'll re-read the ExecPlan standard and start the epic plan skeleton.All six recon agents are running. While they work, I'll re-read the ExecPlan standard and start the epic plan skeleton."
+        },
+        {
+          "id": "agent:26120",
+          "role": "assistant",
+          "text": "The recon fan-out is underway and the prerequisite issue states are confirmed (#2401, #2414, #2376, #813 all still open — those anchor the Wave A contracts; #2371 is closed, meaning the sealed-dispatch discharge contract already exists for the summary work to build on).\n\nPlan of record for the epic, following the epic's own dependency structure:\n\n1. **Recon (running now):** six read-only agents mapping the Wave A subsystems — semantic-pack activation (#2442), the #2102 control machinery (#2443), heap/object vocabulary (#2444), summary machinery (#2445), project topology evidence (#2448), and the cache/generation layer (#2449).\n2. **Design:** one living ExecPlan at `.agents/plans/issue-2441-real-project-semantics.md` (same pattern that worked for the P0 epic), whose first milestone is the thing the epic gates everything on: the shared contracts — the project-topology envelope that #2442 and #2448 must agree on before freezing types, control/event row identity, object/access-path identity, the summary envelope, and semantic artifact keys.\n3. **Implementation:** delegate the first mergeable slices to Opus agents in isolated worktrees, starting with the tracks that collide least: #2443 slice 1 (control relations into the row registry plus one dominance policy fixture), #2444 slice 1 (object identity and intraprocedural must-alias), and the #2442/#2448 shared envelope with a JVM fixture.\n\nI'll write the ExecPlan as soon as the recon reports land.The recon fan-out is underway and the prerequisite issue states are confirmed (#2401, #2414, #2376, #813 all still open — those anchor the Wave A contracts; #2371 is closed, meaning the sealed-dispatch discharge contract already exists for the summary work to build on).\n\nPlan of record for the epic, following the epic's own dependency structure:\n\n1. **Recon (running now):** six read-only agents mapping the Wave A subsystems — semantic-pack activation (#2442), the #2102 control machinery (#2443), heap/object vocabulary (#2444), summary machinery (#2445), project topology evidence (#2448), and the cache/generation layer (#2449).\n2. **Design:** one living ExecPlan at `.agents/plans/issue-2441-real-project-semantics.md` (same pattern that worked for the P0 epic), whose first milestone is the thing the epic gates everything on: the shared contracts — the project-topology envelope that #2442 and #2448 must agree on before freezing types, control/event row identity, object/access-path identity, the summary envelope, and semantic artifact keys.\n3. **Implementation:** delegate the first mergeable slices to Opus agents in isolated worktrees, starting with the tracks that collide least: #2443 slice 1 (control relations into the row registry plus one dominance policy fixture), #2444 slice 1 (object identity and intraprocedural must-alias), and the #2442/#2448 shared envelope with a JVM fixture.\n\nI'll write the ExecPlan as soon as the recon reports land.The recon fan-out is underway and the prerequisite issue states are confirmed (#2401, #2414, #2376, #813 all still open — those anchor the Wave A contracts; #2371 is closed, meaning the sealed-dispatch discharge contract already exists for the summary work to build on).\n\nPlan of record for the epic, following the epic's own dependency structure:\n\n1. **Recon (running now):** six read-only agents mapping the Wave A subsystems — semantic-pack activation (#2442), the #2102 control machinery (#2443), heap/object vocabulary (#2444), summary machinery (#2445), project topology evidence (#2448), and the cache/generation layer (#2449).\n2. **Design:** one living ExecPlan at `.agents/plans/issue-2441-real-project-semantics.md` (same pattern that worked for the P0 epic), whose first milestone is the thing the epic gates everything on: the shared contracts — the project-topology envelope that #2442 and #2448 must agree on before freezing types, control/event row identity, object/access-path identity, the summary envelope, and semantic artifact keys.\n3. **Implementation:** delegate the first mergeable slices to Opus agents in isolated worktrees, starting with the tracks that collide least: #2443 slice 1 (control relations into the row registry plus one dominance policy fixture), #2444 slice 1 (object identity and intraprocedural must-alias), and the #2442/#2448 shared envelope with a JVM fixture.\n\nI'll write the ExecPlan as soon as the recon reports land."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "ok, that's done (the workflows add)\n\nP1 is now yours",
+    "assistant_text_tail": "that #2442 and #2448 must agree on before freezing types, control/event row identity, object/access-path identity, the summary envelope, and semantic artifact keys.\n3. **Implementation:** delegate the first mergeable slices to Opus agents in isolated worktrees, starting with the tracks that collide least: #2443 slice 1 (control relations into the row registry plus one dominance policy fixture), #2444 slice 1 (object identity and intraprocedural must-alias), and the #2442/#2448 shared envelope with a JVM fixture.\n\nI'll write the ExecPlan as soon as the recon reports land.The recon fan-out is underway and the prerequisite issue states are confirmed (#2401, #2414, #2376, #813 all still open — those anchor the Wave A contracts; #2371 is closed, meaning the sealed-dispatch discharge contract already exists for the summary work to build on).\n\nPlan of record for the epic, following the epic's own dependency structure:\n\n1. **Recon (running now):** six read-only agents mapping the Wave A subsystems — semantic-pack activation (#2442), the #2102 control machinery (#2443), heap/object vocabulary (#2444), summary machinery (#2445), project topology evidence (#2448), and the cache/generation layer (#2449).\n2. **Design:** one living ExecPlan at `.agents/plans/issue-2441-real-project-semantics.md` (same pattern that worked for the P0 epic), whose first milestone is the thing the epic gates everything on: the shared contracts — the project-topology envelope that #2442 and #2448 must agree on before freezing types, control/event row identity, object/access-path identity, the summary envelope, and semantic artifact keys.\n3. **Implementation:** delegate the first mergeable slices to Opus agents in isolated worktrees, starting with the tracks that collide least: #2443 slice 1 (control relations into the row registry plus one dominance policy fixture), #2444 slice 1 (object identity and intraprocedural must-alias), and the #2442/#2448 shared envelope with a JVM fixture.\n\nI'll write the ExecPlan as soon as the recon reports land.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 25520,
+    "input_rationale": "Progress report on starting P1: recon agents running, plan of record, ExecPlan next. 'Still open' only describes prerequisite issue states; no decision or input is requested.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-08-21T14:07:58.232Z",
+        "kind": "agent",
+        "text": "The summary-machinery recon is back and it's decisive for #2445: there are four separate summary envelopes today (semantic, taint, protocol, string-effect), three incompatible evidence encodings, no s"
+      },
+      {
+        "at": "2026-08-21T14:08:06.288Z",
+        "kind": "agent",
+        "text": "The dependency/activation recon is back with a headline that reshapes #2442: most of what the issue asks for already exists (canonical `ResolvedDependency` evidence rows, nine bounded per-ecosystem re"
+      },
+      {
+        "at": "2026-08-21T14:09:10.423Z",
+        "kind": "agent",
+        "text": "The control recon is in, and it sharpens #2443's first slice considerably: all five control algorithms (#2102) already exist, tested and deterministic — but they're `pub(crate)`, keyed by procedure-lo"
+      },
+      {
+        "at": "2026-08-21T14:09:30.405Z",
+        "kind": "agent",
+        "text": "The incrementality recon is in — four of six now done. Key takeaways for #2449: the store's two validity axes (content-addressed blobs, per-language epoch generations from #772) are sound, but every w"
+      },
+      {
+        "at": "2026-08-21T14:09:40.988Z",
+        "kind": "agent",
+        "text": "The topology recon is in — five of six done. The #2448 picture: there is no topology model at all today (ownership is a path prefix, the only dependency edge is an untyped derived file-import relation"
+      },
+      {
+        "at": "2026-08-21T14:10:25.522Z",
+        "kind": "agent",
+        "text": "All six recon reports are in. The heap one completes the picture with the same theme as the others: the vocabulary #2444 wants largely exists (alias relations, strong-update certificates, bounded acce"
+      }
+    ]
+  }
+}

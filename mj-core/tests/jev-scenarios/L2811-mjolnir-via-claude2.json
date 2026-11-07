@@ -1,0 +1,253 @@
+{
+  "id": "L2811",
+  "title": "mjolnir via claude2",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "669efe4f488f1665b2b3d834a33e69a2",
+    "session_title": "mjolnir via claude2",
+    "reply_position": 9729,
+    "captured_at": "2026-11-06T12:04:34.932Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "sometimes the TUI freezes for 100s to 1000s of ms, we should not have anything on the event loop thread that blocks that long (we do have an event loop based design right?)"
+        },
+        {
+          "id": "user:752",
+          "role": "user",
+          "text": "both 1 and 2 pls"
+        },
+        {
+          "id": "user:2102",
+          "role": "user",
+          "text": "yes and yes"
+        },
+        {
+          "id": "user:2448",
+          "role": "user",
+          "text": "push"
+        },
+        {
+          "id": "user:3226",
+          "role": "user",
+          "text": "add an ask_oracle agent tool; it should use a 3rd \"subagent\" type configuredin the same place as the others, but with a separate description: it is for read-only tricky questions that the primary agent isn't sure about\n\ntool description:\nConsult a strong read-only advisor about a decision before you commit to it. Consult when a choice is hard to reverse or affects more than your change, and you cannot state what it must satisfy, why your choice satisfies each requirement (beyond \"tests pass\"), and what would fail if you were wrong. Also consult before giving up, escalating to a human, or a third attempt at something that failed twice. Check facts yourself first; never use it for routine work. Send the decision, options, and evidence.\n\n---\nmechanics:\n\none oracle session per primary session, created lazily when first invoked, so no need to expose session ids. Oracle session should retain context between calls.\n\nany questions?"
+        },
+        {
+          "id": "user:3283",
+          "role": "user",
+          "text": "oh, expose it in the new/move dialog as \"Oracle: [enabled|disabled]\" when the subagent type is defined (default is None)"
+        },
+        {
+          "id": "user:3445",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nDelivery: Later, as a message (Recommended)\nDelegation: Independent (Recommended)\nToggle: Enabled (Recommended)\nRead-only: Instructions only"
+        },
+        {
+          "id": "user:3448",
+          "role": "user",
+          "text": "and like subagents, should remember the most recent choice by profile"
+        },
+        {
+          "id": "user:3605",
+          "role": "user",
+          "text": "(oracle can show up in the subagents virtual workspace even tho it's a special pony)"
+        },
+        {
+          "id": "user:4144",
+          "role": "user",
+          "text": "push and install when complete, then notify 1ea309c3a68c04ca5e3e64aeda6ee07a that you have done so"
+        },
+        {
+          "id": "user:4225",
+          "role": "user",
+          "text": "oh and oracle needs to be exposed to cli like stfwd/subtle configs"
+        },
+        {
+          "id": "user:7718",
+          "role": "user",
+          "text": "I'm confused, why isn't this using established subagent machinery"
+        },
+        {
+          "id": "user:7958",
+          "role": "user",
+          "text": "Yes to stop and reset please"
+        },
+        {
+          "id": "user:8527",
+          "role": "user",
+          "text": "Yes to investigate and fix the bug"
+        },
+        {
+          "id": "agent:8530",
+          "role": "assistant",
+          "text": "I'll start two read-only children now. The rebuild child is the only writer in this checkout and is building there, so the usage-bug fix waits until the rebuild has landed. That avoids two writers breaking each other's builds, as happened in the first version.\n- **OpenCode Mjolnir sub-agents:** find why OpenCode is excluded and what enabling it would take.\n- **OpenCode `mj usage` empty totals:** diagnose the cause and propose a fix, with file and line references.\n\nBoth will read committed code (`git show HEAD:…`) so the rebuild's in-progress edits don't confuse them, and neither will run cargo."
+        },
+        {
+          "id": "agent:8577",
+          "role": "assistant",
+          "text": "Three children are running now:\n- **oracle-thin-rebuild:** the only writer. It is rebuilding `ask_oracle` on spawn and `send_message`.\n- **investigate-opencode-mjolnir-subagents (read-only):** finding why OpenCode is excluded from Mjolnir delegation and what enabling it would take.\n- **diagnose-opencode-usage-empty (read-only):** finding why `mj usage` records empty totals for OpenCode turns, and proposing the smallest fix with a regression test.\n\n`★ Insight ─────────────────────────────────────`\n- The two investigations read committed code (`git show HEAD:…`), not the working tree. They share a checkout with a writer that is mid-edit, and reading HEAD gives them a stable view without a separate worktree, which AGENTS.md's no-branch rule makes awkward.\n- The usage fix will be implemented after the oracle rebuild and committed as its own change. One writer at a time avoids the build interference that hit the first version, and a separate commit keeps the oracle's review focused on the oracle.\n`─────────────────────────────────────────────────`\n\nWhen the reports arrive, I'll review the rebuild, take it through pre-push review, implement the usage fix from the diagnosis, and bring you the OpenCode findings with a recommendation before any OpenCode work starts. Push, install (all three instances), and the \"installed\" message to `1ea309c3…` follow once the oracle is clean."
+        },
+        {
+          "id": "user:8673",
+          "role": "user",
+          "text": "And minor point, the ask tool should make it clear that Oracle remembers context between calls"
+        },
+        {
+          "id": "agent:8675",
+          "role": "assistant",
+          "text": "I'll add one sentence to the end of the tool description. Your wording stays as it is, and the sentence goes where the model reads the tool's purpose:\n\n> \"The oracle remembers your earlier questions and its answers, so a follow-up can build on them.\"\n\nThe `message` parameter keeps its note that the oracle reads the workspace but not the caller's conversation, so together the two say what the oracle does and does not know."
+        },
+        {
+          "id": "agent:8701",
+          "role": "assistant",
+          "text": "The rebuild child has the change queued, and it reaches the child at its next tool call. The description will now end with:\n\n> \"…Send the decision, options, and evidence. The oracle remembers your earlier questions and its answers, so a follow-up can build on them.\"\n\nThis describes the thin design accurately: follow-ups go to the same parked oracle through `send_message`, so its conversation carries over. If an oracle has died and been replaced, the `ask_oracle` reply already says that the earlier context was lost. So the sentence states what normally happens, and the exception is reported when it occurs.\n\nI'm still waiting for the three children: the rebuild, the OpenCode delegation investigation, and the usage diagnosis."
+        },
+        {
+          "id": "agent:8751",
+          "role": "assistant",
+          "text": "The OpenCode investigation is done (read-only). Full findings: `.mj/agents/0c344d03d318c896bdfcd4822e4e46ae/opencode-delegation-findings.md`.\n\n**Why OpenCode is excluded (confirmed as a scoping decision):** commit `2e66d14ff` (2026-09-13) limited v1 to Claude and Codex, which were \"trained for delegation\" and \"accept native-tool suppression\". OpenCode was likely never evaluated. DSH was added later (`7feabd81c`), and it is the closest precedent.\n\n**What enabling it needs:**\n\n| Need | OpenCode today |\n|---|---|\n| Receive and call the `mj-agents` parent tools | No code blocker: the server already reaches OpenCode over ACP (`mj-worker/src/acp/launch.rs:268`). Whether the tools are exposed is likely but not verified live. |\n| Suppress OpenCode's own task tool (required for an honest Mjolnir or None choice) | **The gap.** Claude and Codex use `disallowedTools`, and DSH has nothing to suppress. A candidate mechanism exists (`OPENCODE_CONFIG_CONTENT`, already built in `json_gh_rules.rs:62-104`). Whether OpenCode 2.2.1 can deny its task tool by config is **unknown**. |\n| Message delivery while the parent is busy | Probably only at turn end, as with DSH (no hooks; ACP steering unknown). |\n| Tool approvals | It may prompt for each `mj-agents` call unless the session is unconstrained; DSH needed special handling here. |\n\n**A side effect to decide on:** the same predicate, `supports_delegation_tools()`, also turns on push-review gating (`worker_launch.rs:435`). Adding OpenCode to it would also gate OpenCode pushes. Following the repo's one-owner-per-fact rule, I'd split it into two predicates rather than let one change switch both.\n\n**Size:** small if OpenCode can deny its task tool by config, medium if approvals or the predicate split add work, large only if the task tool cannot be disabled.\n\n**Recommendation:** next, run a short live check of the pinned OpenCode 2.2.1 in an isolated environment:\n1. Can a config deny its task tool?\n2. Are `mj-agents` tools callable over ACP?\n3. Does it load `AGENTS.md`?\n4. Does it prompt for MCP approvals?\n\nThat check decides the size. It needs a real OpenCode run on one of your OpenRouter-backed profiles, at a small token cost. Should I run it? Kimi, Grok and Muse would each need their own version of the suppression check, so I'd leave them out for now.\n\nSeparately: the oracle on an OpenCode parent doesn't depend on any of this, since it rides the message server OpenCode already gets. The approval-prompt question in row 4 may matter for it too, if the lane does not run unconstrained. I'll check that before confirming OpenCode support in the \"installed\" message.\n\nI'm still waiting for the rebuild and the usage diagnosis."
+        },
+        {
+          "id": "agent:8966",
+          "role": "assistant",
+          "text": "The usage diagnosis is done. Full report: `.mj/agents/9a2a8e6f4671d5592e922ddf6ddeb53d/opencode-usage-diagnosis.md`.\n\n**Cause (confirmed from the stored rows):** the tokens are recorded but excluded from totals.\n- mj takes OpenCode usage only from the ACP prompt response.\n- OpenCode 2.2.1 declares no usage scope, so `TokenUsage::from_acp` stores it as `Unspecified` (`mj-core/src/usage.rs:54-55`).\n- `mj usage` adds only `Turn`-scope rows to totals (`mj-controller/src/database/usage.rs:276`). Everything else is counted as `unspecified_reports`.\n- The stored row has the right numbers: 15,434 input, 468 output, 99 reasoning, 27,648 cache read. The difference from the session total in `opencode.db` (15,980 / 476) is a request outside the turn, probably title generation, and is not an mj bug.\n- All 190 OpenCode turns in the main store have the same problem. It affects every OpenCode profile, because the scope is chosen by harness.\n\n**Fix:** a one-line \"treat OpenCode as `Turn`\" change is not enough. OpenCode's input excludes cache and its output excludes reasoning, so the raw numbers would fail the pricing shape checks and cost would show as unknown. The proposed fix follows the existing Muse adapter:\n- Add `mj-worker/src/acp/opencode_usage.rs`, in the style of `muse_usage.rs`, which normalizes the numbers: input += cache, output += reasoning.\n- Mark the row `Turn` only when the parts add up to OpenCode's own total. Otherwise keep `Unspecified` and log a warning.\n- Add regression tests using the reported numbers.\n\nTwo things the implementer must check first:\n- **Does OpenCode reset `usage.turn` on each prompt?** If the counter were cumulative for the session, labeling it per-turn would overcount. Store data suggests it resets, but that is likely, not confirmed.\n- **Pricing gap:** `openrouter/deepseek/deepseek-v4.1-flash-1017` has no price entry. After the fix the tokens will total correctly, but cost will still show as missing unless a rate is added. I'd leave that as a separate decision.\n\n**Order of work:** the rebuild child is still the only writer. Once the oracle is committed, I'll start a child to implement the usage fix as its own commit. That way the oracle push and the \"installed\" message for Series 48 don't wait on it, and the usage fix ships in a second install.\n\nI'm waiting for the rebuild child, and for your answer on the OpenCode live check."
+        },
+        {
+          "id": "user:9137",
+          "role": "user",
+          "text": "Yes to the check"
+        },
+        {
+          "id": "agent:9164",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- A recording stub provider makes the check exact. Rather than asking a real model \"what tools do you see?\" and trusting its answer, the stub captures the actual tool array and system prompt OpenCode sends. Each of the four questions then becomes a grep over a request log.\n- The same setup tests approvals without any risk. The stub sends a scripted tool call, and the ACP client logs whether OpenCode asks `session/request_permission` before running it. That is exactly what mj's permission layer would see.\n`─────────────────────────────────────────────────`\n\nThe OpenCode live check has started (`opencode-live-delegation-check`). It runs the pinned OpenCode with isolated homes against a localhost stub, so there are no model calls, no credentials, and no mj daemon. It answers task-tool suppression, MCP tool exposure over ACP, `AGENTS.md` loading, approval prompts, and, if it's cheap, steering.\n\nRunning now:\n- **oracle-thin-rebuild:** the only repo writer.\n- **opencode-live-delegation-check:** works outside the repo.\n\nThe usage fix is next in line after the oracle commit. I'm waiting for reports."
+        },
+        {
+          "id": "agent:9265",
+          "role": "assistant",
+          "text": "The OpenCode live check is done. Write-up: `.mj/agents/7f339042c5b78fa97ced540ccc0d51d3/findings.md`, with raw request captures in `evidence/`. **Size: medium, not large**, because OpenCode can suppress its own sub-agent tool.\n\n**Results (all confirmed by captured requests):**\n1. **Suppression works.** The native tool is named `subagent`, not `task`. Passing `{\"permissions\":[{\"action\":\"subagent\",\"resource\":\"*\",\"effect\":\"deny\"}]}` through `OPENCODE_CONFIG_CONTENT` removes it, including after resume. The rule is not saved in the session, so every launch must carry it, in both approval modes. Today that function returns early except under configured approvals.\n2. **`mj-agents` tools work over ACP, but through \"Code Mode\" by default.** OpenCode 2.2.1 hides MCP tools behind one `execute` JavaScript tool, and the model has to write `tools[\"mj-agents\"].spawn(...)`. Denying `execute` makes them direct tools (`mj-agents_spawn`, `mj-agents_ask_oracle`, …). There is also a race: a first prompt sent at once after `session/new` can run before the MCP server connects.\n3. **`AGENTS.md` loads**, both the staged copy and the one in the working directory.\n4. **Approvals:** under configured approvals, OpenCode asks before each `mj-agents` call. Adding an `mj-agents_*` allow rule stops that. Under unconstrained, nothing asks.\n5. **No steering:** a mid-turn prompt is refused, so messages are delivered at turn end, as for DSH.\n\n**This affects the oracle on OpenCode parents today,** not only delegation. The Series 48 `ds8bit` lane's DeepSeek model would have to call `ask_oracle` through Code Mode JavaScript. On the first turn the tool may be missing because of the race. And under configured approvals, each call would ask for permission.\n\n**One decision for you:** Code Mode, or deny `execute`?\n- **I recommend denying `execute` in mj-launched OpenCode sessions.** The `mj-agents` and `mj-memory` tools then become ordinary direct tools, as on every other harness. Models call direct tools more reliably than they write JS against a catalog. The cost is one more deny rule, and losing Code Mode for MCP servers in those sessions, which matters little because they have few tools.\n- Keeping Code Mode avoids that rule, but every MCP use, including `ask_oracle`, would depend on the model writing JS.\n\n**Proposed OpenCode delegation work (medium), after the oracle and the usage fix:**\n- Split the predicate: delegation versus push-review gating.\n- Add the `subagent` deny (and `execute` deny, if you agree) on every OpenCode launch.\n- Add an `mj-agents_*` allow rule next to the existing owned-MCP approvals.\n- Make the worker wait for the MCP server before the first prompt.\n- Update the policy text and tests.\n\nThe deny-`execute` rule and the first-turn wait help the oracle on OpenCode even without delegation. I'd put those two into the same follow-up rather than the oracle rebuild, unless you want them before the Series 48 `ds8bit` lane launches.\n\nSo: deny `execute` or keep Code Mode? And should I go ahead with the OpenCode delegation work after the oracle and usage fix land?"
+        },
+        {
+          "id": "agent:9487",
+          "role": "assistant",
+          "text": "The rebuild is done and much smaller: 105 files and +2,697 lines (mostly fixtures and goldens), against 117 files and +5,751 in v1. No requirement needed new durable oracle state, and all ten default-member suites pass. I'll look at what the \"Move oracle fix-up\" it mentions actually is before accepting."
+        },
+        {
+          "id": "agent:9542",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The rebuild's key move is `deliver_to_own_child`, extracted from the existing `send_message` child branch. A follow-up question is now, in code, the same operation as a parent messaging its child, so it inherits that path's replay dedup, park and wake handling, and queuing. In v1 each of those had to be rebuilt and then patched.\n- The one rule kept, \"at most one live oracle per primary\", sits inside the existing registration transaction as a typed `OracleAlreadyLive` result. The loser of a race simply delivers its question to the winner, so there is no slot and nothing to release.\n`─────────────────────────────────────────────────`\n\nThe rebuild child is finishing the docs, the oracle-ID leak in the resume notice, the Playwright check, the older-worker compatibility check, and a Move test. Then I'll commit and request review.\n\nStill open with you: **Code Mode or deny `execute`** for OpenCode, and whether to go ahead with the OpenCode delegation work after the oracle and the usage fix."
+        },
+        {
+          "id": "agent:9650",
+          "role": "assistant",
+          "text": "All five items are done. The full Playwright project passes, and the failing test passed 15 times in a row; the child traced it to an unpolled read at `new-session.spec.js:1207`, which supports calling it a flake. The child also hardened the worker's read of `oracle` to plain JSON, so an older or newer launch file cannot hide the tool. I'll commit, including the new `oracle.rs` file, and request review."
+        },
+        {
+          "id": "agent:9729",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- Schema revision numbers are a shared, ordered resource, so two branches that each add \"revision 110\" collide even when their SQL doesn't. The rule is that a shipped revision is immutable and an unshipped one moves. Upstream's 110 is now on `origin/master`, so ours gets renumbered.\n- `selected_models` shows the semantic merge risk. Upstream replaced the single `review.profile`/`review.model` with a list of reviewers, and the oracle added a model. The correct resolution unions both sets, which neither side's text alone contains. That is why I asked for a `cargo check` and full suites rather than only clearing the conflict markers.\n`─────────────────────────────────────────────────`\n\nThe rebuilt oracle is committed (`6e686e3bb`), and the merge with `origin/master` is in progress. The rebuild child is resolving the 8 conflicts and rerunning everything. After that I'll commit the merge, request pre-push review, then push, install (all three instances), and message the Series 48 lead with confirmed answers.\n\nStill open with you: **Code Mode or deny `execute`** for OpenCode, and whether to go ahead with the OpenCode delegation work afterwards."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Yes to the check",
+    "assistant_text_tail": "`★ Insight ─────────────────────────────────────`\n- Schema revision numbers are a shared, ordered resource, so two branches that each add \"revision 110\" collide even when their SQL doesn't. The rule is that a shipped revision is immutable and an unshipped one moves. Upstream's 110 is now on `origin/master`, so ours gets renumbered.\n- `selected_models` shows the semantic merge risk. Upstream replaced the single `review.profile`/`review.model` with a list of reviewers, and the oracle added a model. The correct resolution unions both sets, which neither side's text alone contains. That is why I asked for a `cargo check` and full suites rather than only clearing the conflict markers.\n`─────────────────────────────────────────────────`\n\nThe rebuilt oracle is committed (`6e686e3bb`), and the merge with `origin/master` is in progress. The rebuild child is resolving the 8 conflicts and rerunning everything. After that I'll commit the merge, request pre-push review, then push, install (all three instances), and message the Series 48 lead with confirmed answers.\n\nStill open with you: **Code Mode or deny `execute`** for OpenCode, and whether to go ahead with the OpenCode delegation work afterwards.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "work": "waiting",
+    "reply": "continuing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      9265,
+      9542,
+      9729
+    ],
+    "user_position": 9137,
+    "input_rationale": "The agent recommends denying execute but leaves the choice, and the follow-on OpenCode work, to the user. The user asked a clarifying question next and approved ('accepted') later.",
+    "label": "required_final",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T12:05:04.297Z",
+        "kind": "user",
+        "text": "so Code Mode is a synonym for execute-enabled?"
+      },
+      {
+        "at": "2026-11-06T12:05:27.120Z",
+        "kind": "agent",
+        "text": "Effectively yes, for MCP tools in OpenCode 2.2.1. Code Mode is on exactly when the `execute` tool is allowed. The live check confirmed this, and the binary's tool-listing code shows why: it chooses Co"
+      },
+      {
+        "at": "2026-11-06T12:05:54.128Z",
+        "kind": "user",
+        "text": "accepted"
+      },
+      {
+        "at": "2026-11-06T12:06:00.634Z",
+        "kind": "agent",
+        "text": "Noted: mj-launched OpenCode sessions will deny `execute`, so the `mj-agents` and `mj-memory` tools appear as direct tools. I'll record that decision with the investigation results, so the OpenCode wor"
+      },
+      {
+        "at": "2026-11-06T12:06:23.570Z",
+        "kind": "agent",
+        "text": "I recorded the decision and the live-check results in memory, so the OpenCode work has its starting point.  The order of work in this checkout, one writer at a time: 1. **Oracle:** finish the merge wi"
+      },
+      {
+        "at": "2026-11-06T12:09:05.069Z",
+        "kind": "user",
+        "text": "what was step 3?"
+      }
+    ]
+  }
+}

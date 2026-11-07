@@ -1,0 +1,317 @@
+{
+  "id": "L2501",
+  "title": "mjolnir via claude none",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "e965bcdb8c5c3036d6dcfbeb6120fe68",
+    "session_title": "mjolnir via claude",
+    "reply_position": 7191,
+    "captured_at": "2026-10-23T15:29:51.508Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "how does ~/Projects/kodus-ai compare to mj's autoreview? how is the \"code graph\" used? could we leverage ~/Projects/bifrost similarly in mj?"
+        },
+        {
+          "id": "user:998",
+          "role": "user",
+          "text": "how does kodus deal with very large diffs / graph context?"
+        },
+        {
+          "id": "user:1569",
+          "role": "user",
+          "text": "which issues should we report to kodus gh?"
+        },
+        {
+          "id": "user:1630",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:2084",
+          "role": "user",
+          "text": "file 1 2 3 4 5, investigate \"nothing produces callGraphJson\""
+        },
+        {
+          "id": "user:2678",
+          "role": "user",
+          "text": "go ahead and file it"
+        },
+        {
+          "id": "user:2844",
+          "role": "user",
+          "text": "why am i getting \"Search: SessionWiki index is at a different version\" and how to fix"
+        },
+        {
+          "id": "user:3209",
+          "role": "user",
+          "text": "> session_index_dir_for should not isolate the index when MJ_DATA_DIR equals the default data directory\n\nagreed, fix and push pls"
+        },
+        {
+          "id": "user:3375",
+          "role": "user",
+          "text": "i tried to import a claude session just now and after the final Okay, nothing happened"
+        },
+        {
+          "id": "user:3647",
+          "role": "user",
+          "text": "yes pls, then push"
+        },
+        {
+          "id": "user:3689",
+          "role": "user",
+          "text": "and while you're add it, add a line explaining what the \"ignore untracked\" import option changes"
+        },
+        {
+          "id": "user:4029",
+          "role": "user",
+          "text": "pull. did ryan land the deepseek harness code he was planning yesterday?"
+        },
+        {
+          "id": "user:4219",
+          "role": "user",
+          "text": "\"the file?\""
+        },
+        {
+          "id": "user:4365",
+          "role": "user",
+          "text": "tweak the subagents close tool desc to explain that the subagent reporting directory will be GC'd"
+        },
+        {
+          "id": "user:4542",
+          "role": "user",
+          "text": "eh, just discard this, old was fine"
+        },
+        {
+          "id": "user:4586",
+          "role": "user",
+          "text": ". ! status in a session should be cleared after the session is focused"
+        },
+        {
+          "id": "user:4632",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nClient: TUI dashboard (mj)\nStatus: Awaiting input / blocked\nOther: i just know it's marked with ! (at this writing d8443f17cb24506c5ee26277fcf319f4 is an example)"
+        },
+        {
+          "id": "user:4956",
+          "role": "user",
+          "text": "did the parent not see that child stopped w question?\n\nchild statuses should be surfaced to parent not to human"
+        },
+        {
+          "id": "user:5348",
+          "role": "user",
+          "text": "1. i don't want a new tool. parent can \"type out\" its answer in send_message. just cancel the elicitation and let the parent response drive it from there, this should work everywhere\n2. no\n3. agreed"
+        },
+        {
+          "id": "user:5602",
+          "role": "user",
+          "text": "push when complete"
+        },
+        {
+          "id": "agent:5604",
+          "role": "assistant",
+          "text": "Understood. Once both parts are finished and I've reviewed the combined changes and the test results, I'll commit and push to `master`. Waiting for both children now."
+        },
+        {
+          "id": "agent:5666",
+          "role": "assistant",
+          "text": "Waiting on two children: A (routing) and a check of whether the terminal-drawing test also fails on clean `master`."
+        },
+        {
+          "id": "agent:5717",
+          "role": "assistant",
+          "text": "Waiting on child A (routing child questions to the parent)."
+        },
+        {
+          "id": "agent:5732",
+          "role": "assistant",
+          "text": "Nesting isn't supported anywhere. `State::validate_subagent` (`mj-core/src/state.rs:2425`) refuses a child whose parent is itself a child agent. So the authorization change I approved would never run. I'm keeping the rule against nesting and telling A to remove that exception."
+        },
+        {
+          "id": "agent:5755",
+          "role": "assistant",
+          "text": "While A finishes testing, I'll review its main changes."
+        },
+        {
+          "id": "agent:5808",
+          "role": "assistant",
+          "text": "One more thing to check. If the daemon ever rebuilds a session's event projection from the start, old questions could be sent to the parent again under new sequence numbers. I'll ask A to check this."
+        },
+        {
+          "id": "agent:5825",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The permission code has two layers. First, the session's policy can approve a request automatically (YOLO mode). Only requests that get past that layer turn into forms for a person. \"Send to parent instead of the human\" belongs only at the second layer. Putting it at the first layer would have turned silent approvals into refusals.\n- Deduplication only works if the key stays the same every time the daemon creates the same event. The API seq never restarts, but a rebuild that inserts old events again would give them new seq values. That is why I asked A to check for that case.\n`─────────────────────────────────────────────────`\n\nWaiting on A. It is removing the nesting exception, fixing the full-access permission regression, checking the projection-rebuild case, and running the full tests, clippy and the terminal-drawing test. Once it reports back, I'll commit and push."
+        },
+        {
+          "id": "agent:5912",
+          "role": "assistant",
+          "text": "The shortened rules keep their meaning. Next I'll check the migration and the frontier logic, since that changes saved data."
+        },
+        {
+          "id": "agent:5968",
+          "role": "assistant",
+          "text": "The test passes, and no install build is running. Next I'll commit, and fetch to see whether `origin/master` has moved."
+        },
+        {
+          "id": "agent:5982",
+          "role": "assistant",
+          "text": "`origin/master` gained two commits. Before merging, I'll check whether either one also adds a schema migration 93."
+        },
+        {
+          "id": "agent:5996",
+          "role": "assistant",
+          "text": "Upstream already used migration 93, so ours must become 94. I'll read upstream's migration to see which compatibility floor it sets."
+        },
+        {
+          "id": "agent:6009",
+          "role": "assistant",
+          "text": "Upstream's migration 93 is also compatible and keeps the floor at 92. I'll merge and renumber ours to 94, with the floor still at 92."
+        },
+        {
+          "id": "agent:6085",
+          "role": "assistant",
+          "text": "The background build will notify me when it finishes, so I don't need a separate monitor. Still waiting for the controller rebuild and the schema and child-question tests. After they pass, I'll finish the merge commit and push."
+        },
+        {
+          "id": "agent:6121",
+          "role": "assistant",
+          "text": "The migration tests pass, including upstream's `turn_profile` test and ours. They were slow, but none failed. I'll run clippy on the controller crate, then finish the merge and push."
+        },
+        {
+          "id": "agent:6158",
+          "role": "assistant",
+          "text": "I pushed the change to `master`. Child agents' questions now go to their parent agent instead of waiting for a person. Commits: `8421a0695` (the change) and `b9286fa31` (merge with upstream).\n\n**What changed:**\n- **Child's worker:** when a child would show a question or permission form to a person, the worker records it and closes it at once. Requests that full-access mode approves automatically are not affected.\n- **Daemon:** sends the question text to the direct parent as a message from the child, which wakes the parent. The message ends with \"Its question form is already closed. Answer with send_message to session_id …\". The parent answers with ordinary `send_message`. No new tool and no new protocol version. This works the same way for every harness.\n- **Repeats:** a new compatible schema migration (94) stops a rebuild of a session's history from sending old questions to the parent again. The floor for older daemons stays at 92.\n- **Older workers:** questions still open on workers from before this change are sent to the parent too. Those workers keep the form open until they are replaced.\n- **TUI:** a parent row no longer shows `!` because of a child's question.\n- **Children's instructions** now say that questions go to the parent and the answer comes back as a message.\n\n**Two changes from the plan:**\n- I dropped the nested-parent permission change. Child agents can't have children of their own (`State::validate_subagent`), so it would never run.\n- Our migration was renumbered from 93 to 94, because upstream had already used 93.\n\n**Test results:**\n- **Before the merge:** clippy across the whole workspace passed. The full test suites for the five affected crates ran about 4,000 tests, and 11 failed on the first run. Each of those 11 passed when rerun alone, so the full run never passed cleanly in one go:\n  - Six failed on timeouts (5 seconds) or a port conflict.\n  - Two failed because the instruction text grew past a length limit; the child agent shortened the wording, and both pass now.\n  - The terminal-drawing test failed only when `NO_COLOR` was set, and passed 3 out of 3 times without it.\n- **After the merge:** clippy on the controller passed, and the schema and child-question tests passed.\n- **Not run:** an end-to-end test with a real daemon. Older workers still keep their forms open, as noted above.\n\n**What this means for `d8443f17…`:** the new build isn't installed. Once it is, the mailbox sweep should send child `9645b51a`'s open question to `d8443f17…` (likely, not verified), and the `!` on its row should go away.\n\nI saved your rule (child status goes to the parent, no new tools, no exceptions for the human) as a memory for future sessions.\n\n`★ Insight ─────────────────────────────────────`\n- Upstream and this change both took migration 93 in the same short window. Because each migration checks `version < N` and runs in its own transaction, renumbering ours to 94 was enough. The test had to change too: after a failed 94 step, the schema now stays at 93, not 92.\n- Each part of this has one owner. The worker answers the request it holds, and the daemon handles delivery. That split is what removed the race where a cancel could reach a newer question with the same ID.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:6402",
+          "role": "user",
+          "text": "e8566ee44d5a562c41deb74d72243980 didn't get subagent-finished delivered until i interrupted it"
+        },
+        {
+          "id": "agent:6435",
+          "role": "assistant",
+          "text": "Checking the worker's relay journal for when the stuck turn started. The daemon handed off both messages within a second. The worker then held them because it thought a turn was still running."
+        },
+        {
+          "id": "agent:6487",
+          "role": "assistant",
+          "text": "I found where the session got stuck. I'm now pulling the full record of that moment from the daemon database, because the worker's own log file was rotated while I was reading it."
+        },
+        {
+          "id": "agent:6583",
+          "role": "assistant",
+          "text": "The evidence is complete. I'm doing one last check: whether a fix landed after this session's worker was built."
+        },
+        {
+          "id": "agent:6610",
+          "role": "assistant",
+          "text": "The daemon was not at fault: it handed the message to the worker in about 60 ms. The worker held it because it wrongly believed Claude Code was still in the middle of a turn. That belief started at 13:11 UTC (08:11 your time) and lasted 94 minutes, until your interrupt ended it. I confirmed this sequence from the worker's journal.\n\n**What happened** (times in UTC)\n\n| Time | Journal ordinal | Event |\n|---|---|---|\n| 13:01:08 | 5111 | Claude Code started a turn on its own after a background-task notice. It started a background shell (tool call `…ESFfSZZK`) and ran tests. |\n| 13:11:07 | 5185 | That turn ended normally (`harness_turn_settled`, origin `task-notification`). |\n| 13:11:07 | 5187, 5188 | Within a few milliseconds, Claude Code sent a `tool_call_update` marking that background shell `failed` (\"Claude stopped this to…\"). The worker treated this as new output and opened a new turn (5187). No model work followed, so nothing ever ended that turn. |\n| 13:35:30 | 5189–5191 | The subagent-finished message arrived. The worker saw a turn as open, so it saved the message to show at the next tool call instead of waking the session. No tool call ever came. |\n| 13:44:00 | 5192–5194 | A session message was held the same way. |\n| 14:45:49–54 | 5195–5201 | You sent a prompt and a stop. Claude Code never answered the stop. After 5 seconds the worker gave up waiting, logged `Claude Code did not answer a stop of the turn it started on its own`, and closed the turn. Your prompt then carried both held messages. |\n\n**The code involved**\n- `opens_harness_turn` (`mj-worker/src/relay.rs:1262`) opens a turn on any agent output while no prompt or turn is open. `is_agent_output` (`mj-worker/src/relay/background.rs:24`) counts every `ToolCallUpdate` as output, including a late status change for a tool from a turn that has already ended.\n- `mailbox_wake_is_allowed` (`mj-worker/src/relay/commands.rs:1986`) needs `can_submit`. That stays false while a turn is open, so a message that should wake the session is only saved.\n- A turn that Claude Code started on its own ends in only two ways: a `claude_turn_result`, or a stop that goes unanswered. There is no time limit.\n\n**This is a different cause from the 2026-10-20 case.** That one was a stale `/clear` flag. Here every outbox row was accepted within about 1 second. No fix for this has reached `origin/master` since this session's worker was built.\n\n**What I could not confirm**\n- The full text of the \"failed\" update. The worker rotated its journal file while I was reading it, and I had kept only the first 400 characters of each line.\n- Why the shell was stopped: Claude Code's cleanup at the end of the turn, or the model itself stopping it.\n- That Claude Code was idle throughout. This is likely: it produced no output for 94 minutes and did not answer the stop.\n\n**Recommendation:** make `opens_harness_turn` ignore a `ToolCallUpdate` that only reports a final status (completed or failed) for a tool call that began in a turn that has already ended. New chunks and new `tool_call`s would still open a turn. This follows the existing special cases for \"Task stopped by user\" and setup notices. Add a regression test that replays the 5185→5188 sequence and checks that a mailbox event sent afterwards wakes the session.\n\nA time limit on silent turns would also have caught this. But it would be a second mechanism for the same problem, so I would not add one unless the narrow fix proves incomplete. I have not changed any code.\n\n`★ Insight ─────────────────────────────────────`\n- A message that should wake the session takes one of two routes. If the session is idle, the worker wakes it with the message as a prompt. If a turn is running, the worker saves the message and shows it at the next tool call. So if the worker wrongly thinks a turn is running, messages are held without any error.\n- Claude Code sends no explicit signal when it starts a turn on its own, so the worker infers one from the first output. This means every message type the adapter sends outside model work needs its own exception. This incident adds a third one: a late status update for a background tool.\n- The worker rotates `relay-journal/active.jsonl` at each checkpoint. Copy it as soon as you start diagnosing, or the evidence can be gone a minute later. That happened partway through this check.\n`─────────────────────────────────────────────────`\n\nI added this second cause to the memory note on missed parent notifications."
+        },
+        {
+          "id": "user:6924",
+          "role": "user",
+          "text": "yes, pls fix and push"
+        },
+        {
+          "id": "agent:6961",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- I chose a rule that keeps no state (\"a status update never opens a turn\") over a rule that tracks which tool calls have been seen. The tracking version would have to keep a set of tool call IDs that survives worker restarts. This bug does not need that.\n- The child first checks the one assumption the rule depends on: that Claude Code always announces a tool call before sending any update for it. If that assumption is wrong, the simpler rule could miss a real turn. In that case I'll switch to tracking IDs.\n`─────────────────────────────────────────────────`\n\nA child is implementing the fix and the regression test. It will not commit. When it reports back, I'll review the diff, commit, and push to `origin/master`."
+        },
+        {
+          "id": "agent:7072",
+          "role": "assistant",
+          "text": "Upstream has 10 new commits, and two of them lightly change these same files. I'll commit, rebase onto them, and rerun the affected tests before pushing."
+        },
+        {
+          "id": "agent:7090",
+          "role": "assistant",
+          "text": "The rebase was clean. Now I'm rerunning the worker crate's tests on the rebased code."
+        },
+        {
+          "id": "agent:7109",
+          "role": "assistant",
+          "text": "The worker tests are still running in the background on the rebased commit (`5e82e710e`). The build had to recompile after the 10 upstream commits. I'll push once the tests pass."
+        },
+        {
+          "id": "agent:7136",
+          "role": "assistant",
+          "text": "The library tests pass, including the new regression test. Six integration tests failed, though, which the child's run before the rebase did not show. I'm reading the panic messages."
+        },
+        {
+          "id": "agent:7177",
+          "role": "assistant",
+          "text": "Outside the sandbox, all 13 tests pass. The failures came from the sandbox, not from the fix. Pushing now."
+        },
+        {
+          "id": "agent:7191",
+          "role": "assistant",
+          "text": "I've pushed the fix to `origin/master` as `5e82e710e`.\n\n**The change:** in `opens_harness_turn` (`mj-worker/src/relay.rs`), a Claude `ToolCallUpdate` no longer opens a turn. The update is still recorded, so the tool row in the conversation still shows \"failed\". A real new model cycle still opens a turn with its first text or new tool call.\n\n**Verification:**\n- The child checked the adapter's code (claude-agent-acp 0.94.0). It always announces a tool call before it sends any update for it. So no real turn can begin with an update, and this rule cannot miss one.\n- The source of the late update is `unfinished()` in `dist/tool-calls/renderer.js`. When a cycle ends, it marks each tool call left unfinished as failed, with the text \"Claude stopped this tool call before it ran.\" That update arrives after the cycle's result.\n- New regression test: `late_claude_tool_status_preserves_the_transcript_without_opening_a_turn`. It replays this session's sequence of events. It fails without the fix and passes with it.\n- On the rebased commit, all 703 worker library tests pass. Six integration tests failed in my first run because the sandbox blocks starting a shell (`/bin/bash` \"did not answer within 10 seconds\"). Outside the sandbox, all 13 tests in those two files pass. The child also ran clippy and fmt; both are clean.\n\n**When it takes effect:** the fix is in the worker, not the daemon. Session e8566ee4 and other running sessions keep the old behaviour until a new install replaces their workers.\n\n`★ Insight ─────────────────────────────────────`\n- Mjolnir has to work out when Claude Code is busy from the order of its messages, so each message the adapter sends between cycles needs its own exception. This is the third: setup notices and \"Task stopped by user\" were the first two. Each fix has a \"Hard-won\" test built from a real session's sequence, so a later refactor cannot remove one without a test failing.\n- The two runs differed only in the sandbox. Before treating a failure as a regression, check how the passing run was run. Here, rerunning the failed test files outside the sandbox answered the question in seconds.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "yes, pls fix and push",
+    "assistant_text_tail": "t text or new tool call.\n\n**Verification:**\n- The child checked the adapter's code (claude-agent-acp 0.94.0). It always announces a tool call before it sends any update for it. So no real turn can begin with an update, and this rule cannot miss one.\n- The source of the late update is `unfinished()` in `dist/tool-calls/renderer.js`. When a cycle ends, it marks each tool call left unfinished as failed, with the text \"Claude stopped this tool call before it ran.\" That update arrives after the cycle's result.\n- New regression test: `late_claude_tool_status_preserves_the_transcript_without_opening_a_turn`. It replays this session's sequence of events. It fails without the fix and passes with it.\n- On the rebased commit, all 703 worker library tests pass. Six integration tests failed in my first run because the sandbox blocks starting a shell (`/bin/bash` \"did not answer within 10 seconds\"). Outside the sandbox, all 13 tests in those two files pass. The child also ran clippy and fmt; both are clean.\n\n**When it takes effect:** the fix is in the worker, not the daemon. Session e8566ee4 and other running sessions keep the old behaviour until a new install replaces their workers.\n\n`★ Insight ─────────────────────────────────────`\n- Mjolnir has to work out when Claude Code is busy from the order of its messages, so each message the adapter sends between cycles needs its own exception. This is the third: setup notices and \"Task stopped by user\" were the first two. Each fix has a \"Hard-won\" test built from a real session's sequence, so a later refactor cannot remove one without a test failing.\n- The two runs differed only in the sandbox. Before treating a failure as a regression, check how the passing run was run. Here, rerunning the failed test files outside the sandbox answered the question in seconds.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "action": "finished",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Still open / needs you turn-ending label",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_positions": [],
+    "user_position": 6924,
+    "input_rationale": "The user said 'yes, pls fix and push'; the fix is pushed and verified. The remaining note about running sessions keeping the old behaviour until install is informational and asks nothing.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": null
+  },
+  "context": {
+    "after": []
+  }
+}
