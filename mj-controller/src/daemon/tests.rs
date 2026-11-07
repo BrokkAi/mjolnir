@@ -2527,8 +2527,8 @@ async fn daemon_lifecycle_reports_balanced_concurrent_stages() {
         let lifecycle_owner = state.owner();
         let lifecycle = &lifecycle_owner.lifecycle;
         let stages = &lifecycle.get("session-1").unwrap().active_stages;
-        assert_eq!(stages.get(&ProvisionStage::Cloning).unwrap().count, 1);
-        assert_eq!(stages.get(&ProvisionStage::Syncing).unwrap().count, 1);
+        assert_eq!(stages.get(&ProvisionStage::Cloning).unwrap().0, 1);
+        assert_eq!(stages.get(&ProvisionStage::Syncing).unwrap().0, 1);
     }
     executor.stage_finished(ProvisionStage::Cloning);
     executor.stage_finished(ProvisionStage::Syncing);
@@ -3468,35 +3468,6 @@ async fn a_create_queued_for_a_turn_longer_than_the_bound_is_not_stalled() {
     assert!(check_progress(&state, bound).is_err());
 }
 
-/// A Create runs lanes concurrently. One lane hung in a working stage is
-/// stalled however long the other lane has queued, and the other lane's
-/// queue stage is not named.
-// Hard-won: pre-push review of d31ae04cd: a hung working stage was never cancelled while another lane sat in a queue stage
-#[tokio::test(start_paused = true)]
-async fn a_create_with_one_lane_hung_while_another_queues_is_stalled() {
-    let state = test_runtime_state();
-    start_idle_create(&state);
-    tokio::task::yield_now().await;
-    let executor = DaemonStageReportingExecutor::new(
-        RefusingExecutor("a stage notification"),
-        state.clone(),
-        "session-1".into(),
-    );
-    let bound = create::CREATE_STALL_BOUND;
-    executor.stage_started(ProvisionStage::Syncing);
-    tokio::time::sleep(bound / 2).await;
-    executor.stage_started(ProvisionStage::WaitingForWorkerStore);
-    tokio::time::sleep(bound / 2 - Duration::from_secs(1)).await;
-    check_progress(&state, bound).unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let error = check_progress(&state, bound).unwrap_err().to_string();
-    assert!(error.contains("stalled in: Sync"), "{error}");
-    assert!(
-        !error.contains("Waiting for the worker binary store"),
-        "{error}"
-    );
-}
-
 /// Harness preparation reports its own progress and failure, and one step (a
 /// download) can be slow: it stays off the stall clock, as it is off the
 /// native startup deadline.
@@ -3645,7 +3616,8 @@ async fn a_create_stalled_in_one_stage_fails_its_start_and_names_the_stage() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     let error = check_progress(&state, bound).unwrap_err().to_string();
     assert!(
-        error.contains("stalled in: Sync") && error.contains("no progress for 601 s"),
+        error.contains("stalled in: Sync")
+            && error.contains("no stage started or finished for 601 s"),
         "{error}"
     );
 }

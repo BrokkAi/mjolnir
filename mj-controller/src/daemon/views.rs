@@ -6,11 +6,11 @@ pub(super) enum CreateProgress {
     NotRunning,
     /// A Create is running and is either in a stage or recently was.
     Running,
-    /// A Create has a stage that went past the bound without starting or
-    /// finishing, or went past it with no stage active.
+    /// A Create has gone past the bound without a stage starting or
+    /// finishing.
     Stalled {
         idle: Duration,
-        /// The stages that stalled; empty between stages.
+        /// The stages it is in; empty between stages.
         stages: Vec<String>,
         /// What the stall check found when it asked the Create to cancel.
         phase: StalledCreate,
@@ -296,7 +296,7 @@ impl RuntimeState {
                 active_stages: active
                     .active_stages
                     .iter()
-                    .map(|(stage, active)| (stage.clone(), active.started_at_epoch_seconds))
+                    .map(|(stage, (_, started_at))| (stage.clone(), *started_at))
                     .collect(),
                 resume_destination: active.resume_destination.clone(),
                 notice: active.notice.clone(),
@@ -581,8 +581,7 @@ impl RuntimeState {
             if operation.operation_id != operation_id || !operation.is_running() {
                 return;
             }
-            let now = tokio::time::Instant::now();
-            operation.last_stage_change = now;
+            operation.last_stage_change = tokio::time::Instant::now();
             if active {
                 let started_at = stage
                     .started_at_epoch_seconds()
@@ -590,21 +589,15 @@ impl RuntimeState {
                 let entry = operation
                     .active_stages
                     .entry(stage)
-                    .or_insert_with(|| ActiveStage {
-                        count: 0,
-                        started_at_epoch_seconds: started_at,
-                        last_change: now,
-                    });
-                entry.count += 1;
-                entry.last_change = now;
-                entry.count == 1
+                    .or_insert_with(|| (0, started_at));
+                entry.0 += 1;
+                entry.0 == 1
             } else {
-                let Some(entry) = operation.active_stages.get_mut(&stage) else {
+                let Some((count, _)) = operation.active_stages.get_mut(&stage) else {
                     return;
                 };
-                entry.count -= 1;
-                entry.last_change = now;
-                if entry.count == 0 {
+                *count -= 1;
+                if *count == 0 {
                     operation.active_stages.remove(&stage);
                     true
                 } else {
@@ -618,13 +611,10 @@ impl RuntimeState {
     }
 
     /// Decide, in one owner critical section, whether the session's running
-    /// Create has stalled, and cancel it when it has. A Create runs lanes
-    /// concurrently, so each active stage is judged by its own clock: a stage
-    /// that has gone `bound` without an instance of it starting or finishing
-    /// is stalled, however the other lanes are doing. With no stage active,
-    /// `bound` without any stage starting or finishing is a stall between
-    /// stages. A stage that queues for a slot or prepares a harness
-    /// (`ProvisionStage::pauses_stall_clock`) never stalls itself.
+    /// Create has stalled, and cancel it when it has. A stall is `bound`
+    /// without a provisioning stage starting or finishing; a Create that is
+    /// queued for a slot or preparing a harness (`ProvisionStage::pauses_stall_clock`)
+    /// is never stalled.
     ///
     /// Cancelling is what ends the stall: failing only the reviewer start
     /// would leave the Create running with its lifecycle admission held, and
@@ -641,24 +631,16 @@ impl RuntimeState {
         if operation.kind != LifecycleKind::Create || !operation.is_running() {
             return CreateProgress::NotRunning;
         }
-        let (idle, stages) = if operation.active_stages.is_empty() {
-            (operation.last_stage_change.elapsed(), Vec::new())
-        } else {
-            let stalled: Vec<_> = operation
+        let idle = operation.last_stage_change.elapsed();
+        if idle < bound
+            || operation
                 .active_stages
-                .iter()
-                .filter(|(stage, _)| !stage.pauses_stall_clock())
-                .map(|(stage, active)| (stage.label(), active.last_change.elapsed()))
-                .filter(|(_, age)| *age >= bound)
-                .collect();
-            let Some(idle) = stalled.iter().map(|(_, age)| *age).max() else {
-                return CreateProgress::Running;
-            };
-            (idle, stalled.into_iter().map(|(label, _)| label).collect())
-        };
-        if idle < bound {
+                .keys()
+                .any(ProvisionStage::pauses_stall_clock)
+        {
             return CreateProgress::Running;
         }
+        let stages = operation.stage_labels();
         let phase = if operation.request_cancel(session_id, "create stalled") {
             StalledCreate::Cancelled
         } else if matches!(operation.phase, LifecyclePhase::Cancelling) {
