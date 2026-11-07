@@ -318,6 +318,15 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - Decision (twentieth review): `docs/AWS.md` states the limit of the IMDSv2 requirement: it holds on instances this version launches or adopts; an instance launched earlier keeps its `HttpTokens` setting until it is replaced, and Mjolnir does not check or change instances it is not adopting.
   Date/Author: 2026-11-07 / Claude, from review.
 
+- Decision (twenty-first review): a role-scoped cycle withdraws first. Reading the worker's staged profile name can fail, and the session can make it fail (delete or damage its `aws-config`), so the withdrawal must not depend on it. Each cycle now (a) reconciles what the session holds against the role's scope and withdraws anything that does not match, which needs only the role, the policy and the installed secret; (b) reads the staged name; (c) resolves the host's selection, mints and installs. If (b) fails nothing is installed and the cycle reports the error with what the person can do (restart the session so its AWS configuration is staged again), the withdrawal having already happened. The reconciliation no longer waits for a stale cache: it runs every cycle, one small job.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (twenty-first review): one rule for profile names. `AwsCredentials::validate` (what launch accepts when it stages) and the name read back from the worker's configuration both use `valid_profile_name`: non-empty, no control characters, no `[` or `]`. The narrower `[A-Za-z0-9_.-]+` check is gone, so a name with `@` or a space that launch staged is read back. The rule allows leading or trailing whitespace in a name, which the AWS CLI's configuration parser may trim; that is launch's existing rule and is not narrowed here.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (twenty-first review): a withdrawal is reported once. The interim result carries the `AwsCredentialsRemoved` action; the cycle's final result does not carry it again when the interim was sent (a caller with no sink keeps it in the final result).
+  Date/Author: 2026-11-07 / Claude, from review.
+
 ## Outcomes & Retrospective
 
 Implemented through Milestone 6 on 2026-11-07. A Bedrock profile with `[profiles.<id>.aws] role_arn = ...` now gives each container or SSH session credentials assumed for it alone (role session name `mj-<session id>`), narrowed by a session policy, renewed after half their lifetime through the existing credential sync, with no relay or database change. A refused role fails the launch with AWS's error line and a remedy, or fails the running session's sync outcome while the worker keeps what it has; nothing falls back to the unscoped export. Profiles without a role behave as before, and `mj doctor` warns about them and probes a configured role with a real throwaway AssumeRole. Every EC2 launch (ordinary and Move) requires IMDSv2, verified in the launch response, and doctor warns about a launch template that allows IMDSv1.
@@ -558,3 +567,5 @@ Revision note (2026-11-07, eighteenth review, item 1): the session's AWS profile
 Revision note (2026-11-07, nineteenth review): the controller records each session's AWS profile in its own table (migration 117); the worker-reported profile is reverted; valid relative staged paths are recognised; ended renewal tasks are reported and restarted. Reason: nineteenth review.
 
 Revision note (2026-11-07, twentieth review): the unscoped path is back to its pre-#1424 behaviour; the controller table and migration are removed; role-scoped sessions mint from the host's current selection and install under the worker's staged (checked) name; withdrawal depends on the role alone; every pending trigger is answered; the IMDSv2 limit is documented. Reason: twentieth review.
+
+Revision note (2026-11-07, twenty-first review): withdraw before reading the staged name; one profile-name rule; a withdrawal is reported once. Reason: twenty-first review.

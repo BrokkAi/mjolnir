@@ -1250,32 +1250,91 @@ pub(super) async fn aws_cycle(
     };
     // A role is configured for the profile, so nothing the session holds may
     // outlast it unless it matches the role: unscoped credentials, or ones for
-    // another role or policy, are withdrawn. That depends on the role alone,
-    // not on whether the profile still authenticates with the AWS credential
-    // chain, which decides only whether credentials are minted.
+    // another role or policy, are withdrawn. That depends on the role, the
+    // policy and the installed secret alone, never on the profile name or on
+    // whether the profile still authenticates with the AWS credential chain
+    // (which decides only whether credentials are minted), so it comes first
+    // and nothing later in the cycle can stop it. Matching credentials stay
+    // until the replacement arrives; a session with obsolete credentials goes
+    // without until then, which is the fail-closed choice.
+    let reconcile = AwsSync::Pending {
+        expected_scope: ScopeExpectation::of(target),
+    };
     if !base.mints {
-        let withdraw = AwsSync::Pending {
-            expected_scope: ScopeExpectation::of(target),
-        };
         let result = aws_job(
             access,
             target,
             installing,
-            SyncWork::Aws(Box::new(withdraw)),
+            SyncWork::Aws(Box::new(reconcile)),
         )
         .await;
         return (session_id, result);
     }
+    let held = match aws_job(access, target, None, SyncWork::Aws(Box::new(reconcile))).await {
+        Ok(Some(sync)) => sync,
+        // Not reached this cycle: the next one tries again.
+        Ok(None) => return (session_id, Ok(None)),
+        Err(error) => return (session_id, Err(error)),
+    };
+    // What the withdrawal did is said now, not when the cycle ends: the mint
+    // may take as long as it takes. Said once: with a sink the final result
+    // does not carry it again.
+    let mut withdrawn = Vec::new();
+    if !held.actions.is_empty() || !held.failures.is_empty() {
+        let mut failures = held.failures.clone();
+        if !held.actions.is_empty() {
+            failures.push(StepFailure {
+                step: SyncStep::Aws,
+                detail: "AWS credentials: the session's previous credentials did not match this profile's role and were withdrawn; it has none until new role-scoped ones are installed".into(),
+            });
+        }
+        match interim {
+            Some(sink) => {
+                let _ = sink.send(CredentialSyncResult {
+                    profile_id: target.profile_id.clone(),
+                    trigger: None,
+                    failure: None,
+                    partial: true,
+                    outcomes: vec![CredentialSyncOutcome {
+                        session_id: session_id.clone(),
+                        outcome: Ok(held.actions.clone()),
+                        step_failures: failures,
+                    }],
+                });
+            }
+            None => withdrawn = held.actions.clone(),
+        }
+    }
     // The name the credentials are installed under is the one the worker's
     // staged configuration has (the session's environment selects it). A
-    // worker that cannot answer now defers the cycle; nothing changes.
+    // worker that cannot answer now defers the cycle; nothing changes. A
+    // configuration that cannot be read is the cycle's failure, said with what
+    // the person can do; the withdrawal above has already happened.
     let staged = match aws_job(access, target, None, SyncWork::StagedProfile).await {
         Ok(Some(sync)) => match sync.staged_profile {
             Some(staged) => staged,
             None => return (session_id, Ok(None)),
         },
         Ok(None) => return (session_id, Ok(None)),
-        Err(error) => return (session_id, Err(error)),
+        Err(error) => {
+            let mut details = held
+                .failures
+                .iter()
+                .map(|failure| failure.detail.clone())
+                .collect::<Vec<_>>();
+            details.push(format!("AWS credentials: {error:#}"));
+            return (
+                session_id,
+                Ok(Some(SessionSync {
+                    actions: withdrawn,
+                    failures: vec![StepFailure {
+                        step: SyncStep::Aws,
+                        detail: details.join("; "),
+                    }],
+                    staged_profile: None,
+                })),
+            );
+        }
     };
     // The host profile the mint runs as is the host's selection as it is now,
     // read now. A configuration that cannot be read fails the cycle closed: the
@@ -1312,50 +1371,6 @@ pub(super) async fn aws_cycle(
             return (session_id, result);
         }
     };
-    // A mint that has to call AWS has no deadline of ours, so what the session
-    // holds is reconciled first, independently of it: credentials that do not
-    // match the target (unscoped, issued under another role or policy) are
-    // withdrawn before the mint starts, not after it returns. Matching
-    // credentials stay until the replacement arrives. A session with obsolete
-    // credentials goes without until then, which is the fail-closed choice.
-    let mut withdrawn = Vec::new();
-    if mint_needed(&session_id, &source, force_new) {
-        let pending = AwsSync::Pending {
-            expected_scope: ScopeExpectation::of(target),
-        };
-        match aws_job(access, target, None, SyncWork::Aws(Box::new(pending))).await {
-            Ok(Some(sync)) => {
-                if !sync.actions.is_empty() || !sync.failures.is_empty() {
-                    let mut failures = sync.failures.clone();
-                    if !sync.actions.is_empty() {
-                        failures.push(StepFailure {
-                            step: SyncStep::Aws,
-                            detail: "AWS credentials: the session's previous credentials did not match this profile's role and were withdrawn; it has none until AssumeRole returns the new ones".into(),
-                        });
-                    }
-                    if let Some(sink) = interim {
-                        // Said now, not when the cycle ends: the mint may take
-                        // as long as it takes.
-                        let _ = sink.send(CredentialSyncResult {
-                            profile_id: target.profile_id.clone(),
-                            trigger: None,
-                            failure: None,
-                            partial: true,
-                            outcomes: vec![CredentialSyncOutcome {
-                                session_id: session_id.clone(),
-                                outcome: Ok(sync.actions.clone()),
-                                step_failures: failures,
-                            }],
-                        });
-                    }
-                }
-                withdrawn = sync.actions;
-            }
-            // Not reached this cycle: the next one tries again.
-            Ok(None) => return (session_id, Ok(None)),
-            Err(error) => return (session_id, Err(error)),
-        }
-    }
     let aws = match start_scoped_mint(target, &source, &staged, force_new) {
         Some((mint, _stops_with_the_task)) => match mint
             .await
@@ -1401,18 +1416,6 @@ async fn aws_job(
         |hold| async move { run_on_session(access.relays, target, work, hold).await },
     )
     .await
-}
-
-/// Whether the cycle's mint has to call AWS: the cache holds no fresh
-/// credentials for the source, or the cycle is forced. A cached mint returns
-/// at once and needs no earlier reconciliation.
-fn mint_needed(
-    session_id: &str,
-    source: &mj_core::aws_credentials::AwsCredentialSource,
-    force_new: bool,
-) -> bool {
-    force_new
-        || !crate::aws_assume_role::ScopedAwsCredentials::shared().is_fresh(session_id, source)
 }
 
 /// What a session's renewal task needs, shared by all of them.
@@ -2053,11 +2056,11 @@ async fn run_work(
             );
             let (_, profile) = client.aws_credentials_staging().await?;
             let profile = profile.context(
-                "the session has no valid staged AWS configuration, so there is no profile to renew credentials for",
+                "the session has no valid staged AWS configuration, so there is no profile to renew credentials for. Restart the session to stage its AWS configuration again",
             )?;
             anyhow::ensure!(
                 mj_core::aws_credentials::valid_profile_name(&profile),
-                "the worker reported an AWS profile name that is not valid"
+                "the worker reported an AWS profile name that is not valid. Restart the session to stage its AWS configuration again"
             );
             Ok(SessionSync {
                 actions: Vec::new(),

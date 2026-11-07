@@ -138,15 +138,6 @@ impl ScopedAwsCredentials {
         })
     }
 
-    /// Whether credentials for this session and source are cached and still
-    /// fresh, so a request for them returns without calling AWS.
-    pub(crate) fn is_fresh(&self, session_id: &str, source: &AwsCredentialSource) -> bool {
-        self.peek(session_id, source, |entry, now| {
-            entry.fresh_at(now).then_some(())
-        })
-        .is_some()
-    }
-
     /// Drop the credentials cached for this session and source, so the next
     /// request mints new ones: for a session whose credentials may have been
     /// refused, or lost from the worker. Blocking, like `credentials_for`: it

@@ -277,11 +277,7 @@ impl AwsCredentials {
             "unsupported AWS credential export version"
         );
         ensure!(
-            !self.profile.is_empty()
-                && !self
-                    .profile
-                    .chars()
-                    .any(|c| c.is_control() || matches!(c, '[' | ']')),
+            valid_profile_name(&self.profile),
             "AWS profile name cannot be represented in a shared credentials file"
         );
         let valid_secret =
@@ -370,12 +366,17 @@ fn remove_if_present(path: &Path) -> Result<()> {
     }
 }
 
-/// A profile name the controller will install role-scoped credentials under.
+/// A profile name that can be the section name of an AWS configuration
+/// (`[profile <name>]`). The one rule: launch validates the credentials it
+/// stages with it, and the name read back from a worker is held to it too, so
+/// staging and reading accept the same names. (It allows spaces and `@`; it
+/// does not say whether the AWS CLI trims a name with leading or trailing
+/// whitespace.)
 pub fn valid_profile_name(name: &str) -> bool {
     !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '[' | ']'))
 }
 
 /// The AWS profile this session was staged with: the section name in its AWS
@@ -383,7 +384,7 @@ pub fn valid_profile_name(name: &str) -> bool {
 /// keeps the name the session's environment selects. The session can edit the
 /// file, which is safe here only because what is installed under the name is
 /// role-scoped: a changed name changes where those credentials are written, not
-/// what they allow. `None` when nothing was staged or the name is not valid.
+/// what they allow. `None` when nothing was staged or no section has a valid name.
 pub fn staged_profile(home: &Path) -> Result<Option<String>> {
     let text = match std::fs::read_to_string(home.join(CONFIG_FILE)) {
         Ok(text) => text,
@@ -559,6 +560,38 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    // One rule for profile names: what launch accepts when it stages
+    // credentials is what is read back from the staged configuration.
+    #[test]
+    fn staging_and_reading_accept_the_same_profile_names() {
+        let home = tempfile::tempdir().unwrap();
+        let staged = |name: &str| {
+            credentials()
+                .with_profile(name)
+                .and_then(|credentials| credentials.install(home.path(), home.path()).map(|_| ()))
+        };
+        for name in ["bedrock", "dev@example team", "team.a_b-c", "a/b"] {
+            staged(name).unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            assert_eq!(
+                staged_profile(home.path()).unwrap().as_deref(),
+                Some(name),
+                "{name}"
+            );
+        }
+        // Launch refuses what cannot be a section name, and a configuration
+        // that has such a header (a session can write one) has no profile.
+        for name in ["", "a]b", "a[b", "a\nb"] {
+            assert!(staged(name).is_err(), "{name:?}");
+            assert!(!valid_profile_name(name), "{name:?}");
+        }
+        for header in ["[profile a]b]", "[profile ]", "[default]"] {
+            std::fs::write(home.path().join(CONFIG_FILE), format!("{header}\n")).unwrap();
+            assert_eq!(staged_profile(home.path()).unwrap(), None, "{header}");
+        }
+        std::fs::remove_file(home.path().join(CONFIG_FILE)).unwrap();
+        assert_eq!(staged_profile(home.path()).unwrap(), None);
     }
 
     // Launch writes an SSH worker's profile path relative to the user's home;

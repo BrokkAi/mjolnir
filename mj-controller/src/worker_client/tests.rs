@@ -3530,22 +3530,36 @@ async fn obsolete_credentials_are_withdrawn_before_a_stuck_mint_and_the_step_say
     );
     let failure = outcome.failure_text().unwrap();
     assert!(
-        failure.contains("withdrawn") && failure.contains("until AssumeRole returns"),
+        failure.contains("withdrawn") && failure.contains("until new role-scoped"),
         "{failure}"
     );
 
     // The mint returns: the new credentials are installed and the failure ends.
     std::fs::write(&release, "").unwrap();
+    let mut seen = vec![interim.clone()];
     let done = loop {
         let result = tokio::time::timeout(Duration::from_secs(20), results_rx.recv())
             .await
             .expect("the cycle ended")
             .unwrap();
+        seen.push(result.clone());
         if result.failures().next().is_none() {
             break result;
         }
     };
     assert!(done.pushed_to("obsolete"), "{done:?}");
+    // The withdrawal is reported once, by the interim result, not again in the
+    // cycle's own.
+    let removals =
+        seen.iter()
+            .flat_map(|result| &result.outcomes)
+            .filter(|outcome| {
+                outcome.outcome.as_ref().is_ok_and(|actions| {
+                    actions.contains(&CredentialSyncAction::AwsCredentialsRemoved)
+                })
+            })
+            .count();
+    assert_eq!(removals, 1, "{seen:?}");
     assert!(root.join("aws").exists());
     renewal.abort();
 }
@@ -3701,12 +3715,26 @@ async fn a_session_that_edits_its_aws_configuration_still_gets_only_role_scoped_
             .contains("arn:aws:iam::123456789012:role/mj-bedrock")
     );
 
-    // A name that is not a profile name is refused, and nothing is minted.
+    // Any name launch accepts is accepted here, spaces and `@` included.
     std::fs::remove_file(&args).unwrap();
+    std::fs::write(
+        root.join("aws-config"),
+        "[profile dev@example team]\ncredential_process = cat x\n",
+    )
+    .unwrap();
+    reconcile_profile(std::slice::from_ref(&target), None).await;
+    let installed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("aws")).unwrap()).unwrap();
+    assert_eq!(installed["Profile"], "dev@example team");
+
+    // A name that cannot be a section name is refused, and nothing is minted.
+    // (The credentials are cached, so the CLI is not called again either way;
+    // the log is cleared to show no call is made.)
+    std::fs::remove_file(&args).ok();
     std::fs::remove_file(root.join("aws")).unwrap();
     std::fs::write(
         root.join("aws-config"),
-        "[profile ../../etc/passwd]\ncredential_process = cat x\n",
+        "[profile a]b]\ncredential_process = cat x\n",
     )
     .unwrap();
     let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
@@ -3715,8 +3743,61 @@ async fn a_session_that_edits_its_aws_configuration_still_gets_only_role_scoped_
         failure.contains("profile name that is not valid"),
         "{failure}"
     );
+    assert!(failure.contains("Restart the session"), "{failure}");
     assert!(!args.exists(), "something was minted");
     assert!(!root.join("aws").exists());
+}
+
+// A session can delete or damage its own AWS configuration, so withdrawing the
+// credentials that do not match the role must not wait on reading the profile
+// name from it: the withdrawal comes first, and the error that follows says what
+// the person can do.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_session_that_breaks_its_aws_configuration_still_has_host_credentials_withdrawn() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let token = scratch.path().join("token-source");
+    std::fs::write(&token, "pat").unwrap();
+    let cli = granting_aws_cli(scratch.path());
+    let started = scratch.path().join("sts-started");
+    std::fs::write(
+        cli.join("aws"),
+        format!("#!/bin/sh\n/usr/bin/touch {}\nexit 1\n", started.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(cli.join("aws"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = scratch.path().join("session");
+    std::fs::create_dir(&root).unwrap();
+    let target = aws_sync_session_named(home.path(), &root, &token, &cli, "broken", None);
+    let host_credentials = br#"{"Version":1,"AccessKeyId":"AKIA"}"#;
+
+    for (case, config) in [("deleted", None), ("invalid header", Some("[profile ]\n"))] {
+        std::fs::write(root.join("aws"), host_credentials).unwrap();
+        match config {
+            Some(text) => std::fs::write(root.join("aws-config"), text).unwrap(),
+            None => std::fs::remove_file(root.join("aws-config")).unwrap(),
+        }
+
+        let outcomes = reconcile_profile(std::slice::from_ref(&target), None).await;
+
+        assert!(
+            !root.join("aws").exists(),
+            "{case}: host credentials stayed"
+        );
+        let failure = outcomes[0].failure_text().unwrap();
+        assert!(failure.contains("Restart the session"), "{case}: {failure}");
+        assert!(
+            outcomes[0]
+                .outcome
+                .as_ref()
+                .is_ok_and(|actions| actions.contains(&CredentialSyncAction::AwsCredentialsRemoved)),
+            "{case}: {outcomes:?}"
+        );
+        assert!(!started.exists(), "{case}: something was minted");
+    }
 }
 
 // A role configured for a profile means no session of that profile keeps
@@ -3796,9 +3877,23 @@ async fn an_unreadable_provider_configuration_is_that_cycles_outcome_and_a_repai
         .expect("a renewal result arrived")
     };
 
-    // Unreadable: the unscoped credentials are withdrawn, and the error said.
-    let failed = next_partial(&mut coordinator).await;
-    let (_, step, detail) = failed.failures().next().expect("the error is reported");
+    // Unreadable: the unscoped credentials are withdrawn (said at once), and
+    // the error said.
+    let withdrawn = next_partial(&mut coordinator).await;
+    assert!(withdrawn.pushed_to("unreadable") || withdrawn.failures().next().is_some());
+    let failed = loop {
+        let result = next_partial(&mut coordinator).await;
+        if result
+            .failures()
+            .any(|(_, _, detail)| detail.contains("could not be determined"))
+        {
+            break result;
+        }
+    };
+    let (_, step, detail) = failed
+        .failures()
+        .find(|(_, _, detail)| detail.contains("could not be determined"))
+        .expect("the error is reported");
     assert_eq!(step, Some(SyncStep::Aws));
     assert!(
         detail.contains("could not be determined") && detail.contains("TOML parse error"),
