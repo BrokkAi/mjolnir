@@ -5,7 +5,7 @@ use crate::controller::checkpoint::{
     BarrierBusyPolicy, CHECKPOINT_BARRIER_TIMEOUT, adopt_restarted_checkpoint_relay,
     connect_checkpoint_relay, wait_for_checkpoint_barrier,
 };
-use crate::controller::worker_binary::{WorkerRootPresence, worker_root_presence};
+use crate::controller::worker_binary::{WorkerRecovery, worker_recovery};
 
 impl Controller {
     /// Persist the child's final relay events before removing its private
@@ -51,19 +51,20 @@ impl Controller {
                 // it. None of the worker waits below should hold up replacing
                 // the daemon, even when the relay never answers.
                 executor.begin_resumable_work()?;
-                // A Create cancelled before its last provisioning step leaves
-                // a target but no worker root. There is no journal to recover
-                // and no binary to restart, so go straight to cleanup. When the
-                // probe cannot tell, the root may exist: keep the recovery path.
+                // A Create cancelled before its worker reached its durable relay
+                // leaves a target with no worker root, or a root without relay
+                // state. There is no journal to synchronize, and a
+                // checkpoint-only worker would refuse the root, so go straight to
+                // cleanup. When the probe cannot tell, keep the recovery path.
                 let (placement, worker_root) = self.worker_placement(session_id)?;
-                let root_absent = worker_root_presence(executor, &placement, &worker_root)
-                    == WorkerRootPresence::Absent;
-                if root_absent {
+                let nothing_to_recover = worker_recovery(executor, &placement, &worker_root)
+                    == WorkerRecovery::NothingToRecover;
+                if nothing_to_recover {
                     tracing::info!(
                         session_id,
                         target = ?previous.target,
                         worker_root,
-                        "closing a sub-agent whose worker root is absent without checkpoint recovery"
+                        "closing a sub-agent whose worker root holds no relay state, without checkpoint recovery"
                     );
                 }
                 let backend =
@@ -73,7 +74,7 @@ impl Controller {
                     .into_iter()
                     .next()
                     .context("reconnect plan is empty")?;
-                if root_absent {
+                if nothing_to_recover {
                     None
                 } else {
                     let connected =

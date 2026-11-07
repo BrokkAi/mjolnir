@@ -51,56 +51,78 @@ pub(in crate::controller) fn worker_liveness_command(
         .purpose("probe Mjolnir worker daemon liveness")
 }
 
-/// Whether a session's worker root exists on its target.
+/// Whether a session's worker root holds anything a worker could recover.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::controller) enum WorkerRootPresence {
-    Present,
-    /// The probe ran and the root is not there.
-    Absent,
-    /// The probe itself failed (SSH, Podman, a stopped container), so the root
-    /// may or may not exist. Callers must treat this as present.
+pub(in crate::controller) enum WorkerRecovery {
+    /// The root has relay state or a relay journal.
+    Recoverable,
+    /// The root is absent, or exists without relay state or a journal: no
+    /// worker ever got as far as its durable relay there. A checkpoint-only
+    /// worker refuses such a root ("checkpoint recovery requires existing
+    /// relay state"), so there is nothing to synchronize.
+    NothingToRecover,
+    /// The probe itself failed (SSH, Podman, a stopped container, a lookup
+    /// error), so the root may hold state. Callers must treat this as
+    /// recoverable.
     Unknown,
 }
 
-pub(in crate::controller) fn worker_root_presence_command(
+pub(in crate::controller) fn worker_recovery_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> CommandSpec {
-    // Absent only when the parent directory can be searched and listed and
-    // nothing, not even a dangling link, has the root's name. A test that fails
-    // on a permission error says nothing, so it exits nonzero: Unknown.
-    let parent = std::path::Path::new(worker_root)
+    // Decided from directory listings, never from the shell's file tests
+    // alone: those are false on any lookup error (a stale NFS handle, a
+    // permission error), so they cannot tell "no such entry" from "could not
+    // look". The root is absent only when its parent's listing works and has
+    // no entry with its name. A root holds nothing to recover only when its
+    // own listing works and has neither the relay state nor the journal. An
+    // entry that exists but is not a usable directory, or a listing that
+    // fails, exits nonzero: Unknown.
+    let path = std::path::Path::new(worker_root);
+    let parent = path
         .parent()
         .map(|parent| parent.to_string_lossy().into_owned())
         .unwrap_or_else(|| "/".to_owned());
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let script = format!(
-        "root={root}; parent={parent}; \
-         if [ -d \"$root\" ]; then printf 'present\\n'; \
-         elif [ -d \"$parent\" ] && [ -x \"$parent\" ] && [ -r \"$parent\" ] \
-              && [ ! -e \"$root\" ] && [ ! -L \"$root\" ]; then printf 'absent\\n'; \
+        "root={root}; parent={parent}; name={name}; \
+         if [ -d \"$root\" ]; then \
+           entries=$(ls -1A \"$root\") || exit 1; \
+           if printf '%s\\n' \"$entries\" | grep -qxF -e {state} -e {journal}; then \
+             printf 'recoverable\\n'; else printf 'nothing\\n'; fi; \
+         elif entries=$(ls -1A \"$parent\"); then \
+           if printf '%s\\n' \"$entries\" | grep -qxF -- \"$name\"; then exit 1; fi; \
+           printf 'nothing\\n'; \
          else exit 1; fi",
         root = targets::posix_quote(worker_root),
         parent = targets::posix_quote(&parent),
+        name = targets::posix_quote(&name),
+        state = targets::posix_quote(mj_core::relay::RELAY_STATE_FILE),
+        journal = targets::posix_quote(mj_core::relay::RELAY_JOURNAL_DIR),
     );
     targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
         .purpose("probe Mjolnir worker root")
 }
 
-/// Ask the target whether `worker_root` exists. Only the install step creates a
-/// child's root and only its cleanup removes it, so an absent root means no
-/// worker ever ran there or its cleanup already finished.
-pub(in crate::controller) fn worker_root_presence(
+/// Ask the target whether `worker_root` holds anything to recover. Only the
+/// install step creates a child's root and only its cleanup removes it, and
+/// only a worker that reached its durable relay writes relay state there.
+pub(in crate::controller) fn worker_recovery(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,
-) -> WorkerRootPresence {
-    match executor.execute(&worker_root_presence_command(locator, worker_root)) {
+) -> WorkerRecovery {
+    match executor.execute(&worker_recovery_command(locator, worker_root)) {
         Ok(output) if output.status == 0 => match String::from_utf8_lossy(&output.stdout).trim() {
-            "present" => WorkerRootPresence::Present,
-            "absent" => WorkerRootPresence::Absent,
-            _ => WorkerRootPresence::Unknown,
+            "recoverable" => WorkerRecovery::Recoverable,
+            "nothing" => WorkerRecovery::NothingToRecover,
+            _ => WorkerRecovery::Unknown,
         },
-        _ => WorkerRootPresence::Unknown,
+        _ => WorkerRecovery::Unknown,
     }
 }
 
