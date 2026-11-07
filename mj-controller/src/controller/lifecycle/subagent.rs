@@ -5,6 +5,7 @@ use crate::controller::checkpoint::{
     BarrierBusyPolicy, CHECKPOINT_BARRIER_TIMEOUT, adopt_restarted_checkpoint_relay,
     connect_checkpoint_relay, wait_for_checkpoint_barrier,
 };
+use crate::controller::worker_binary::{WorkerRootPresence, worker_root_presence};
 
 impl Controller {
     /// Persist the child's final relay events before removing its private
@@ -29,7 +30,7 @@ impl Controller {
                 .get(session_id)
                 .with_context(|| format!("unknown session {session_id}"))?
                 .clone();
-            let live = previous.target.is_some()
+            let mut live = previous.target.is_some()
                 && matches!(
                     previous.state,
                     SessionState::Running
@@ -38,6 +39,24 @@ impl Controller {
                         | SessionState::Closing
                         | SessionState::Error
                 );
+            if live {
+                // A Create cancelled before its last provisioning step leaves
+                // a target but no worker root. There is no journal to recover
+                // and no binary to restart, so go straight to cleanup. When the
+                // probe cannot tell, the root may exist: keep the recovery path.
+                let (backend, worker_root) = self.worker_placement(session_id)?;
+                if worker_root_presence(executor, &backend, &worker_root)
+                    == WorkerRootPresence::Absent
+                {
+                    tracing::info!(
+                        session_id,
+                        target = ?previous.target,
+                        worker_root,
+                        "closing a sub-agent whose worker root is absent without checkpoint recovery"
+                    );
+                    live = false;
+                }
+            }
             let mut relay = if live {
                 let record = self.state.sessions.get_mut(session_id).unwrap();
                 apply_close_checkpoint_started(record, now());

@@ -51,6 +51,47 @@ pub(in crate::controller) fn worker_liveness_command(
         .purpose("probe Mjolnir worker daemon liveness")
 }
 
+/// Whether a session's worker root exists on its target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::controller) enum WorkerRootPresence {
+    Present,
+    /// The probe ran and the root is not there.
+    Absent,
+    /// The probe itself failed (SSH, Podman, a stopped container), so the root
+    /// may or may not exist. Callers must treat this as present.
+    Unknown,
+}
+
+pub(in crate::controller) fn worker_root_presence_command(
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> CommandSpec {
+    let script = format!(
+        "if [ -d {} ]; then printf 'present\\n'; else printf 'absent\\n'; fi",
+        targets::posix_quote(worker_root)
+    );
+    targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+        .purpose("probe Mjolnir worker root")
+}
+
+/// Ask the target whether `worker_root` exists. Only the install step creates a
+/// child's root and only its cleanup removes it, so an absent root means no
+/// worker ever ran there or its cleanup already finished.
+pub(in crate::controller) fn worker_root_presence(
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> WorkerRootPresence {
+    match executor.execute(&worker_root_presence_command(locator, worker_root)) {
+        Ok(output) if output.status == 0 => match String::from_utf8_lossy(&output.stdout).trim() {
+            "present" => WorkerRootPresence::Present,
+            "absent" => WorkerRootPresence::Absent,
+            _ => WorkerRootPresence::Unknown,
+        },
+        _ => WorkerRootPresence::Unknown,
+    }
+}
+
 /// Print the worker's exit record, or nothing when it left none. Reads only,
 /// so it works on a target whose disk is full.
 pub(in crate::controller) fn worker_exit_record_command(
