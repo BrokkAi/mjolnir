@@ -179,22 +179,23 @@ impl RuntimeState {
 
     /// Whether `child_id` is still waiting for its review's verdict, so its
     /// ended turn or recorded handback is not final. Delegation completion and
-    /// parent report reconciliation both ask here, and only about a child that
-    /// can request review; the review host answers.
+    /// parent report reconciliation both ask here. The review host owns the
+    /// answer: a review the child already started stays open even if review
+    /// has since been turned off, so the current configuration is not asked.
     ///
-    /// When the host cannot answer (its startup recovery failed), the child
-    /// counts as having no open review: a review that recovery did not restore
-    /// cannot produce a verdict in this daemon run, and one it restored is
-    /// still reported as open, so waiting would only block the child forever.
+    /// When the host cannot answer (its startup recovery failed and it did not
+    /// restore this session), the child counts as having no open review: a
+    /// review recovery did not restore cannot produce a verdict in this daemon
+    /// run, and waiting would only block the child forever. Restored reviews
+    /// still answer open.
     pub(crate) async fn child_awaits_review(&self, child_id: &str) -> bool {
-        if !self.child_can_request_review(child_id) {
-            return false;
-        }
         match self.review_host().has_open_review(child_id).await {
             Ok(open) => open,
             Err(error) => {
-                tracing::warn!(child_session_id = child_id, %error,
-                    "cannot tell whether the child's review is open; settling it as having none");
+                if self.child_can_request_review(child_id) {
+                    tracing::warn!(child_session_id = child_id, %error,
+                        "cannot tell whether the child's review is open; settling it as having none");
+                }
                 false
             }
         }

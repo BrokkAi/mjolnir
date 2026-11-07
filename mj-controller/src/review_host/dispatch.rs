@@ -5,9 +5,12 @@ impl HostState {
     /// stop.
     pub(super) async fn handle(&mut self, event: HostEvent) -> bool {
         if let Some(reason) = &self.startup_failure {
+            // A group restored before recovery failed still runs: its events,
+            // and questions about whether it is open, are answered as usual.
             let active_owner = match &event {
                 HostEvent::ReviewerFinished { session_id, .. }
-                | HostEvent::Resolve { session_id, .. } => Some(session_id),
+                | HostEvent::Resolve { session_id, .. }
+                | HostEvent::HasOpenReview { session_id, .. } => Some(session_id),
                 _ => None,
             };
             if active_owner.is_some_and(|session_id| self.reviews.contains_key(session_id)) {
@@ -28,8 +31,9 @@ impl HostState {
                     let _ = reply.send(None);
                     return false;
                 }
-                // Reviews that recovery did not restore are missing from the
-                // maps, so "no review" cannot be answered truthfully.
+                // A session recovery did not restore is missing from the maps,
+                // so "no review" cannot be answered truthfully. (Restored ones
+                // were answered above as active owners.)
                 HostEvent::HasOpenReview { reply, .. } => {
                     let _ = reply.send(Err(reason.clone()));
                     return false;
@@ -279,9 +283,13 @@ impl HostState {
                             let _ =
                                 reply.send(Err(format!("review startup recovery failed: {error}")));
                         }
-                        HostEvent::HasOpenReview { reply, .. } => {
-                            let _ =
-                                reply.send(Err(format!("review startup recovery failed: {error}")));
+                        // A group restored before the failure still runs.
+                        HostEvent::HasOpenReview { session_id, reply } => {
+                            let _ = reply.send(if self.reviews.contains_key(&session_id) {
+                                Ok(true)
+                            } else {
+                                Err(format!("review startup recovery failed: {error}"))
+                            });
                         }
                         HostEvent::QuestionTarget { reply, .. } => {
                             let _ = reply.send(None);
