@@ -208,7 +208,7 @@ RUN npm install --global --no-audit --no-fund \
         @brokkai/muse-acp@0.21.0 \
         @moonshot-ai/kimi-code@2.4.0 \
         @openai/codex@0.165.0 \
-        @opencode/cli@2.2.1 \
+        @opencode/cli@2.2.6 \
         @xai-official/grok@1.0.70 \
     && npm cache clean --force \
     && codex --version \
@@ -217,7 +217,7 @@ RUN npm install --global --no-audit --no-fund \
     && [ "$(dsh-acp --version)" = "dsh-acp 0.5.0" ] \
     && kimi --version | grep -qF 2.4.0 \
     && grok --version | grep -qF 1.0.70 \
-    && OPENCODE_DISABLE_AUTOUPDATE=1 opencode --version | grep -qF 2.2.1 \
+    && OPENCODE_DISABLE_AUTOUPDATE=1 opencode --version | grep -qF 2.2.6 \
     && [ "$(node -p "require('/usr/local/lib/node_modules/@brokkai/muse-acp/package.json').version")" = "0.21.0" ]
 
 # The bridge prefers CODEX_PATH over its bundled Codex binary. Select the

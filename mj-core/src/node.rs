@@ -807,6 +807,11 @@ async fn run_child(
         .as_ref()
         .filter(|_| command.expects_ssh_start_marker())
         .map(|lease| lease.gate().clone());
+    // `scp` carries no start marker and exits with a status of its own while
+    // relaying the refusal of the `ssh` it runs. Its stderr waits for its exit,
+    // so a refused copy can still be retried with nothing sent to the daemon.
+    let holds_until_exit = lease.is_some() && command.program == "scp";
+    let sent_stdout = std::sync::atomic::AtomicBool::new(false);
     let stderr_tail = std::sync::Mutex::new(Vec::<u8>::new());
     let group = (!command.detaches).then(|| crate::subprocess::ProcessGroupGuard::new(child.id()));
     let mut stdin = child.stdin.take().context("node child stdin missing")?;
@@ -929,9 +934,10 @@ async fn run_child(
                     // A session whose stdout ended with no byte never started:
                     // its stderr is classified with its exit, and the caller
                     // sends it only if the exit is not a refusal.
-                    let started = gate
-                        .as_ref()
-                        .is_none_or(|gate| gate.phase() == crate::targets::StartPhase::Started);
+                    let started = !holds_until_exit
+                        && gate
+                            .as_ref()
+                            .is_none_or(|gate| gate.phase() == crate::targets::StartPhase::Started);
                     if is_stderr && !started {
                         held.push(framed);
                         continue;
@@ -942,6 +948,9 @@ async fn run_child(
                     // An empty frame only signals the start; the daemon gets
                     // nothing for it.
                     if framed.len() > 5 {
+                        if !is_stderr {
+                            sent_stdout.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                         send_all(send, framed).await?
                     }
                 }
@@ -1002,13 +1011,19 @@ async fn run_child(
     // status.
     if let (Some(lease), Some(code)) = (&lease, status.code()) {
         let text = String::from_utf8_lossy(&tail);
+        // A copy that sent output to the daemon is a real result.
+        let retryable = gate.is_some()
+            || (holds_until_exit && !sent_stdout.load(std::sync::atomic::Ordering::Relaxed));
         let refusal = match &gate {
             Some(gate) => gate.refusal(code, &text),
+            None if holds_until_exit => (code != 0)
+                .then(|| crate::targets::ssh_refusal_in_stderr(&text))
+                .flatten(),
             None => crate::targets::ssh_refusal(code, &text),
         };
         if let Some(refusal) = refusal {
             let walks_on = lease.note_refusal(refusal);
-            if gate.is_some() {
+            if retryable {
                 // Nothing reached the daemon: the caller retries the attempt.
                 // The lease is released first, then the process group's
                 // leftovers (none for a refused session) are gone with it.
@@ -1803,6 +1818,69 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&stdout).trim(), length.to_string());
         assert_eq!(stderr, b"", "refused attempts print nothing to the daemon");
         assert_eq!(fake.attempts(), 6);
+    }
+
+    /// `scp` carries no start marker and exits 1 while relaying the refusal of
+    /// the `ssh` it runs. The node, where the lease lives, still retries it,
+    /// and the refused attempt's stderr never reaches the daemon.
+    // Hard-won: 6f9354f41: a refused scp run through a node was neither classified nor retried
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // The sharing override is process-wide.
+    async fn a_node_retries_an_scp_that_relays_a_refused_session() {
+        use crate::targets::fake_ssh::FastRetries;
+        use crate::targets::{SshSharingForTest, SshTarget, set_ssh_connection_sharing_for_test};
+
+        let _guard = crate::targets::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let _fast_retries = FastRetries::new();
+        let directory = tempfile::tempdir().unwrap();
+        let script = r#"#!/bin/sh
+dir=$(dirname "$0")
+count=$(cat "$dir/attempts" 2>/dev/null || echo 0)
+echo $((count + 1)) > "$dir/attempts"
+if [ "$count" -eq 0 ]; then
+  echo 'mux_client_request_session: session request failed: Session open refused by peer' >&2
+  echo 'scp: Connection closed' >&2
+  exit 1
+fi
+exit 0
+"#;
+        let fake = directory.path().join("scp");
+        std::fs::write(&fake, script).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ssh = SshTarget {
+            destination: "fake-host".to_owned(),
+            ssh_args: Vec::new(),
+        };
+        let mut command = crate::targets::scp_download(&ssh, "remote-file", "local-file");
+        let path = std::env::var("PATH").unwrap_or_default();
+        command.env.insert(
+            "PATH".to_owned(),
+            format!("{}:{path}", directory.path().display()),
+        );
+        let client = connected().await;
+        let exec = client.exec(&command.to_node_run(false)).await.unwrap();
+        let (_stdin, mut output) = exec.split();
+        let mut stderr = Vec::new();
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                match output.next().await.unwrap().expect("exit frame") {
+                    NodeFrame::Stdout(_) => {}
+                    NodeFrame::Stderr(bytes) => stderr.extend_from_slice(&bytes),
+                    NodeFrame::Exit(exit) => break exit,
+                }
+            }
+        })
+        .await
+        .expect("the node retries the copy");
+        set_ssh_connection_sharing_for_test(None);
+        assert_eq!(exit.status, Some(0), "{}", String::from_utf8_lossy(&stderr));
+        assert_eq!(stderr, b"", "the refused copy prints nothing to the daemon");
+        let attempts = std::fs::read_to_string(directory.path().join("attempts")).unwrap();
+        assert_eq!(attempts.trim(), "2");
     }
 
     /// Stderr printed before the session starts is held, and the start marker

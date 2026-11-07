@@ -8,6 +8,8 @@
 //! URLs over HTTPS. Doctor reports which one the host has; it changes nothing.
 //! Its findings are warnings: a host that never uses GitHub needs neither.
 
+use mj_core::remote_git::GITHUB_SSH_REWRITE_PREFIXES;
+
 use super::*;
 
 const SSH_PROBE: [&str; 9] = [
@@ -22,16 +24,17 @@ const SSH_PROBE: [&str; 9] = [
     "git@github.com",
 ];
 
-/// Remotes in each spelling Git accepts for GitHub over SSH.
-const SSH_REMOTES: [&str; 2] = [
-    "git@github.com:octocat/hello-world.git",
-    "ssh://git@github.com/octocat/hello-world.git",
-];
+/// A remote in each spelling Git accepts for GitHub over SSH.
+fn ssh_remotes() -> [String; 2] {
+    GITHUB_SSH_REWRITE_PREFIXES.map(|prefix| format!("{prefix}octocat/hello-world.git"))
+}
 
-const REWRITE_COMMANDS: [&str; 2] = [
-    "git config --global --add url.https://github.com/.insteadOf git@github.com:",
-    "git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/",
-];
+/// The command that makes Git send each of those spellings over HTTPS.
+pub(super) fn rewrite_commands() -> [String; 2] {
+    GITHUB_SSH_REWRITE_PREFIXES.map(|prefix| {
+        format!("git config --global --add url.https://github.com/.insteadOf {prefix}")
+    })
+}
 
 const FINGERPRINTS_URL: &str = "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints";
 
@@ -210,8 +213,9 @@ pub(super) fn github_access_check(
     executor: &impl CommandExecutor,
 ) -> DoctorCheck {
     let location = host.location();
-    let (over_https, over_ssh): (Vec<usize>, Vec<usize>) = (0..SSH_REMOTES.len())
-        .partition(|&index| rewrites_to_https(host, SSH_REMOTES[index], executor));
+    let ssh_remotes = ssh_remotes();
+    let (over_https, over_ssh): (Vec<usize>, Vec<usize>) = (0..ssh_remotes.len())
+        .partition(|&index| rewrites_to_https(host, &ssh_remotes[index], executor));
     let refusal = if over_ssh.is_empty() {
         None
     } else {
@@ -231,7 +235,7 @@ pub(super) fn github_access_check(
     let remotes = |indexes: &[usize]| {
         indexes
             .iter()
-            .map(|&index| SSH_REMOTES[index])
+            .map(|&index| ssh_remotes[index].as_str())
             .collect::<Vec<_>>()
             .join(" and ")
     };
@@ -275,7 +279,7 @@ pub(super) fn github_access_check(
                 "On {location}, run {}, then rerun `mj doctor`.",
                 over_ssh
                     .iter()
-                    .map(|&index| format!("`{}`", REWRITE_COMMANDS[index]))
+                    .map(|&index| format!("`{}`", rewrite_commands()[index]))
                     .collect::<Vec<_>>()
                     .join(" and ")
             ),
@@ -329,9 +333,9 @@ fn no_access_remediation(location: &str, ssh: SshFailure, rewritten: bool) -> St
     } else {
         ssh_fix
     };
+    let [scp_rewrite, ssh_rewrite] = rewrite_commands();
     format!(
-        "{ssh_fix}. Or use HTTPS: on {location}, run `gh auth login` then `gh auth setup-git` (it records gh's absolute path, which non-interactive SSH needs when gh is not on PATH), then run `{}` and `{}`. Rerun `mj doctor` afterwards.",
-        REWRITE_COMMANDS[0], REWRITE_COMMANDS[1]
+        "{ssh_fix}. Or use HTTPS: on {location}, run `gh auth login` then `gh auth setup-git` (it records gh's absolute path, which non-interactive SSH needs when gh is not on PATH), then run `{scp_rewrite}` and `{ssh_rewrite}`. Rerun `mj doctor` afterwards."
     )
 }
 
@@ -596,13 +600,14 @@ mod tests {
             let rewrites = |config: &str, remote: &str| {
                 rewrites_to_https(BareHost::Local, remote, &IsolatedGit::new(config))
             };
-            for remote in SSH_REMOTES {
+            let ssh_remotes = ssh_remotes();
+            for remote in &ssh_remotes {
                 assert!(rewrites(REWRITES, remote), "{remote}");
                 assert!(rewrites(REWRITES_WITH_USER, remote), "{remote}");
                 assert!(!rewrites("", remote), "{remote}");
             }
-            assert!(rewrites(SCP_REWRITE_ONLY, SSH_REMOTES[0]));
-            assert!(!rewrites(SCP_REWRITE_ONLY, SSH_REMOTES[1]));
+            assert!(rewrites(SCP_REWRITE_ONLY, &ssh_remotes[0]));
+            assert!(!rewrites(SCP_REWRITE_ONLY, &ssh_remotes[1]));
         }
     }
 }

@@ -25,6 +25,7 @@ use crate::targets::{
     ProcessExecutor, ProvisionStage, ProvisionStageGuard,
 };
 use mj_core::relay::RelayCommand;
+use mj_core::remote_git::is_github_https_url;
 
 use super::backend::{backend_locator, validate_resource_allocation};
 use super::checkpoint::upload_checkpoint_spec;
@@ -1364,7 +1365,7 @@ fn fetch_source_commit(
         }
     };
     if accepted_source.is_some() {
-        if source.starts_with("https://github.com/") && github_token.is_some() {
+        if github_token.is_some() && is_github_https_url(&source) {
             token_auth = true;
             arguments.extend([
                 "-c".to_owned(), "credential.helper=".to_owned(), "-c".to_owned(),

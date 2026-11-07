@@ -330,6 +330,7 @@ fn github_token_is_inherited_only_by_managed_containers() {
             url: Some("git@github.com:example/app.git".into()),
             push_urls: vec![
                 "git@github.com:fork/app.git".into(),
+                "git://github.com/legacy/app.git".into(),
                 "ssh://git@example.test/app.git".into(),
             ],
             destination: "app".into(),
@@ -347,6 +348,7 @@ fn github_token_is_inherited_only_by_managed_containers() {
         bundle.repositories[0].push_urls,
         [
             "https://github.com/fork/app.git",
+            "https://github.com/legacy/app.git",
             "ssh://git@example.test/app.git"
         ]
     );

@@ -123,7 +123,7 @@ pub const GROK_VERSION: &str = "1.0.70";
 pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
 pub const MUSE_ACP_VERSION: &str = "0.21.0";
 pub const MUSE_VERSION: &str = "1.4.14-R7309.1";
-pub const OPENCODE_VERSION: &str = "2.2.1";
+pub const OPENCODE_VERSION: &str = "2.2.6";
 pub const DSH_ACP_VERSION: &str = "0.5.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
 
@@ -489,8 +489,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "bin/grok",
         },
         HarnessKind::OpenCode => HarnessPin {
-            install_id: "opencode-2.2.1",
-            display_version: "OpenCode 2.2.1",
+            install_id: "opencode-2.2.6",
+            display_version: "OpenCode 2.2.6",
             entrypoint: "opencode",
             cli_entrypoint: "opencode",
         },
