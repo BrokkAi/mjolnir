@@ -18,9 +18,10 @@ on:
         default: false
         type: boolean
 
+# Only the publish job may mint an OIDC token: the package job checks out a
+# caller-chosen ref and runs its scripts, which must not publish to npm.
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   package:
@@ -121,6 +122,11 @@ jobs:
     if: github.event_name == 'release' || github.event_name == 'workflow_run' || inputs.publish
     runs-on: ubuntu-latest
     environment: npm-publish
+    # Trusted publishing and provenance need the OIDC token. Job permissions
+    # replace the workflow's, so contents: read is restated.
+    permissions:
+      contents: read
+      id-token: write
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name || github.event.workflow_run.head_branch }}
     steps:
