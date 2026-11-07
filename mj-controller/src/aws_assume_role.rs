@@ -58,10 +58,11 @@ impl ScopedEntry {
 }
 
 impl ScopedAwsCredentials {
-    /// Drop expired credentials. Called on every use and on every periodic
-    /// credential sync pass, so the daemon holds a session's credentials for
-    /// at most their own lifetime after the session stops being synced, and no
-    /// expired secret at all once a pass has run.
+    /// Drop expired credentials. Called once per periodic credential sync pass
+    /// and not on each call, which would make a pass quadratic in its sessions:
+    /// the daemon holds a session's credentials for at most their own lifetime
+    /// after the session stops being synced, and no expired secret survives a
+    /// pass.
     pub(crate) fn sweep_expired(&self) {
         let now = (self.now)();
         sweep(
@@ -140,7 +141,6 @@ impl ScopedAwsCredentials {
                 .entries
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            sweep(&mut entries, now);
             Arc::clone(
                 entries
                     .entry(ScopedKey {
@@ -552,8 +552,9 @@ mod tests {
         assert_eq!(aws.calls.load(Ordering::SeqCst), 3);
     }
 
+    // Hard-won: 96c0993ac: every call swept the whole map, making a pass quadratic in its role-scoped sessions.
     #[test]
-    fn expired_entries_are_dropped_from_the_cache() {
+    fn expired_entries_are_dropped_by_the_pass_and_not_by_every_call() {
         let clock = TestClock::new();
         let aws = FakeAws::new(&clock, Duration::from_secs(900));
         let cache = cache(&clock);
@@ -566,6 +567,10 @@ mod tests {
         cache
             .credentials_for(PROFILE, "fedcba9876543210fedcba9876543210", &source, &aws)
             .unwrap();
+        // A call scans nothing but its own key...
+        assert_eq!(cache.entries.lock().unwrap().len(), 2);
+        // ...the pass drops what has expired.
+        cache.sweep_expired();
         let entries = cache.entries.lock().unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries.keys().all(|key| key.session_id != SESSION));
