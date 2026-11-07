@@ -634,19 +634,14 @@ def run_workflow(
     # for the dialog to go would fail. No sleep decides the outcome.
     tmux.send_prefix("?")
     tmux.send_key("Escape")
-    palette_seen: list[str] = []
 
     def dialog_closed() -> bool:
         screen = tmux.capture()
         if " Commands " in screen:
-            palette_seen.append(screen)
+            raise ScenarioFailure("the palette opened over the Target actions dialog:\n" + screen)
         return "Target actions" not in screen
 
     tmux.wait_until(dialog_closed, "Target actions closed by a single Escape")
-    if palette_seen:
-        raise ScenarioFailure(
-            "the palette opened over the Target actions dialog:\n" + palette_seen[0]
-        )
     closed_screen = tmux.capture()
     evidence.event(
         "prefix-command-held-by-dialog",
