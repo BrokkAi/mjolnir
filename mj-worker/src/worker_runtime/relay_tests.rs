@@ -882,7 +882,9 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
         role_session_name: "mj-0123456789abcdef0123456789abcdef".into(),
         session_policy_fingerprint: "policy".into(),
+        source_identity: None,
         expires_at_epoch_millis: 4_070_908_800_000,
+        tag: "tag".into(),
     };
     let scoped_credentials =
         |key: &str, scope: Option<&mj_core::aws_credentials::AwsCredentialScope>| {

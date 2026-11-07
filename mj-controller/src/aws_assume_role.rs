@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, ensure};
-use mj_core::aws_credentials::{AwsCredentialSource, AwsCredentials};
+use hmac::Hmac;
+use mj_core::aws_credentials::{AwsCredentialScope, AwsCredentialSource, AwsCredentials};
 use mj_core::config::AwsRoleConfig;
 use mj_core::targets::{CommandExecutor, CommandSpec};
 
@@ -72,6 +73,39 @@ impl ScopedAwsCredentials {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             now,
         );
+    }
+
+    /// How long until the credentials cached for this session and source reach
+    /// half their lifetime and are due to be renewed; `None` when none are
+    /// cached (or another caller is minting into the entry).
+    pub(crate) fn renew_in(
+        &self,
+        session_id: &str,
+        source: &AwsCredentialSource,
+    ) -> Option<Duration> {
+        let role = source.role.as_ref()?;
+        let now = (self.now)();
+        let cell = Arc::clone(
+            self.entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&ScopedKey {
+                    session_id: session_id.to_owned(),
+                    role: role.clone(),
+                    environment: source.environment.clone(),
+                })?,
+        );
+        let entry = cell.try_lock().ok()?;
+        let entry = entry.as_ref()?;
+        let lifetime = entry
+            .expires_at
+            .duration_since(entry.minted_at)
+            .unwrap_or_default();
+        Some(
+            (entry.minted_at + lifetime / 2)
+                .duration_since(now)
+                .unwrap_or_default(),
+        )
     }
 
     /// Whether the cache holds credentials for the session.
@@ -149,12 +183,17 @@ impl ScopedAwsCredentials {
         let minted = mint(&command, host_profile, executor)
             .and_then(|credentials| {
                 // Recorded beside the secret on the worker, so what Mjolnir
-                // issued for this session's role is recognisable later.
-                credentials.issued_for(
-                    &role.role_arn,
-                    &session_name(session_id),
-                    &role.session_policy_fingerprint(),
-                )
+                // issued for this session's role is recognisable later, and
+                // authenticated with a key the session cannot compute.
+                let name = session_name(session_id);
+                credentials
+                    .issued_for(
+                        &role.role_arn,
+                        &name,
+                        &role.session_policy_fingerprint(),
+                        role.source_identity.then_some(name.as_str()),
+                    )?
+                    .sign_scope(sign_scope)
             })
             .with_context(|| {
             format!(
@@ -200,6 +239,61 @@ fn selected_profile(source: &AwsCredentialSource) -> &str {
         .get("AWS_PROFILE")
         .map(String::as_str)
         .unwrap_or("default")
+}
+
+/// The key that authenticates scope records, derived from the controller's
+/// private signing key (the phone cookie key, kept owner-only in the data
+/// directory and created once) so no new secret file is needed. Rotating that
+/// key, the documented sign-everyone-out gesture, also makes every record fail
+/// verification, which withdraws what a failed mint would otherwise keep: the
+/// safe direction.
+fn scope_key() -> Result<Vec<u8>> {
+    #[cfg(test)]
+    let root = b"test signing key, not a secret".to_vec();
+    #[cfg(not(test))]
+    let root = crate::server::load_or_create_cookie_key(&crate::server::cookie_key_path())?;
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut derive =
+        Hmac::<sha2::Sha256>::new_from_slice(&root).expect("HMAC accepts any key length");
+    derive.update(b"mjolnir aws credential scope key v1");
+    Ok(derive.finalize().into_bytes().to_vec())
+}
+
+fn scope_mac(
+    key: &[u8],
+    scope: &AwsCredentialScope,
+    secret_fingerprint: &str,
+) -> Hmac<sha2::Sha256> {
+    use hmac::{KeyInit, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(&scope.signed_payload(secret_fingerprint));
+    mac
+}
+
+/// The tag for a scope record describing the secret with this fingerprint.
+pub(crate) fn sign_scope(scope: &AwsCredentialScope, secret_fingerprint: &str) -> Result<String> {
+    use hmac::Mac;
+    let mac = scope_mac(&scope_key()?, scope, secret_fingerprint);
+    Ok(mj_core::hex::lower_hex(mac.finalize().into_bytes()))
+}
+
+/// Whether a record the worker reports was made by this controller for the
+/// secret with this fingerprint. A record the session could have written
+/// itself does not verify.
+pub(crate) fn scope_is_authentic(scope: &AwsCredentialScope, secret_fingerprint: &str) -> bool {
+    use hmac::Mac;
+    let Ok(key) = scope_key() else {
+        return false;
+    };
+    let Some(tag) = (0..scope.tag.len() / 2)
+        .map(|index| u8::from_str_radix(scope.tag.get(index * 2..index * 2 + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()
+    else {
+        return false;
+    };
+    scope_mac(&key, scope, secret_fingerprint)
+        .verify_slice(&tag)
+        .is_ok()
 }
 
 /// The role session name: it appears in the assumed-role ARN of every
@@ -543,7 +637,6 @@ mod tests {
         assert_eq!(aws.calls.load(Ordering::SeqCst), 3);
     }
 
-    // Hard-won: 96c0993ac: every call swept the whole map, making a pass quadratic in its role-scoped sessions.
     #[test]
     fn expired_entries_are_dropped_by_the_pass_and_not_by_every_call() {
         let clock = TestClock::new();
@@ -585,7 +678,6 @@ mod tests {
         assert_eq!(aws.calls.load(Ordering::SeqCst), 1);
     }
 
-    // Hard-won: 7e7806ea8: the cache key ignored the source environment, so credentials minted by one host identity were served after the identity changed.
     #[test]
     fn a_changed_credential_source_mints_again() {
         let clock = TestClock::new();
@@ -614,7 +706,6 @@ mod tests {
         );
     }
 
-    // Hard-won: 7e7806ea8: the sweep removed an expired entry another caller still held, so that caller minted into a cell the map no longer knew.
     #[test]
     fn the_sweep_leaves_an_expired_entry_a_caller_still_holds() {
         let clock = TestClock::new();

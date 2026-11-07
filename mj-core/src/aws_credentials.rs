@@ -32,7 +32,37 @@ pub struct AwsCredentialScope {
     /// issued under. A narrower policy configured since makes them broader
     /// than configured.
     pub session_policy_fingerprint: String,
+    /// The AWS `SourceIdentity` set when the credentials were issued: the
+    /// role session name, or `None` when `source_identity` was off. Credentials
+    /// issued before it was enabled lack the attribution configured now.
+    #[serde(default)]
+    pub source_identity: Option<String>,
     pub expires_at_epoch_millis: i64,
+    /// Keyed MAC over the other fields and the secret's fingerprint, made by
+    /// the controller with a key only it holds. The worker's home is writable
+    /// by the session, so without it the session could write a record that
+    /// vouches for any credentials; the controller trusts a record only when
+    /// this verifies.
+    #[serde(default)]
+    pub tag: String,
+}
+
+impl AwsCredentialScope {
+    /// The bytes the tag authenticates: every field but the tag, and the
+    /// fingerprint of the secret the record describes, so a tag cannot be
+    /// moved to other credentials.
+    pub fn signed_payload(&self, secret_fingerprint: &str) -> Vec<u8> {
+        serde_json::to_vec(&(
+            "mjolnir-aws-scope-v1",
+            secret_fingerprint,
+            &self.role_arn,
+            &self.role_session_name,
+            &self.session_policy_fingerprint,
+            &self.source_identity,
+            self.expires_at_epoch_millis,
+        ))
+        .expect("a tuple of strings and numbers serializes")
+    }
 }
 
 /// What the worker stores: the scope, bound to the secret it describes.
@@ -139,6 +169,7 @@ impl AwsCredentials {
         role_arn: &str,
         role_session_name: &str,
         session_policy_fingerprint: &str,
+        source_identity: Option<&str>,
     ) -> Result<Self> {
         let expires_at_epoch_millis = self
             .expires_at_epoch_millis()
@@ -147,8 +178,23 @@ impl AwsCredentials {
             role_arn: role_arn.to_owned(),
             role_session_name: role_session_name.to_owned(),
             session_policy_fingerprint: session_policy_fingerprint.to_owned(),
+            source_identity: source_identity.map(str::to_owned),
             expires_at_epoch_millis,
+            tag: String::new(),
         });
+        Ok(self)
+    }
+
+    /// Authenticate the scope with `sign`, given the fingerprint of the secret
+    /// that will be installed and the scope's fields.
+    pub fn sign_scope(
+        mut self,
+        sign: impl FnOnce(&AwsCredentialScope, &str) -> Result<String>,
+    ) -> Result<Self> {
+        let fingerprint = crate::credentials::credential_fingerprint(&self.encode()?);
+        if let Some(scope) = &mut self.scope {
+            scope.tag = sign(scope, &fingerprint)?;
+        }
         Ok(self)
     }
 

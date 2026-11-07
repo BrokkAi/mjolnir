@@ -239,8 +239,10 @@ What a session receives depends on the profile:
   until they expire while the sync reports the failure, but a session that
   still holds the host's own credentials (installed before the role was
   configured) has them withdrawn, because static host keys never expire. The
-  worker records beside the secret which role and session Mjolnir issued
-  credentials for, so after a daemon restart Mjolnir still keeps what it issued
+  worker records beside the secret which role, session, policy and
+  `SourceIdentity` Mjolnir issued credentials for, authenticated with a key
+  derived from the controller's private signing key that a session cannot
+  compute, so a record a session wrote itself counts for nothing; so after a daemon restart Mjolnir still keeps what it issued
   and withdraws everything else. A session on a worker too old to withdraw is
   moved to a current worker automatically when it is idle, and withdrawn then.
   Mjolnir never falls back to the host's credentials, and the session's other

@@ -3507,7 +3507,6 @@ fn a_profile_models_allow_list_round_trips_and_is_omitted_when_empty() {
     );
 }
 
-// Hard-won: 96c0993ac: a profile with an `aws` table that does not authenticate with the AWS chain refused every session, leaving the person to edit configuration first.
 #[test]
 fn an_aws_role_table_on_a_profile_that_cannot_use_it_does_not_refuse_sessions() {
     let home = tempfile::tempdir().unwrap();

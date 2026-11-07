@@ -761,6 +761,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
             }),
             failure: failure.map(str::to_owned),
             outcomes,
+            partial: false,
         }
     };
     let reached = |outcome: Result<Vec<CredentialSyncAction>, String>| {

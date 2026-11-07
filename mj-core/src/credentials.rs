@@ -726,6 +726,10 @@ pub struct CredentialSyncResult {
     /// The whole reconcile stopped before it could report per-session
     /// outcomes. Kept separate so the failure is reported, never dropped.
     pub failure: Option<String>,
+    /// The result covers only the sessions in `outcomes` (one session's AWS
+    /// renewal), not the whole profile: a failure it does not mention is not
+    /// thereby over.
+    pub partial: bool,
     pub outcomes: Vec<CredentialSyncOutcome>,
 }
 
