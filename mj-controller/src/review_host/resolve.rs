@@ -118,9 +118,7 @@ impl HostState {
                 return;
             };
             slot.finishing = false;
-            let delay = slot.retry_delay;
-            slot.retry_delay = (delay * 2).min(std::time::Duration::from_secs(30));
-            (delay, slot.epoch)
+            (slot.take_retry_delay(), slot.epoch)
         };
         tracing::warn!(%session_id, %error, retry_in_seconds = delay.as_secs(), "push review delivery will retry");
         if delay == std::time::Duration::from_secs(1) {

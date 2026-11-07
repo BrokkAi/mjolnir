@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 117;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 118;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2196,13 +2196,36 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Compatible: deletes only the `worker_restart_intents` rows of sessions
+    // that are `stopped` and hold no target, so no worker can exist to
+    // restart. A sub-agent's close left them behind. Older builds read and
+    // write these rows per session, only while restarting or observing that
+    // session's worker; a stopped session without a target has neither, and
+    // a restart that finds no row begins a new one. No column, constraint or
+    // stored value changes, so the compatibility floor stays where it is.
+    if version < 117 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             DELETE FROM worker_restart_intents
+                 WHERE session_id IN (
+                     SELECT session_id FROM sessions
+                     WHERE state = 'stopped'
+                       AND NOT EXISTS (SELECT 1 FROM session_targets
+                                       WHERE session_targets.session_id = sessions.session_id));
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (117, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 117;
+             COMMIT;",
+        )?;
+    }
+
     // Breaking: the new table is additive, but a finished child's park is now
     // reported to its parent as a `subagent_parked` mailbox event, which is
-    // persisted in `mailbox_outbox.event_json`. A revision-116 daemon cannot
+    // persisted in `mailbox_outbox.event_json`. A revision-117 daemon cannot
     // deserialize that body and would skip the row, so it must not write or
     // read this store once such an event can exist. The table also cascades
     // from `sessions`, which older writers do not know to rely on.
-    if version < 117 {
+    if version < 118 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
              CREATE TABLE IF NOT EXISTS subagent_work_facts (
@@ -2214,10 +2237,10 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
                  finish_json TEXT CHECK(finish_json IS NULL OR json_valid(finish_json)),
                  park_json TEXT CHECK(park_json IS NULL OR json_valid(park_json))
              ) STRICT;
-             UPDATE schema_compatibility SET minimum_compatible_version = 117 WHERE singleton = 1;
+             UPDATE schema_compatibility SET minimum_compatible_version = 118 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
-                 VALUES (117, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-             PRAGMA user_version = 117;
+                 VALUES (118, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 118;
              COMMIT;",
         )?;
     }
@@ -3660,7 +3683,7 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
-        if version < 117 {
+        if version < 118 {
             connection
                 .execute_batch("DROP TABLE IF EXISTS subagent_work_facts;")
                 .unwrap();
@@ -4235,15 +4258,15 @@ mod reader_tests {
         let path = directory.path().join("mj.sqlite3");
         let record = super::super::tests::session("facts-upgrade", "project");
         save_session_to(&path, &record).unwrap();
-        stamp_schema_version(&path, 116);
+        stamp_schema_version(&path, 117);
         let connection = open_writer(&path).unwrap();
         let state = read_schema_state(&connection).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(117));
-        // A revision-116 build is refused, as a store with a park event needs.
-        let refused = state.ensure_supported_by(116).unwrap_err();
-        assert!(format!("{refused:#}").contains("117"), "{refused:#}");
-        state.ensure_supported_by(117).unwrap();
+        assert_eq!(state.minimum_compatible, Some(118));
+        // A revision-117 build is refused, as a store with a park event needs.
+        let refused = state.ensure_supported_by(117).unwrap_err();
+        assert!(format!("{refused:#}").contains("118"), "{refused:#}");
+        state.ensure_supported_by(118).unwrap();
         connection
             .execute(
                 "INSERT INTO subagent_work_facts(child_session_id, finish_ordinal, finish_json, park_json)
@@ -4447,6 +4470,68 @@ mod reader_tests {
                 [],
             )
             .expect("the index agrees with prompt_history");
+    }
+
+    #[test]
+    fn stopped_targetless_sessions_lose_their_worker_restart_intents_and_others_keep_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let connection = open_writer(&path).unwrap();
+        // Rewind to revision 116 and store what a revision-116 build left:
+        // intents of a closed child, of a stopped session that still names a
+        // container, of a failed child and of a live session.
+        connection
+            .execute_batch(
+                "DELETE FROM schema_migrations WHERE version >= 117;
+                 UPDATE schema_compatibility SET minimum_compatible_version = 114;
+                 PRAGMA user_version = 116;",
+            )
+            .unwrap();
+        for (id, state, phase, target) in [
+            ("closed-child", "stopped", "swapping", false),
+            ("kept-container", "stopped", "awaiting_readiness", true),
+            ("failed-child", "error", "awaiting_readiness", false),
+            ("live", "running", "swapping", false),
+        ] {
+            connection
+                .execute_batch(&format!(
+                    "INSERT INTO session_contexts(session_id, bundle_id, created_at)
+                         VALUES ('{id}', 'project', 'now');
+                     INSERT INTO sessions(session_id, title, harness_kind, last_profile,
+                                          target_template_id, state, updated_at)
+                         VALUES ('{id}', '{id}', 'codex', 'codex', 'local', '{state}', 'now');
+                     INSERT INTO worker_restart_intents(session_id, operation_id, target_json,
+                                                        desired_build, phase)
+                         VALUES ('{id}', 'op-{id}', '{{}}', '', '{phase}');"
+                ))
+                .unwrap();
+            if target {
+                connection
+                    .execute(
+                        "INSERT INTO session_targets(session_id, kind, resource_id)
+                         VALUES (?1, 'local-podman', 'container')",
+                        [id],
+                    )
+                    .unwrap();
+            }
+        }
+        drop(connection);
+        forget_verified_schema(&path);
+
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        state
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+            .expect("a revision-116 build still reads and writes the store");
+        let remaining: Vec<String> = connection
+            .prepare("SELECT session_id FROM worker_restart_intents ORDER BY session_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(remaining, ["failed-child", "kept-container", "live"]);
     }
 
     #[test]

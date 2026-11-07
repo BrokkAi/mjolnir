@@ -71,6 +71,7 @@ impl HostState {
                 start_reply: None,
                 pending_outcome: None,
                 queued_outcomes: Vec::new(),
+                ended_while_queued: BTreeMap::new(),
             },
         );
         self.run(&session_id, requests);

@@ -1,5 +1,6 @@
 //! Durable, non-blocking diagnostics for controller-facing Mjolnir processes.
 
+use mj_core::logging::LOG_TIMESTAMP_FORMAT as LOG_TIMESTAMP;
 use mj_core::logging::ResilientWriter;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -22,8 +23,6 @@ const RETAINED_LOGS: usize = 10;
 /// minute ago, such as the one whose slow daemon upgrade needed explaining.
 const RECENT_LOG_WINDOW: chrono::TimeDelta = chrono::TimeDelta::hours(1);
 const RECENT_LOG_LIMIT: usize = 1000;
-/// The timestamp format in log filenames. It sorts as text in time order.
-const LOG_TIMESTAMP: &str = "%Y%m%dT%H%M%S%.3fZ";
 /// Give a queued burst time to drain under contention without allowing a stuck
 /// writer to hold process shutdown indefinitely.
 const LOG_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -41,6 +40,9 @@ pub(crate) enum ProcessKind {
     Tui,
     /// A one-shot CLI invocation (everything else).
     Cli,
+    /// A daemon log kept because that daemon crashed (see
+    /// [`mj_core::logging::crashed_log_name`]). Never the kind of a new log.
+    CrashedDaemon,
 }
 
 impl ProcessKind {
@@ -49,6 +51,7 @@ impl ProcessKind {
             ProcessKind::Daemon => "daemon",
             ProcessKind::Tui => "tui",
             ProcessKind::Cli => "cli",
+            ProcessKind::CrashedDaemon => "daemon",
         }
     }
 }
@@ -323,12 +326,15 @@ fn current_daemon_pid(data_dir: &Path) -> Option<u32> {
 /// PID is `None` when it cannot be parsed, which keeps the file eligible for
 /// pruning as before this change.
 fn parse_log_filename(name: &str) -> Option<(ProcessKind, Option<u32>)> {
+    let (name, crashed) = mj_core::logging::without_crashed_mark(name);
     let stem = name.strip_prefix("mj-")?.strip_suffix(".log")?;
     let parts: Vec<&str> = stem.split('-').collect();
     match parts.as_slice() {
         [kind, _timestamp, pid] => {
             let kind = match *kind {
+                "daemon" if crashed => ProcessKind::CrashedDaemon,
                 "daemon" => ProcessKind::Daemon,
+                _ if crashed => return None,
                 "tui" => ProcessKind::Tui,
                 "cli" => ProcessKind::Cli,
                 _ => return None,
@@ -341,11 +347,12 @@ fn parse_log_filename(name: &str) -> Option<(ProcessKind, Option<u32>)> {
 }
 
 /// The start timestamp in a managed log filename, in either format.
-fn log_timestamp(name: &str) -> Option<&str> {
+fn log_timestamp(name: &str) -> Option<String> {
+    let (name, _) = mj_core::logging::without_crashed_mark(name);
     let stem = name.strip_prefix("mj-")?.strip_suffix(".log")?;
     let parts: Vec<&str> = stem.split('-').collect();
     match parts.as_slice() {
-        [_, timestamp, _] | [timestamp, _] => Some(timestamp),
+        [_, timestamp, _] | [timestamp, _] => Some((*timestamp).to_owned()),
         _ => None,
     }
 }
@@ -423,7 +430,7 @@ fn prune_logs_since(
                 path.file_name()
                     .and_then(|name| name.to_str())
                     .and_then(log_timestamp)
-                    .is_some_and(|started| started >= recent)
+                    .is_some_and(|started| started.as_str() >= recent)
             })
             .count();
         let keep = retain.max(started_recently.min(RECENT_LOG_LIMIT));
@@ -671,6 +678,33 @@ mod tests {
             })
             .count();
         assert_eq!(remaining_cli, RETAINED_LOGS - 1);
+
+        // A crashed daemon's log is a kind of its own: a stream of newer
+        // ordinary daemon logs prunes only the ordinary ones.
+        let crashed_names: Vec<String> = (0..2)
+            .map(|index| format!("mj-daemon-2025010{index}T000000.000Z-{OTHER_PID}.crashed.log"))
+            .collect();
+        for name in &crashed_names {
+            fs::write(directory.path().join(name), "crashed").unwrap();
+        }
+        for index in 0..12 {
+            let name = format!("mj-daemon-202602{index:02}T000000.000Z-{OTHER_PID}.log");
+            fs::write(directory.path().join(&name), "daemon").unwrap();
+        }
+        prune_logs(directory.path(), RETAINED_LOGS - 1, None).unwrap();
+        for name in &crashed_names {
+            assert!(directory.path().join(name).exists(), "{name} was pruned");
+        }
+        let remaining_daemon = fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry.file_name().to_str().is_some_and(|name| {
+                    name.starts_with("mj-daemon-") && !name.ends_with(".crashed.log")
+                })
+            })
+            .count();
+        assert_eq!(remaining_daemon, RETAINED_LOGS - 1);
     }
 
     // Hard-won: 1d6a27cb: Legacy CLI log names could still crowd out the live daemon log after filename versioning.

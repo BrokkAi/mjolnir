@@ -7,7 +7,7 @@ const DEFERRED_SUBMIT_CAPACITY: usize = 32;
 /// `Closing` and `Destroying` are still in flight and their owners need the
 /// actor. The rest have ended: nothing will ever answer on this session's
 /// control socket again.
-fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
+pub(crate) fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
     use mj_core::state::SessionState;
     matches!(
         state,
@@ -18,6 +18,18 @@ fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
             | SessionState::Parked
             | SessionState::DestroyedWithDataLoss
     )
+}
+
+/// Whether a session's durable state means it has really ended, as opposed
+/// to passing through a state on the way to running again.
+///
+/// This is [`terminal_for_reconnect`] without `StartupCleanup`: provisioning
+/// enters that state before retrying a worker start that failed before it
+/// published its socket, and the retry can end in `Running`. The relay actor
+/// may stop on `StartupCleanup` (nothing answers on the socket meanwhile), but
+/// whoever waits on the session's outcome must not treat it as ended.
+pub(crate) fn session_has_ended(state: mj_core::state::SessionState) -> bool {
+    state != mj_core::state::SessionState::StartupCleanup && terminal_for_reconnect(state)
 }
 
 /// This session's durable state and stored cause, read off the actor's task.

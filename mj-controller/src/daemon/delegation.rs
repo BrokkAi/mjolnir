@@ -488,7 +488,7 @@ async fn complete_child(
             tokio::task::spawn_blocking(move || crate::database::load_subagent_report(&id))
                 .await??
                 .handback
-                .filter(|handback| handback.command_id == command_id)
+                .filter(|handback| handback.answers(&command_id))
                 .map(|handback| handback.message);
         state
             .review_host()

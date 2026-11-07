@@ -637,3 +637,53 @@ fn cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_cop
         .unwrap_err();
     assert!(crate::target_storage::is_storage_full(&error), "{error:#}");
 }
+
+/// A wait behind a held gate is its own stage, open from the first failed
+/// attempt until the gate is taken, so a lifecycle watching for stalls can
+/// tell a queue from a stuck command. A free gate reports nothing.
+#[test]
+fn a_wait_behind_a_held_store_gate_is_reported_as_a_queue_stage() {
+    #[derive(Default)]
+    struct Stages(Mutex<Vec<(bool, targets::ProvisionStage)>>);
+    impl CommandExecutor for Stages {
+        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+            unreachable!("waiting for a gate runs no command: {command:?}");
+        }
+        fn stage_started(&self, stage: targets::ProvisionStage) {
+            self.0.lock().unwrap().push((true, stage));
+        }
+        fn stage_finished(&self, stage: targets::ProvisionStage) {
+            self.0.lock().unwrap().push((false, stage));
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let locator = target(temp.path(), "33333333333333333333333333333333");
+    let gate = store_gate(&locator, "queue-stage-test");
+    let stages = Stages::default();
+    drop(lock_gate(&stages, &gate, "free", "take a free gate").unwrap());
+    assert!(stages.0.lock().unwrap().is_empty());
+
+    let held = gate.try_lock("holder", "hold the gate").unwrap();
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| {
+            drop(lock_gate(&stages, &gate, "waiter", "wait for the gate").unwrap());
+        });
+        while stages.0.lock().unwrap().is_empty() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            *stages.0.lock().unwrap(),
+            vec![(true, targets::ProvisionStage::WaitingForWorkerStore)],
+            "the stage is open while the gate is held"
+        );
+        drop(held);
+        waiter.join().unwrap();
+    });
+    assert_eq!(
+        *stages.0.lock().unwrap(),
+        vec![
+            (true, targets::ProvisionStage::WaitingForWorkerStore),
+            (false, targets::ProvisionStage::WaitingForWorkerStore)
+        ]
+    );
+}

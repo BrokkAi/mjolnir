@@ -46,7 +46,19 @@ pub enum ProvisionStage {
     /// Waiting for a background download of this target's image to finish,
     /// rather than starting a second download of the same image.
     PullingImage,
+    /// Queued behind another task pulling this image. This is waiting for a
+    /// turn, not work, so it never counts as a stall.
+    WaitingForImagePull,
     WaitingForContainerUpgrade,
+    /// Queued behind another task holding the worker binary store for this
+    /// target. This is waiting for a turn, not work.
+    WaitingForWorkerStore,
+    /// Queued behind another task opening the shared SSH connection to this
+    /// host. This is waiting for a turn, not work.
+    WaitingForSshConnection,
+    /// Queued behind other children starting in the same container. This is
+    /// waiting for a turn, not work, so it never counts as a stall.
+    WaitingForStartSlot,
     Provisioning,
     Booting,
     Cloning,
@@ -73,9 +85,13 @@ impl ProvisionStage {
     pub fn label(&self) -> String {
         match self {
             Self::PullingImage => "Pull image".into(),
+            Self::WaitingForImagePull => "Waiting for another image pull".into(),
             Self::WaitingForContainerUpgrade => {
                 "Container upgrade pending; waiting for accepted work".into()
             }
+            Self::WaitingForWorkerStore => "Waiting for the worker binary store".into(),
+            Self::WaitingForSshConnection => "Waiting for an SSH connection to open".into(),
+            Self::WaitingForStartSlot => "Waiting for a container start slot".into(),
             Self::Provisioning => "Provision".into(),
             Self::Booting => "Boot".into(),
             Self::Cloning => "Clone".into(),
@@ -95,6 +111,23 @@ impl ProvisionStage {
             Self::RemovingStorage => "Remove container storage".into(),
             Self::CleaningCache => "Clean cache".into(),
         }
+    }
+
+    /// Whether time in this stage stays off a stall clock. Queue time is not
+    /// progress: the stage waits for a turn behind other work, and admission
+    /// ends it. Harness preparation reports its own progress and failure
+    /// (the native startup deadline is likewise suspended during it), and one
+    /// step, such as a download, can be slow without being stuck.
+    pub fn pauses_stall_clock(&self) -> bool {
+        matches!(
+            self,
+            Self::WaitingForImagePull
+                | Self::WaitingForContainerUpgrade
+                | Self::WaitingForWorkerStore
+                | Self::WaitingForSshConnection
+                | Self::WaitingForStartSlot
+                | Self::PreparingHarness { .. }
+        )
     }
 
     /// The worker owns the start time for harness preparation. Other stages
@@ -2855,8 +2888,8 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
 }
 mod convert;
 pub use convert::{
-    RecordedTarget, StoredTarget, TargetConversionError, locator_needs_connection,
-    ssh_args_with_identity,
+    RecordedTarget, StoredTarget, TargetConversionError, locator_kind_name,
+    locator_needs_connection, ssh_args_with_identity,
 };
 
 mod ssh;

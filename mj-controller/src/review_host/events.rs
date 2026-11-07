@@ -64,11 +64,23 @@ pub(super) enum HostEvent {
     CloseChild {
         child_session_id: String,
     },
+    /// A reviewer child's session reached a terminal state. The role it
+    /// served fails unless it already has an outcome.
+    ChildEnded {
+        child_session_id: String,
+        reason: String,
+    },
     ReviewerFinished {
         session_id: String,
         child_session_id: String,
-        answer: Option<String>,
+        report: ReviewerReport,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// An ended reviewer's failure could not be saved.
+    ReviewerEndNotSaved {
+        child_session_id: String,
+        reason: String,
+        error: String,
     },
     ReviewerOutcomeSaved {
         session_id: String,
@@ -93,6 +105,21 @@ pub(super) enum HostEvent {
         session_id: String,
         epoch: u64,
     },
+    /// The store would not say whether a reviewer's session had ended, or
+    /// what it handed back. The role stays pending until a later read answers.
+    ReviewerStandingUnread {
+        session_id: String,
+        epoch: u64,
+        role: String,
+        origin: StandingRead,
+        error: String,
+    },
+    RetryReviewerStanding {
+        session_id: String,
+        epoch: u64,
+        role: String,
+        origin: StandingRead,
+    },
     QuestionTarget {
         session_id: String,
         child_session_id: String,
@@ -116,6 +143,19 @@ pub(super) enum HostEvent {
     StartupRecoveryFailed(String),
     Shutdown {
         reply: oneshot::Sender<Result<(), String>>,
+    },
+}
+
+/// Why a reviewer's standing is being read, which decides what happens once
+/// a read answers after failing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StandingRead {
+    /// Launching a reviewer restored after a restart.
+    Restored,
+    /// The reviewer's session ended; a handback it saved is its outcome.
+    Ended {
+        child_session_id: String,
+        reason: String,
     },
 }
 
@@ -163,6 +203,12 @@ pub(super) enum PersistenceRequest {
 pub(super) enum ReviewStep {
     Delta(Result<Vec<mj_core::relay::RepoDelta>, String>),
     PushDelivered(Result<Box<TurnReviewState>, String>),
+    /// Delivery failed and the requesting session still exists, or could not
+    /// be looked up: the delivery is tried again.
+    PushRetry(String),
+    /// A save failed because the requesting session's record is gone, so no
+    /// verdict or review state can be saved for it.
+    OwnerGone,
 }
 
 /// Everything one blocking preparation gathered before a review can start.
@@ -187,9 +233,19 @@ pub(super) struct PendingOpen {
 
 pub(super) type ReviewerIdentity = mj_core::review::settings::ResolvedReviewSettings;
 
+/// What a reviewer child gave the host. Handbacks and ended sessions both
+/// arrive as reports, so [`HostState::reviewer_finished`] decides every
+/// reviewer outcome and failure one at a time, behind a saving outcome.
+pub(super) enum ReviewerReport {
+    /// The text of its handback.
+    Answer(String),
+    /// It ended without one; the reason says why.
+    Failed(String),
+}
+
 pub(super) struct ReviewerHandback {
     pub(super) child_session_id: String,
-    pub(super) answer: Option<String>,
+    pub(super) report: ReviewerReport,
     pub(super) reply: oneshot::Sender<Result<(), String>>,
 }
 
@@ -206,8 +262,32 @@ pub(super) struct ReviewSlot {
     pub(super) finishing: bool,
     pub(super) retry_delay: std::time::Duration,
     pub(super) start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
-    pub(super) pending_outcome: Option<TurnReviewState>,
+    pub(super) pending_outcome: Option<PendingOutcome>,
     pub(super) queued_outcomes: Vec<ReviewerHandback>,
+    /// Reviewers that ended while their handback waited in
+    /// `queued_outcomes`, with the reason. That handback is their outcome, so
+    /// no standing read is made yet; the entry moves to the save of that
+    /// handback, which reports the end again if the save fails.
+    pub(super) ended_while_queued: BTreeMap<String, String>,
+}
+
+/// The outcome being saved: the state to return to if the save fails, and the
+/// reviewer end that save is the only record of.
+pub(super) struct PendingOutcome {
+    pub(super) prior: TurnReviewState,
+    /// The child and reason of an end noted while this handback was queued.
+    pub(super) ended: Option<(String, String)>,
+}
+
+impl ReviewSlot {
+    /// The wait before the next retry of anything this review retries
+    /// (push delivery, a restored reviewer's standing read); each call
+    /// doubles the next wait up to 30 s.
+    pub(super) fn take_retry_delay(&mut self) -> std::time::Duration {
+        let delay = self.retry_delay;
+        self.retry_delay = (delay * 2).min(std::time::Duration::from_secs(30));
+        delay
+    }
 }
 
 pub(super) struct HostState {
