@@ -259,6 +259,9 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
 - Decision (sixth review): The survivor check is a synchronous command on the target, so `finish_stopped_park` is a synchronous function and the daemon runs it with `spawn_blocking` (`finish_stopped_parks_of`), still detached and outside handoff admission. Test `the_survivor_check_does_not_run_on_an_async_worker` runs it on a single-threaded runtime with a ticking task and fails if the check holds the thread.
   Date/Author: 2026-11-07 / implementing agent, from review.
 
+- Decision (sixth review, accepted with a change): A pending park on a child not recorded as parked is not dropped. The finish report promised a later message about the listed processes, so one follow-up is sent per park (same identity: parent, child, finish ordinal) saying Mjolnir could not confirm the park of this child, why, and that the listed processes were not checked afterwards, with the stored pre-stop facts. New `ParkFacts.unconfirmed` (distinct from `unverified`, whose text says "the park ran"). The startup settlement sends it for a child not recorded as parked ("the stop failed or the daemon stopped during it"), still without a probe; the failed-stop path in the park sends it at once ("the stop of the worker failed: ..."), through the park's own record, so a startup after it finds nothing. Tests: `a_park_whose_stop_fails_tells_the_parent_it_could_not_be_confirmed`, the startup test extended with a running child, and a golden case.
+  Date/Author: 2026-11-07 / implementing agent, from the parent.
+
 
 ## Outcomes & Retrospective
 

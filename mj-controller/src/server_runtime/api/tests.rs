@@ -5114,7 +5114,16 @@ async fn startup_settles_the_park_and_tree_follow_ups_the_previous_daemon_owed()
         mj_core::work_facts::ParkFacts::started(known.processes.clone()),
     )
     .unwrap();
-    assert_eq!(crate::database::load_unfinished_parks().unwrap().len(), 1);
+    // A second child's park began, and the daemon went before the stop was
+    // known to have run: the child is still recorded as running.
+    store_parent_and_child("child-2");
+    crate::database::record_finish_facts("child-2".into(), 4, known.clone()).unwrap();
+    crate::database::record_park_started(
+        "child-2".into(),
+        mj_core::work_facts::ParkFacts::started(known.processes.clone()),
+    )
+    .unwrap();
+    assert_eq!(crate::database::load_unfinished_parks().unwrap().len(), 2);
     assert!(working_tree_followups().is_empty());
 
     crate::database::settle_followups_after_restart().unwrap();
@@ -5141,13 +5150,29 @@ async fn startup_settles_the_park_and_tree_follow_ups_the_previous_daemon_owed()
             mj_core::mailbox::render_mailbox_event(&parsed)
         })
         .collect();
-    assert_eq!(parks.len(), 1, "{parks:?}");
+    assert_eq!(parks.len(), 2, "{parks:?}");
+    let checked = parks
+        .iter()
+        .find(|text| text.contains("the daemon restarted during the check"))
+        .unwrap_or_else(|| panic!("{parks:?}"));
+    assert!(checked.contains("pid 41301"), "{checked}");
+    // The child not recorded as parked is not silently dropped: the report
+    // promised a message about the listed processes, and it says plainly that
+    // the park could not be confirmed and the processes were not checked.
+    let unconfirmed = parks
+        .iter()
+        .find(|text| text.contains("could not confirm the park of this child"))
+        .unwrap_or_else(|| panic!("{parks:?}"));
     assert!(
-        parks[0].contains("the daemon restarted during the check"),
-        "{}",
-        parks[0]
+        unconfirmed.contains("the stop failed or the daemon stopped during it"),
+        "{unconfirmed}"
     );
-    assert!(parks[0].contains("pid 41301"), "{}", parks[0]);
+    assert!(unconfirmed.contains("were not checked"), "{unconfirmed}");
+    assert!(unconfirmed.contains("pid 41301"), "{unconfirmed}");
+    assert_eq!(
+        crate::database::load_session_state("child-2").unwrap(),
+        Some(SessionState::Running)
+    );
     assert_eq!(
         crate::database::load_session_state("child-1").unwrap(),
         Some(SessionState::Parked),

@@ -144,6 +144,11 @@ pub struct ParkFacts {
     /// nothing then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unverified: Option<String>,
+    /// Mjolnir could not confirm that the park happened (its stop failed, or the
+    /// daemon stopped during it), and why. The processes were not checked
+    /// afterwards, so the counts mean nothing then either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unconfirmed: Option<String>,
     /// The part of `snapshot.shown` that was no longer running after the stop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gone_shown: Vec<RunningProcess>,
@@ -171,6 +176,7 @@ impl ParkFacts {
             gone: 0,
             survived: 0,
             unverified: None,
+            unconfirmed: None,
             gone_shown: Vec::new(),
             survived_shown: Vec::new(),
             exited_before: 0,
@@ -242,6 +248,16 @@ impl ParkFacts {
         park
     }
 
+    /// A park that Mjolnir could not confirm happened. Its processes were not
+    /// checked after it, and the message says so.
+    pub fn unconfirmed(snapshot: Observed<ProcessFacts>, reason: impl Into<String>) -> Self {
+        let mut park = Self::settled(snapshot, &[]);
+        park.gone = 0;
+        park.gone_shown.clear();
+        park.unconfirmed = Some(reason.into());
+        park
+    }
+
     /// The number of processes the stop was about, when they were observed.
     fn observed_running(&self) -> u32 {
         self.snapshot
@@ -261,7 +277,8 @@ impl ParkFacts {
                 || self.gone > 0
                 || self.survived > 0
                 || self.exited_before > 0
-                || (self.unverified.is_some() && self.observed_running() > 0))
+                || ((self.unverified.is_some() || self.unconfirmed.is_some())
+                    && self.observed_running() > 0))
     }
 
     /// The lines of a `list_agents` entry.
@@ -269,6 +286,12 @@ impl ParkFacts {
         let mut lines = Vec::new();
         if self.pending {
             return vec!["Park: stopping; the result is not recorded yet".into()];
+        }
+        if let Some(reason) = &self.unconfirmed {
+            lines.push(format!(
+                "Park: not confirmed ({reason}); the processes listed earlier were not checked"
+            ));
+            return lines;
         }
         match (&self.snapshot, &self.unverified) {
             (Observed::Unavailable { reason }, _) => lines.push(format!(
@@ -312,6 +335,20 @@ impl ParkFacts {
     pub fn message_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         let plural = |count: u32| if count == 1 { "process" } else { "processes" };
+        if let Some(reason) = &self.unconfirmed {
+            lines.push(format!(
+                "Mjolnir could not confirm the park of this child: {reason}. The processes listed in the finish report were not checked after it, so whether they still run is unknown; check on them yourself if they matter."
+            ));
+            if let Observed::Known(processes) = &self.snapshot {
+                lines.extend(
+                    processes
+                        .shown
+                        .iter()
+                        .map(|process| format!("  {}", render_process(process))),
+                );
+            }
+            return lines;
+        }
         match (&self.snapshot, &self.unverified) {
             (Observed::Pending, _) => {
                 lines.push(

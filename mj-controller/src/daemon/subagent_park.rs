@@ -351,8 +351,11 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        crate::database::record_park_started("park-check-child".into(), ParkFacts::started(snapshot()))
-            .unwrap();
+        crate::database::record_park_started(
+            "park-check-child".into(),
+            ParkFacts::started(snapshot()),
+        )
+        .unwrap();
     }
 
     /// The survivor check is a synchronous command on the target. On a runtime

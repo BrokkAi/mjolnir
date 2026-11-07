@@ -1033,6 +1033,17 @@ mod tests {
             ParkFacts::unverified(Observed::Known(processes), "the target did not answer")
         }
 
+        pub fn park_unconfirmed() -> ParkFacts {
+            let busy = busy();
+            let Observed::Known(processes) = busy.processes else {
+                unreachable!()
+            };
+            ParkFacts::unconfirmed(
+                Observed::Known(processes),
+                "the stop failed or the daemon stopped during it",
+            )
+        }
+
         fn process(pid: u32, elapsed_secs: u64, command: &str, detached: bool) -> RunningProcess {
             RunningProcess {
                 pid,
@@ -1280,6 +1291,7 @@ mod tests {
             // What the park after a finish did to the processes listed in it.
             parked("child-4", "Run suites", fact_fixture::park_settled()),
             parked("child-7", "Check cache", fact_fixture::park_unverified()),
+            parked("child-5", "Fix lexer", fact_fixture::park_unconfirmed()),
             // The tree that report was still reading, delivered once it was stored.
             event(MailboxEventBody::SubagentWorkingTree {
                 child_session_id: "child-9".into(),

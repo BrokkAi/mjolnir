@@ -710,8 +710,9 @@ pub(crate) fn record_park_outcome_expecting(
 /// check could not be completed; a working tree still being read is stored as
 /// unavailable and sent, since no task of the new daemon is reading it. Recovering a child's
 /// lifecycle is the session recovery's job, not this one's, so a pending park
-/// on a child that is not recorded as parked (its stop failed or never ran) is
-/// dropped without a message.
+/// on a child that is not recorded as parked (its stop failed, or the daemon
+/// stopped during it) is sent as one that could not be confirmed, with the
+/// stored facts and without a word about what became of the processes.
 pub(crate) fn settle_followups_after_restart() -> Result<()> {
     let parked = mj_core::state::SessionState::Parked.as_str();
     let state_of = |child: &str| -> Result<Option<String>> {
@@ -725,30 +726,36 @@ pub(crate) fn settle_followups_after_restart() -> Result<()> {
             .optional()?)
     };
     for (child, ordinal, park) in load_unfinished_parks()? {
-        if state_of(&child)?.as_deref() == Some(parked) {
-            let name = {
-                let connection = open_reader(&database_path())?;
-                connection
-                    .query_row(
-                        "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
-                        [&child],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?
-                    .and_then(|json| {
-                        serde_json::from_str::<mj_core::subagent::SubagentRecord>(&json).ok()
-                    })
-                    .map(|relation| relation.task_name)
-                    .unwrap_or_default()
-            };
-            let settled = mj_core::work_facts::ParkFacts::unverified(
+        let name = {
+            let connection = open_reader(&database_path())?;
+            connection
+                .query_row(
+                    "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+                    [&child],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|json| {
+                    serde_json::from_str::<mj_core::subagent::SubagentRecord>(&json).ok()
+                })
+                .map(|relation| relation.task_name)
+                .unwrap_or_default()
+        };
+        let settled = if state_of(&child)?.as_deref() == Some(parked) {
+            mj_core::work_facts::ParkFacts::unverified(
                 park.snapshot.clone(),
                 "the daemon restarted during the check",
-            );
-            record_park_outcome_expecting(child, ordinal, name, settled, Some(park))?;
+            )
         } else {
-            discard_unfinished_park(child, ordinal)?;
-        }
+            // Nothing says the stop ran, and the finish report promised a later
+            // message about the listed processes: say that the park could not
+            // be confirmed rather than say nothing.
+            mj_core::work_facts::ParkFacts::unconfirmed(
+                park.snapshot.clone(),
+                "the stop failed or the daemon stopped during it",
+            )
+        };
+        record_park_outcome_expecting(child, ordinal, name, settled, Some(park))?;
     }
     let finishes: Vec<(String, u64, String)> = {
         let connection = open_reader(&database_path())?;

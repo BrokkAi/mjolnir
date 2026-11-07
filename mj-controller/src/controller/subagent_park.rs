@@ -251,17 +251,28 @@ impl Controller {
                 stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
             {
                 // The child stays running (a worker the stop did reach is
-                // restarted in place), so the marker describes a park that did
-                // not happen: drop it.
-                if let Some(ordinal) = started
-                    && let Err(discard) =
-                        crate::database::discard_unfinished_park(session_id.to_owned(), ordinal)
-                {
-                    tracing::warn!(
-                        session_id,
-                        error = format!("{discard:#}"),
-                        "could not drop the marker of a park whose stop failed"
+                // restarted in place), so the park did not happen. The finish
+                // report promised a later message about the listed processes:
+                // the parent is told the park could not be confirmed, once, by
+                // the park's own record.
+                if let (Some(ordinal), Some(snapshot)) = (started, &before_stop) {
+                    let unconfirmed = ParkFacts::unconfirmed(
+                        snapshot.clone(),
+                        format!("the stop of the worker failed: {error:#}"),
                     );
+                    if let Err(report) = crate::database::record_park_outcome_expecting(
+                        session_id.to_owned(),
+                        ordinal,
+                        session.message_name(),
+                        unconfirmed,
+                        Some(ParkFacts::started(snapshot.clone())),
+                    ) {
+                        tracing::warn!(
+                            session_id,
+                            error = format!("{report:#}"),
+                            "could not report a park whose stop failed"
+                        );
+                    }
                 }
                 return Err(error.context("stop the sub-agent's worker"));
             }
@@ -1330,6 +1341,116 @@ mod tests {
         );
 
         let targets = refresher.await.unwrap();
+        drop(targets);
+        shutdown.shutdown().await.unwrap();
+    }
+
+    /// Stands in for a target whose stop of the worker fails.
+    struct FailingStop;
+
+    impl CommandExecutor for FailingStop {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            if command.purpose == "stop Mjolnir worker daemon" {
+                anyhow::bail!("the target refused the stop");
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    /// A park whose stop fails leaves the child running, but the finish report
+    /// promised a later message about the processes it listed. The park's own
+    /// record sends it, once: the park could not be confirmed and the processes
+    /// were not checked. The marker is gone afterwards.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_park_whose_stop_fails_tells_the_parent_it_could_not_be_confirmed() {
+        const FACTS_FILE: &str = "MJ_TEST_PARK_FACTS_FILE";
+        if std::env::var_os(MARKER).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let facts = directory.path().join("facts.json");
+            std::fs::write(
+                &facts,
+                serde_json::to_vec(&facts_with_two_processes()).unwrap(),
+            )
+            .unwrap();
+            let worker = directory.path().join("worker-source");
+            std::fs::write(&worker, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "a_park_whose_stop_fails_tells_the_parent_it_could_not_be_confirmed",
+            ))
+            .env(MARKER, "1")
+            .env(FACTS_FILE, &facts)
+            .env(
+                crate::controller::checkpoint::tests::LATCH_RELAY_WORK_FACTS,
+                &facts,
+            )
+            .env("MJ_WORKER_BINARY", worker)
+            .env("MJ_INSTANCE", "durable-unpark-test")
+            .isolated_store(directory.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        register_child(root.path());
+        // The finish the park followed listed the two processes.
+        crate::database::record_finish_facts(
+            LATCH_RELAY_SESSION.into(),
+            9,
+            facts_with_two_processes(),
+        )
+        .unwrap();
+        let crate::session_manager::SessionManagerChannels {
+            session_cpu: _,
+            targets,
+            control,
+            updates: _updates,
+            shutdown,
+        } = crate::session_manager::spawn_session_manager().unwrap();
+        targets
+            .send(vec![latch_relay_target(
+                root.path(),
+                None,
+                ReleaseSupport::Supported,
+                false,
+            )])
+            .unwrap();
+        control
+            .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+            .await
+            .unwrap();
+        let error = loaded_controller()
+            .park_subagent_worker(LATCH_RELAY_SESSION, &FailingStop, &control)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("the target refused the stop"));
+        assert_eq!(
+            crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(),
+            Some(SessionState::Running)
+        );
+        assert!(crate::database::load_unfinished_parks().unwrap().is_empty());
+        let events = crate::database::pending_mailbox_events(10).unwrap();
+        let parked: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_json.contains("subagent_parked"))
+            .collect();
+        assert_eq!(parked.len(), 1, "{events:?}");
+        let event: mj_core::mailbox::MailboxEvent =
+            serde_json::from_str(&parked[0].event_json).unwrap();
+        assert!(event.wake);
+        let text = mj_core::mailbox::render_mailbox_event(&event);
+        assert!(
+            text.contains(
+                "Mjolnir could not confirm the park of this child: the stop of the worker failed"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("were not checked"), "{text}");
+        assert!(text.contains("pid 5002"), "{text}");
         drop(targets);
         shutdown.shutdown().await.unwrap();
     }
