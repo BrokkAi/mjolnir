@@ -3005,6 +3005,7 @@ fn bare_move_preparation_normalizes_an_empty_resource_reset() {
 }
 
 #[cfg(unix)]
+// Hard-won: #1470: native delegation without managed children blocked automatic quota Moves.
 #[test]
 fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
     let name = test_name("roleless_in_place_move_refuses_live_children_but_allows_parked_children");
@@ -3025,6 +3026,23 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         subtle: None,
     });
     crate::database::save_session(parent).unwrap();
+    let mut empty_selection =
+        in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE).selection;
+    empty_selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let empty = runtime
+        .block_on(
+            fixture
+                .controller
+                .prepare_move_session_controlled(empty_selection.clone(), &ProcessExecutor),
+        )
+        .unwrap();
+    assert!(empty.in_place);
+    assert!(!empty.stops_subagents);
+
     let mut child = fixture.controller.state.sessions[parent_id].clone();
     child.id = "live-child".into();
     child.state = SessionState::Running;
@@ -3063,10 +3081,6 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
     let mut selection =
         in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE).selection;
     selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
     let error = runtime
         .block_on(
             fixture
@@ -3098,6 +3112,84 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         prepared.stops_subagents,
         "a destination without parent tools stops the parked children"
     );
+
+    fixture
+        .controller
+        .state
+        .subagents
+        .get_mut("live-child")
+        .unwrap()
+        .kind = mj_core::subagent::SubagentKind::Oracle;
+    let oracle = runtime
+        .block_on(
+            fixture
+                .controller
+                .prepare_move_session_controlled(empty_selection.clone(), &ProcessExecutor),
+        )
+        .unwrap();
+    assert!(oracle.stops_subagents, "parked oracles are stopped too");
+    fixture
+        .controller
+        .state
+        .sessions
+        .get_mut("live-child")
+        .unwrap()
+        .state = SessionState::Stopped;
+    let stopped = runtime
+        .block_on(
+            fixture
+                .controller
+                .prepare_move_session_controlled(empty_selection, &ProcessExecutor),
+        )
+        .unwrap();
+    assert!(!stopped.stops_subagents);
+    let late_child = fixture
+        .controller
+        .state
+        .sessions
+        .get_mut("live-child")
+        .unwrap();
+    late_child.state = SessionState::Parked;
+    crate::database::save_session(late_child).unwrap();
+    // A child admitted after the empty preview is checked under the drained
+    // worker queue before an automatic Move can run the child-stop hook.
+    let mut automatic = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    automatic.selection = empty.selection.clone();
+    automatic.configuration_fingerprint = fixture
+        .controller
+        .move_configuration_fingerprint(&automatic.selection)
+        .unwrap();
+    automatic.quota_stop_reason = Some("weekly quota exhausted".into());
+    let executor = RecordingProcessExecutor::default();
+    let error = run_in_place_move(
+        &mut fixture.controller,
+        &mut automatic,
+        &fixture.worker_root,
+        &executor,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("automatic quota Move would stop existing sub-agents"));
+    assert_eq!(executor.move_stop_calls(), 0);
+    assert_eq!(
+        fixture.controller.state.sessions[parent_id].state,
+        SessionState::Running
+    );
+    let mut manual = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    manual.selection = empty.selection.clone();
+    manual.configuration_fingerprint = fixture
+        .controller
+        .move_configuration_fingerprint(&manual.selection)
+        .unwrap();
+    manual.accepted_preparation = Some(Box::new(empty));
+    let error = run_in_place_move(
+        &mut fixture.controller,
+        &mut manual,
+        &fixture.worker_root,
+        &executor,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("sub-agents appeared after preparation"));
+    assert_eq!(executor.move_stop_calls(), 0);
 }
 
 #[cfg(unix)]
@@ -3466,6 +3558,7 @@ fn in_place_move_reopens_gate_after_lost_admission_close_reply() {
 /// A Native source has no parent tools, but its worker still has a request
 /// queue (`ask_oracle`, `request_review`), so an in-place Move closes it first.
 #[cfg(unix)]
+// Hard-won: #1470: the child-stop hook could stop daemon-side children after the quota check.
 #[test]
 fn in_place_move_drains_the_queue_of_a_native_source() {
     let name = test_name("in_place_move_drains_the_queue_of_a_native_source");
@@ -3498,13 +3591,16 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
     source.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
     crate::database::save_session(source).unwrap();
     let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
-    run_in_place_move(
-        &mut controller,
-        &mut operation,
-        &worker_root,
-        &RecordingProcessExecutor::default(),
-    )
-    .unwrap();
+    operation.quota_stop_reason = Some("weekly quota exhausted".into());
+    operation.quota_continuation = Some(mj_core::state::QuotaMoveContinuation::Prompt);
+    operation.queue = ResumeQueueDisposition::Start;
+    let executor = RecordingProcessExecutor::default();
+    run_in_place_move(&mut controller, &mut operation, &worker_root, &executor).unwrap();
+    assert_eq!(
+        executor.move_stop_calls(),
+        0,
+        "an automatic Move must never invoke the hook that re-reads and stops children"
+    );
 
     let queue: serde_json::Value =
         serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
@@ -4816,7 +4912,14 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
         let operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();
-        let api = crate::server::ViewerMoveRecovery::from_operation(&operation).unwrap();
+        let api = crate::server::ViewerMoveRecovery::from_operation(&operation)
+            .unwrap()
+            .with_public_failure(Some(&published));
+        assert_eq!(
+            api.failure_notice.as_deref(),
+            Some(published.as_str()),
+            "the stored public recovery instructions must reach the conversation"
+        );
         assert!(
             api.checkpoint_retained,
             "{kill:?}: the guidance promises a retry the API denies"
@@ -4930,7 +5033,14 @@ fn in_place_move_whose_handoff_is_lost_fails_truthfully_into_a_destroyable_state
         let operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();
-        let api = crate::server::ViewerMoveRecovery::from_operation(&operation).unwrap();
+        let api = crate::server::ViewerMoveRecovery::from_operation(&operation)
+            .unwrap()
+            .with_public_failure(Some(&published));
+        assert_eq!(
+            api.failure_notice.as_deref(),
+            Some(published.as_str()),
+            "the stored public recovery instructions must reach the conversation"
+        );
         assert!(!api.checkpoint_retained, "{kill:?}");
         assert!(api.environment_retained, "{kill:?}");
 
