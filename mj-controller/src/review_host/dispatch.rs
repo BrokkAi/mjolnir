@@ -108,23 +108,33 @@ impl HostState {
                 reason,
                 error,
             } => self.reviewer_end_not_saved(child_session_id, reason, error),
-            HostEvent::RestoredReviewerUnread {
+            HostEvent::ReviewerStandingUnread {
                 session_id,
                 epoch,
                 role,
+                origin,
                 error,
-            } => self.restored_reviewer_unread(&session_id, epoch, role, error),
-            HostEvent::RetryRestoredReviewer {
+            } => self.reviewer_standing_unread(&session_id, epoch, role, origin, error),
+            HostEvent::RetryReviewerStanding {
                 session_id,
                 epoch,
                 role,
+                origin,
             } => {
                 if self
                     .reviews
                     .get(&session_id)
                     .is_some_and(|slot| slot.epoch == epoch)
                 {
-                    self.launch_reviewer_child(&session_id, &role, false);
+                    match origin {
+                        StandingRead::Restored => {
+                            self.launch_reviewer_child(&session_id, &role, false)
+                        }
+                        StandingRead::Ended {
+                            child_session_id,
+                            reason,
+                        } => self.child_ended(&child_session_id, reason),
+                    }
                 }
             }
             HostEvent::RetryPushDelivery { session_id, epoch } => {

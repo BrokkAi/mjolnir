@@ -105,18 +105,20 @@ pub(super) enum HostEvent {
         session_id: String,
         epoch: u64,
     },
-    /// The store would not say whether a restored reviewer's session had
-    /// ended. The role stays pending until a later read answers.
-    RestoredReviewerUnread {
+    /// The store would not say whether a reviewer's session had ended, or
+    /// what it handed back. The role stays pending until a later read answers.
+    ReviewerStandingUnread {
         session_id: String,
         epoch: u64,
         role: String,
+        origin: StandingRead,
         error: String,
     },
-    RetryRestoredReviewer {
+    RetryReviewerStanding {
         session_id: String,
         epoch: u64,
         role: String,
+        origin: StandingRead,
     },
     QuestionTarget {
         session_id: String,
@@ -141,6 +143,19 @@ pub(super) enum HostEvent {
     StartupRecoveryFailed(String),
     Shutdown {
         reply: oneshot::Sender<Result<(), String>>,
+    },
+}
+
+/// Why a reviewer's standing is being read, which decides what happens once
+/// a read answers after failing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StandingRead {
+    /// Launching a reviewer restored after a restart.
+    Restored,
+    /// The reviewer's session ended; a handback it saved is its outcome.
+    Ended {
+        child_session_id: String,
+        reason: String,
     },
 }
 

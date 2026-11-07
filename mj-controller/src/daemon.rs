@@ -547,6 +547,18 @@ struct StartupQueue {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// One provisioning stage an operation is in. A Create runs lanes
+/// concurrently, so each stage carries its own clock.
+struct ActiveStage {
+    /// How many instances of the stage are running.
+    count: usize,
+    started_at_epoch_seconds: u64,
+    /// When an instance of this stage last started or finished: the stall
+    /// check judges a working stage by this, not by the operation's other
+    /// stages. Set by `change_lifecycle_stage` only.
+    last_change: tokio::time::Instant,
+}
+
 struct ActiveLifecycle {
     move_operation_id: Option<String>,
     /// Durable intent bound by Restart admission; cleanup names this exact owner.
@@ -558,9 +570,10 @@ struct ActiveLifecycle {
     control: LifecycleControl,
     kind: LifecycleKind,
     started_at_epoch_seconds: u64,
-    active_stages: BTreeMap<ProvisionStage, (usize, u64)>,
-    /// When a stage last started or finished: the one record of whether this
-    /// operation is making progress. Set by `change_lifecycle_stage` only.
+    active_stages: BTreeMap<ProvisionStage, ActiveStage>,
+    /// When any stage last started or finished: the stall check's record of
+    /// whether an operation with no stage active is making progress. Set by
+    /// `change_lifecycle_stage` only.
     last_stage_change: tokio::time::Instant,
     /// The workspace a resume is claiming before its durable record changes.
     /// Workspace deletion consults this so it cannot race the claim.

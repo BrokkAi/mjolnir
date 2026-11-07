@@ -244,10 +244,11 @@ impl HostState {
                     // pending and the read is repeated.
                     Err(error) => {
                         tracing::warn!(child, %error, "could not read a restored reviewer's standing");
-                        let _ = events.send(HostEvent::RestoredReviewerUnread {
+                        let _ = events.send(HostEvent::ReviewerStandingUnread {
                             session_id,
                             epoch,
                             role,
+                            origin: StandingRead::Restored,
                             error,
                         });
                         return;
@@ -271,13 +272,15 @@ impl HostState {
         });
     }
 
-    /// Reads a restored reviewer's standing again after the delay the review
-    /// uses for its other retries, until a read answers.
-    pub(super) fn restored_reviewer_unread(
+    /// Reads a reviewer's standing again after the delay the review uses for
+    /// its other retries, until a read answers. The role is not settled in
+    /// between: a failed read says nothing about whether it saved a handback.
+    pub(super) fn reviewer_standing_unread(
         &mut self,
         session_id: &str,
         epoch: u64,
         role: String,
+        origin: StandingRead,
         error: String,
     ) {
         let Some(slot) = self
@@ -288,15 +291,16 @@ impl HostState {
             return;
         };
         let delay = slot.take_retry_delay();
-        tracing::warn!(%session_id, role, %error, retry_in_seconds = delay.as_secs(), "restored reviewer's standing will be read again");
+        tracing::warn!(%session_id, role, ?origin, %error, retry_in_seconds = delay.as_secs(), "reviewer's standing will be read again");
         let events = self.events.clone();
         let session_id = session_id.to_owned();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let _ = events.send(HostEvent::RetryRestoredReviewer {
+            let _ = events.send(HostEvent::RetryReviewerStanding {
                 session_id,
                 epoch,
                 role,
+                origin,
             });
         });
     }
@@ -458,7 +462,7 @@ impl HostState {
     /// like every other reviewer outcome, so the group resolves like any other
     /// reviewer failure.
     pub(super) fn child_ended(&mut self, child: &str, reason: String) {
-        let Some((session_id, role)) = self.reviews.iter().find_map(|(session_id, slot)| {
+        let Some((session_id, epoch, role)) = self.reviews.iter().find_map(|(session_id, slot)| {
             let registration = slot
                 .state
                 .active_group
@@ -466,7 +470,7 @@ impl HostState {
                 .registrations
                 .iter()
                 .find(|item| item.child_session_id.as_deref() == Some(child))?;
-            Some((session_id.clone(), registration.role.clone()))
+            Some((session_id.clone(), slot.epoch, registration.role.clone()))
         }) else {
             return;
         };
@@ -483,14 +487,23 @@ impl HostState {
         let child = child.to_owned();
         tokio::spawn(async move {
             // A handback the child recorded before it ended is its outcome.
-            let (handback, reason) = match reviewer_standing(&environment, &child).await {
-                Ok(standing) => (standing.handback, reason),
+            let handback = match reviewer_standing(&environment, &child).await {
+                Ok(standing) => standing.handback,
+                // Failing the role now could discard a handback the child
+                // saved, so the role stays pending and the read is repeated.
                 Err(error) => {
                     tracing::warn!(child, %error, "could not check an ended reviewer for a handback");
-                    (
-                        None,
-                        format!("{reason}; its recorded handback could not be read: {error}"),
-                    )
+                    let _ = events.send(HostEvent::ReviewerStandingUnread {
+                        session_id,
+                        epoch,
+                        role,
+                        origin: StandingRead::Ended {
+                            child_session_id: child,
+                            reason,
+                        },
+                        error,
+                    });
+                    return;
                 }
             };
             tracing::info!(child, session_id, role, %reason, found_handback = handback.is_some(), "reviewer child ended");

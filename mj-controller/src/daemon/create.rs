@@ -408,7 +408,7 @@ impl RuntimeState {
                 };
                 tracing::warn!(session_id = child, idle_secs = idle.as_secs(), %stage, ?phase, "reviewer child Create stalled");
                 anyhow::bail!(
-                    "the reviewer child {child} stalled while provisioning: no stage started or finished for {} s (stalled in: {stage}); {outcome}",
+                    "the reviewer child {child} stalled while provisioning: no progress for {} s (stalled in: {stage}); {outcome}",
                     idle.as_secs()
                 )
             }

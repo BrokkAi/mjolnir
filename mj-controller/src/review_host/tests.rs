@@ -2296,6 +2296,41 @@ async fn a_restored_reviewer_whose_standing_cannot_be_read_waits_and_reads_again
     host.shutdown().await.unwrap();
 }
 
+// Hard-won: pre-push review of d31ae04cd: an ended reviewer whose standing could not be read was failed, discarding a handback it had saved
+#[tokio::test]
+async fn an_ended_reviewer_whose_standing_cannot_be_read_is_read_again_before_it_settles() {
+    let session = session_id("ended-unread");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+    environment
+        .standing_errors
+        .lock()
+        .unwrap()
+        .insert(children[0].clone(), "database is locked".into());
+    environment.standings.lock().unwrap().insert(
+        children[0].clone(),
+        ChildStanding {
+            ended: Some("stopped".into()),
+            handback: Some("real defect".into()),
+        },
+    );
+
+    host.child_ended(
+        children[0].clone(),
+        "the reviewer's session ended (stopped)".into(),
+    );
+    finish_child(&host, &environment, &session, &children[1], Some("other")).await;
+    // The first read fails, so the role waits; the read repeated on the
+    // review's retry delay finds the handback.
+    wait_until_review_resolves(&host, &session).await;
+
+    let (complete, failures) = delivered_findings(&environment);
+    assert!(complete, "{failures:?}");
+    assert!(failures.is_empty(), "{failures:?}");
+    host.shutdown().await.unwrap();
+}
+
 // Hard-won: pre-push review of 4aaf9274c: an ended reviewer's failure bypassed the serialized outcome path, so a failed save of another outcome dropped it
 #[tokio::test]
 async fn an_ended_reviewers_failure_is_applied_after_a_failed_outcome_save() {
