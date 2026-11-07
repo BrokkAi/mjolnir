@@ -72,9 +72,7 @@
   "recorded_verdict": null,
   "expected": {
     "input": "none",
-    "wrong_actions": [
-      "await_input"
-    ],
+    "wrong_actions": [],
     "failure": "none",
     "quiet": null
   },

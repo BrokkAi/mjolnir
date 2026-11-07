@@ -327,7 +327,7 @@ def report(args):
         record = json.loads(line)
         by_id[record["id"]].append(record)
     rows = []
-    categories = defaultdict(lambda: {"n": 0, "axes_agree": 0, "above": 0, "action_ok": 0, "wrong_high": 0, "errors": 0})
+    categories = defaultdict(lambda: {"n": 0, "axes_agree": 0, "above": 0, "action_n": 0, "action_ok": 0, "wrong_high": 0, "errors": 0})
     inputs = defaultdict(lambda: {"n": 0, "agree": 0, "agree_high": 0, "detected": 0, "missed": 0, "false_required": 0, "errors": 0})
     reply_stats = defaultdict(lambda: {
         "requests": 0,
@@ -417,7 +417,9 @@ def report(args):
             act = record["action"]
             stats["axes_agree"] += agree
             stats["above"] += agree and above
-            stats["action_ok"] += expected.get("action") is not None and act == expected["action"]
+            if expected.get("action") is not None:
+                stats["action_n"] += 1
+                stats["action_ok"] += act == expected["action"]
             wrong = act in expected.get("wrong_actions", [])
             stats["wrong_high"] += wrong
             cells = " ".join(f"{axis[0]}={verdict[axis]['choice']}:{verdict[axis]['confidence']:.2f}" for axis in ("failure", "input", "work"))
@@ -433,7 +435,7 @@ def report(args):
     lines += [
         f"Input is scored independently of failure and work. Detection policy: `{policy}`. Confidence columns remain separate diagnostics. Errors count as unsuccessful requests.",
         f"Ambiguous cases excluded from strict input counts: {input_unscored} requests. Their hypothesized axes remain in the full-verdict table.",
-        f"Requests on fixtures without a work label or action: {partially_labeled}; axes agree over the labeled axes only, and action as expected counts labeled actions only.", "",
+        f"Requests on fixtures without a work label or action: {partially_labeled}; axes agree over the labeled axes only, and action as expected is out of the requests with a labeled action.", "",
         "| expected input | requests | choice agrees | agrees >= 0.85 | required detected | required missed | false required | errors |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
@@ -442,9 +444,9 @@ def report(args):
     lines += [""]
     lines += ["| category | requests | axes agree | agree and all >= 0.85 | action as expected | wrong action | errors |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
     for category, s in sorted(categories.items()):
-        lines.append(f"| {category} | {s['n']} | {s['axes_agree']} | {s['above']} | {s['action_ok']} | {s['wrong_high']} | {s['errors']} |")
-    total = {k: sum(s[k] for s in categories.values()) for k in ("n", "axes_agree", "above", "action_ok", "wrong_high", "errors")}
-    lines.append(f"| all | {total['n']} | {total['axes_agree']} | {total['above']} | {total['action_ok']} | {total['wrong_high']} | {total['errors']} |")
+        lines.append(f"| {category} | {s['n']} | {s['axes_agree']} | {s['above']} | {s['action_ok']}/{s['action_n']} | {s['wrong_high']} | {s['errors']} |")
+    total = {k: sum(s[k] for s in categories.values()) for k in ("n", "axes_agree", "above", "action_n", "action_ok", "wrong_high", "errors")}
+    lines.append(f"| all | {total['n']} | {total['axes_agree']} | {total['above']} | {total['action_ok']}/{total['action_n']} | {total['wrong_high']} | {total['errors']} |")
     lines += ["", "## Reply axis", ""]
     if reply_stats:
         lines += [

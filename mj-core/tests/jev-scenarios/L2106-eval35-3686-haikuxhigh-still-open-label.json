@@ -312,11 +312,7 @@
   "recorded_verdict": null,
   "expected": {
     "input": "required",
-    "wrong_actions": [
-      "continue",
-      "finished",
-      "wait"
-    ],
+    "wrong_actions": [],
     "failure": "none",
     "quiet": null
   },
