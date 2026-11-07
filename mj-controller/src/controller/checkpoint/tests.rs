@@ -1069,10 +1069,23 @@ fn latch_relay_child_serves_stdio() {
                     worker_build: None,
                 })
             }
-            mj_core::relay::RelayRequest::WorkFacts => std::env::var_os(LATCH_RELAY_WORK_FACTS)
-                .map(|path| mj_core::relay::RelayResponsePayload::WorkFacts {
-                    facts: serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap(),
-                }),
+            mj_core::relay::RelayRequest::WorkFacts { worktree } => {
+                std::env::var_os(LATCH_RELAY_WORK_FACTS).map(|path| {
+                    // Record what each request asked for, beside the facts.
+                    use std::io::Write;
+                    let mut requests = path.clone();
+                    requests.push(".requests");
+                    let mut log = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(requests)
+                        .expect("open the work facts request log");
+                    writeln!(log, "worktree={worktree}").expect("log a work facts request");
+                    mj_core::relay::RelayResponsePayload::WorkFacts {
+                        facts: serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap(),
+                    }
+                })
+            }
             mj_core::relay::RelayRequest::PollSubagentQueue { .. }
             | mj_core::relay::RelayRequest::SubagentRequests => {
                 subagent_connection_response(&request).map(|response| match response.body {

@@ -167,7 +167,7 @@ After spawning, end your turn with a one-line status. Each time a message from M
         text = subprocess.run(
             mj + ["transcript", "--session", parent, "--limit", "1000"],
             env=env, text=True, capture_output=True, timeout=120).stdout
-        assert "Mjolnir observed this when the child's turn ended" in text, text[-3000:]
+        assert "Mjolnir observed this when it recorded this finish" in text, text[-3000:]
         assert "detached from the harness: " in text and "sleep 600" in text, text[-3000:]
 
         parked = eventually("park message", lambda: events("subagent-parked-"), timeout=300)[0]

@@ -7905,6 +7905,7 @@ async fn work_facts_answer_on_the_connection_without_journaling() {
                 session_id: SESSION_ID.into(),
                 worker_pid: std::process::id(),
                 directory: directory.path().to_path_buf(),
+                git: "git".into(),
                 harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
             }),
             ..Default::default()
@@ -7915,7 +7916,7 @@ async fn work_facts_answer_on_the_connection_without_journaling() {
     let request = RelayRequestEnvelope {
         request_id: "facts".into(),
         protocol_version: RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::WorkFacts,
+        request: RelayRequest::WorkFacts { worktree: true },
     };
     let mut bytes = serde_json::to_vec(&request).unwrap();
     bytes.push(b'\n');

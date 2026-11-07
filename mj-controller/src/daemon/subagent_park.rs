@@ -164,6 +164,72 @@ impl RuntimeState {
         }
     }
 
+    /// Settle the parks that began a stop and did not record an outcome, from
+    /// the snapshot each wrote before its stop (see
+    /// `Controller::settle_unfinished_park`). Each runs as the child's park
+    /// lifecycle, so it is serialized with every other operation on the child,
+    /// and a failure leaves the marker for the next startup.
+    pub(super) fn recover_unfinished_parks(self: &Arc<Self>) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let parks = match blocking(crate::database::load_unfinished_parks).await {
+                Ok(parks) => parks,
+                Err(error) => {
+                    tracing::warn!(
+                        error = format!("{error:#}"),
+                        "could not read the parks that did not finish"
+                    );
+                    return;
+                }
+            };
+            for (child_session_id, park) in parks {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    // Another operation on the child (a restart that recovery
+                    // is running for the same crash) ends by itself, and the
+                    // settling does not depend on which comes first: it asks
+                    // whether the parked worker still lives. So it waits its
+                    // turn, with a growing pause.
+                    let mut pause = Duration::from_millis(250);
+                    let settled = loop {
+                        let attempt = state
+                            .run_lifecycle(child_session_id.clone(), LifecycleKind::Park, {
+                                let park = park.clone();
+                                move |_state, session_id, _cancelled| async move {
+                                    let controller = blocking(Controller::load).await?;
+                                    let executor =
+                                        CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);
+                                    controller
+                                        .settle_unfinished_park(&session_id, park, &executor)
+                                        .await?;
+                                    Ok(DaemonLifecycleResult::Done)
+                                }
+                            })
+                            .await;
+                        match attempt {
+                            Err(error) if error.is::<SessionLifecycleBusy>() => {
+                                tokio::time::sleep(pause).await;
+                                pause = (pause * 2).min(Duration::from_secs(30));
+                            }
+                            other => break other,
+                        }
+                    };
+                    match settled {
+                        Ok(_) => {
+                            tracing::info!(session_id = %child_session_id, "settled a sub-agent park that did not finish");
+                            state.publish_revision();
+                        }
+                        Err(error) => tracing::warn!(
+                            session_id = %child_session_id,
+                            error = format!("{error:#}"),
+                            "could not settle a sub-agent park that did not finish; it will be retried at the next startup"
+                        ),
+                    }
+                });
+            }
+        });
+    }
+
     /// Accept a durable wake and launch the worker. Its actor observes startup
     /// independently, including after daemon replacement.
     pub async fn unpark_subagent(self: &Arc<Self>, child_session_id: String) -> Result<()> {

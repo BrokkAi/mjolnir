@@ -389,7 +389,7 @@ struct WorkFactsJob {
 impl RelayConnectionJob for WorkFactsJob {
     fn run<'a>(self: Box<Self>, client: &'a mut RelayClient) -> futures::future::BoxFuture<'a, ()> {
         Box::pin(async move {
-            if self.reply.send(client.work_facts().await).is_err() {
+            if self.reply.send(client.work_facts(true).await).is_err() {
                 tracing::debug!("work facts receiver was dropped");
             }
         })

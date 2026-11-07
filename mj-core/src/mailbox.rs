@@ -615,7 +615,7 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
             // reads the claim against the observation.
             if let Some(facts) = &report.facts {
                 lines.push(
-                    "Mjolnir observed this when the child's turn ended; it is not the child's own claim."
+                    "Mjolnir observed this when it recorded this finish, not when you read it; it is not the child's own claim."
                         .into(),
                 );
                 lines.extend(facts.render_lines());
@@ -1036,6 +1036,7 @@ mod tests {
             WorkFacts {
                 observed_at_ms: 1,
                 processes: Observed::Known(ProcessFacts {
+                    worker: None,
                     running: 9,
                     shown,
                     omitted: 6,
@@ -1058,6 +1059,7 @@ mod tests {
             WorkFacts {
                 observed_at_ms: 1,
                 processes: Observed::Known(ProcessFacts {
+                    worker: None,
                     running: 0,
                     shown: Vec::new(),
                     omitted: 0,

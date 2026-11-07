@@ -4762,6 +4762,7 @@ fn observed_work() -> mj_core::work_facts::WorkFacts {
     WorkFacts {
         observed_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap() - 5_000,
         processes: Observed::Known(ProcessFacts {
+            worker: None,
             running: 1,
             shown: vec![RunningProcess {
                 pid: 41301,

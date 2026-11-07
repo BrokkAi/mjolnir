@@ -156,8 +156,13 @@ pub enum RelayRequest {
     /// Connection-only CPU measurement; never journaled.
     CpuUsage,
     /// Connection-only observation of the processes this session's agent left
-    /// running and of its working tree; never journaled.
-    WorkFacts,
+    /// running and, unless `worktree` is false, of its working tree; never
+    /// journaled. A caller that needs only processes (a park, which holds the
+    /// worker's idle reservation) leaves the Git read out.
+    WorkFacts {
+        #[serde(default = "work_facts_worktree_default")]
+        worktree: bool,
+    },
     /// Report non-secret metadata for this session's harness credentials.
     /// The runtime handles credential requests on the connection and never
     /// passes them through the durable relay.
@@ -388,7 +393,7 @@ impl RelayRequest {
             Self::InstallAttachment { .. } => "install_attachment",
             Self::ReadAttachment { .. } => "read_attachment",
             Self::CpuUsage => "cpu_usage",
-            Self::WorkFacts => "work_facts",
+            Self::WorkFacts { .. } => "work_facts",
             Self::CredentialState => "credential_state",
             Self::ReadCredentials => "read_credentials",
             Self::InstallCredentials { .. } => "install_credentials",
@@ -430,7 +435,7 @@ impl RelayRequest {
             | Self::InstallSlopcopLogin { .. }
             | Self::RemoveSlopcopLogin => super::RELAY_SLOPCOP_LOGIN_PROTOCOL,
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
-            Self::WorkFacts => super::RELAY_WORK_FACTS_PROTOCOL,
+            Self::WorkFacts { .. } => super::RELAY_WORK_FACTS_PROTOCOL,
             Self::DrainMailbox { .. } | Self::AckMailbox { .. } => 33,
             Self::ReserveIdle { .. } => 21,
             Self::HistoryQuery { .. }
@@ -899,4 +904,8 @@ mod project_memory_wire_tests {
         gzip.truncate(gzip.len() / 2);
         assert!(ProjectMemoryWireTree::Gzip { gzip }.decode().is_err());
     }
+}
+
+fn work_facts_worktree_default() -> bool {
+    true
 }

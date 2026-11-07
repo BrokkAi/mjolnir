@@ -851,6 +851,7 @@ pub async fn run_daemon_owned(
         session_id: config.session_id.clone(),
         worker_pid: std::process::id(),
         directory: config.cwd.clone(),
+        git: "git".into(),
         harness_ready_ms: durable_relay.harness_ready_clock(),
     };
     let relay = Arc::new(Mutex::new(durable_relay));
@@ -2156,13 +2157,14 @@ pub(super) async fn serve_client_with_memory(
                 write_logged_response(&mut writer, &response, &session_id, "cpu_usage").await?;
                 continue;
             }
-            if matches!(&envelope.request, RelayRequest::WorkFacts) {
+            if let RelayRequest::WorkFacts { worktree } = &envelope.request {
+                let worktree = *worktree;
                 // The scan reads `/proc` and runs Git, so it never runs on
                 // this loop, and it holds no relay lock. A controller that
                 // goes away cancels the wait.
                 let facts = match &work {
                     Some(observer) => tokio::select! {
-                        facts = crate::work_facts::collect(observer) => facts,
+                        facts = crate::work_facts::collect(observer, worktree) => facts,
                         disconnected = reader.fill_buf() => match disconnected {
                             Ok(_) => return Ok(()),
                             Err(error) => return Err(error.into()),

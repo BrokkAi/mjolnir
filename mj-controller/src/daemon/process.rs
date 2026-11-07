@@ -252,6 +252,7 @@ pub(super) async fn run_daemon_runtime(
         lifecycle_owned.extend(move_sessions.iter().cloned());
         state.resume_retained_cleanups();
         state.resume_startup_cleanups(true);
+        state.recover_unfinished_parks();
         state.restore_startup_deliveries(&cancellation).await?;
         Ok::<_, anyhow::Error>((move_sessions, lifecycle_owned))
     }

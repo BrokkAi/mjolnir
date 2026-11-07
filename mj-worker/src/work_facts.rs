@@ -8,11 +8,13 @@
 //! PID 1 and no walk of parent links finds it. The controller exports the
 //! variable to every harness, and tool shells pass it on.
 //!
-//! Helpers the harness needs are not work. They are excluded by what they are:
-//! Mjolnir's own executable, anything run from a managed harness or Node
-//! installation, and every descendant that started before the harness session
-//! was configured. A descendant that started after that moment was started by
-//! the agent.
+//! Helpers the harness needs are not work, and they are identified by which
+//! processes they are, never by which program they run: the harness's bridge
+//! and its helper processes (an MCP server, a language runtime the bridge runs
+//! on) are the descendants of this worker that already existed when the
+//! harness session was configured, and Mjolnir's own commands are processes of
+//! its own executable. A descendant that started after that moment was started
+//! by the agent, even when it runs the very `node` the bridge runs on.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,6 +35,8 @@ pub struct WorkObserver {
     pub worker_pid: u32,
     /// The agent's working directory.
     pub directory: PathBuf,
+    /// The Git program. Only a test names another.
+    pub git: std::ffi::OsString,
     /// Epoch milliseconds at which the harness session was last configured, or
     /// 0 while no configured harness exists.
     pub harness_ready_ms: Arc<AtomicI64>,
@@ -63,10 +67,8 @@ pub(crate) struct ScanContext<'a> {
     pub worker_pid: u32,
     /// Age of the harness's configured session in ms; `None` before it exists.
     pub harness_age_ms: Option<i64>,
-    /// File name of Mjolnir's own executable.
-    pub own_exe_name: Option<&'a std::ffi::OsStr>,
-    /// Directories whose programs are harness runtime, not agent work.
-    pub helper_roots: &'a [PathBuf],
+    /// Mjolnir's own executable: its commands are never the agent's work.
+    pub own_exe: Option<&'a Path>,
 }
 
 /// Decide which rows are the agent's work. Pure: the platform readers feed it.
@@ -104,13 +106,8 @@ pub(crate) fn select_processes(
             continue;
         }
         let described = describe(row);
-        if let Some(exe) = &described.exe {
-            if ctx.own_exe_name.is_some() && exe.file_name() == ctx.own_exe_name {
-                continue;
-            }
-            if ctx.helper_roots.iter().any(|root| exe.starts_with(root)) {
-                continue;
-            }
+        if ctx.own_exe.is_some() && described.exe.as_deref() == ctx.own_exe {
+            continue;
         }
         work.push((row, described, !in_tree));
     }
@@ -127,7 +124,15 @@ pub(crate) fn select_processes(
             detached: *detached,
         })
         .collect();
+    let worker = rows
+        .iter()
+        .find(|row| row.pid == ctx.worker_pid)
+        .map(|row| ProcessIdentity {
+            pid: row.pid,
+            start: describe(row).identity,
+        });
     ProcessFacts {
+        worker,
         running,
         omitted: running.saturating_sub(u32::try_from(shown.len()).unwrap_or(u32::MAX)),
         shown,
@@ -159,9 +164,11 @@ mod linux;
 mod macos;
 
 fn scan_processes(observer: &WorkObserver) -> Observed<ProcessFacts> {
-    let own_exe = std::env::current_exe().ok();
-    let own_exe_name = own_exe.as_deref().and_then(Path::file_name);
-    let helper_roots = helper_roots();
+    let own_exe = std::env::current_exe().ok().map(|exe| {
+        // A replaced executable reads back with this suffix.
+        let text = exe.to_string_lossy();
+        PathBuf::from(text.strip_suffix(" (deleted)").unwrap_or(&text))
+    });
     let ready_ms = observer.harness_ready_ms.load(Ordering::Acquire);
     #[cfg(target_os = "linux")]
     let table = linux::read_table(&observer.session_id);
@@ -181,8 +188,7 @@ fn scan_processes(observer: &WorkObserver) -> Observed<ProcessFacts> {
         // The configured moment is wall-clock; ages are monotonic, so convert
         // through the present.
         harness_age_ms: (ready_ms > 0).then(|| now_ms.saturating_sub(ready_ms)),
-        own_exe_name,
-        helper_roots: &helper_roots,
+        own_exe: own_exe.as_deref(),
     };
     Observed::Known(select_processes(&rows, &ctx, |row| reader.describe(row)))
 }
@@ -204,21 +210,13 @@ impl ProcessReader {
     }
 }
 
-fn helper_roots() -> Vec<PathBuf> {
-    let xdg = std::env::var_os("XDG_CACHE_HOME");
-    let home = std::env::var_os("HOME");
-    [
-        mj_core::harness_runtime::managed_harness_cache_root(xdg.as_deref(), home.as_deref()),
-        mj_core::harness_runtime::managed_node_cache_root(xdg.as_deref(), home.as_deref()),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
-}
-
 /// What `git status` and `git log` say about `directory`.
-fn read_worktree(directory: &Path) -> Observed<WorktreeFacts> {
-    let status = match run_git(directory, &["status", "--porcelain=v2", "-z", "--branch"]) {
+fn read_worktree(git: &std::ffi::OsStr, directory: &Path) -> Observed<WorktreeFacts> {
+    let status = match run_git(
+        git,
+        directory,
+        &["status", "--porcelain=v2", "-z", "--branch"],
+    ) {
         Ok(output) => output,
         Err(reason) => return Observed::unavailable(reason),
     };
@@ -227,6 +225,7 @@ fn read_worktree(directory: &Path) -> Observed<WorktreeFacts> {
         // A subject that cannot be read leaves the commit id, which is the
         // fact; an empty subject is not an error.
         if let Ok(subject) = run_git(
+            git,
             directory,
             &["log", "-1", "--format=%s", "--no-show-signature"],
         ) {
@@ -236,8 +235,12 @@ fn read_worktree(directory: &Path) -> Observed<WorktreeFacts> {
     Observed::Known(facts)
 }
 
-fn run_git(directory: &Path, args: &[&str]) -> std::result::Result<Vec<u8>, String> {
-    let mut command = std::process::Command::new("git");
+fn run_git(
+    git: &std::ffi::OsStr,
+    directory: &Path,
+    args: &[&str],
+) -> std::result::Result<Vec<u8>, String> {
+    let mut command = std::process::Command::new(git);
     // `GIT_OPTIONAL_LOCKS=0` keeps this read from taking the index lock a
     // concurrent `git commit` of the agent's would need.
     command
@@ -343,31 +346,40 @@ fn change_record(rest: &str, leading: usize) -> (String, &str) {
     (letter.to_string(), path)
 }
 
-/// Observe the processes and the working tree, concurrently. Always returns:
-/// a part that fails says why, and neither part can stall the other.
-pub async fn collect(observer: &WorkObserver) -> WorkFacts {
-    let scan = {
+/// Observe the processes, then the working tree when `worktree` asks for it.
+/// Always returns: a part that fails says why.
+///
+/// The processes are read first and Git started after, in one order: the
+/// collector's own `git` children are descendants of the worker that started
+/// after the harness was configured, which is how the agent's work is told
+/// apart, so a scan that ran beside Git could report the observer's own
+/// subprocesses as the agent's work.
+pub async fn collect(observer: &WorkObserver, worktree: bool) -> WorkFacts {
+    let processes = {
         let observer = observer.clone();
         tokio::task::spawn_blocking(move || scan_processes(&observer))
+            .await
+            .unwrap_or_else(|error| Observed::unavailable(format!("process scan failed: {error}")))
     };
-    let tree = {
+    let worktree = if worktree {
+        let git = observer.git.clone();
         let directory = observer.directory.clone();
-        tokio::task::spawn_blocking(move || read_worktree(&directory))
+        tokio::task::spawn_blocking(move || read_worktree(&git, &directory))
+            .await
+            .unwrap_or_else(|error| Observed::unavailable(format!("Git read failed: {error}")))
+    } else {
+        Observed::unavailable("the working tree was not requested")
     };
-    let (processes, worktree) = tokio::join!(scan, tree);
     WorkFacts {
         observed_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0),
-        processes: processes
-            .unwrap_or_else(|error| Observed::unavailable(format!("process scan failed: {error}"))),
-        worktree: worktree
-            .unwrap_or_else(|error| Observed::unavailable(format!("Git read failed: {error}"))),
+        processes,
+        worktree,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
 
     const WORKER: u32 = 100;
 
@@ -383,13 +395,15 @@ mod tests {
 
     fn describe(row: &ProcRow) -> Described {
         let (command, exe) = match row.pid {
-            // The harness's own helpers.
+            // The harness's own helpers, present when it was configured.
             101..=104 => ("hel worker acp-supervisor".to_owned(), "/bin/hel"),
             105 => ("node bridge.js".to_owned(), "/usr/bin/node"),
             106 => (
                 "claude --output-format stream-json".to_owned(),
-                "/cache/mjolnir/harnesses/claude/bin/claude",
+                "/usr/bin/claude",
             ),
+            // The agent's own `node`: the very program the bridge runs on.
+            107 => ("node server.js".to_owned(), "/usr/bin/node"),
             _ => (format!("cargo test --job {}", row.pid), "/usr/bin/cargo"),
         };
         Described {
@@ -401,7 +415,8 @@ mod tests {
 
     // A busy host: 300 unrelated processes, the harness helpers started before
     // the session was configured, and the agent's own work: a still-parented
-    // build and a `setsid` process that has been handed to PID 1.
+    // build, the agent's own `node`, and a `setsid` process that has been
+    // handed to PID 1.
     fn busy_table() -> Vec<ProcRow> {
         let mut rows: Vec<ProcRow> = (1000..1300)
             .map(|pid| row(pid, 1, 500_000, false))
@@ -411,8 +426,8 @@ mod tests {
             rows.push(row(pid, WORKER, 800_000, true));
         }
         rows.push(row(105, 101, 800_000, true));
-        // Started after the configuration, from the harness's own executable.
-        rows.push(row(106, 105, 10_000, true));
+        rows.push(row(106, 105, 800_000, true));
+        rows.push(row(107, 105, 30_000, true));
         for pid in 200..210 {
             rows.push(row(pid, 105, 10_000 + i64::from(pid), true));
         }
@@ -420,42 +435,53 @@ mod tests {
         rows
     }
 
-    fn context<'a>(roots: &'a [PathBuf], own: &'a OsStr) -> ScanContext<'a> {
+    fn context(own: &Path) -> ScanContext<'_> {
         ScanContext {
             worker_pid: WORKER,
             harness_age_ms: Some(700_000),
-            own_exe_name: Some(own),
-            helper_roots: roots,
+            own_exe: Some(own),
         }
     }
 
+    // Hard-won: a430ee620: every process running anything under the managed
+    // Node directory was hidden, so an agent's own node, npm and test processes
+    // were reported as no work at all.
     #[test]
     fn processes_exclude_helpers_and_keep_exact_counts_beyond_what_is_shown() {
-        let roots = [PathBuf::from("/cache/mjolnir/harnesses")];
-        let facts = select_processes(&busy_table(), &context(&roots, OsStr::new("hel")), describe);
-        // Ten still-parented builds and the reparented process; no helper, no
-        // unrelated process among the 300.
-        assert_eq!(facts.running, 11);
-        assert_eq!(facts.identities.len(), 11);
+        let facts = select_processes(&busy_table(), &context(Path::new("/bin/hel")), describe);
+        // The agent's `node` is reported beside ten builds and the reparented
+        // process; the bridge, which runs the same `node`, is not, nor is any
+        // other helper or unrelated process among the 300.
+        assert_eq!(facts.running, 12);
+        assert_eq!(facts.identities.len(), 12);
         assert_eq!(facts.shown.len(), SHOWN_PROCESSES);
-        assert_eq!(facts.omitted, 6);
-        // Longest running first: the detached process is 20 s old, the builds
-        // 10 s, so it leads and is the only one marked detached.
-        assert_eq!(facts.shown[0].pid, 300);
-        assert!(facts.shown[0].detached);
-        assert!(facts.shown[1..].iter().all(|process| !process.detached));
+        assert_eq!(facts.omitted, 7);
+        // Longest running first: the node is 30 s old, the detached process
+        // 20 s, the builds 10 s; only the detached one is marked so.
+        assert_eq!(facts.shown[0].pid, 107);
+        assert_eq!(facts.shown[0].command, "node server.js");
+        assert_eq!(facts.shown[1].pid, 300);
+        assert!(facts.shown[1].detached);
+        assert!(
+            facts
+                .shown
+                .iter()
+                .filter(|process| process.detached)
+                .count()
+                == 1
+        );
         assert!(
             facts
                 .identities
                 .iter()
                 .all(|identity| identity.start == format!("boot:{}", identity.pid))
         );
+        assert!(!facts.identities.iter().any(|identity| identity.pid == 105));
     }
 
     #[test]
     fn nothing_is_agent_work_before_the_harness_is_configured() {
-        let roots = [];
-        let mut context = context(&roots, OsStr::new("hel"));
+        let mut context = context(Path::new("/bin/hel"));
         context.harness_age_ms = None;
         let facts = select_processes(&busy_table(), &context, describe);
         // Only the process outside the harness tree remains.
@@ -509,7 +535,7 @@ mod tests {
             )
             .unwrap();
         }
-        let Observed::Known(facts) = read_worktree(directory) else {
+        let Observed::Known(facts) = read_worktree("git".as_ref(), directory) else {
             panic!("worktree unavailable");
         };
         assert_eq!(facts.changed, 5001);
@@ -526,7 +552,7 @@ mod tests {
     #[test]
     fn a_directory_that_is_not_a_repository_is_unavailable_not_clean() {
         let temp = tempfile::tempdir().unwrap();
-        match read_worktree(temp.path()) {
+        match read_worktree("git".as_ref(), temp.path()) {
             Observed::Unavailable { reason } => {
                 assert!(reason.contains("not a git repository"), "{reason}")
             }
@@ -549,7 +575,7 @@ mod tests {
         git(directory, &["add", "."]);
         git(directory, &["commit", "-qm", "first"]);
         git(directory, &["mv", "old name.txt", "new name.txt"]);
-        let Observed::Known(facts) = read_worktree(directory) else {
+        let Observed::Known(facts) = read_worktree("git".as_ref(), directory) else {
             panic!("worktree unavailable");
         };
         assert_eq!(facts.changed, 1);
@@ -574,6 +600,7 @@ mod tests {
             session_id: session,
             worker_pid: std::process::id(),
             directory: std::env::temp_dir(),
+            git: "git".into(),
             harness_ready_ms: Arc::new(AtomicI64::new(0)),
         };
         let mut found = None;
@@ -595,5 +622,55 @@ mod tests {
         assert!(process.detached);
         assert_eq!(process.command, "sleep 61");
         assert_eq!(facts.identities[0].start, identity);
+    }
+    // Hard-won: a430ee620: the working-tree read ran beside the process scan, so
+    // the observer's own `git` could be reported as the agent's work.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_observers_own_git_is_not_reported_as_the_agents_work() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let slow_git = temp.path().join("fake-git-for-the-observer-test");
+        std::fs::write(&slow_git, "#!/bin/sh\nsleep 1\nexit 1\n").unwrap();
+        std::fs::set_permissions(&slow_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let observer = WorkObserver {
+            session_id: format!("observer-git-{}", std::process::id()),
+            // This test process stands in for the worker, so a `git` the
+            // collector starts is one of its descendants, as in a real worker,
+            // and it started after the harness was configured.
+            worker_pid: std::process::id(),
+            directory: temp.path().to_path_buf(),
+            git: slow_git.clone().into(),
+            harness_ready_ms: Arc::new(AtomicI64::new(mj_core::clock::epoch_millis() - 1)),
+        };
+        let facts = collect(&observer, true).await;
+        let Observed::Known(processes) = &facts.processes else {
+            panic!("{:?}", facts.processes);
+        };
+        let reported = processes
+            .shown
+            .iter()
+            .filter(|process| process.command.contains("fake-git-for-the-observer-test"))
+            .count();
+        assert_eq!(reported, 0, "{processes:?}");
+        // The Git read ran, and failed, and says so; it is not an empty tree.
+        assert!(facts.worktree.known().is_none(), "{:?}", facts.worktree);
+    }
+
+    #[tokio::test]
+    async fn a_request_for_processes_only_runs_no_git_at_all() {
+        let temp = tempfile::tempdir().unwrap();
+        let observer = WorkObserver {
+            session_id: "no-git".into(),
+            worker_pid: std::process::id(),
+            directory: temp.path().to_path_buf(),
+            git: "/nonexistent/git-must-not-run".into(),
+            harness_ready_ms: Arc::new(AtomicI64::new(0)),
+        };
+        let facts = collect(&observer, false).await;
+        assert!(matches!(
+            &facts.worktree,
+            Observed::Unavailable { reason } if reason.contains("not requested")
+        ));
     }
 }

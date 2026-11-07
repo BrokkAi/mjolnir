@@ -22,6 +22,13 @@ pub(super) fn parse_elapsed_secs(text: &str) -> Option<i64> {
     days.checked_mul(86_400)?.checked_add(seconds)
 }
 
+/// The command line `ps` shows for itself when run with `args`. The scan's own
+/// `ps` is a child of the worker that started after the harness was
+/// configured, so it would be reported as the agent's work without this.
+fn own_ps_command(args: &[&str]) -> String {
+    format!("ps {}", args.join(" "))
+}
+
 fn ps(args: &[&str]) -> Result<String> {
     let mut command = Command::new("ps");
     command.args(args).env("LC_ALL", "C");
@@ -32,6 +39,8 @@ fn ps(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+const LISTING: &[&str] = &["-axww", "-o", "pid=,ppid=,etime=,stat=,command="];
+
 pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReader)> {
     let wanted = format!("MJ_SESSION_ID={session_id}");
     let marked: std::collections::BTreeSet<u32> = ps(&["-axwwE", "-o", "pid=,command="])?
@@ -39,7 +48,7 @@ pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReade
         .filter(|line| line.split_whitespace().any(|word| word == wanted))
         .filter_map(|line| line.split_whitespace().next()?.parse().ok())
         .collect();
-    let listing = ps(&["-axww", "-o", "pid=,ppid=,etime=,stat=,command="])?;
+    let listing = ps(LISTING)?;
     let mut rows = Vec::new();
     let mut commands = std::collections::BTreeMap::new();
     for line in listing.lines() {
@@ -56,7 +65,11 @@ pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReade
         ) else {
             continue;
         };
-        commands.insert(pid, fields.collect::<Vec<_>>().join(" "));
+        let command = fields.collect::<Vec<_>>().join(" ");
+        if ppid == std::process::id() && command == own_ps_command(LISTING) {
+            continue;
+        }
+        commands.insert(pid, command);
         rows.push(ProcRow {
             pid,
             ppid,

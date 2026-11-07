@@ -51,7 +51,7 @@ pub struct WorkFacts {
     pub worktree: Observed<WorktreeFacts>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessFacts {
     /// Exact number of work processes found.
     pub running: u32,
@@ -61,6 +61,12 @@ pub struct ProcessFacts {
     pub omitted: u32,
     /// Identity of every counted process, for the park's later liveness check.
     pub identities: Vec<ProcessIdentity>,
+    /// The worker that observed them. A daemon that must settle a park it
+    /// began but did not finish asks whether this process still lives: if it
+    /// does, the stop never ran; if it does not, the stop ran and the
+    /// identities above say what survived it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<ProcessIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
