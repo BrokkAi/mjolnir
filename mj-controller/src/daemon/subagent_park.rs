@@ -394,7 +394,7 @@ async fn finish_stopped_park_of<E>(
                         started.marker.snapshot.clone(),
                         format!("the controller could not be loaded: {error:#}"),
                     ),
-                    Some(started.expectation()),
+                    Some(started.marker.clone()),
                 )
             }
         },

@@ -128,7 +128,7 @@ fn report_unconfirmed_park(
         started.ordinal,
         session.message_name(),
         unconfirmed,
-        Some(started.expectation()),
+        Some(started.marker.clone()),
     ) {
         tracing::warn!(
             session_id,
@@ -379,7 +379,7 @@ impl Controller {
             started.ordinal,
             session.message_name(),
             settled,
-            Some(started.expectation()),
+            Some(started.marker.clone()),
         )
     }
 
@@ -1680,10 +1680,11 @@ mod tests {
     }
 
     /// A settlement settles the park it was started for, and no other. The child
-    /// is parked again for the same finish while the first park's check is still
-    /// running: the two markers are equal, and only the park's own start tells
-    /// them apart. The first check, which ran before the second park's stop, must
-    /// not settle the second; the second settles only after its own check.
+    /// is unparked with no new turn and parked again for the same finish while
+    /// the first park's check is still running: the two parks list the same
+    /// processes, and only the id in each marker tells them apart. The first
+    /// check, which ran before the second park's stop, must not settle the
+    /// second; the second settles only after its own check.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_settlement_settles_only_the_park_it_was_started_for() {
         if !isolated("a_settlement_settles_only_the_park_it_was_started_for") {
@@ -1692,8 +1693,11 @@ mod tests {
         let _writer = crate::database::install_isolated_test_writer();
         let (_root, first) = child_with_marker();
         let second = crate::database::record_park_started(LATCH_RELAY_SESSION.into()).unwrap();
-        assert_eq!(first.marker, second.marker, "the markers are equal");
-        assert_ne!(first.generation, second.generation);
+        // The same finish, the same processes: only the park's own id differs.
+        assert_eq!(first.ordinal, second.ordinal);
+        assert_eq!(first.marker.snapshot, second.marker.snapshot);
+        assert_ne!(first.marker.start_id, second.marker.start_id);
+        assert_ne!(first.marker, second.marker);
 
         // The first park's check ends after the second park began.
         loaded_controller()

@@ -133,6 +133,12 @@ pub struct ParkFacts {
     /// that died between the stop and its record finds at startup.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pending: bool,
+    /// Which start of a park this marker is. Written with the marker when the
+    /// park starts, so a settlement that holds it settles that park and no other,
+    /// even one of the same finish. Zero in an outcome, and in a marker written
+    /// before it existed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub start_id: u64,
     /// The processes the finish report listed, which the check asks about.
     pub snapshot: Observed<ProcessFacts>,
     /// Processes no longer running at the check after the stop; zero when
@@ -159,12 +165,17 @@ pub struct ParkFacts {
     pub survived_shown: Vec<RunningProcess>,
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 impl ParkFacts {
     /// Settle a park from the pids that still ran after the stop. A snapshot
     /// that was not observable settles with nothing counted.
     pub fn settled(snapshot: Observed<ProcessFacts>, survivors: &[u32]) -> Self {
         let mut park = Self {
             pending: false,
+            start_id: 0,
             snapshot,
             gone: 0,
             survived: 0,
