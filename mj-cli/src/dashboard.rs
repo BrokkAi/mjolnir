@@ -284,6 +284,9 @@ pub(crate) struct DashboardContext {
     /// conversation stays current whether or not it is the one with the
     /// keyboard, and moving between panes is a redraw rather than a rebuild.
     pub(crate) chats: BTreeMap<String, mj_chat::chat::ActiveChat>,
+    /// Live session views published by the controller runtime feed.
+    pub(crate) runtime_sessions:
+        mj_core::snapshot_map::SnapshotMap<String, mj_client::daemon::RuntimeSessionView>,
     /// The last record of each session that left the runtime feed while a
     /// chat still showed it. The feed carries only live sessions, but the
     /// chat still detaches, and this says where its draft and read position
@@ -1878,6 +1881,7 @@ impl DashboardContext {
             events: Some(events),
             splash: None,
             chats: BTreeMap::new(),
+            runtime_sessions: Default::default(),
             departed_records: BTreeMap::new(),
             question_drafts: BTreeMap::new(),
             transcript_positions: BTreeMap::new(),

@@ -44,6 +44,7 @@ fn runtime_view(
     projection_digest: &str,
 ) -> crate::daemon::RuntimeSessionView {
     crate::daemon::RuntimeSessionView {
+        policy_config_keys: Vec::new(),
         session_id: session_id.to_owned(),
         projection_ordinal,
         projection_digest: projection_digest.to_owned(),

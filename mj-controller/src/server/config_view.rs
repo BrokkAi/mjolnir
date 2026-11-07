@@ -70,3 +70,17 @@ pub fn session_config_view(
     );
     viewer_config_options(&state.config_options, &facts)
 }
+
+/// Remove execution-policy selectors only at the user projection boundary.
+/// Worker and plan control retain the complete ACP catalogue.
+pub fn filter_policy_config_options(
+    options: &mut Vec<ViewerConfigOption>,
+    enforcement: Option<mj_core::config::ExecutionEnforcement>,
+    raw: &[agent_client_protocol::v1::schema::SessionConfigOption],
+) -> Vec<String> {
+    let owned = enforcement
+        .map(|value| value.owned_config_keys(raw))
+        .unwrap_or_default();
+    options.retain(|option| !owned.contains(&option.key));
+    owned
+}

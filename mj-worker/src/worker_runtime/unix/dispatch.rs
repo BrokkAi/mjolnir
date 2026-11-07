@@ -624,14 +624,10 @@ pub(crate) fn record_runtime_event(
         }
         RuntimeEvent::SessionModeApplied {
             request_id,
-            mode_id,
+            mode_id: _,
             config_options,
             modes,
         } => {
-            relay.record_observation(RelayObservation::ConfigurationUpdated {
-                key: "mode".to_owned(),
-                value: mode_id,
-            })?;
             relay.record_observation(RelayObservation::SessionConfigured { config_options })?;
             relay.record_observation(RelayObservation::SessionModesConfigured { modes })?;
             relay.record_command_completed(&request_id, RelayCommandOutcome::SessionModeSet)?;

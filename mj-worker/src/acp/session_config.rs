@@ -476,29 +476,6 @@ fn announced_mode_substitute(harness: HarnessKind, desired: &str) -> Option<&'st
     }
 }
 
-/// The config option that offers `desired`: `selector` when the bridge lists
-/// it there, otherwise the bridge's Mode selector.
-fn execution_mode_option<'a>(
-    config_options: &'a [SessionConfigOption],
-    selector: Option<&str>,
-    desired: &str,
-) -> Option<&'a SessionConfigOption> {
-    let offers = |option: &&SessionConfigOption| select_contains(&option.kind, desired);
-    selector
-        .and_then(|id| {
-            config_options
-                .iter()
-                .filter(|option| option.id.to_string() == id)
-                .find(offers)
-        })
-        .or_else(|| {
-            config_options
-                .iter()
-                .filter(|option| option.category == Some(SessionConfigOptionCategory::Mode))
-                .find(offers)
-        })
-}
-
 pub(super) async fn enforce_execution_mode(
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
@@ -508,7 +485,7 @@ pub(super) async fn enforce_execution_mode(
     config_options: &mut Vec<SessionConfigOption>,
     legacy_modes: &mut Option<agent_client_protocol::v1::schema::SessionModeState>,
 ) -> Result<String> {
-    if let Some(option) = execution_mode_option(config_options, selector, desired) {
+    if let Some(option) = mj_core::acp::execution_mode_option(config_options, selector, desired) {
         let option_id = option.id.clone();
         // Legacy session modes mirror only the Mode selector.
         let mirrors_legacy_modes = option.category == Some(SessionConfigOptionCategory::Mode);
@@ -610,6 +587,7 @@ async fn select_confirmed(
     desired: &str,
     config_options: &mut Vec<SessionConfigOption>,
 ) -> Result<String> {
+    let previous = surface::config_current_value(config_options, &option_id.to_string());
     let response = connection
         .send_request(SetSessionConfigOptionRequest::new(
             session_id.clone(),
@@ -620,6 +598,13 @@ async fn select_confirmed(
         .await
         .with_context(|| format!("select required ACP {label} {desired}"))?;
     *config_options = response.config_options;
+    // Codex and Kimi answer with the configuration they held before the
+    // change (see `adopt_requested_value`). Every other harness must confirm
+    // the value it now runs, since acknowledging one mode while running in
+    // another is unsafe.
+    if matches!(harness, HarnessKind::Codex | HarnessKind::Kimi) {
+        adopt_requested_value(config_options, &option_id, previous.as_deref(), desired);
+    }
     // A harness can answer the request and still report another value, so
     // the session is only safe to use once it confirms the effective one.
     let effective = surface::config_current_value(config_options, &option_id.to_string());
@@ -698,3 +683,370 @@ pub(super) fn refused_mode_warning(
          session continues in {kept}."
     )
 }
+
+/// How `reassert_execution_policy` treats the cached mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PolicySync {
+    /// Request the policy values even when the cache already shows them: the
+    /// cache can predate a permission response's mode change.
+    Always,
+    /// Request them only when the cache shows another value, leaving Plan on.
+    IfDrifted,
+}
+
+/// A harness's answer refusing the policy mode, as `mode_refusal` reads it.
+pub(super) struct ModeRefusal {
+    pub(super) error: anyhow::Error,
+    pub(super) text: String,
+    /// The bridge does not offer the mode at all, as opposed to refusing a
+    /// request for it. Only Claude has a safe mode to take instead.
+    pub(super) unoffered: bool,
+}
+
+/// Reconcile the bridge with the launch policy at a command boundary. Plan
+/// controls may temporarily select Plan; leaving it always returns to policy.
+/// A refused policy mode is the answer, not an error, so the caller decides
+/// what the session does instead; the policy setting is selected either way,
+/// and any other failure, the setting's included, is an error.
+pub(super) async fn reassert_execution_policy(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    config_options: &mut Vec<SessionConfigOption>,
+    modes: &mut Option<SessionModeState>,
+    sync: PolicySync,
+) -> Result<Option<ModeRefusal>> {
+    let Some(enforcement) = enforcement else {
+        return Ok(None);
+    };
+    let mut refused = None;
+    if let Some(desired) = enforcement.acp_mode() {
+        // The value on the selector the policy owns, or the legacy list when
+        // the bridge has no such selector. Muse keeps Plan on another
+        // selector, so its Plan never stands in for the approval policy.
+        let setting = enforcement.acp_setting().map(|(key, _)| key);
+        let current = match enforcement
+            .owned_config_keys(config_options)
+            .into_iter()
+            .find(|key| Some(key.as_str()) != setting)
+        {
+            Some(selector) => surface::config_current_value(config_options, &selector),
+            None => modes
+                .as_ref()
+                .map(|modes| modes.current_mode_id.to_string()),
+        };
+        // A bridge whose catalogue omits the policy mode, as Claude's does
+        // for Auto on some models, has refused it as plainly as one that
+        // answers the request with an error.
+        let offered = mj_core::acp::execution_mode_option(
+            config_options,
+            enforcement.acp_mode_selector(),
+            desired,
+        )
+        .is_some()
+            || modes.as_ref().is_some_and(|modes| {
+                modes
+                    .available_modes
+                    .iter()
+                    .any(|mode| mode.id.to_string() == desired)
+            });
+        let needed = sync == PolicySync::Always
+            || (current.as_deref() != Some(desired) && current.as_deref() != Some("plan"));
+        if needed && !offered {
+            let text = format!(
+                "{} does not offer the {desired} mode here",
+                harness.display_name()
+            );
+            refused = Some(ModeRefusal {
+                error: anyhow!("{text}"),
+                text,
+                unoffered: true,
+            });
+        } else if needed
+            && let Err(error) = enforce_execution_mode(
+                connection,
+                session_id,
+                harness,
+                enforcement.acp_mode_selector(),
+                desired,
+                config_options,
+                modes,
+            )
+            .await
+        {
+            let Some(text) = mode_refusal(&error) else {
+                return Err(error);
+            };
+            refused = Some(ModeRefusal {
+                error,
+                text,
+                unoffered: false,
+            });
+        }
+    }
+    if let Some((key, value)) = enforcement.acp_setting()
+        && (sync == PolicySync::Always
+            || surface::config_current_value(config_options, key).as_deref() != Some(value))
+    {
+        enforce_policy_setting(
+            connection,
+            session_id,
+            harness,
+            (key, value),
+            config_options,
+        )
+        .await?;
+    }
+    Ok(refused)
+}
+
+/// The warning a session gets when its harness refused the policy mode,
+/// naming the mode the session is left in.
+pub(super) fn refused_policy_warning(
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    refusal: &ModeRefusal,
+    modes: Option<&SessionModeState>,
+    config_options: &[SessionConfigOption],
+) -> String {
+    let desired = enforcement
+        .and_then(ExecutionEnforcement::acp_mode)
+        .unwrap_or_default();
+    tracing::warn!(
+        ?harness,
+        mode = desired,
+        error = format!("{:#}", refusal.error),
+        "the harness refused the execution mode"
+    );
+    refused_mode_warning(
+        harness,
+        enforcement.and_then(ExecutionEnforcement::acp_mode_selector),
+        desired,
+        &refusal.text,
+        modes,
+        config_options,
+    )
+}
+
+/// The mode Claude and Kimi leave Plan for when the policy sets no mode, and
+/// Claude's when it refuses the policy's: it asks before every change, so it
+/// is never looser than the policy, and Plan can always be left.
+const PLAN_EXIT_DEFAULT_MODE: &str = "default";
+
+/// Answer a refused policy mode. Claude takes its default mode, which asks
+/// before every change, so whatever mode the session held (a restored
+/// bypassPermissions included) never outlives the refusal. Returns the
+/// warning to show, or `None` for a harness with no such safe mode, whose
+/// caller decides.
+pub(super) async fn take_safe_mode(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    config_options: &mut Vec<SessionConfigOption>,
+    modes: &mut Option<SessionModeState>,
+    refusal: &ModeRefusal,
+) -> Result<Option<String>> {
+    if harness != HarnessKind::Claude {
+        return Ok(None);
+    }
+    enforce_execution_mode(
+        connection,
+        session_id,
+        harness,
+        None,
+        PLAN_EXIT_DEFAULT_MODE,
+        config_options,
+        modes,
+    )
+    .await?;
+    Ok(Some(refused_policy_warning(
+        harness,
+        enforcement,
+        refusal,
+        modes.as_ref(),
+        config_options,
+    )))
+}
+
+/// Leave Plan for the policy mode, returning the warning to show when the
+/// harness refused it and the session took Claude's default mode instead.
+/// A policy that sets no mode leaves Plan for the harness default.
+pub(super) async fn leave_plan_for_policy(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    config_options: &mut Vec<SessionConfigOption>,
+    modes: &mut Option<SessionModeState>,
+) -> Result<Option<String>> {
+    if enforcement
+        .and_then(ExecutionEnforcement::acp_mode)
+        .is_none()
+    {
+        enforce_execution_mode(
+            connection,
+            session_id,
+            harness,
+            None,
+            PLAN_EXIT_DEFAULT_MODE,
+            config_options,
+            modes,
+        )
+        .await?;
+    }
+    let Some(refusal) = reassert_execution_policy(
+        connection,
+        session_id,
+        harness,
+        enforcement,
+        config_options,
+        modes,
+        PolicySync::Always,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    match take_safe_mode(
+        connection,
+        session_id,
+        harness,
+        enforcement,
+        config_options,
+        modes,
+        &refusal,
+    )
+    .await?
+    {
+        Some(warning) => Ok(Some(warning)),
+        None => Err(refusal.error),
+    }
+}
+
+/// Reassert the policy after the session's model moved. A harness that
+/// refuses the policy mode stays usable with a warning instead of ending:
+/// Claude takes its default mode, another harness keeps its own.
+///
+/// A model change can move the bridge's mode, and its answer need not say
+/// so (a legacy mode list, or an empty catalogue the worker keeps its own
+/// copy over), so the policy is requested outright unless Plan is on.
+pub(super) async fn reconcile_execution_policy(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    enforcement: Option<ExecutionEnforcement>,
+    config_options: &mut Vec<SessionConfigOption>,
+    modes: &mut Option<SessionModeState>,
+    events: &mpsc::Sender<RuntimeEvent>,
+) -> Result<()> {
+    let sync = if current_session_mode(config_options, modes).as_deref() == Some("plan") {
+        PolicySync::IfDrifted
+    } else {
+        PolicySync::Always
+    };
+    let Some(refusal) = reassert_execution_policy(
+        connection,
+        session_id,
+        harness,
+        enforcement,
+        config_options,
+        modes,
+        sync,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let message = match take_safe_mode(
+        connection,
+        session_id,
+        harness,
+        enforcement,
+        config_options,
+        modes,
+        &refusal,
+    )
+    .await?
+    {
+        Some(message) => message,
+        // Without a safe mode, a mode the bridge does not offer at all
+        // cannot be worked around: the session would run without its policy.
+        None if refusal.unoffered => return Err(refusal.error),
+        None => refused_policy_warning(
+            harness,
+            enforcement,
+            &refusal,
+            modes.as_ref(),
+            config_options,
+        ),
+    };
+    emit_runtime_event(events, RuntimeEvent::Warning { message }).await
+}
+
+/// The model the session reports, which decides whether the bridge allows
+/// the policy mode (Claude's Auto).
+pub(super) fn session_model(options: &[SessionConfigOption]) -> Option<String> {
+    options
+        .iter()
+        .find(|option| option.category == Some(SessionConfigOptionCategory::Model))
+        .and_then(|option| surface::config_current_value(options, &option.id.to_string()))
+        .or_else(|| surface::config_current_value(options, "model"))
+}
+
+/// Whether a mode change from outside the worker may select `value` on the
+/// selector `key` (`None` for the legacy session-mode list). The policy owns
+/// its selectors: only Plan and the policy's own values pass, so no caller,
+/// an older controller included, can move a session off its policy.
+pub(super) fn policy_permits(
+    enforcement: Option<ExecutionEnforcement>,
+    options: &[SessionConfigOption],
+    key: Option<&str>,
+    value: &str,
+) -> bool {
+    let Some(enforcement) = enforcement else {
+        return true;
+    };
+    let policy_mode = |value: &str| value == "plan" || enforcement.acp_mode() == Some(value);
+    // The selector the change would reach: `set_session_config` resolves
+    // aliases such as `mode` to the bridge's own selector id.
+    let resolved = key.map(|key| {
+        mj_core::acp::find_session_config_option(options, key)
+            .map_or_else(|| key.to_owned(), |option| option.id.to_string())
+    });
+    match resolved.as_deref() {
+        // The legacy mode list mirrors the Mode selector, which carries the
+        // policy unless the bridge has the policy's own named selector
+        // (Muse images before muse-acp 0.10 do not).
+        None => {
+            enforcement.acp_mode().is_none()
+                || enforcement.acp_mode_selector().is_some_and(|selector| {
+                    options
+                        .iter()
+                        .any(|option| option.id.to_string() == selector)
+                })
+                || policy_mode(value)
+        }
+        Some(key)
+            if enforcement
+                .acp_setting()
+                .is_some_and(|(setting, _)| setting == key) =>
+        {
+            enforcement.acp_setting() == Some((key, value))
+        }
+        Some(key)
+            if enforcement
+                .owned_config_keys(options)
+                .iter()
+                .any(|owned| owned == key) =>
+        {
+            policy_mode(value)
+        }
+        Some(_) => true,
+    }
+}
+
+/// Refusal for a mode change `policy_permits` turns down.
+pub(super) const POLICY_OWNED_MODE: &str =
+    "The target's permission policy sets this setting. Use plan mode to enter or leave Plan.";
