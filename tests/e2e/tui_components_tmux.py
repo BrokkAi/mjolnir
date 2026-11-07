@@ -511,11 +511,12 @@ def dashboard_dimensions(tmux: TmuxController, evidence: Evidence) -> None:
 def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
     """Changing only the sidebar size moves both support panes together.
 
-    Where the sidebar ends and the support panes start depends on the
-    terminal width and on how wide their tables are, so the probe compares
-    states instead of fixing columns: in every state Targets and Profiles
-    share a column; the narrow and wide sidebars differ; and returning to the
-    narrow one restores the whole layout.
+    Where the sidebar ends depends on the terminal width, so the probe
+    compares states instead of fixing columns: in every state Targets and
+    Profiles begin in the column right after the sidebar's edge; the narrow
+    and wide sidebars differ; and returning to the narrow one restores the
+    whole layout. The terminal is wide enough that the panes' tables fit beside
+    Sessions with either size.
     """
     tmux.resize(200, 40)
     tmux.wait_until(
@@ -565,12 +566,16 @@ def sidebar_relayout(tmux: TmuxController, evidence: Evidence) -> None:
         tmux.wait_until(settled, f"support panes settled with {label} sidebar")
         states[label] = before = accepted[-1]
         edge, targets_x, quota_x = states[label]
-        if targets_x != quota_x:
-            raise ScenarioFailure(f"Targets and Profiles are not aligned in {label}: {states}")
+        # The panes sit beside Sessions: both begin in the column right after
+        # the sidebar's edge, wherever the sidebar's edge is.
+        if not targets_x == quota_x == edge + 1:
+            raise ScenarioFailure(
+                f"Targets and Profiles do not follow the sidebar in {label}: {states}"
+            )
         evidence.event(
             f"sidebar-relayout-{label}",
             f"click Sessions {glyph} at fixed 200x40",
-            "Targets and Profiles share a column",
+            "Targets and Profiles begin right after the sidebar",
             f"sidebar ends at column {edge}; Targets and Profiles begin at column {targets_x}",
             evidence.capture(f"sidebar-relayout-{label}", tmux.capture()),
         )
