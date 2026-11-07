@@ -1892,7 +1892,7 @@ struct Imds {
     pending_checks: std::sync::atomic::AtomicUsize,
     /// Report this state instead of `applied` or `pending`.
     state: Option<&'static str>,
-    cancelled: bool,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     commands: Mutex<Vec<Vec<String>>>,
 }
 
@@ -1904,7 +1904,7 @@ impl Imds {
             modify_has_no_effect: false,
             pending_checks: std::sync::atomic::AtomicUsize::new(0),
             state: None,
-            cancelled: false,
+            cancelled: Default::default(),
             commands: Mutex::new(Vec::new()),
         }
     }
@@ -1936,7 +1936,7 @@ impl Imds {
 
 impl CommandExecutor for Imds {
     fn cancellation_requested(&self) -> bool {
-        self.cancelled
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
@@ -2241,11 +2241,40 @@ fn an_imdsv2_change_that_never_applies_fails_at_the_deadline() {
     assert!(clock.sleeps.borrow().is_empty());
 
     // So does cancelling the operation.
-    let mut cancelled = Imds::new(false).pending_for(usize::MAX);
-    cancelled.cancelled = true;
+    let cancelled = Imds::new(false).pending_for(usize::MAX);
+    cancelled
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let clock = VirtualClock::new();
     let error = clock
         .ensure(&cancelled, Duration::from_secs(300))
         .unwrap_err();
     assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+}
+
+// Hard-won: 96c0993ac: the wait for IMDSv2 slept in one piece, so cancelling provisioning was noticed only when the pause ended.
+#[test]
+fn cancelling_during_the_imdsv2_wait_ends_it_promptly() {
+    let executor = Imds::new(false).pending_for(usize::MAX);
+    let cancelled = executor.cancelled.clone();
+    // The first pause is three seconds; the cancellation arrives in the middle.
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let started = std::time::Instant::now();
+    let error = crate::controller::backend::ensure_imdsv2(
+        "default",
+        "us-east-1",
+        "i-0123456789abcdef0",
+        &executor,
+    )
+    .unwrap_err();
+    canceller.join().unwrap();
+    assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the wait ran on for {:?}",
+        started.elapsed()
+    );
 }

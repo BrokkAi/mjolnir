@@ -1331,7 +1331,11 @@ pub(super) fn ensure_imdsv2(
         executor,
         AWS_SSH_READY_TIMEOUT,
         Instant::now,
-        std::thread::sleep,
+        // The pauses add up to minutes; cancelling the provisioning must end
+        // the wait, not be noticed when it is over.
+        |pause| {
+            targets::sleep_unless_cancelled(pause, &|| executor.cancellation_requested());
+        },
     )
 }
 
@@ -1437,6 +1441,10 @@ pub(super) fn ensure_imdsv2_until(
         );
         sleep(pause.min(timeout - elapsed));
         pause *= 2;
+        ensure!(
+            !executor.cancellation_requested(),
+            "cancelled while waiting for IMDSv2 to apply on the new instance"
+        );
         (tokens, state) = options()?;
     }
 }
