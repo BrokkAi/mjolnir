@@ -11,7 +11,7 @@ use std::sync::{
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
-use futures::future::{FutureExt, Shared, TryFutureExt, join_all};
+use futures::future::{FutureExt, Shared, join_all};
 use mj_client::session::BoxFuture;
 #[cfg(test)]
 use mj_core::config::HarnessProfile;
@@ -116,17 +116,22 @@ const RETRY_DELAYS: [Duration; 6] = [
     Duration::from_secs(15 * 60),
 ];
 
-/// A failed attempt: its reason, and whether a later attempt could succeed.
+/// A failed attempt: its reason, whether a later attempt could succeed, and
+/// the catalog-input digest the attempt read before it ran — the home state
+/// the failure is about, which a retry window should arm against so a fresh
+/// edit bypasses it.
 #[derive(Clone)]
 struct AttemptError {
     message: Arc<str>,
     retryable: bool,
+    home_digest: Option<[u8; 32]>,
 }
 impl AttemptError {
-    fn new(error: &anyhow::Error) -> Self {
+    fn new(error: &anyhow::Error, home_digest: Option<[u8; 32]>) -> Self {
         Self {
             message: format!("{error:#}").into(),
             retryable: !crate::controller::profile_config::discovery_is_unsupported(error),
+            home_digest,
         }
     }
 }
@@ -1150,26 +1155,34 @@ impl ProfileCatalog {
                 return;
             }
             inner.refreshing.remove(&key);
-            let Some(Ok(outcome)) = result else {
-                // The re-probe failed: the entry keeps its pre-edit copy and
-                // the identity stays stale. Re-arm the retry window so the
-                // next pass waits it out instead of re-probing the identity
-                // every poll. The window retries one digest — the state the
-                // failed probe was correcting — so a pass whose current
-                // digest differs is a fresh edit and bypasses it. The window
-                // is cleared by the home watch when it observes every served
-                // entry settled, never by a probe.
-                match inner.home_edit_retry_after.get_mut(&key.0) {
-                    Some((after, _)) => *after = Instant::now() + self.home_edit_retry_wait(),
-                    None => {
-                        let armed = inner.home_settled.get(&key).copied();
-                        inner.home_edit_retry_after.insert(
-                            key.0.clone(),
-                            (Instant::now() + self.home_edit_retry_wait(), armed),
-                        );
+            let outcome = match result {
+                Some(Ok(outcome)) => outcome,
+                Some(Err(error)) => {
+                    // The re-probe failed: the entry keeps its pre-edit copy
+                    // and the identity stays stale. Re-arm the retry window
+                    // so the next pass waits it out instead of re-probing the
+                    // identity every poll. The window retries one digest —
+                    // the home state the failed probe read, else the state
+                    // the entry serves — so a pass whose current digest
+                    // differs is a fresh edit and bypasses it, even for an
+                    // entry a cache-served publish never settled. The window
+                    // is cleared by the home watch when it observes every
+                    // served entry settled, never by a probe.
+                    let armed = error
+                        .home_digest
+                        .or_else(|| inner.home_settled.get(&key).copied());
+                    match inner.home_edit_retry_after.get_mut(&key.0) {
+                        Some((after, _)) => *after = Instant::now() + self.home_edit_retry_wait(),
+                        None => {
+                            inner.home_edit_retry_after.insert(
+                                key.0.clone(),
+                                (Instant::now() + self.home_edit_retry_wait(), armed),
+                            );
+                        }
                     }
+                    return;
                 }
-                return;
+                None => return,
             };
             let Some(Entry::Ready(previous)) = inner.entries.get(&key).cloned() else {
                 return;
@@ -1231,14 +1244,17 @@ impl ProfileCatalog {
         let probe: BoxFuture<'static, Result<crate::controller::profile_config::Discovery>> = {
             #[cfg(test)]
             if let Some((probe, model_probe)) = &self.probe {
-                match model {
+                let future = match model {
                     None => probe(definition.id.clone()),
                     Some(model) => model_probe(definition.id.clone(), model),
+                };
+                async move {
+                    let choices = future.await?;
+                    Ok::<_, anyhow::Error>(crate::controller::profile_config::Discovery {
+                        choices,
+                        probed: true,
+                    })
                 }
-                .map_ok(|choices| crate::controller::profile_config::Discovery {
-                    choices,
-                    probed: true,
-                })
                 .boxed()
             } else {
                 crate::controller::profile_config::discover_for(
@@ -1272,7 +1288,9 @@ impl ProfileCatalog {
                 .as_deref()
                 .and_then(hash_home_inputs)
                 .map(|inputs| home_digest(&inputs));
-            let discovery = probe.await?;
+            let discovery = probe
+                .await
+                .map_err(|error| AttemptError::new(&error, digest_at_start))?;
             // A cache-served answer predates the home edit the digest just
             // captured: it settles nothing, so the watch keeps the entry
             // pending for a real re-probe instead of masking the edit.
@@ -1286,7 +1304,6 @@ impl ProfileCatalog {
                 home_digest,
             })
         }
-        .map_err(|error: anyhow::Error| AttemptError::new(&error))
         .boxed()
         .shared()
     }
@@ -1348,7 +1365,9 @@ impl ProfileCatalog {
                                 ));
                             }
                         }
-                        Err(AttemptError { message, retryable }) => {
+                        Err(AttemptError {
+                            message, retryable, ..
+                        }) => {
                             inner.entries.insert(
                                 key.clone(),
                                 Entry::Failed {
