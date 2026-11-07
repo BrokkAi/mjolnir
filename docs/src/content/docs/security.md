@@ -229,22 +229,19 @@ Claude Remote Control or claude.ai connectors.
 
 By default, Mjolnir's own SSH connections accept a host key they have never
 seen, record it in `known_hosts`, and refuse a key that later changes
-(`StrictHostKeyChecking=accept-new`). A machine's `extra_args` or an EC2
-machine's `ssh_args` replaces that default for Mjolnir's connections to that
-machine, in either direction. A `GIT_SSH_COMMAND` in the daemon's environment
-replaces it for most Git commands Mjolnir runs on the controller, but not for
-the clone cache or the checkpoint base-commit check, which always use
-`accept-new`; only verified keys in `known_hosts`, described below, protect
-those. The default covers its connections to SSH
+(`StrictHostKeyChecking=accept-new`). That covers its connections to SSH
 machines and EC2 instances, whose key is always new at first contact, and the
 Git fetches it runs for its clone cache and checkpoint checks, whether those run
 on the controller or on an SSH machine that hosts a target's containers. Someone
 who can intercept a first connection can present their own key, and it is
 trusted from then on. Other Git commands that run on a target follow that
-target's own SSH settings.
+target's own SSH settings. SSH options you set yourself, such as a
+`StrictHostKeyChecking` option in a machine's `extra_args` or a
+`GIT_SSH_COMMAND` in the daemon's environment, change the checking for the
+connections that use them.
 
-A key that is already in `known_hosts` is checked, not trusted anew. To avoid
-first-use trust:
+A key that is already in `known_hosts` is checked, not trusted anew, unless an
+SSH option you set turns checking off. To avoid first-use trust:
 
 - Before the first connection, add the verified key of each Git host and each
   machine to the `known_hosts` file of the account Mjolnir uses, on every
