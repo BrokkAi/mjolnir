@@ -16,8 +16,8 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 
 - [x] (2026-11-06 00:00Z) Read issue #1424 and researched the code paths named in this plan.
 - [x] (2026-11-06 00:00Z) Wrote this ExecPlan (design only).
-- [ ] Parent review of this plan; resolve the open decisions listed under "Decision Log" marked "open".
-- [ ] Milestone 0: live AWS prototype. Record real `aws sts assume-role` output and an `aws ec2 run-instances --metadata-options` response; confirm the Bedrock default policy against both harnesses.
+- [x] (2026-11-06 Z) Parent reviewed and accepted the plan and all five open decisions (see Decision Log, 2026-11-06 acceptance entries).
+- [x] (2026-11-07 03:58Z) Milestone 0: live AWS prototype done against the user's account with the limits the user set; all resources created were deleted and verified gone (see Artifacts and Notes, "Milestone 0 resource log"). Fixtures recorded under `mj-controller/tests/fixtures/`. Findings are in Surprises & Discoveries.
 - [ ] Milestone 1: IMDSv2 on Mjolnir-launched EC2 (launch flag, launch-response verification, Move compatibility, doctor template check).
 - [ ] Milestone 2: configuration type `[profiles.<id>.aws]`, validation, settings surface, shared "does this session receive synced credentials" predicate.
 - [ ] Milestone 3: STS minting and the per-session cache in the controller; launch-time use.
@@ -44,6 +44,21 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 
 - Observation: A Move to a new EC2 destination persists its `run-instances` argument vector in the database before running it, so a Move prepared by an older daemon will not carry the new flag.
   Evidence: `mj-controller/src/controller/move_session/destination.rs` (~L103-L118) stores `launch_args: command.args` in `PreparedDestinationState::LaunchPending`, and executes those stored arguments later.
+
+- Observation (Milestone 0): the AWS CLI v2 error shape is `aws: [ERROR]: An error occurred (<Code>) when calling the AssumeRole operation: <message>`, with the literal prefix `aws: [ERROR]: `. A client-side range error has a different shape and no "when calling" clause.
+  Evidence: fixtures `aws-sts-assume-role-access-denied.txt`, `aws-sts-assume-role-validation-error.txt`; `--duration-seconds 100` gave `aws: [ERROR]: An error occurred (ParamValidation): Parameter validation failed:` then `Invalid value for parameter DurationSeconds, value: 100, valid min value: 900`. So the plan's error-line parser must accept the `aws: [ERROR]: ` prefix and may match on `An error occurred (<Code>)` alone; for `ParamValidation` the next line carries the useful text. A 12-hour request against a one-hour role gave `ValidationError ... The requested DurationSeconds exceeds the MaxSessionDuration set for this role.` (no maximum is named, which confirms the decision not to guess one).
+
+- Observation (Milestone 0): `aws sts assume-role` output and the `--policy-arns arn=<arn>` syntax work as planned; omitting `--duration-seconds` gives a one-hour credential; the session policy narrows the role.
+  Evidence: fixture `aws-sts-assume-role.json` (keys `Credentials.{AccessKeyId,SecretAccessKey,SessionToken,Expiration}`, `AssumedRoleUser.{AssumedRoleId,Arn}`, `PackedPolicySize`, `SourceIdentity`; `Expiration` looks like `2026-11-07T04:03:09+00:00`, accepted by `chrono::DateTime::parse_from_rfc3339`). A call without policy, session name `mj-<32 hex>`, no duration returned `Expiration` exactly one hour after the call. The assumed ARN is `arn:aws:sts::<account>:assumed-role/<role>/mj-<session id>`. With the role allowing `bedrock:List*` and a session policy of only `bedrock:InvokeModel`, `aws bedrock list-foundation-models` returned `AccessDeniedException`, while the same call with a session policy that included `bedrock:ListFoundationModels` succeeded: the session policy narrows, as designed. `sts:SetSourceIdentity` in the trust policy made `--source-identity` succeed.
+
+- Observation (Milestone 0): the `--metadata-options` override over a launch template could NOT be proven. The user's existing launch template (`hel-runson`, us-east-1) already sets `HttpTokens=required` and `HttpPutResponseHopLimit=1`, which is also the EC2 default, so passing `--metadata-options HttpTokens=required` produced the same result with or without the override, and the hop-limit reset question is likewise indistinguishable (template 1, default 1). Creating a template with `optional` was outside the authorized resources.
+  Evidence: `describe-launch-template-versions` for `hel-runson` `$Default` shows `MetadataOptions` `{HttpTokens: required, HttpPutResponseHopLimit: 1, HttpEndpoint: enabled}`; the `run-instances` response and a later `describe-instances` both show `{"State":"pending","HttpTokens":"required","HttpPutResponseHopLimit":1,"HttpEndpoint":"enabled","HttpProtocolIpv6":"disabled","InstanceMetadataTags":"disabled"}` (fixture `aws-run-instances-imdsv2.json`). The response-verification step in Milestone 1 is therefore the guard, as the plan intended; Milestone 1 should also keep the plan's note that the precedence is unproven for a template that sets `optional`.
+
+- Observation (Milestone 0): `aws ec2 run-instances` with a launch template accepts no `--min-count`/`--max-count` in AWS CLI 2.36.24 (`--count` only), so the Move path in `mj-controller/src/controller/move_session/destination.rs` (~L107-L112), which appends `--min-count 1 --max-count 1`, is rejected by this CLI.
+  Evidence: `aws: [ERROR]: Unknown options: --min-count, --max-count, 1, 1` for a run with the same flags as the Move path; the same command without them launched one instance. This predates #1424 and is outside this plan's scope; it is reported to the parent as a separate defect (the Move EC2 launch cannot work with this CLI version). Milestone 1 must not depend on that argument pair.
+
+- Observation (Milestone 0): through isolated `mj` sessions, both Bedrock harnesses complete a turn when the scoped credentials allow only `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` (Claude Code) or only `bedrock:InvokeModel` (Codex).
+  Evidence: the lab used a local bare target, profile environment `AWS_PROFILE=mj-m0` whose `credential_process` assumed the test role with a chosen session policy, in an isolated `--instance`. Claude (`CLAUDE_CODE_USE_BEDROCK=1`, `us.anthropic.claude-haiku-4-5-20251001-v1:0`): six-action policy completed; Invoke+InvokeWithResponseStream completed; `InvokeModel` alone failed with `ACP auth_required` (so the scoped credentials were in use and streaming is required). Codex (`amazon-bedrock-runtime`, `global.openai.gpt-6-luna`): six-action policy, Invoke+Stream, and `InvokeModel` alone all completed; a policy allowing only `ListFoundationModels` failed with `ACP auth_required` after 14 s. `mj models --profile` listed models for both profiles with the invoke-only policy, so discovery needs no List action in this build. No Bedrock action beyond these was needed, so the provisional default does not need `bedrock:*`.
 
 ## Decision Log
 
@@ -90,6 +105,18 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - Decision: No relay protocol change, no database migration, no new wire message.
   Rationale: See the second discovery. Older workers that already understand protocol 46 accept scoped credentials as they accept today's. Older workers (below protocol 46) are already skipped for AWS sync. Configuration is additive and optional, so an existing `config.toml` loads unchanged.
   Date/Author: 2026-11-06 / Claude.
+
+- Decision (2026-11-06 acceptance by the user's review of this plan): all five open decisions are accepted as written above: (1) omit `DurationSeconds` so STS applies its 3600-second default, no role-maximum lookup; (2) role session name `mj-<id>` always, `SourceIdentity` opt-in via `source_identity = true`, no session tags; (3) a built-in Bedrock invoke/list session policy is used when a role has no policy configured, provisional until Milestone 0; (4) a failed AssumeRole refuses the launch with the AWS error and a remedy, with no unscoped fallback and no credential-less session; (5) an IMDSv1 launch template is a `mj doctor` warning.
+  Rationale: user decision recorded verbatim in the review message that started implementation.
+  Date/Author: 2026-11-06 / user, recorded by Claude.
+
+- Decision (Milestone 0 result): keep the six-action default session policy (`InvokeModel`, `InvokeModelWithResponseStream`, `ListInferenceProfiles`, `GetInferenceProfile`, `ListFoundationModels`, `GetFoundationModel`); do not widen to `bedrock:*`.
+  Rationale: both harnesses completed turns with only the two invoke actions (Codex with `InvokeModel` alone), so the required actions are covered; the four list/get actions are kept as a small superset for model discovery and harness updates that may call them, at no widening of the role. The default is still a narrowing: the live test showed `s3` and `iam` calls denied under it.
+  Date/Author: 2026-11-07 / Claude.
+
+- Decision (Milestone 0 result): the error-line parser accepts the AWS CLI v2 prefix `aws: [ERROR]: ` and the shape `An error occurred (<Code>) when calling the AssumeRole operation: <message>`; for `ParamValidation` it reports the code and the following `Invalid value` line, and for anything else only the exit status.
+  Rationale: this is what the recorded real output looks like.
+  Date/Author: 2026-11-07 / Claude.
 
 ## Outcomes & Retrospective
 
@@ -219,6 +246,18 @@ What the role needs. The controller's AWS identity (the `AWS_PROFILE` above) nee
 
 Honest limits to state in the documentation: this scopes credentials delivered to container and SSH sessions through the credential sync; local bare sessions still read the host's AWS files directly, EC2 sessions use their instance profile (now IMDSv2 only), and a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`) is not covered. Scoped credentials limit what stolen credentials can do and for how long; they do not stop code in the session from using them during their lifetime.
 
+Milestone 0 resource log (all times UTC, account 842609633142, caller `arn:aws:iam::842609633142:user/jonathan`, profile `default`; role trust allowed only that user, tagged `purpose=mj-1424-m0`):
+
+    2026-11-07T03:47:52Z CREATED iam role mj-1424-m0-test
+    2026-11-07T03:47:59Z CREATED inline policy mj-1424-m0-bedrock on that role
+    2026-11-07T03:49:17Z CREATED ec2 instance i-0f59152b3ebf671ba (us-east-1, template hel-runson, m8i-flex.large)
+    2026-11-07T03:50:09Z TERMINATED that instance (verified state terminated)
+    2026-11-07T03:58:18Z DELETED inline policy mj-1424-m0-bedrock
+    2026-11-07T03:58:20Z DELETED iam role mj-1424-m0-test
+    2026-11-07T03:58:25Z VERIFIED: get-role returns NoSuchEntity; no instance tagged purpose=mj-1424-m0 is live
+
+Nothing else was created in AWS. AssumeRole calls (about ten, including deliberate failures) and Bedrock invocations (about six one-word turns through isolated `mj` sessions) appear in the account's logs and billing. The first EC2 attempt used `--min-count`/`--max-count`, was rejected by the CLI before any resource existed, and needed no cleanup. Locally, the lab (`~/m0-1424-lab`, with copied binaries and an isolated daemon, `--instance m0-1424`) and `/tmp/m0-1424` were deleted; no real profile home or live config was touched.
+
 ## Interfaces and Dependencies
 
 No new crate dependency. The AWS CLI v2 (`aws`), already required, is the only AWS interface.
@@ -268,3 +307,5 @@ Time source: the cache takes `Arc<dyn Fn() -> SystemTime + Send + Sync>`, the sa
 Documentation to update in the same commits as the behavior: docs/AWS.md (the exact `run-instances` command with `--metadata-options`, the doctor template check, IMDSv2-only instance-profile credentials, and the sentence about hop limit 2 in docs/src/content/docs/profiles.md that must stay accurate for containers on hosts the person manages); docs/src/content/docs/security.md, section "Credential synchronization and exclusion" (what AWS credentials a session gets, scoped versus unscoped, the limits listed under Artifacts and Notes); docs/src/content/docs/profiles.md, section "Codex on Amazon Bedrock" (the `[profiles.<id>.aws]` table, the role's trust and permission requirements, and the same table for Claude on Bedrock).
 
 Revision note (2026-11-06): initial version of the plan, written for parent review before any implementation. Reason: requested design-first deliverable for #1424.
+
+Revision note (2026-11-07): recorded the user's acceptance of the five decisions and the Milestone 0 results (fixtures, CLI error shape, EC2 override left unproven, Move `--min-count` incompatibility, Bedrock action evidence). Reason: Milestone 0 complete; implementation continues from Milestone 1 after parent review.
