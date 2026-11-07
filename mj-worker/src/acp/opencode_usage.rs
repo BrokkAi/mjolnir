@@ -4,18 +4,19 @@ use mj_core::usage::{TokenUsage, UsageScope};
 
 const USAGE_SCOPE_KEY: &str = "mjolnir.dev/usage-scope";
 
-/// The OpenCode version whose prompt response was checked live to report the
-/// whole turn (every model step of the prompt). Another version, for example
-/// one found on PATH, may report only the last step, so its report keeps the
-/// adapter's undeclared scope.
-const WHOLE_TURN_VERSION: &str = "2.2.6";
+/// The OpenCode versions whose prompt responses were checked live to report the
+/// whole turn (every model step of the prompt): the pinned version, and the
+/// older one that containers built from an older image still run. Another
+/// version, for example one found on PATH, may report only the last step, so
+/// its report keeps the adapter's undeclared scope.
+const WHOLE_TURN_VERSIONS: [&str; 2] = ["2.2.1", "2.2.6"];
 
 /// Whether this OpenCode, as it named itself in `initialize`, reports whole turns.
 pub fn reports_whole_turns(agent_version: Option<&str>) -> bool {
-    agent_version == Some(WHOLE_TURN_VERSION)
+    agent_version.is_some_and(|version| WHOLE_TURN_VERSIONS.contains(&version))
 }
 
-/// OpenCode 2.2.6 sums its model steps into one per-prompt figure but does not
+/// OpenCode 2.2.1 and 2.2.6 sum their model steps into one per-prompt figure but does not
 /// declare a scope, and it counts differently from the rest of mj: `input`
 /// excludes cache reads and writes, and `output` excludes reasoning. Fold both
 /// back in so input and output are the full counts, then mark the report as a
@@ -80,14 +81,14 @@ mod tests {
     }
 
     // Moving the pin must come with a fresh live check of the prompt
-    // response's usage scope; then update `WHOLE_TURN_VERSION`.
+    // response's usage scope; then add the new version to `WHOLE_TURN_VERSIONS`.
     #[test]
-    fn the_whole_turn_version_is_the_pinned_opencode() {
-        assert_eq!(
-            WHOLE_TURN_VERSION,
+    fn the_pinned_opencode_is_a_whole_turn_version() {
+        assert!(WHOLE_TURN_VERSIONS.contains(&mj_core::harness_runtime::OPENCODE_VERSION));
+        assert!(reports_whole_turns(Some(
             mj_core::harness_runtime::OPENCODE_VERSION
-        );
-        assert!(reports_whole_turns(Some(WHOLE_TURN_VERSION)));
+        )));
+        assert!(reports_whole_turns(Some("2.2.1")));
         assert!(!reports_whole_turns(Some("1.14.0")));
         assert!(!reports_whole_turns(None));
     }
