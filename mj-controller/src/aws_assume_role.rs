@@ -591,7 +591,6 @@ mod tests {
         AwsCredentialSource {
             environment: BTreeMap::from([("AWS_PROFILE".into(), "work".into())]),
             role: Some(role),
-            selection: None,
         }
     }
 

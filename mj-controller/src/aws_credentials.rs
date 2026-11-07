@@ -195,12 +195,14 @@ pub(crate) fn source(
     selected_source(profile).map(Some)
 }
 
-/// [`source`] for the credential sync. It never reads the harness's
-/// configuration for the AWS profile it selects: the source carries a pointer
-/// to the file ([`AwsCredentialSource::selection`]), and whoever mints reads it
-/// when it does ([`resolve`]), each time, because an edit to that file does
-/// not rebuild the sync targets. A file that cannot be read is then that
-/// cycle's outcome, not part of the target.
+/// [`source`] for the credential sync. The sync never reads the harness's
+/// configuration for the AWS profile it selects: launch resolved that and
+/// staged it into the session, and the worker's staged configuration owns it
+/// for the session's life, so the sync asks the worker
+/// ([`with_staged_profile`]). What this source carries is only what the mj
+/// configuration owns (the profile's environment and role), which does
+/// rebuild the sync targets when it changes. Its `AWS_PROFILE` is the
+/// profile's own default, to be replaced.
 pub(crate) fn sync_source(
     profile: &HarnessProfile,
     backend: &TargetLocator,
@@ -210,27 +212,32 @@ pub(crate) fn sync_source(
         .then(|| base_source(profile))
 }
 
-/// The environment the AWS CLI runs in to resolve this profile's identity on
-/// the controller host: the profile's own environment with the AWS profile
-/// it selects. Callers have already decided that the profile receives synced
-/// credentials.
-pub(crate) fn selected_source(profile: &HarnessProfile) -> Result<AwsCredentialSource> {
-    resolve(&base_source(profile))
+/// The source, run as the AWS profile the session was staged with.
+pub(crate) fn with_staged_profile(
+    source: &AwsCredentialSource,
+    profile: &str,
+) -> AwsCredentialSource {
+    let mut source = source.clone();
+    source
+        .environment
+        .insert("AWS_PROFILE".into(), profile.to_owned());
+    source
 }
 
-/// The source with the AWS profile the harness's configuration selects, read
-/// now. Callers that mint call this each time they do. An error means the
-/// configuration cannot be read: nothing can be minted for that attempt.
-pub(crate) fn resolve(source: &AwsCredentialSource) -> Result<AwsCredentialSource> {
-    let mut source = source.clone();
+/// The environment the AWS CLI runs in to resolve this profile's identity on
+/// the controller host: the profile's own environment with the AWS profile
+/// it selects. This is where a session's selection is made, at launch; callers
+/// have already decided that the profile receives synced credentials.
+pub(crate) fn selected_source(profile: &HarnessProfile) -> Result<AwsCredentialSource> {
+    let mut source = base_source(profile);
     // Codex can select its AWS profile inside the provider table.
-    if let Some(selection) = &source.selection
+    if profile.kind == mj_core::config::HarnessKind::Codex
         && let Some(config) = mj_core::codex_provider::ConfigFiles::read_with(
-            &selection.home,
-            selection.overlay.as_deref(),
+            &profile.home,
+            profile.codex_profile.as_deref(),
             crate::host_fs::read_optional_sync,
         )?
-        .layer(&selection.home)?
+        .layer(&profile.home)?
     {
         let config: toml::Value =
             toml::from_str(&config).context("read Codex AWS profile selection")?;
@@ -264,12 +271,6 @@ fn base_source(profile: &HarnessProfile) -> AwsCredentialSource {
     AwsCredentialSource {
         environment,
         role: profile.aws.clone(),
-        selection: (profile.kind == mj_core::config::HarnessKind::Codex).then(|| {
-            mj_core::aws_credentials::AwsProfileSelection {
-                home: profile.home.clone(),
-                overlay: profile.codex_profile.clone(),
-            }
-        }),
     }
 }
 
@@ -328,12 +329,12 @@ mod tests {
     }
 
     // An unreadable provider configuration is unknown, not "not Bedrock": a
-    // profile with a role stays managed by the sync, where launch fails. The
-    // sync's source never captures the file's content: it is read each time a
-    // credential is minted, so a repair (or a new profile selection) is seen
-    // without anything rebuilding the sync targets.
+    // profile with a role stays managed by the sync, while launch, which is
+    // where the session's AWS profile is selected from that file, fails. The
+    // sync never reads the file: a running session keeps the profile it was
+    // staged with.
     #[test]
-    fn an_unreadable_codex_configuration_is_read_again_each_time_it_is_used() {
+    fn an_unreadable_codex_configuration_fails_launch_and_leaves_the_sync_managed() {
         let home = tempfile::tempdir().unwrap();
         let config = home.path().join("config.toml");
         let role = mj_core::config::AwsRoleConfig {
@@ -352,28 +353,29 @@ mod tests {
         };
         let none = BTreeMap::new();
 
-        // Malformed: the sync's source is still there, and unchanged by what
-        // the file says; launch (which resolves) refuses, as does a mint.
+        // Malformed: launch refuses; the sync's source is there, whatever the
+        // file says.
         std::fs::write(&config, "model_provider = [unterminated").unwrap();
+        assert!(super::source(&profile, &container, &none).is_err());
+        let why = format!("{:#}", selected_source(&profile).unwrap_err());
+        assert!(why.contains("TOML parse error"), "{why}");
         let synced = sync_source(&profile, &container, &none).expect("still managed");
         assert!(synced.role.is_some());
-        assert!(super::source(&profile, &container, &none).is_err());
-        let why = format!("{:#}", resolve(&synced).unwrap_err());
-        assert!(why.contains("TOML parse error"), "{why}");
 
-        // Repaired, and it now selects an AWS profile: the same source, with
-        // nothing rebuilt, resolves to it.
+        // Repaired, and it selects an AWS profile: launch stages that one.
         std::fs::write(
             &config,
             "model_provider = \"amazon-bedrock-runtime\"\n[model_providers.amazon-bedrock-runtime.aws]\nprofile = \"team\"\n",
         )
         .unwrap();
+        let launched = selected_source(&profile).unwrap();
+        assert_eq!(launched.environment.get("AWS_PROFILE").unwrap(), "team");
+        // The sync's source keeps the profile's own default, to be replaced by
+        // what the worker reports.
         assert_eq!(
-            sync_source(&profile, &container, &none).as_ref(),
-            Some(&synced)
+            with_staged_profile(&synced, "staged").environment["AWS_PROFILE"],
+            "staged"
         );
-        let resolved = resolve(&synced).unwrap();
-        assert_eq!(resolved.environment.get("AWS_PROFILE").unwrap(), "team");
 
         // The decision about the host does not depend on the configuration:
         // a raw local session is still withheld, for its own reason.
@@ -422,7 +424,6 @@ mod tests {
                 ("AWS_EC2_METADATA_DISABLED".into(), "true".into()),
             ]),
             role: None,
-            selection: None,
         };
         for generation in ["original", "renewed"] {
             std::fs::write(
@@ -486,7 +487,6 @@ mod tests {
         let source = AwsCredentialSource {
             environment: BTreeMap::new(),
             role: None,
-            selection: None,
         };
         let error = export(&source, &FailedExport).err().unwrap();
         assert!(!format!("{error:#}").contains("private-"));

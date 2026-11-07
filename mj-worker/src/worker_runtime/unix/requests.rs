@@ -429,6 +429,7 @@ pub(crate) fn apply_credential_request_at(
         )),
         RelayRequest::AwsCredentialsScope => Ok(RelayResponsePayload::AwsCredentialsScope {
             scope: mj_core::aws_credentials::scope(&endpoint.home)?,
+            profile: mj_core::aws_credentials::staged_profile(&endpoint.home)?,
         }),
         RelayRequest::RemoveAwsCredentials => Ok(credential_state_payload(
             &mj_core::aws_credentials::remove(&endpoint.home)?,

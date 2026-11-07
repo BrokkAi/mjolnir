@@ -668,36 +668,6 @@ pub(super) async fn reconcile_profile_guarded(
     } else {
         HostSlopcopLogin::Unknown
     };
-    // Without a role, every session of the profile receives the same export,
-    // so it is taken once per pass.
-    let unscoped_aws_credentials = match targets.iter().find_map(|target| {
-        target
-            .aws_credentials
-            .clone()
-            .filter(|source| source.role.is_none())
-    }) {
-        Some(source) => {
-            let exported = tokio::task::spawn_blocking(move || {
-                // The harness's configuration may select the AWS profile; it
-                // is read now, as for the scoped mint, so the export runs as
-                // the profile the session was staged with. If it cannot be
-                // read nothing is exported and the credentials the session
-                // holds stay as they are.
-                let source = crate::aws_credentials::resolve(&source).context(
-                    "the profile's AWS identity could not be determined, so no credentials were exported",
-                )?;
-                crate::aws_credentials::export(
-                    &source,
-                    &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
-                )
-            })
-            .await
-            .context("AWS credential export task stopped")
-            .and_then(|result| result);
-            exported.map(Some)
-        }
-        None => Ok(None),
-    };
     // Targets share a profile but can differ in host CLI access. Collect off
     // scheduler threads once per wire format, then derive both scoped trees.
     let skills = Arc::new(
@@ -715,39 +685,16 @@ pub(super) async fn reconcile_profile_guarded(
         slopcop_login: &slopcop_login,
         triggered_by,
         steps,
+        unscoped: UnscopedExports::default(),
     };
-    // The AWS step of the sequential pass: the profile's one export. A
-    // role-scoped session's AWS credentials are installed by its own
-    // operation above.
-    let aws_for_login = targets
-        .iter()
-        .map(|target| match &target.aws_credentials {
-            Some(source) if source.role.is_none() => match &unscoped_aws_credentials {
-                Ok(Some(credentials)) => AwsSync::Install(credentials.clone()),
-                Ok(None) => AwsSync::Unmanaged,
-                Err(error) => AwsSync::Unavailable {
-                    error: format!("{error:#}"),
-                    scoped_required: false,
-                    expected_scope: None,
-                },
-            },
-            _ => AwsSync::Unmanaged,
-        })
-        .collect::<Vec<_>>();
     let login_pass = async {
         let mut outcomes = BTreeMap::<String, CredentialSyncOutcome>::new();
         for pass in 0..2 {
             let mut pulled = false;
-            for (index, target) in targets.iter().enumerate() {
+            for target in targets {
                 let reported = outcomes.contains_key(&target.session_id);
-                let result = Box::pin(reconcile_target(
-                    &pass_context,
-                    target,
-                    &aws_for_login[index],
-                    pass,
-                    reported,
-                ))
-                .await;
+                let result =
+                    Box::pin(reconcile_target(&pass_context, target, pass, reported)).await;
                 pulled |= result.pulled;
                 match result.outcome {
                     Some(outcome) => {
@@ -844,7 +791,9 @@ fn merge_aws_cycle(
     result: Result<Option<SessionSync>>,
 ) {
     match result {
-        Ok(Some(SessionSync { actions, failures })) => {
+        Ok(Some(SessionSync {
+            actions, failures, ..
+        })) => {
             if let Some(failure) = joined_failures(&failures) {
                 tracing::warn!(
                     session_id,
@@ -952,6 +901,10 @@ pub(super) enum GithubSync {
 pub(super) struct SessionSync {
     pub(super) actions: Vec<CredentialSyncAction>,
     pub(super) failures: Vec<StepFailure>,
+    /// The AWS profile the session was staged with, when the work asked its
+    /// worker for it (`SyncWork::StagedProfile`), and in the result of an AWS
+    /// cycle that learned it.
+    pub(super) staged_profile: Option<String>,
 }
 
 /// The role, role session and session policy credentials were issued for.
@@ -998,6 +951,19 @@ struct PassContext<'a> {
     slopcop_login: &'a HostSlopcopLogin,
     triggered_by: Option<&'a str>,
     steps: &'a SessionSteps,
+    unscoped: UnscopedExports,
+}
+
+/// What a pass has learned for the sessions without a role, which receive the
+/// export of the AWS profile each was staged with. A session's staged profile
+/// is read from its worker once per pass, and one export is taken per distinct
+/// profile among the sessions, not one per session.
+#[derive(Default)]
+struct UnscopedExports {
+    staged: tokio::sync::Mutex<BTreeMap<String, String>>,
+    exported: tokio::sync::Mutex<
+        BTreeMap<String, std::result::Result<mj_core::aws_credentials::AwsCredentials, String>>,
+    >,
 }
 
 /// What reconciling one session in one pass found.
@@ -1090,12 +1056,88 @@ pub(super) async fn admitted<T, F: std::future::Future<Output = Result<Option<T>
     }
 }
 
+/// The AWS step of the sequential pass for a session without a role: the
+/// export of the AWS profile the session was staged with, asked of its worker.
+/// `Ok(None)` when the session was not reached. Role-scoped sessions are the
+/// renewal task's, not the pass's.
+async fn unscoped_aws_sync(
+    context: &PassContext<'_>,
+    target: &CredentialSyncTarget,
+) -> Result<Option<AwsSync>> {
+    let Some(source) = target
+        .aws_credentials
+        .as_ref()
+        .filter(|source| source.role.is_none())
+    else {
+        return Ok(Some(AwsSync::Unmanaged));
+    };
+    let staged = context
+        .unscoped
+        .staged
+        .lock()
+        .await
+        .get(&target.session_id)
+        .cloned();
+    let staged = match staged {
+        Some(staged) => staged,
+        None => {
+            let turn = context.steps.enter(&target.session_id).await;
+            let Some(sync) = admitted(
+                context.gate,
+                context.runtime,
+                target,
+                turn,
+                None,
+                |hold| async move {
+                    run_on_session(context.relays, target, SyncWork::StagedProfile, hold).await
+                },
+            )
+            .await?
+            else {
+                return Ok(None);
+            };
+            let staged = sync
+                .staged_profile
+                .context("the worker did not report the session's AWS profile")?;
+            context
+                .unscoped
+                .staged
+                .lock()
+                .await
+                .insert(target.session_id.clone(), staged.clone());
+            staged
+        }
+    };
+    let mut exported = context.unscoped.exported.lock().await;
+    if !exported.contains_key(&staged) {
+        let source = crate::aws_credentials::with_staged_profile(source, &staged);
+        let credentials = tokio::task::spawn_blocking(move || {
+            crate::aws_credentials::export(
+                &source,
+                &crate::targets::BoundedProcessExecutor::new(Duration::from_secs(30)),
+            )
+        })
+        .await
+        .context("AWS credential export task stopped")
+        .and_then(|result| result)
+        .map_err(|error| format!("{error:#}"));
+        exported.insert(staged.clone(), credentials);
+    }
+    Ok(Some(match &exported[&staged] {
+        Ok(credentials) => AwsSync::Install(credentials.clone()),
+        Err(error) => AwsSync::Unavailable {
+            error: error.clone(),
+            scoped_required: false,
+            expected_scope: None,
+        },
+    }))
+}
+
 /// One session's reconciliation in one pass. `reported` says an earlier pass
 /// already recorded an outcome for it.
 async fn reconcile_target(
     context: &PassContext<'_>,
     target: &CredentialSyncTarget,
-    aws_credentials: &AwsSync,
     pass: usize,
     reported: bool,
 ) -> TargetResult {
@@ -1107,7 +1149,26 @@ async fn reconcile_target(
         slopcop_login,
         triggered_by,
         steps,
+        unscoped: _,
     } = context;
+    // Which credentials the session gets. A session that cannot be reached
+    // for this is not reached for the rest either.
+    let aws_credentials = match unscoped_aws_sync(context, target).await {
+        Ok(Some(aws)) => aws,
+        Ok(None) => {
+            return TargetResult {
+                outcome: None,
+                pulled: false,
+                clean: false,
+            };
+        }
+        Err(error) => AwsSync::Unavailable {
+            error: format!("{error:#}"),
+            scoped_required: false,
+            expected_scope: None,
+        },
+    };
+    let aws_credentials = &aws_credentials;
     // After the same session's AWS install, if it is running, never racing it
     // for the session's admission slot.
     let turn = steps.enter(&target.session_id).await;
@@ -1147,10 +1208,11 @@ async fn reconcile_target(
             pulled: false,
             clean: false,
         },
-        Ok(Some(SessionSync { actions, failures }))
-            if actions.is_empty()
-                && failures.is_empty()
-                && (*triggered_by != Some(target.session_id.as_str()) || reported) =>
+        Ok(Some(SessionSync {
+            actions, failures, ..
+        })) if actions.is_empty()
+            && failures.is_empty()
+            && (*triggered_by != Some(target.session_id.as_str()) || reported) =>
         {
             TargetResult {
                 outcome: None,
@@ -1158,7 +1220,9 @@ async fn reconcile_target(
                 clean: true,
             }
         }
-        Ok(Some(SessionSync { actions, failures })) => {
+        Ok(Some(SessionSync {
+            actions, failures, ..
+        })) => {
             if let Some(failure) = joined_failures(&failures) {
                 tracing::warn!(
                     session_id = %target.session_id,
@@ -1239,6 +1303,38 @@ pub(super) async fn aws_cycle(
             Err(error) => return (session_id, Err(error)),
         }
     }
+    // The AWS profile the session was staged with is asked of its worker, which
+    // owns it, before anything is minted: the mint runs as that profile and the
+    // installed configuration keeps naming it. The host's configuration is not
+    // read again, because an edit to it never reached the running session. A
+    // worker that cannot answer now defers the cycle; nothing changes.
+    let Some(base) = target
+        .aws_credentials
+        .as_ref()
+        .filter(|source| source.role.is_some())
+    else {
+        // Not a role-scoped session: nothing for a renewal to do.
+        return (session_id, Ok(None));
+    };
+    let staged = match aws_job(
+        relays,
+        gate,
+        runtime,
+        target,
+        steps,
+        None,
+        SyncWork::StagedProfile,
+    )
+    .await
+    {
+        Ok(Some(sync)) => match sync.staged_profile {
+            Some(staged) => staged,
+            None => return (session_id, Ok(None)),
+        },
+        Ok(None) => return (session_id, Ok(None)),
+        Err(error) => return (session_id, Err(error)),
+    };
+    let source = crate::aws_credentials::with_staged_profile(base, &staged);
     // A mint that has to call AWS has no deadline of ours, so what the session
     // holds is reconciled first, independently of it: credentials that do not
     // match the target (unscoped, issued under another role or policy) are
@@ -1246,11 +1342,21 @@ pub(super) async fn aws_cycle(
     // credentials stay until the replacement arrives. A session with obsolete
     // credentials goes without until then, which is the fail-closed choice.
     let mut withdrawn = Vec::new();
-    if mint_needed(target, force_new).await {
+    if mint_needed(&session_id, &source, force_new) {
         let pending = AwsSync::Pending {
             expected_scope: ScopeExpectation::of(target),
         };
-        match aws_job(relays, gate, runtime, target, steps, None, pending).await {
+        match aws_job(
+            relays,
+            gate,
+            runtime,
+            target,
+            steps,
+            None,
+            SyncWork::Aws(Box::new(pending)),
+        )
+        .await
+        {
             Ok(Some(sync)) => {
                 if !sync.actions.is_empty() || !sync.failures.is_empty() {
                     let mut failures = sync.failures.clone();
@@ -1283,7 +1389,7 @@ pub(super) async fn aws_cycle(
             Err(error) => return (session_id, Err(error)),
         }
     }
-    let aws = match start_scoped_mint(target, force_new) {
+    let aws = match start_scoped_mint(target, &source, force_new) {
         Some((mint, _stops_with_the_task)) => match mint
             .await
             .context("AWS role assumption task stopped")
@@ -1302,9 +1408,19 @@ pub(super) async fn aws_cycle(
         },
         None => AwsSync::Unmanaged,
     };
-    let mut result = aws_job(relays, gate, runtime, target, steps, installing, aws).await;
+    let mut result = aws_job(
+        relays,
+        gate,
+        runtime,
+        target,
+        steps,
+        installing,
+        SyncWork::Aws(Box::new(aws)),
+    )
+    .await;
     if let Ok(Some(sync)) = &mut result {
         sync.actions.splice(0..0, withdrawn);
+        sync.staged_profile = Some(staged);
     }
     (session_id, result)
 }
@@ -1319,39 +1435,25 @@ async fn aws_job(
     target: &CredentialSyncTarget,
     steps: &SessionSteps,
     installing: Option<SessionTurn>,
-    aws: AwsSync,
+    work: SyncWork,
 ) -> Result<Option<SessionSync>> {
     let turn = steps.enter(&target.session_id).await;
     admitted(gate, runtime, target, turn, installing, |hold| async move {
-        run_on_session(relays, target, SyncWork::Aws(Box::new(aws)), hold).await
+        run_on_session(relays, target, work, hold).await
     })
     .await
 }
 
-/// Whether the cycle's mint has to call AWS: the harness configuration is read
-/// now, and the cache holds no fresh credentials for the result. A cached
-/// mint returns at once and needs no earlier reconciliation.
-async fn mint_needed(target: &CredentialSyncTarget, force_new: bool) -> bool {
-    let Some(source) = target
-        .aws_credentials
-        .clone()
-        .filter(|source| source.role.is_some())
-    else {
-        return false;
-    };
-    if force_new {
-        return true;
-    }
-    let session_id = target.session_id.clone();
-    tokio::task::spawn_blocking(move || {
-        // A configuration that cannot be read fails the mint at once, and the
-        // failed-mint path withdraws in the same cycle: nothing waits.
-        crate::aws_credentials::resolve(&source).is_ok_and(|source| {
-            !crate::aws_assume_role::ScopedAwsCredentials::shared().is_fresh(&session_id, &source)
-        })
-    })
-    .await
-    .unwrap_or(true)
+/// Whether the cycle's mint has to call AWS: the cache holds no fresh
+/// credentials for the source, or the cycle is forced. A cached mint returns
+/// at once and needs no earlier reconciliation.
+fn mint_needed(
+    session_id: &str,
+    source: &mj_core::aws_credentials::AwsCredentialSource,
+    force_new: bool,
+) -> bool {
+    force_new
+        || !crate::aws_assume_role::ScopedAwsCredentials::shared().is_fresh(session_id, source)
 }
 
 /// What a session's renewal task needs, shared by all of them.
@@ -1486,6 +1588,15 @@ pub(super) async fn renew_session_aws(
         )
         .await;
         let completed = matches!(&result, Ok(Some(sync)) if sync.failures.is_empty());
+        // The source as the cycle ran it (the profile the worker reported),
+        // which keys the cached credentials the schedule looks for.
+        let ran_as = match (&result, &target.aws_credentials) {
+            (Ok(Some(sync)), Some(base)) => sync
+                .staged_profile
+                .as_deref()
+                .map(|profile| crate::aws_credentials::with_staged_profile(base, profile)),
+            _ => None,
+        };
         // A cycle that reached the session has checked its AWS credentials,
         // whatever it found: clean or failed, its outcome is reported, and
         // the notices decide what that ends. A deferred cycle checked
@@ -1499,9 +1610,9 @@ pub(super) async fn renew_session_aws(
                 env.retry,
                 failures_in_a_row - 1,
                 retry_limit,
-                scheduling_source(&target).await.and_then(|source| {
+                ran_as.as_ref().and_then(|source| {
                     crate::aws_assume_role::ScopedAwsCredentials::shared()
-                        .remaining_validity(&target.session_id, &source)
+                        .remaining_validity(&target.session_id, source)
                 }),
             );
         }
@@ -1543,9 +1654,9 @@ pub(super) async fn renew_session_aws(
             }
         }
         if completed
-            && let Some(source) = scheduling_source(&target).await
+            && let Some(source) = &ran_as
             && let Some(until) = crate::aws_assume_role::ScopedAwsCredentials::shared()
-                .renew_in(&target.session_id, &source)
+                .renew_in(&target.session_id, source)
         {
             delay = until;
         }
@@ -1562,21 +1673,6 @@ pub(super) async fn renew_session_aws(
             },
         }
     }
-}
-
-/// The source as the cycle just minted for it, to find its cached credentials:
-/// the cache is keyed by the environment the mint ran in, which includes the
-/// AWS profile the harness's configuration selects. Read now, off the async
-/// threads; `None` when the configuration cannot be read (nothing is cached
-/// for it, and the schedule falls back to the retry delay).
-async fn scheduling_source(
-    target: &CredentialSyncTarget,
-) -> Option<mj_core::aws_credentials::AwsCredentialSource> {
-    let source = target.aws_credentials.clone()?;
-    tokio::task::spawn_blocking(move || crate::aws_credentials::resolve(&source).ok())
-        .await
-        .ok()
-        .flatten()
 }
 
 /// How long to wait before the next attempt after the `failures`-th
@@ -1622,25 +1718,18 @@ fn backoff(base: Duration, failures: u32, limit: Duration) -> Duration {
 /// cannot keep its replacement waiting.
 fn start_scoped_mint(
     target: &CredentialSyncTarget,
+    source: &mj_core::aws_credentials::AwsCredentialSource,
     force_new: bool,
 ) -> Option<(
     tokio::task::JoinHandle<Result<mj_core::aws_credentials::AwsCredentials>>,
     mj_core::targets::ProcessCancellationGuard,
 )> {
-    let source = target
-        .aws_credentials
-        .clone()
-        .filter(|source| source.role.is_some())?;
+    source.role.as_ref()?;
+    let source = source.clone();
     let session_id = target.session_id.clone();
     let executor = crate::targets::CancellableProcessExecutor::new(Arc::default());
     let stops_with_the_task = executor.cancel_on_drop();
     let mint = tokio::task::spawn_blocking(move || {
-        // The harness's configuration may select the AWS profile; it is read
-        // now, every time a mint is wanted, because an edit to it does not
-        // rebuild the target. If it cannot be read, nothing is minted.
-        let source = crate::aws_credentials::resolve(&source).context(
-            "the profile's AWS identity could not be determined, so no credentials were renewed",
-        )?;
         let cache = crate::aws_assume_role::ScopedAwsCredentials::shared();
         if force_new {
             cache.forget(&session_id, &source);
@@ -1800,6 +1889,8 @@ pub(super) enum SyncWork {
     Full(Box<SessionCanonical>),
     /// Only the session's AWS credentials.
     Aws(Box<AwsSync>),
+    /// Only the AWS profile the session was staged with.
+    StagedProfile,
 }
 
 /// Reconcile one session. Returns every action taken, where an empty list
@@ -1881,9 +1972,30 @@ async fn run_work(
             let mut sync = SessionSync {
                 actions: Vec::new(),
                 failures: Vec::new(),
+                staged_profile: None,
             };
             reconcile_aws_step(client, &aws, &mut sync).await;
             Ok(sync)
+        }
+        SyncWork::StagedProfile => {
+            // The worker's staged configuration owns the session's AWS
+            // profile for its whole life: launch resolved it from the host,
+            // and the controller asks rather than resolves again, which would
+            // follow a later edit of the host's configuration that the
+            // session's environment never saw.
+            anyhow::ensure!(
+                client.protocol_version() >= mj_core::relay::RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL,
+                "the session's worker (relay protocol {}) cannot report the AWS profile it was staged with, so its credentials cannot be renewed. Mjolnir is replacing that worker automatically as soon as the session is idle; nothing needs to be done",
+                client.protocol_version()
+            );
+            let (_, profile) = client.aws_credentials_staging().await?;
+            Ok(SessionSync {
+                actions: Vec::new(),
+                failures: Vec::new(),
+                staged_profile: Some(profile.context(
+                    "the session has no staged AWS configuration, so there is no profile to renew credentials for",
+                )?),
+            })
         }
     }
 }
@@ -1902,9 +2014,12 @@ pub(super) async fn reconcile_on(
     let mut sync = SessionSync {
         actions: Vec::new(),
         failures: Vec::new(),
+        staged_profile: None,
     };
     reconcile_aws_step(client, &canonical.aws, &mut sync).await;
-    let SessionSync { actions, failures } = &mut sync;
+    let SessionSync {
+        actions, failures, ..
+    } = &mut sync;
     let mut note = |step: SyncStep, label: &str, error: String| {
         failures.push(StepFailure {
             step,

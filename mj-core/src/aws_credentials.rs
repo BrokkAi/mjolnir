@@ -80,20 +80,6 @@ pub struct AwsCredentialSource {
     /// credentials. Part of the source, and so of the sync target's identity:
     /// a configuration change makes obsolete queued work compare unequal.
     pub role: Option<crate::config::AwsRoleConfig>,
-    /// Where the harness's own configuration may name the AWS profile to use
-    /// (Codex's provider table). Only the pointer is part of the source and so
-    /// of the sync target's identity; the file's content is read by whoever
-    /// uses the source, each time they use it, because an edit to it does not
-    /// rebuild the target.
-    pub selection: Option<AwsProfileSelection>,
-}
-
-/// The configuration file that may select the AWS profile.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct AwsProfileSelection {
-    pub home: std::path::PathBuf,
-    /// The Codex profile overlay the profile runs with, if any.
-    pub overlay: Option<String>,
 }
 
 impl std::fmt::Debug for AwsCredentialSource {
@@ -345,6 +331,25 @@ fn remove_if_present(path: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
     }
+}
+
+/// The AWS profile this session was staged with: the section name in its AWS
+/// configuration. It is written when the session is staged and rewritten by
+/// every install, and withdrawing credentials leaves it, so it names the
+/// session's selection for its whole life. `None` when nothing was staged.
+pub fn staged_profile(home: &Path) -> Result<Option<String>> {
+    let text = match std::fs::read_to_string(home.join(CONFIG_FILE)) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read session AWS configuration"),
+    };
+    Ok(text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("[profile ")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+    }))
 }
 
 /// The scope Mjolnir recorded for the credentials in `home`, when the record
