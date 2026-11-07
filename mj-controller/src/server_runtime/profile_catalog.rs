@@ -1168,8 +1168,21 @@ impl ProfileCatalog {
                         .home_digest
                         .or_else(|| inner.home_settled.get(&key).copied());
                     match inner.home_edit_retry_after.get_mut(&key.0) {
-                        Some((after, _)) => *after = Instant::now() + self.home_edit_retry_wait(),
+                        Some((after, armed_slot)) => {
+                            *after = Instant::now() + self.home_edit_retry_wait();
+                            // Adopt the digest this failure read: the window
+                            // retries the state the probe just failed, so an
+                            // unchanged home waits the bound instead of
+                            // re-probing every pass. A newer edit still
+                            // bypasses, differing from the armed digest.
+                            if let Some(failed_digest) = armed {
+                                *armed_slot = Some(failed_digest);
+                            }
+                        }
                         None => {
+                            // Arm only when some digest is known: with none,
+                            // any current digest could be a fresh edit's,
+                            // and the window must not suppress it.
                             if let Some(armed) = armed {
                                 inner.home_edit_retry_after.insert(
                                     key.0.clone(),
@@ -3220,7 +3233,7 @@ mod tests {
             flaky.clone(),
             Arc::new(move |id, _| flaky(id)),
         );
-        Arc::get_mut(&mut catalog).unwrap().home_edit_retry_wait = Duration::from_secs(60);
+        Arc::get_mut(&mut catalog).unwrap().home_edit_retry_wait = Duration::from_millis(50);
         catalog.sync_now(&config).await;
         catalog.watch_homes();
 
@@ -3246,6 +3259,33 @@ mod tests {
             5,
             "a fresh edit bypasses the window armed by an unrelated failure"
         );
+        while !catalog.lock().refreshing.is_empty() {
+            tokio::task::yield_now().await;
+        }
+
+        // The bypassed re-probe failed too, and the window adopted the
+        // edit's digest: the same state now retries at the bounded cadence
+        // instead of re-probing every pass.
+        catalog.watch_homes();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            5,
+            "a failed fresh edit waits out the window it re-armed"
+        );
+
+        failing.store(false, Ordering::SeqCst);
+        for _ in 0..4 {
+            catalog.watch_homes();
+            while !catalog.lock().refreshing.is_empty() {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::sleep(Duration::from_millis(60)).await;
+        }
+        assert_eq!(
+            current_model(&catalog, "solo").await.as_deref(),
+            Some("solo-second")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
     }
 
     // Hard-won: #1337 review: a permanently failed entry kept its identity
