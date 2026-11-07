@@ -136,17 +136,19 @@ impl Drop for GateGuard<'_> {
 }
 
 /// Wait for the gate, logging the holder once the wait passes five seconds.
-/// Waiting observes the executor's cancellation.
+/// Waiting observes the executor's cancellation. A wait that has to queue is
+/// reported as its own stage, so a lifecycle watching for stalls does not
+/// count the queue as time with no progress.
 pub(super) fn lock_gate<'a>(
     executor: &impl CommandExecutor,
     gate: &'a StoreGate,
     session_id: &str,
     purpose: &'static str,
 ) -> Result<GateGuard<'a>> {
-    let mut wait = None::<mj_core::lock_wait::LockWait>;
+    let mut waiting = None::<(mj_core::lock_wait::LockWait, ProvisionStageGuard<'_, _>)>;
     loop {
         if let Some(guard) = gate.try_lock(session_id, purpose) {
-            if let Some(wait) = wait {
+            if let Some((wait, _queued)) = waiting {
                 wait.acquired();
             }
             return Ok(guard);
@@ -158,10 +160,15 @@ pub(super) fn lock_gate<'a>(
             )?;
             bail!("worker binary store wait cancelled");
         }
-        wait.get_or_insert_with(|| mj_core::lock_wait::LockWait::new("the worker binary store"))
-            .blocked(&gate.label, &format!("{session_id} ({purpose})"), || {
-                gate.describe_holder()
-            });
+        let (wait, _queued) = waiting.get_or_insert_with(|| {
+            (
+                mj_core::lock_wait::LockWait::new("the worker binary store"),
+                ProvisionStageGuard::new(executor, ProvisionStage::WaitingForWorkerStore),
+            )
+        });
+        wait.blocked(&gate.label, &format!("{session_id} ({purpose})"), || {
+            gate.describe_holder()
+        });
         std::thread::sleep(Duration::from_millis(25));
     }
 }

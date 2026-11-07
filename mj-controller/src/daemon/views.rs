@@ -1,5 +1,23 @@
 use super::*;
 
+/// What `RuntimeState::cancel_stalled_create` found.
+pub(super) enum CreateProgress {
+    /// No Create is running for the session.
+    NotRunning,
+    /// A Create is running and is either in a stage or recently was.
+    Running,
+    /// A Create has gone past the bound without a stage starting or
+    /// finishing.
+    Stalled {
+        idle: Duration,
+        /// The stages it is in; empty between stages.
+        stages: Vec<String>,
+        /// Whether the cancel was accepted. A Create that has committed
+        /// cannot be cancelled and stays with its caller.
+        cancelled: bool,
+    },
+}
+
 impl RuntimeState {
     fn request_lifecycle_cancel(
         &self,
@@ -581,22 +599,42 @@ impl RuntimeState {
         }
     }
 
-    /// How long the session's running Create has gone without a provisioning
-    /// stage starting or finishing, and the stages it is in now (empty
-    /// between stages). `None` when no Create is running for the session, or
-    /// while it waits for a container start slot: a queue is not a stall.
-    pub(super) fn create_stall(&self, session_id: &str) -> Option<(Duration, Vec<String>)> {
-        let owner = self.owner();
-        let operation = owner.lifecycle.get(session_id)?;
-        let queued = operation
-            .active_stages
-            .contains_key(&ProvisionStage::WaitingForStartSlot);
-        (operation.kind == LifecycleKind::Create && operation.is_running() && !queued).then(|| {
-            (
-                operation.last_stage_change.elapsed(),
-                operation.stage_labels(),
-            )
-        })
+    /// Decide, in one owner critical section, whether the session's running
+    /// Create has stalled, and cancel it when it has. A stall is `bound`
+    /// without a provisioning stage starting or finishing; a Create that is
+    /// queued for a slot (`ProvisionStage::is_queue_wait`) is never stalled.
+    ///
+    /// Cancelling is what ends the stall: failing only the reviewer start
+    /// would leave the Create running with its lifecycle admission held, and
+    /// that admission blocks daemon handoff.
+    pub(super) fn cancel_stalled_create(
+        &self,
+        session_id: &str,
+        bound: Duration,
+    ) -> CreateProgress {
+        let mut owner = self.owner();
+        let Some(operation) = owner.lifecycle.get_mut(session_id) else {
+            return CreateProgress::NotRunning;
+        };
+        if operation.kind != LifecycleKind::Create || !operation.is_running() {
+            return CreateProgress::NotRunning;
+        }
+        let idle = operation.last_stage_change.elapsed();
+        if idle < bound
+            || operation
+                .active_stages
+                .keys()
+                .any(ProvisionStage::is_queue_wait)
+        {
+            return CreateProgress::Running;
+        }
+        let stages = operation.stage_labels();
+        let cancelled = operation.request_cancel(session_id, "create stalled");
+        CreateProgress::Stalled {
+            idle,
+            stages,
+            cancelled,
+        }
     }
 
     /// Record something the daemon did on its own, for every attached surface

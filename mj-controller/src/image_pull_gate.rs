@@ -176,9 +176,11 @@ pub(crate) fn hold_image_pull<'a>(
 ///
 /// For a container target this waits for a background download of the same
 /// image on the same host, and reports the wait as the "Pull image" stage with
-/// a notice saying what it is waiting for. Nothing extra is reported in the
-/// ordinary case where no download is running, and a target that runs no image
-/// just runs `work`.
+/// a notice saying what it is waiting for. `work` is where the engine pulls a
+/// missing image (the probe or the run command), and it can take minutes, so
+/// the stage stays open from the first moment of waiting until `work` returns:
+/// a pull that no command stage covers must not look like a stalled Create. A
+/// target that runs no image just runs `work`.
 pub(crate) fn with_image_ready<T>(
     target: &TargetTemplate,
     executor: &impl CommandExecutor,
@@ -189,24 +191,25 @@ pub(crate) fn with_image_ready<T>(
     };
     let image = container.image.clone();
     let lock = image_pull_mutex(&host, &image);
-    // The stage guard is created inside `on_wait`, so it exists only on the
-    // waiting path, and dropped as soon as the wait is over: the stage
-    // describes the wait, not the work that follows it.
-    let mut waiting = None;
+    // The wait opens the stage and the work inherits it, so the stage has no
+    // gap between the two.
+    let mut pulling = None;
     let guard = hold_image_pull(
         &lock,
         || executor.cancellation_requested(),
         || {
-            waiting = Some(ProvisionStageGuard::new(
+            pulling = Some(ProvisionStageGuard::new(
                 executor,
                 ProvisionStage::PullingImage,
             ));
             executor.notify_notice(&format!("Waiting for image {image} to finish downloading"));
         },
     )?;
-    drop(waiting);
+    let pulling =
+        pulling.unwrap_or_else(|| ProvisionStageGuard::new(executor, ProvisionStage::PullingImage));
     let result = work();
     drop(guard);
+    drop(pulling);
     result
 }
 

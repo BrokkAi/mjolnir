@@ -1774,24 +1774,34 @@ impl SessionLedger {
         );
         if slot.needs_check() {
             let _opening = {
-                let mut wait = None::<crate::lock_wait::LockWait>;
+                // A lease that has to queue reports it as a stage, so a
+                // lifecycle watching for stalls does not count the queue.
+                let mut waiting = None::<(crate::lock_wait::LockWait, ProvisionStageGuard<'_, _>)>;
                 loop {
                     ensure!(
                         !executor.cancellation_requested(),
                         "operation cancelled while waiting for SSH master"
                     );
                     if let Some(guard) = reservation.opening.try_lock() {
-                        if let Some(wait) = wait {
+                        if let Some((wait, _queued)) = waiting {
                             wait.acquired();
                         }
                         break guard;
                     }
-                    wait.get_or_insert_with(|| crate::lock_wait::LockWait::new("an SSH master"))
-                        .blocked(
-                            &format!("{} shard {}", ssh.destination, reservation.shard),
-                            &format!("thread {}", current_thread_name()),
-                            || reservation.opening.describe_holder(),
-                        );
+                    let (wait, _queued) = waiting.get_or_insert_with(|| {
+                        (
+                            crate::lock_wait::LockWait::new("an SSH master"),
+                            ProvisionStageGuard::new(
+                                executor,
+                                ProvisionStage::WaitingForSshConnection,
+                            ),
+                        )
+                    });
+                    wait.blocked(
+                        &format!("{} shard {}", ssh.destination, reservation.shard),
+                        &format!("thread {}", current_thread_name()),
+                        || reservation.opening.describe_holder(),
+                    );
                     std::thread::sleep(Duration::from_millis(25));
                 }
             };
@@ -1847,7 +1857,7 @@ fn ensure_master(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor)
     // background connection that no ControlPersist ever closes (J-18). The
     // lock also keeps one process from removing, as stale, a socket the
     // other has just bound.
-    let _opening = lock_master_opening_unless(socket, &|| executor.cancellation_requested())?;
+    let _opening = lock_master_opening_unless(socket, Some(executor))?;
     if master_running(ssh, socket, executor)? {
         return Ok(false);
     }
@@ -1891,21 +1901,24 @@ fn ensure_master(ssh: &SshTarget, socket: &Path, executor: &dyn CommandExecutor)
 /// new master at `<socket>.<16 random characters>`, so the names never meet.
 #[cfg(all(unix, test))]
 fn lock_master_opening(socket: &Path) -> Result<crate::file_lock::FileLock> {
-    lock_master_opening_unless(socket, &|| false)
+    lock_master_opening_unless(socket, None)
 }
 
 #[cfg(unix)]
 fn lock_master_opening_unless(
     socket: &Path,
-    cancelled: &dyn Fn() -> bool,
+    executor: Option<&dyn CommandExecutor>,
 ) -> Result<crate::file_lock::FileLock> {
     let mut path = socket.as_os_str().to_owned();
     path.push(".lock");
     let path = PathBuf::from(path);
-    let mut wait = None::<crate::lock_wait::LockWait>;
+    let mut waiting = None::<(
+        crate::lock_wait::LockWait,
+        Option<ProvisionStageGuard<'_, dyn CommandExecutor>>,
+    )>;
     loop {
         ensure!(
-            !cancelled(),
+            !executor.is_some_and(CommandExecutor::cancellation_requested),
             "operation cancelled while waiting for SSH master lock"
         );
         let file = fs::OpenOptions::new()
@@ -1919,10 +1932,18 @@ fn lock_master_opening_unless(
             Err(std::fs::TryLockError::WouldBlock) => {
                 // The lock file is empty, so it cannot name its holder: that
                 // is another process, or another open of the file here.
-                wait.get_or_insert_with(|| {
-                    crate::lock_wait::LockWait::new("an SSH master file lock")
-                })
-                .blocked(
+                let (wait, _queued) = waiting.get_or_insert_with(|| {
+                    (
+                        crate::lock_wait::LockWait::new("an SSH master file lock"),
+                        executor.map(|executor| {
+                            ProvisionStageGuard::new(
+                                executor,
+                                ProvisionStage::WaitingForSshConnection,
+                            )
+                        }),
+                    )
+                });
+                wait.blocked(
                     &path.display().to_string(),
                     &format!("thread {}", current_thread_name()),
                     || "held by another process (the lock file records no pid)".to_owned(),
@@ -1940,7 +1961,7 @@ fn lock_master_opening_unless(
         // file removed meanwhile serializes nothing, so take the one at the
         // path now.
         if is_file_at(file.file(), &path) {
-            if let Some(wait) = wait {
+            if let Some((wait, _queued)) = waiting {
                 wait.acquired();
             }
             return Ok(file);
@@ -4245,7 +4266,7 @@ mod tests {
         let socket = dir.path().join("held-master");
         let _held = lock_master_opening(&socket).unwrap();
         let executor = CancellableProcessExecutor::with_timeout(Duration::from_millis(50));
-        assert!(lock_master_opening_unless(&socket, &|| executor.is_cancelled()).is_err());
+        assert!(lock_master_opening_unless(&socket, Some(&executor)).is_err());
 
         let ledger = SessionLedger::new();
         let ssh = plain_target("cancelled-master-host");

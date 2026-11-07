@@ -1788,10 +1788,11 @@ async fn waiting_for_a_container_start_slot_is_its_own_stage_until_admission() {
 }
 
 #[test]
-fn provisioning_reports_the_pull_stage_only_while_waiting() {
+fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns() {
     #[derive(Default)]
     struct StageRecorder {
         stages: Mutex<Vec<targets::ProvisionStage>>,
+        finished: Mutex<Vec<targets::ProvisionStage>>,
         notices: Mutex<Vec<String>>,
     }
 
@@ -1802,6 +1803,10 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
 
         fn stage_started(&self, stage: targets::ProvisionStage) {
             self.stages.lock().unwrap().push(stage);
+        }
+
+        fn stage_finished(&self, stage: targets::ProvisionStage) {
+            self.finished.lock().unwrap().push(stage);
         }
 
         fn notify_notice(&self, notice: &str) {
@@ -1819,15 +1824,28 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
         workspace_storage: Default::default(),
     });
 
+    // Hard-won: 9c928ddc2: the pull stage closed before the work that pulls
+    // the image ran, so a long first pull counted as a stalled Create.
     let quiet = StageRecorder::default();
-    crate::image_pull_gate::with_image_ready(&target, &quiet, || Ok(()))
-        .expect("nothing is downloading, so the work runs straight away");
-    assert!(
-        quiet.stages.lock().unwrap().is_empty(),
-        "a launch with nothing to wait for reported {:?}",
-        quiet.stages.lock().unwrap()
+    crate::image_pull_gate::with_image_ready(&target, &quiet, || {
+        assert_eq!(
+            *quiet.stages.lock().unwrap(),
+            vec![targets::ProvisionStage::PullingImage],
+            "the stage is open while the work that pulls runs"
+        );
+        assert!(quiet.finished.lock().unwrap().is_empty());
+        Ok(())
+    })
+    .expect("nothing is downloading, so the work runs straight away");
+    assert_eq!(
+        *quiet.finished.lock().unwrap(),
+        vec![targets::ProvisionStage::PullingImage]
     );
-    assert!(quiet.notices.lock().unwrap().is_empty());
+    assert!(
+        quiet.notices.lock().unwrap().is_empty(),
+        "a launch with nothing to wait for said {:?}",
+        quiet.notices.lock().unwrap()
+    );
 
     let lock = crate::image_pull_gate::image_pull_mutex(&targets::ImageHost::LocalPodman, image);
     let started = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -1844,8 +1862,14 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
     started.wait();
 
     let waiting = StageRecorder::default();
-    crate::image_pull_gate::with_image_ready(&target, &waiting, || Ok(()))
-        .expect("the launch proceeds once the download finishes");
+    crate::image_pull_gate::with_image_ready(&target, &waiting, || {
+        assert!(
+            waiting.finished.lock().unwrap().is_empty(),
+            "the wait's stage carries into the work without a gap"
+        );
+        Ok(())
+    })
+    .expect("the launch proceeds once the download finishes");
     assert_eq!(
         *waiting.stages.lock().unwrap(),
         vec![targets::ProvisionStage::PullingImage]

@@ -47,6 +47,12 @@ pub enum ProvisionStage {
     /// rather than starting a second download of the same image.
     PullingImage,
     WaitingForContainerUpgrade,
+    /// Queued behind another task holding the worker binary store for this
+    /// target. This is waiting for a turn, not work.
+    WaitingForWorkerStore,
+    /// Queued behind another task opening the shared SSH connection to this
+    /// host. This is waiting for a turn, not work.
+    WaitingForSshConnection,
     /// Queued behind other children starting in the same container. This is
     /// waiting for a turn, not work, so it never counts as a stall.
     WaitingForStartSlot,
@@ -79,6 +85,8 @@ impl ProvisionStage {
             Self::WaitingForContainerUpgrade => {
                 "Container upgrade pending; waiting for accepted work".into()
             }
+            Self::WaitingForWorkerStore => "Waiting for the worker binary store".into(),
+            Self::WaitingForSshConnection => "Waiting for an SSH connection to open".into(),
             Self::WaitingForStartSlot => "Waiting for a container start slot".into(),
             Self::Provisioning => "Provision".into(),
             Self::Booting => "Boot".into(),
@@ -99,6 +107,19 @@ impl ProvisionStage {
             Self::RemovingStorage => "Remove container storage".into(),
             Self::CleaningCache => "Clean cache".into(),
         }
+    }
+
+    /// Whether the stage is a wait for a turn behind other work, as opposed to
+    /// work of this operation. Queue time is not progress, and a stall bound
+    /// must not count it.
+    pub fn is_queue_wait(&self) -> bool {
+        matches!(
+            self,
+            Self::WaitingForContainerUpgrade
+                | Self::WaitingForWorkerStore
+                | Self::WaitingForSshConnection
+                | Self::WaitingForStartSlot
+        )
     }
 
     /// The worker owns the start time for harness preparation. Other stages

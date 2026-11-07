@@ -1,3 +1,4 @@
+use super::views::CreateProgress;
 use super::*;
 
 /// How long creating a parent's report root on its target may take.
@@ -13,6 +14,44 @@ const REPORT_ROOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// executor and `CommandSpec` have no per-command timeout, so a remote command
 /// that hangs on a live connection would otherwise wait for ever (#1438).
 pub(super) const CREATE_STALL_BOUND: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Bounds one reviewer readiness wait that runs with no Create to end it.
+///
+/// The clock runs only while no Create is running, so it starts when the wait
+/// began or when the Create finished, whichever is later. A running Create is
+/// bounded by its own stall check instead, which lets a slow Create take as
+/// long as it keeps making progress.
+pub(super) struct PostCreateWait {
+    what: &'static str,
+    since: Option<tokio::time::Instant>,
+}
+
+impl PostCreateWait {
+    pub(super) fn new(what: &'static str) -> Self {
+        Self {
+            what,
+            since: Some(tokio::time::Instant::now()),
+        }
+    }
+
+    fn create_running(&mut self) {
+        self.since = None;
+    }
+
+    /// The harness startup bound the other readiness waits share, so a
+    /// reviewer is given as long as any other session to open.
+    fn check(&mut self, child: &str) -> Result<()> {
+        let since = *self.since.get_or_insert_with(tokio::time::Instant::now);
+        let bound = crate::controller::NATIVE_SESSION_STARTUP_TIMEOUT;
+        anyhow::ensure!(
+            since.elapsed() < bound,
+            "the reviewer child {child} did not {} within {} s of its Create finishing",
+            self.what,
+            bound.as_secs()
+        );
+        Ok(())
+    }
+}
 
 impl RuntimeState {
     pub(super) async fn start_create_session(
@@ -237,16 +276,21 @@ impl RuntimeState {
         .await?;
         // No total deadline here: one counted queue time and cancelled an
         // accepted Create mid-provision, which left the child without a worker
-        // root (#1438). Each wait ends with the Create's own outcome: the
-        // child is ready, its record says the Create failed or it was closed,
-        // or the Create has stalled for `CREATE_STALL_BOUND`.
+        // root (#1438). While the Create runs, each wait ends with its
+        // outcome: the child is ready, its record says the Create failed or
+        // it was closed, or the Create stalled for `CREATE_STALL_BOUND` and
+        // was cancelled. Once no Create is running (it finished, or the
+        // reviewer was restored without one) nothing else ends a wait, so
+        // `PostCreateWait` bounds it.
+        let mut waiting = PostCreateWait::new("open its session");
         let handle = loop {
-            self.reviewer_child_can_still_start(child)?;
+            self.reviewer_child_can_still_start(child, &mut waiting)?;
             if let Ok(handle) = self.session_manager.session(child.to_owned()).await {
                 break handle;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
+        let mut waiting = PostCreateWait::new("report its capabilities");
         loop {
             let view = handle.view();
             if view.connected
@@ -260,7 +304,7 @@ impl RuntimeState {
             if let Some(error) = view.error {
                 anyhow::bail!("{error:?}");
             }
-            self.reviewer_child_can_still_start(child)?;
+            self.reviewer_child_can_still_start(child, &mut waiting)?;
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         use crate::server_runtime::api::ExportRuntime;
@@ -276,9 +320,10 @@ impl RuntimeState {
                 },
             )
             .await?;
-        // The startup delivery waits for the harness and fails the step when
-        // the session reaches a state that cannot take it, so a status that
-        // stays pending ends either in a submit or in a failure.
+        // The startup delivery fails the step when the session reaches a state
+        // that cannot take it; `PostCreateWait` bounds a harness that never
+        // answers.
+        let mut waiting = PostCreateWait::new("take its first prompt");
         loop {
             match self.startup_status(child.to_owned()).await? {
                 Some(crate::server::api::StartStatus::Submitted { .. }) => return Ok(()),
@@ -286,7 +331,7 @@ impl RuntimeState {
                     anyhow::bail!("{message}")
                 }
                 _ => {
-                    self.reviewer_child_can_still_start(child)?;
+                    self.reviewer_child_can_still_start(child, &mut waiting)?;
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
@@ -295,10 +340,15 @@ impl RuntimeState {
 
     /// Fail unless the reviewer child's record is still one a Create can
     /// finish: missing, closed, failed or destroyed children never become
-    /// ready, so waiting for them would never end. Also fail a Create that has
-    /// stalled (see [`CREATE_STALL_BOUND`]).
-    fn reviewer_child_can_still_start(&self, child: &str) -> Result<()> {
-        self.check_create_progress(child, CREATE_STALL_BOUND)?;
+    /// ready, so waiting for them would never end. Also fail, and cancel, a
+    /// Create that has stalled (see [`CREATE_STALL_BOUND`]), and a readiness
+    /// wait that has gone on too long with no Create running.
+    fn reviewer_child_can_still_start(
+        &self,
+        child: &str,
+        waiting: &mut PostCreateWait,
+    ) -> Result<()> {
+        self.check_create_progress(child, CREATE_STALL_BOUND, waiting)?;
         let Some(record) = self.session_record(child) else {
             anyhow::bail!("reviewer child {child} no longer exists");
         };
@@ -315,26 +365,48 @@ impl RuntimeState {
     }
 
     /// Fail when the child's running Create has gone `bound` without a
-    /// provisioning stage starting or finishing. The stage signal is the one
+    /// provisioning stage starting or finishing, and cancel that Create in
+    /// the same decision, through the cancellation close and destroy use, so
+    /// it stops holding its lifecycle admission. The stage signal is the one
     /// the lifecycle already keeps for its progress display. Waiting for a
-    /// container start slot is a stage of its own and is never a stall;
-    /// admission ends it and so restarts the clock.
-    pub(super) fn check_create_progress(&self, child: &str, bound: Duration) -> Result<()> {
-        let Some((idle, stages)) = self.create_stall(child) else {
-            return Ok(());
-        };
-        if idle < bound {
-            return Ok(());
+    /// slot is a stage of its own and is never a stall; admission ends it and
+    /// so restarts the clock.
+    ///
+    /// With no Create running, `waiting` bounds the readiness wait instead.
+    pub(super) fn check_create_progress(
+        &self,
+        child: &str,
+        bound: Duration,
+        waiting: &mut PostCreateWait,
+    ) -> Result<()> {
+        match self.cancel_stalled_create(child, bound) {
+            CreateProgress::NotRunning => waiting.check(child),
+            CreateProgress::Running => {
+                waiting.create_running();
+                Ok(())
+            }
+            CreateProgress::Stalled {
+                idle,
+                stages,
+                cancelled,
+            } => {
+                let stage = if stages.is_empty() {
+                    "between stages".to_owned()
+                } else {
+                    stages.join(" + ")
+                };
+                let outcome = if cancelled {
+                    "its Create was cancelled"
+                } else {
+                    "its Create has committed and was left running"
+                };
+                tracing::warn!(session_id = child, idle_secs = idle.as_secs(), %stage, cancelled, "reviewer child Create stalled");
+                anyhow::bail!(
+                    "the reviewer child {child} stalled while provisioning: no stage started or finished for {} s (stalled in: {stage}); {outcome}",
+                    idle.as_secs()
+                )
+            }
         }
-        let stage = if stages.is_empty() {
-            "between stages".to_owned()
-        } else {
-            stages.join(" + ")
-        };
-        anyhow::bail!(
-            "the reviewer child {child} stalled while provisioning: no stage started or finished for {} s (stalled in: {stage})",
-            idle.as_secs()
-        )
     }
 
     pub async fn start_create_session_controlled(

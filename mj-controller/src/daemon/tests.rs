@@ -3402,23 +3402,26 @@ async fn a_create_that_keeps_finishing_stages_is_not_failed_as_stalled() {
     for _ in 0..24 {
         executor.stage_started(ProvisionStage::Syncing);
         tokio::time::sleep(Duration::from_secs(5 * 60)).await;
-        state
-            .check_create_progress("session-1", create::CREATE_STALL_BOUND)
+        check_progress(&state, create::CREATE_STALL_BOUND)
             .expect("a Create that is making progress is not stalled");
         executor.stage_finished(ProvisionStage::Syncing);
         tokio::time::sleep(Duration::from_secs(5 * 60)).await;
-        state
-            .check_create_progress("session-1", create::CREATE_STALL_BOUND)
+        check_progress(&state, create::CREATE_STALL_BOUND)
             .expect("a Create that is making progress is not stalled");
     }
 }
 
-/// Queueing at a container's start gate is waiting for a turn, not a stalled
-/// stage: it may last longer than the stall bound, and admission restarts the
-/// clock.
-#[tokio::test(start_paused = true)]
-async fn a_create_queued_at_the_start_gate_longer_than_the_bound_is_not_stalled() {
-    let state = test_runtime_state();
+/// The stall check as the reviewer start runs it while a Create is running.
+fn check_progress(state: &Arc<RuntimeState>, bound: Duration) -> Result<()> {
+    state.check_create_progress(
+        "session-1",
+        bound,
+        &mut create::PostCreateWait::new("test wait"),
+    )
+}
+
+/// A running Create with no work of its own, for the stall tests.
+fn start_idle_create(state: &Arc<RuntimeState>) {
     state
         .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
             |_state, _session_id, _cancelled| async move {
@@ -3428,6 +3431,15 @@ async fn a_create_queued_at_the_start_gate_longer_than_the_bound_is_not_stalled(
             }
         })
         .unwrap();
+}
+
+/// Queueing for a turn (a container start slot, the worker binary store, an
+/// SSH connection to open) is waiting, not a stalled stage: it may last longer
+/// than the stall bound, and admission restarts the clock.
+#[tokio::test(start_paused = true)]
+async fn a_create_queued_for_a_turn_longer_than_the_bound_is_not_stalled() {
+    let state = test_runtime_state();
+    start_idle_create(&state);
     tokio::task::yield_now().await;
     let executor = DaemonStageReportingExecutor::new(
         RefusingExecutor("a stage notification"),
@@ -3435,19 +3447,111 @@ async fn a_create_queued_at_the_start_gate_longer_than_the_bound_is_not_stalled(
         "session-1".into(),
     );
     let bound = create::CREATE_STALL_BOUND;
-    executor.stage_started(ProvisionStage::WaitingForStartSlot);
-    tokio::time::sleep(bound * 3).await;
-    state
-        .check_create_progress("session-1", bound)
-        .expect("a queued Create is not stalled");
-    executor.stage_finished(ProvisionStage::WaitingForStartSlot);
+    for queue in [
+        ProvisionStage::WaitingForStartSlot,
+        ProvisionStage::WaitingForWorkerStore,
+        ProvisionStage::WaitingForSshConnection,
+    ] {
+        executor.stage_started(queue.clone());
+        tokio::time::sleep(bound * 3).await;
+        check_progress(&state, bound)
+            .unwrap_or_else(|error| panic!("a Create queued in {queue:?} is not stalled: {error}"));
+        executor.stage_finished(queue);
+    }
     // Admitted: the clock starts again from admission, and the next stage can
     // stall like any other.
     executor.stage_started(ProvisionStage::Starting);
     tokio::time::sleep(bound - Duration::from_secs(1)).await;
-    state.check_create_progress("session-1", bound).unwrap();
+    check_progress(&state, bound).unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(state.check_create_progress("session-1", bound).is_err());
+    assert!(check_progress(&state, bound).is_err());
+}
+
+// Hard-won: 9c928ddc2: a stalled Create only failed the reviewer start and kept running with its lifecycle admission held, which blocks daemon handoff.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
+    let state = test_runtime_state();
+    let cancel_seen = Arc::new(AtomicBool::new(false));
+    let result = state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+            let cancel_seen = cancel_seen.clone();
+            |_state, _session_id, cancelled| async move {
+                while !cancelled.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                cancel_seen.store(true, Ordering::Release);
+                anyhow::bail!("create cancelled")
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        "session-1".into(),
+    );
+    executor.stage_started(ProvisionStage::Syncing);
+    let bound = create::CREATE_STALL_BOUND;
+    tokio::time::sleep(bound - Duration::from_secs(1)).await;
+    check_progress(&state, bound).unwrap();
+    assert!(!cancel_seen.load(Ordering::Acquire));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let error = check_progress(&state, bound).unwrap_err().to_string();
+    assert!(error.contains("its Create was cancelled"), "{error}");
+    // The cancel reached the Create's own flag, and the Create ended, which
+    // is what drops its admission.
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        RuntimeState::wait_lifecycle_result(result),
+    )
+    .await
+    .expect("the cancelled Create ends");
+    assert!(outcome.is_err());
+    assert!(cancel_seen.load(Ordering::Acquire));
+}
+
+// Hard-won: 9c928ddc2: readiness waits after the Create finished had no bound, so a harness that never reported its capabilities waited for ever.
+#[tokio::test(start_paused = true)]
+async fn a_readiness_wait_with_no_create_running_fails_at_the_startup_timeout() {
+    let state = test_runtime_state();
+    let timeout = crate::controller::NATIVE_SESSION_STARTUP_TIMEOUT;
+    let mut waiting = create::PostCreateWait::new("report its capabilities");
+    // The wait began while a Create ran: that time is the Create's, and its
+    // own stall check bounds it.
+    let finish = Arc::new(tokio::sync::Notify::new());
+    let watch = state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+            let finish = finish.clone();
+            |_state, _session_id, _cancelled| async move {
+                finish.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::sleep(timeout * 4).await;
+    state
+        .check_create_progress("session-1", create::CREATE_STALL_BOUND * 100, &mut waiting)
+        .unwrap();
+    // The Create ends; the wait now has the full bound from that moment.
+    finish.notify_one();
+    RuntimeState::wait_lifecycle_result(watch).await.unwrap();
+    state
+        .check_create_progress("session-1", create::CREATE_STALL_BOUND, &mut waiting)
+        .unwrap();
+    tokio::time::sleep(timeout - Duration::from_secs(1)).await;
+    state
+        .check_create_progress("session-1", create::CREATE_STALL_BOUND, &mut waiting)
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let error = state
+        .check_create_progress("session-1", create::CREATE_STALL_BOUND, &mut waiting)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("did not report its capabilities within 300 s"),
+        "{error}"
+    );
 }
 
 // Hard-won: #1438: a 120 s total deadline cancelled slow Creates mid-provision, and removing it outright left a command that hangs on a live connection with nothing to end its start.
@@ -3472,12 +3576,9 @@ async fn a_create_stalled_in_one_stage_fails_its_start_and_names_the_stage() {
     executor.stage_started(ProvisionStage::Syncing);
     let bound = create::CREATE_STALL_BOUND;
     tokio::time::sleep(bound - Duration::from_secs(1)).await;
-    state.check_create_progress("session-1", bound).unwrap();
+    check_progress(&state, bound).unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let error = state
-        .check_create_progress("session-1", bound)
-        .unwrap_err()
-        .to_string();
+    let error = check_progress(&state, bound).unwrap_err().to_string();
     assert!(
         error.contains("stalled in: Sync")
             && error.contains("no stage started or finished for 601 s"),
