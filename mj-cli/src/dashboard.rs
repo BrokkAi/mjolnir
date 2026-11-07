@@ -25,7 +25,7 @@ mod workspace_settings;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -223,6 +223,51 @@ fn shutdown_wait_notice(blockers: &[String]) -> Option<String> {
     }
 }
 
+/// When each step of the last dashboard exit began. The dashboard records its
+/// steps; `main` adds the runtime shutdown and logs them all in one line just
+/// before the process exits, so a slow quit names the step that waited.
+#[derive(Debug, Clone, Copy)]
+struct QuitTimings {
+    /// `None` when the loop ended without a quit request.
+    requested_at: Option<Instant>,
+    loop_ended_at: Instant,
+    auto_afk_started_at: Instant,
+    auto_afk_finished_at: Instant,
+    saves_started_at: Instant,
+    saves_finished_at: Instant,
+    returned_at: Instant,
+}
+
+static QUIT_TIMINGS: std::sync::Mutex<Option<QuitTimings>> = std::sync::Mutex::new(None);
+
+/// Logs the last dashboard exit's steps. `runtime_shutdown_started` is when
+/// `main` began shutting the runtime down, which ends the teardown step.
+pub(crate) fn log_quit_timings(runtime_shutdown_started: Instant) {
+    let Some(timings) = QUIT_TIMINGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    else {
+        return;
+    };
+    let ms = |from: Instant, to: Instant| to.saturating_duration_since(from).as_millis();
+    let exited_at = Instant::now();
+    let started_at = timings.requested_at.unwrap_or(timings.loop_ended_at);
+    tracing::info!(
+        total_ms = ms(started_at, exited_at),
+        pending_writes_ms = ms(started_at, timings.loop_ended_at),
+        detach_count_ms = ms(timings.loop_ended_at, timings.auto_afk_started_at),
+        auto_afk_ms = ms(timings.auto_afk_started_at, timings.auto_afk_finished_at),
+        terminal_restore_ms = ms(timings.auto_afk_finished_at, timings.saves_started_at),
+        final_saves_ms = ms(timings.saves_started_at, timings.saves_finished_at),
+        session_manager_ms = ms(timings.saves_finished_at, timings.returned_at),
+        teardown_ms = ms(timings.returned_at, runtime_shutdown_started),
+        runtime_shutdown_ms = ms(runtime_shutdown_started, exited_at),
+        quit_requested = timings.requested_at.is_some(),
+        "the dashboard exited"
+    );
+}
+
 /// Bound acknowledgements, not the daemon's accepted mutation. A timeout must
 /// report uncertain durability and must not replay the mutation.
 async fn finish_shutdown_save(
@@ -333,7 +378,8 @@ pub(crate) struct DashboardContext {
     /// changed.
     pub(crate) controller_changed: bool,
     pub(crate) quit_detached: bool,
-    shutdown_requested: bool,
+    /// When the person asked to quit; the quit timing log measures from here.
+    shutdown_requested_at: Option<Instant>,
     pub(crate) critical_operations: CriticalOperationTracker,
     critical_operations_changed: watch::Receiver<u64>,
     /// Built here because it reads the scheduler statistics of the thread
@@ -640,7 +686,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         context.loop_stalls.phase(loop_stalls::Phase::Housekeeping);
         context.update_subagent_scope();
         context.reconcile_stored_session_summaries();
-        if !context.shutdown_requested {
+        if context.shutdown_requested_at.is_none() {
             context.refresh_controller_derived_state();
             context.start_sessions_text_search();
         }
@@ -693,7 +739,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         context.loop_stalls.select_started();
         tokio::select! {
             biased;
-            _ = termination.cancelled(), if !context.shutdown_requested => {
+            _ = termination.cancelled(), if context.shutdown_requested_at.is_none() => {
                 context.loop_stalls.woke("termination");
                 context.begin_shutdown(false);
                 pacer.mark_urgent();
@@ -707,7 +753,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                 if auto_afk::is_operator_input(&event) {
                     context.auto_afk.input();
                 }
-                if context.shutdown_requested {
+                if context.shutdown_requested_at.is_some() {
                     continue;
                 }
                 // Nothing behind the splash has been seen, so nothing there
@@ -880,7 +926,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                     let presence = context.daemon_presence.borrow_and_update().clone();
                     match presence {
                         crate::daemon::DaemonPresence::Upgraded(executable) => {
-                            if !context.shutdown_requested {
+                            if context.shutdown_requested_at.is_none() {
                                 restart_executable = Some(executable);
                                 context.request_shutdown();
                             }
@@ -908,7 +954,7 @@ pub(crate) async fn run_dashboard_for_workspace(
                 pacer.mark();
             }
             _ = context.critical_operations_changed.changed(),
-                if context.shutdown_requested => {
+                if context.shutdown_requested_at.is_some() => {
                 context.loop_stalls.woke("critical_operations");
                 pacer.mark_urgent();
             }
@@ -1026,7 +1072,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         );
         context.save_active_workspace_layout();
         context.loop_stalls.phase(loop_stalls::Phase::Actions);
-        if !context.shutdown_requested {
+        if context.shutdown_requested_at.is_none() {
             context.apply_chat_outcome(chat_outcome).await;
             actions::apply_dashboard_action(&mut context, action).await?;
             // A settled Git identity check lets the new session it held back
@@ -1099,10 +1145,11 @@ pub(crate) async fn run_dashboard_for_workspace(
             context.wiki_search_task = None;
         }
         context.remember_go_selection();
-        if context.shutdown_requested && context.refresh_shutdown_notice() {
+        if context.shutdown_requested_at.is_some() && context.refresh_shutdown_notice() {
             break;
         }
     }
+    let loop_ended_at = Instant::now();
     // Capture the feed-owned projection at the exit decision, before cleanup
     // can close feeds or change the dashboard's state.
     let detached_sessions = match &*context.daemon_presence.borrow() {
@@ -1125,7 +1172,9 @@ pub(crate) async fn run_dashboard_for_workspace(
         }
         _ => DetachedSessions::Unknown,
     };
+    let auto_afk_started_at = Instant::now();
     context.auto_afk.shutdown().await;
+    let auto_afk_finished_at = Instant::now();
     context.cancel_background_work();
     let quit_detached = context.quit_detached;
     // Hand the terminal back before saying anything on it; the warm chat and
@@ -1145,6 +1194,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         );
     }
     // All final persistence shares one budget; independent saves run together.
+    let saves_started_at = Instant::now();
     let deadline = tokio::time::Instant::now() + io::SAVE_ACK_TIMEOUT;
     let workspace_id = context.dashboard.active_workspace_id().map(str::to_owned);
     let last_workspace = async {
@@ -1174,24 +1224,37 @@ pub(crate) async fn run_dashboard_for_workspace(
         ),
         finish_shutdown_save("last workspace", deadline, last_workspace),
     );
+    let saves_finished_at = Instant::now();
     for result in [sidebar, panes, layout, workspace] {
         if let Err(error) = result {
             tracing::warn!(%error, "dashboard final persistence was not confirmed");
             eprintln!("{error:#}");
         }
     }
-    if let Some(shutdown) = context.worker_shutdown.take() {
-        let result = shutdown
+    let session_manager = match context.worker_shutdown.take() {
+        Some(shutdown) => shutdown
             .shutdown()
             .await
-            .context("shut down dashboard session manager");
-        if restart_executable.is_some() {
-            if let Err(error) = result {
-                tracing::warn!(%error, "old terminal session manager failed during upgrade handoff");
-            }
-        } else {
-            result?;
+            .context("shut down dashboard session manager"),
+        None => Ok(()),
+    };
+    // Recorded before a session manager failure returns, so a failed quit is
+    // timed too. The rest of the context drops as this returns; `main` times
+    // that.
+    *QUIT_TIMINGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(QuitTimings {
+        requested_at: context.shutdown_requested_at,
+        loop_ended_at,
+        auto_afk_started_at,
+        auto_afk_finished_at,
+        saves_started_at,
+        saves_finished_at,
+        returned_at: Instant::now(),
+    });
+    if let Err(error) = session_manager {
+        if restart_executable.is_none() {
+            return Err(error);
         }
+        tracing::warn!(%error, "old terminal session manager failed during upgrade handoff");
     }
     Ok(
         if let Some((target, resume)) = restart_executable.zip(resume) {
@@ -1201,7 +1264,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             }
         } else if quit_detached {
             DashboardExit::Detached(detached_sessions)
-        } else if context.shutdown_requested {
+        } else if context.shutdown_requested_at.is_some() {
             DashboardExit::Interrupted
         } else {
             DashboardExit::Normal
@@ -1295,7 +1358,7 @@ impl DashboardContext {
             && !self.startup.pick_pending()
             && self.opening_chat_sessions.is_empty()
             && !self.dashboard.modal_open()
-            && !self.shutdown_requested
+            && self.shutdown_requested_at.is_none()
     }
 
     /// Persists how far a warm chat has been read and the draft it holds.
@@ -1576,9 +1639,11 @@ impl DashboardContext {
     }
 
     fn begin_shutdown(&mut self, detached: bool) {
-        if self.shutdown_requested {
+        if self.shutdown_requested_at.is_some() {
             return;
         }
+        // Timed from here so saving the drafts below counts toward the quit.
+        let requested_at = Instant::now();
         self.collect_prepared_startup_prompts();
         self.startup_prompts
             .cancel_unadmitted(&mut self.dashboard, &mut self.chats);
@@ -1602,7 +1667,7 @@ impl DashboardContext {
         for session_id in self.chats.keys().cloned().collect::<Vec<_>>() {
             self.record_chat_detach(&session_id);
         }
-        self.shutdown_requested = true;
+        self.shutdown_requested_at = Some(requested_at);
         // Shutdown progress belongs on screen, not behind the splash.
         self.splash = None;
         for (session_id, through) in self.read_receipts.retry_failed() {
@@ -1637,7 +1702,7 @@ impl DashboardContext {
     pub(super) fn acknowledge_visible_chats(&mut self) {
         // Freeze the final receipt set so ongoing worker output cannot keep
         // extending shutdown while its existing saves drain.
-        if self.shutdown_requested {
+        if self.shutdown_requested_at.is_some() {
             return;
         }
         let mut sessions = self.drawn_chat_sessions.clone();
@@ -1900,7 +1965,7 @@ impl DashboardContext {
             drawn_notice_generation: 0,
             controller_changed: true,
             quit_detached: false,
-            shutdown_requested: false,
+            shutdown_requested_at: None,
             critical_operations,
             critical_operations_changed,
             loop_stalls: loop_stalls::Meter::new(),

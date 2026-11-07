@@ -859,6 +859,244 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     assert!(reports.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_dir());
 }
 
+/// Records the purpose of every command. The worker-root probe either runs
+/// for real or fails as if SSH or Podman were unreachable; every other command
+/// fails, so a close that tries to reconnect or restart a worker is visible.
+struct RootProbeExecutor {
+    probe_fails: bool,
+    /// What the worker liveness probe answers.
+    worker: &'static str,
+    purposes: std::sync::Mutex<Vec<String>>,
+}
+
+impl CommandExecutor for RootProbeExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.purposes.lock().unwrap().push(command.purpose.clone());
+        match command.purpose.as_str() {
+            "probe Mjolnir worker root" if self.probe_fails => {
+                anyhow::bail!("ssh: connect to host morannon: connection timed out")
+            }
+            "probe Mjolnir worker daemon liveness" => Ok(CommandOutput {
+                status: 0,
+                stdout: format!("{}\n", self.worker).into_bytes(),
+                stderr: Vec::new(),
+            }),
+            "probe Mjolnir worker root"
+            | "stop a borrowed-target sub-agent and remove its private worker state" => {
+                ProcessExecutor.execute(command)
+            }
+            other => anyhow::bail!("unexpected command: {other}"),
+        }
+    }
+}
+
+/// A reviewer child whose Create was cancelled before the install step has a
+/// target and no worker root. Its close must finish in one pass instead of
+/// reconnecting and restarting a worker that never existed; when the probe
+/// cannot tell, the old recovery path (and its retry) stays.
+// Hard-won: a8c169cd3: closing a child with no worker root retried a worker restart forever
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
+async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
+    if !in_isolated_store("closing_a_child_with_no_worker_root_skips_worker_recovery") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    let mut controller = failed_subagent_controller(&worker_root, session_id);
+    controller.state.sessions.get_mut(session_id).unwrap().state = SessionState::Closing;
+    seed_child_reports(&mut controller, session_id, directory.path());
+    assert!(!worker_root.exists());
+
+    let unreachable = RootProbeExecutor {
+        probe_fails: true,
+        worker: "dead",
+        purposes: Default::default(),
+    };
+    controller
+        .suspend_subagent_controlled(session_id, &unreachable, None, None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        *unreachable.purposes.lock().unwrap().first().unwrap(),
+        "probe Mjolnir worker root"
+    );
+    assert!(
+        !unreachable
+            .purposes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|purpose| purpose.starts_with("stop a borrowed-target")),
+        "an unanswered probe must not be read as an absent root"
+    );
+    assert_ne!(
+        controller.state.sessions[session_id].state,
+        SessionState::Stopped
+    );
+    assert!(controller.state.sessions[session_id].target.is_some());
+
+    let answered = RootProbeExecutor {
+        probe_fails: false,
+        worker: "dead",
+        purposes: Default::default(),
+    };
+    controller
+        .suspend_subagent_controlled(session_id, &answered, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        *answered.purposes.lock().unwrap(),
+        [
+            "probe Mjolnir worker root",
+            "probe Mjolnir worker daemon liveness",
+            "stop a borrowed-target sub-agent and remove its private worker state"
+        ]
+    );
+    let closed = &controller.state.sessions[session_id];
+    assert_eq!(closed.state, SessionState::Stopped);
+    assert!(closed.target.is_none());
+}
+
+/// Close a Closing child whose root holds the binary and an exit record, plus
+/// relay state when `has_state`. Returns the commands run and the result.
+async fn close_child_with_partial_root(
+    name: &str,
+    has_state: bool,
+    worker: &'static str,
+) -> Option<(Vec<String>, bool, SessionState, bool)> {
+    if !in_isolated_store(name) {
+        return None;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    std::fs::write(worker_root.join("hel"), b"").unwrap();
+    std::fs::write(worker_root.join("worker-exit.json"), b"{}").unwrap();
+    if has_state {
+        std::fs::write(worker_root.join(mj_core::relay::RELAY_STATE_FILE), b"{}").unwrap();
+    }
+    let mut controller = failed_subagent_controller(&worker_root, session_id);
+    controller.state.sessions.get_mut(session_id).unwrap().state = SessionState::Closing;
+    seed_child_reports(&mut controller, session_id, directory.path());
+    let executor = RootProbeExecutor {
+        probe_fails: false,
+        worker,
+        purposes: Default::default(),
+    };
+    let result = controller
+        .suspend_subagent_controlled(session_id, &executor, None, None)
+        .await;
+    let purposes = executor.purposes.lock().unwrap().clone();
+    Some((
+        purposes,
+        result.is_ok(),
+        controller.state.sessions[session_id].state,
+        worker_root.join(mj_core::relay::RELAY_STATE_FILE).exists(),
+    ))
+}
+
+/// A Create cancelled after install but before the worker reached its durable
+/// relay leaves a root with the binary and an exit record but no relay state.
+/// A checkpoint-only worker refuses it, so its close settles like an absent root.
+// Hard-won: #1438: a partial worker root without relay state kept its close retrying a recovery the worker refuses
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
+async fn closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery() {
+    let Some((purposes, ok, state, _)) = close_child_with_partial_root(
+        "closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery",
+        false,
+        "dead",
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(ok);
+    assert_eq!(
+        purposes,
+        [
+            "probe Mjolnir worker root",
+            "probe Mjolnir worker daemon liveness",
+            "stop a borrowed-target sub-agent and remove its private worker state"
+        ]
+    );
+    assert_eq!(state, SessionState::Stopped);
+}
+
+/// A root with relay state keeps the recovery path and is not cleaned up.
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
+async fn closing_a_child_whose_root_has_relay_state_keeps_worker_recovery() {
+    let Some((purposes, _, _, state_kept)) = close_child_with_partial_root(
+        "closing_a_child_whose_root_has_relay_state_keeps_worker_recovery",
+        true,
+        "dead",
+    )
+    .await
+    else {
+        return;
+    };
+    assert_eq!(
+        purposes.first().map(String::as_str),
+        Some("probe Mjolnir worker root")
+    );
+    assert!(
+        !purposes
+            .iter()
+            .any(|purpose| purpose.starts_with("stop a borrowed-target")),
+        "{purposes:?}"
+    );
+    assert!(state_kept);
+}
+
+/// A worker that is still starting has written no relay state yet. Its empty
+/// root is not "nothing to recover": the close keeps the recovery path so the
+/// conversation the worker is about to start is synchronized, not deleted.
+// Hard-won: #1438: an empty root of a worker that was still starting read as nothing to recover
+#[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
+async fn closing_a_child_whose_worker_is_still_starting_keeps_worker_recovery() {
+    let Some((purposes, _, _, _)) = close_child_with_partial_root(
+        "closing_a_child_whose_worker_is_still_starting_keeps_worker_recovery",
+        false,
+        "starting",
+    )
+    .await
+    else {
+        return;
+    };
+    assert_eq!(
+        purposes[..2],
+        [
+            "probe Mjolnir worker root",
+            "probe Mjolnir worker daemon liveness"
+        ]
+    );
+    assert!(
+        !purposes
+            .iter()
+            .any(|purpose| purpose.starts_with("stop a borrowed-target")),
+        "{purposes:?}"
+    );
+}
+
 /// A child closed by an older daemon can retain a checkpoint; reports
 /// survive there too, not only on the no-checkpoint path.
 // Hard-won: #1333: close deleted the child's report_dir that parents were told to cite.

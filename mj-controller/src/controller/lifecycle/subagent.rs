@@ -5,6 +5,7 @@ use crate::controller::checkpoint::{
     BarrierBusyPolicy, CHECKPOINT_BARRIER_TIMEOUT, adopt_restarted_checkpoint_relay,
     connect_checkpoint_relay, wait_for_checkpoint_barrier,
 };
+use crate::controller::worker_binary::{WorkerRecovery, worker_recovery};
 
 impl Controller {
     /// Persist the child's final relay events before removing its private
@@ -50,6 +51,22 @@ impl Controller {
                 // it. None of the worker waits below should hold up replacing
                 // the daemon, even when the relay never answers.
                 executor.begin_resumable_work()?;
+                // A Create cancelled before its worker reached its durable relay
+                // leaves a target with no worker root, or a root without relay
+                // state. There is no journal to synchronize, and a
+                // checkpoint-only worker would refuse the root, so go straight to
+                // cleanup. When the probe cannot tell, keep the recovery path.
+                let (placement, worker_root) = self.worker_placement(session_id)?;
+                let nothing_to_recover = worker_recovery(executor, &placement, &worker_root)
+                    == WorkerRecovery::NothingToRecover;
+                if nothing_to_recover {
+                    tracing::info!(
+                        session_id,
+                        target = ?previous.target,
+                        worker_root,
+                        "closing a sub-agent whose worker root holds no relay state, without checkpoint recovery"
+                    );
+                }
                 let backend =
                     backend_locator(previous.target.as_ref().unwrap(), &previous, &self.config)?;
                 let reconnect = targets::reconnect_plan(&backend, session_id)?
@@ -57,37 +74,46 @@ impl Controller {
                     .into_iter()
                     .next()
                     .context("reconnect plan is empty")?;
-                let connected =
-                    connect_checkpoint_relay(session_id, manager, &reconnect, None).await;
-                Some(match connected {
-                    Ok(relay) => relay,
-                    Err(error) if crate::session_manager::worker_connect_needs_restart(&error) => {
-                        let (backend, worker_root) = self.worker_placement(session_id)?;
-                        let liveness = executor.execute(
-                            &super::super::worker_binary::worker_liveness_command(
-                                &backend,
-                                &worker_root,
-                            ),
-                        )?;
-                        ensure!(
-                            liveness.status == 0
-                                && String::from_utf8_lossy(&liveness.stdout).trim() == "dead",
-                            "child relay is unreachable, but its worker is not confirmed dead; preserving its private journal: {error:#}"
-                        );
-                        let connection = self
-                            .restart_worker_for_checkpoint_only(
-                                session_id,
-                                executor,
-                                &backend,
-                                &worker_root,
-                                &reconnect,
-                            )
-                            .await
-                            .context("recover dead child worker without starting its harness")?;
-                        adopt_restarted_checkpoint_relay(session_id, manager, connection).await?
-                    }
-                    Err(error) => return Err(error),
-                })
+                if nothing_to_recover {
+                    None
+                } else {
+                    let connected =
+                        connect_checkpoint_relay(session_id, manager, &reconnect, None).await;
+                    Some(match connected {
+                        Ok(relay) => relay,
+                        Err(error)
+                            if crate::session_manager::worker_connect_needs_restart(&error) =>
+                        {
+                            let (backend, worker_root) = self.worker_placement(session_id)?;
+                            let liveness = executor.execute(
+                                &super::super::worker_binary::worker_liveness_command(
+                                    &backend,
+                                    &worker_root,
+                                ),
+                            )?;
+                            ensure!(
+                                liveness.status == 0
+                                    && String::from_utf8_lossy(&liveness.stdout).trim() == "dead",
+                                "child relay is unreachable, but its worker is not confirmed dead; preserving its private journal: {error:#}"
+                            );
+                            let connection = self
+                                .restart_worker_for_checkpoint_only(
+                                    session_id,
+                                    executor,
+                                    &backend,
+                                    &worker_root,
+                                    &reconnect,
+                                )
+                                .await
+                                .context(
+                                    "recover dead child worker without starting its harness",
+                                )?;
+                            adopt_restarted_checkpoint_relay(session_id, manager, connection)
+                                .await?
+                        }
+                        Err(error) => return Err(error),
+                    })
+                }
             } else {
                 None
             };
