@@ -565,8 +565,10 @@ pub(super) async fn serve_session(
         // failing the worker, which left a resumed session suspended on every
         // retry (R8-2). Claude takes its default mode, new or reloaded, so a
         // restored mode such as bypassPermissions never survives. Another
-        // harness keeps its own mode for a new session; a reloaded one fails,
-        // since it opened in this mode before.
+        // harness keeps its own mode for a new session that refused the
+        // request; a reloaded one fails, since it opened in this mode before,
+        // and so does one whose bridge does not offer the mode at all (a Muse
+        // listing only allowAll would run without approvals).
         let message = match take_safe_mode(
             connection,
             &session_id,
@@ -579,7 +581,7 @@ pub(super) async fn serve_session(
         .await?
         {
             Some(message) => message,
-            None if resumed => return Err(refusal.error),
+            None if resumed || refusal.unoffered => return Err(refusal.error),
             None => refused_policy_warning(
                 spec.harness,
                 enforcement,

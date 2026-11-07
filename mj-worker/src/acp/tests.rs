@@ -2651,6 +2651,116 @@ async fn stubborn_mode_bridge(stream: tokio::io::DuplexStream) {
     }
 }
 
+/// A Muse bridge whose approval selector offers only `allowAll`: a Guardian
+/// session has no approval mode to run in.
+async fn allow_all_only_muse_bridge(stream: tokio::io::DuplexStream) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let mut options = serde_json::json!([
+        {"id": "approval_mode", "name": "Approvals", "type": "select",
+         "currentValue": "allowAll", "options": [{"value": "allowAll", "name": "Allow all"}]},
+        {"id": "auto_review", "name": "Auto-review", "type": "select",
+         "currentValue": "off", "options": [
+            {"value": "off", "name": "Off"}, {"value": "on", "name": "On"}
+        ]}
+    ]);
+    let (read, mut write) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read).lines();
+    while let Some(line) = lines.next_line().await.expect("read bridge input") {
+        let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let Some(method) = message.get("method").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let id = message.get("id").cloned().unwrap_or_default();
+        let result = match method {
+            "initialize" => serde_json::json!({"protocolVersion": 1}),
+            "session/new" => serde_json::json!({"sessionId": "scripted", "configOptions": options}),
+            "session/set_config_option" => {
+                select_option(&mut options, &message["params"]);
+                serde_json::json!({"configOptions": options})
+            }
+            _ => serde_json::json!({}),
+        };
+        let response = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+        if write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+// Hard-won: 26a181b: a Guardian Muse session started with approvals off when promptUnmatched was not offered
+#[tokio::test]
+async fn a_guardian_muse_whose_bridge_offers_only_allow_all_fails_the_session() {
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let bridge = tokio::spawn(allow_all_only_muse_bridge(bridge_stream));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(1);
+    let (event_tx, event_rx) = mpsc::channel(16);
+    let spec = LaunchSpec {
+        operator_away: Default::default(),
+        imported_logins: None,
+        bridge_spec_path: None,
+        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
+        managed_subagent: false,
+        subagent_mcp_socket: None,
+        clear_context_request: None,
+        context_restore: None,
+        goal_recovery: Default::default(),
+        command: "scripted".into(),
+        args: Vec::new(),
+        environment: BTreeMap::new(),
+        cwd: std::env::current_dir().unwrap(),
+        additional_directories: Vec::new(),
+        extra_mcp_servers: Vec::new(),
+        project_memory: None,
+        resume_session: None,
+        native_session_may_have_history: false,
+        accepted_config: Default::default(),
+        initial_model: None,
+        harness: HarnessKind::Muse,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        acp_activity: AcpActivityClock::default(),
+        step_clock: crate::acp::StepClock::default(),
+        tools_in_flight: Default::default(),
+        turn_context: Default::default(),
+        verdict: Some(crate::acp::VerdictSource::Direct {
+            key: String::new(),
+            endpoint: String::new(),
+        }),
+        stall_policy: None,
+    };
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), driver)
+        .await
+        .expect("the session must stop instead of waiting for prompts")
+        .expect("the driver task must not panic")
+        .expect_err("a Guardian Muse session without an approval mode must fail");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("does not offer the promptUnmatched mode"),
+        "{message}"
+    );
+    drop(request_tx);
+    drop(event_rx);
+    bridge.abort();
+}
+
 // Hard-won: eed6c53: A harness could acknowledge a permission mode but run under a different, unsafe mode.
 #[tokio::test]
 async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() {

@@ -690,6 +690,9 @@ pub(super) enum PolicySync {
 pub(super) struct ModeRefusal {
     pub(super) error: anyhow::Error,
     pub(super) text: String,
+    /// The bridge does not offer the mode at all, as opposed to refusing a
+    /// request for it. Only Claude has a safe mode to take instead.
+    pub(super) unoffered: bool,
 }
 
 /// Reconcile the bridge with the launch policy at a command boundary. Plan
@@ -743,6 +746,7 @@ pub(super) async fn reassert_execution_policy(
             refused = Some(ModeRefusal {
                 error: anyhow!("{text}"),
                 text,
+                unoffered: true,
             });
         } else if needed
             && let Err(error) = enforce_execution_mode(
@@ -759,7 +763,11 @@ pub(super) async fn reassert_execution_policy(
             let Some(text) = mode_refusal(&error) else {
                 return Err(error);
             };
-            refused = Some(ModeRefusal { error, text });
+            refused = Some(ModeRefusal {
+                error,
+                text,
+                unoffered: false,
+            });
         }
     }
     if let Some((key, value)) = enforcement.acp_setting()
@@ -948,6 +956,9 @@ pub(super) async fn reconcile_execution_policy(
     .await?
     {
         Some(message) => message,
+        // Without a safe mode, a mode the bridge does not offer at all
+        // cannot be worked around: the session would run without its policy.
+        None if refusal.unoffered => return Err(refusal.error),
         None => refused_policy_warning(
             harness,
             enforcement,
