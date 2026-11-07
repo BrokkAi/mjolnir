@@ -42,6 +42,9 @@ def main():
     parser.add_argument("--instance", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--child-model", required=True)
+    parser.add_argument("--kill-daemon-at-handback", action="store_true",
+                        help="kill -9 the daemon the moment the child's handback is recorded, "
+                             "restart it, and require the report's facts to be real")
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("a named isolated instance is required")
@@ -131,6 +134,20 @@ effort = "low"
             return False
         return not stat.rsplit(")", 1)[1].split()[0].startswith("Z")
 
+    def daemon_pids():
+        found = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes().split(b"\0")
+                environ = (entry / "environ").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if b"daemon-run" in cmdline and f"MJ_DATA_DIR={data}".encode() in environ:
+                found.append(int(entry.name))
+        return found
+
     parent = None
     child = None
     sleep_pid = None
@@ -152,6 +169,23 @@ After spawning, end your turn with a one-line status. Each time a message from M
                 "SELECT event_json FROM mailbox_outbox WHERE target_session_id=? AND event_key LIKE ?",
                 [parent, prefix + "%"])]
 
+        if args.kill_daemon_at_handback:
+            # The child has handed back; its turn has not ended and no report
+            # exists. Killing the daemon here leaves the finish to the next one.
+            eventually("handback recorded", lambda: query(
+                "SELECT 1 FROM subagent_handbacks WHERE child_session_id=? AND handback_command_id IS NOT NULL",
+                [child]), timeout=600)
+            for pid in daemon_pids():
+                os.kill(pid, 9)
+            eventually("daemon gone", lambda: not daemon_pids(), timeout=30)
+            stored = query("SELECT 1 FROM subagent_work_facts WHERE child_session_id=?", [child])
+            reported = events("subagent-finished-")
+            print(f"daemon killed at handback; facts already stored: {bool(stored)}; "
+                  f"report already sent: {bool(reported)}", flush=True)
+            assert not reported, "the window was missed: the report was already sent"
+            # Any ordinary command starts the next daemon, whose reconcile and
+            # delegation loop pick the finish up again.
+            cli("workspaces", "list")
         finish = eventually("finish report", lambda: events("subagent-finished-"))[0]
         report = finish["body"]["report"]
         facts = report["facts"]
@@ -179,6 +213,9 @@ After spawning, end your turn with a one-line status. Each time a message from M
             env=env, text=True, capture_output=True, timeout=120).stdout
         assert "Mjolnir observed this when it recorded this finish" in text, text[-3000:]
         assert "detached from the harness: " in text and "sleep 600" in text, text[-3000:]
+        lines = text.splitlines()
+        first = next(i for i, line in enumerate(lines) if "Mjolnir observed this when it recorded" in line)
+        print("REPORT TEXT THE PARENT RECEIVED:\n" + "\n".join(lines[max(0, first - 3):first + 16]), flush=True)
 
         parked = eventually("park message", lambda: events("subagent-parked-"), timeout=300)[0]
         assert parked["wake"] is True, parked
