@@ -5,6 +5,3 @@ pub(crate) mod capture;
 
 #[cfg(unix)]
 pub(crate) mod hook;
-
-#[cfg(unix)]
-pub mod snapshot;

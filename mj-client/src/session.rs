@@ -66,11 +66,6 @@ pub enum ReviewerAction {
         path: Option<std::path::PathBuf>,
         commit: String,
     },
-    /// Create or remove a push review's own checkout of its reviewed commit.
-    Snapshot {
-        repository: std::path::PathBuf,
-        operation: mj_core::relay::SnapshotOperation,
-    },
 }
 
 impl ReviewerAction {
@@ -80,7 +75,6 @@ impl ReviewerAction {
             Self::RecordReviewed { .. } => "reviewer_record_reviewed",
             Self::RecordOverridden { .. } => "reviewer_record_overridden",
             Self::SetReviewBase { .. } => "reviewer_set_review_base",
-            Self::Snapshot { .. } => "reviewer_snapshot",
         }
     }
 }
@@ -97,12 +91,6 @@ pub enum ReviewerOutcome {
         commit: String,
         tree: String,
         changed: bool,
-    },
-    /// Where the snapshot is (`None` after a removal) and every review
-    /// snapshot id the repository holds afterwards.
-    Snapshots {
-        path: Option<std::path::PathBuf>,
-        present: Vec<String>,
     },
 }
 

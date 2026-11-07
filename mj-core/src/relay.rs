@@ -110,10 +110,7 @@ pub const RELAY_TURN_CAPTURE_REMOVED_PROTOCOL: u32 = 53;
 /// child failed) under its own heading, and says when a child whose turn
 /// failed can still take a message. Older workers get the report as text.
 pub const RELAY_SUBAGENT_REPORT_STATE_PROTOCOL: u32 = 54;
-/// 55 adds review snapshots: a detached worktree at the reviewed commit that
-/// a push review's reviewers read instead of the requester's checkout.
-pub const RELAY_REVIEW_SNAPSHOT_PROTOCOL: u32 = 55;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_REVIEW_SNAPSHOT_PROTOCOL;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_SUBAGENT_REPORT_STATE_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

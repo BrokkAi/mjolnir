@@ -78,37 +78,7 @@ impl ReviewCapture {
             mj_core::relay::ReviewerRequest::SetReviewBase { path, commit } => {
                 self.set_review_base(path, commit).await
             }
-            mj_core::relay::ReviewerRequest::Snapshot {
-                repository,
-                operation,
-            } => self.snapshot(repository, operation).await,
         }
-    }
-
-    /// Creates or removes a review's checkout of one repository.
-    async fn snapshot(
-        &self,
-        repository: PathBuf,
-        operation: mj_core::relay::SnapshotOperation,
-    ) -> Result<RelayResponseBody> {
-        let (path, present) = tokio::task::spawn_blocking(move || {
-            let git = &mj_checkpoint::archive::SystemGit;
-            match operation {
-                mj_core::relay::SnapshotOperation::Create { id, commit } => {
-                    let snapshot = crate::review::snapshot::create(git, &repository, &id, &commit)?;
-                    Ok::<_, anyhow::Error>((Some(snapshot.path), snapshot.present))
-                }
-                mj_core::relay::SnapshotOperation::Remove { id } => Ok((
-                    None,
-                    crate::review::snapshot::remove(git, &repository, &id)?,
-                )),
-            }
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("the review snapshot operation stopped: {error}"))??;
-        Ok(RelayResponseBody::Ok {
-            payload: RelayResponsePayload::ReviewSnapshots { path, present },
-        })
     }
     fn roots(&self) -> Vec<PathBuf> {
         let mut roots = vec![self.cwd.clone()];

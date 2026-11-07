@@ -110,16 +110,11 @@ impl HostState {
             return;
         };
         // A push review covers one repository when it names a worktree, so
-        // its reviewer reads context from that repository, not the session's:
-        // from the group's own checkout of the reviewed commit, or from the
-        // requester's checkout when that could not be made.
-        let working_directory =
-            slot.snapshot
-                .clone()
-                .or_else(|| match group.driver.deltas.as_slice() {
-                    [delta] => Some(delta.root.clone()),
-                    _ => None,
-                });
+        // its reviewer reads context from that checkout, not the session's.
+        let working_directory = match group.driver.deltas.as_slice() {
+            [delta] => Some(delta.root.clone()),
+            _ => None,
+        };
         let epoch = slot.epoch;
         let environment = self.environment.clone();
         let events = self.events.clone();
