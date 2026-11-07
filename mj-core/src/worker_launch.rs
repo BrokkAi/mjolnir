@@ -428,9 +428,20 @@ pub fn resolve_subagent_mcp_role(
 }
 
 impl WorkerLaunchConfig {
-    pub fn review_gate(&self) -> bool {
+    /// Whether this session is offered the `mj-review` tools. The controller
+    /// writes `review_trigger` as push only for sessions that may request
+    /// review: top-level sessions and ordinary sub-agents, never reviewers or
+    /// the oracle. This is the one owner of that fact.
+    pub fn review_tools(&self) -> bool {
         self.review_trigger == crate::config::ReviewTrigger::Push
             && self.harness.supports_review_gate()
+    }
+
+    /// Whether pushes from this session are held to review: the pre-push
+    /// hook, `MJ_REVIEW_GATE` and the session-start pin. Only top-level
+    /// sessions are gated; a sub-agent gets the tools without the gate.
+    pub fn review_gate(&self) -> bool {
+        self.review_tools()
             && !self.is_managed_subagent()
             && !self.handback_tool
             && self.reviewer_launch.is_none()
@@ -703,7 +714,9 @@ mod tests {
                 launch
                     .environment
                     .insert(SESSION_MANAGED_SUBAGENT_ENV.into(), "1".into());
+                // A sub-agent is offered the review tools but never gated.
                 assert!(!launch.review_gate());
+                assert_eq!(launch.review_tools(), expected);
                 assert_eq!(
                     launch.subagent_mcp_role(),
                     Some(crate::subagent::SubagentMcpRole::FetchOnly)

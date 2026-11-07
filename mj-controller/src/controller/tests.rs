@@ -2788,6 +2788,8 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
             .report_dir,
         None
     );
+    // Review is on, so the launch files show who may request it.
+    controller.config.review = mj_core::config::ReviewConfig::legacy_default();
     let worker_root = mj_core::config::data_dir()
         .join("workers")
         .join(&child.child_session_id);
@@ -2803,6 +2805,10 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     assert_eq!(worker_launch.execution_policy, launch.execution_policy);
     assert_eq!(worker_launch.initial_model, launch.model);
     assert!(!worker_launch.review_capture);
+    assert!(
+        !worker_launch.review_tools(),
+        "a reviewer never requests review"
+    );
     assert_eq!(
         worker_launch.subagent_mcp_role(),
         Some(mj_core::subagent::SubagentMcpRole::Child)
@@ -2845,6 +2851,22 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     assert_eq!(oracle.model.as_deref(), Some("oracle-model"));
     assert_eq!(oracle.effort.as_deref(), Some("high"));
     assert!(oracle.handback_tool);
+    let oracle_launch = controller
+        .current_worker_launch_config(
+            &oracle.child_session_id,
+            &targets::TargetLocator::LocalBare {
+                worker_root: mj_core::config::data_dir()
+                    .join("workers")
+                    .join(&oracle.child_session_id)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        )
+        .unwrap();
+    assert!(
+        !oracle_launch.review_tools(),
+        "the oracle never requests review"
+    );
     let oracle_session = &controller.state.sessions[&oracle.child_session_id];
     assert_eq!(
         oracle_session.subagents,
@@ -2943,6 +2965,21 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         worker.child_session_id, child.child_session_id,
         "kind belongs to the idempotent key"
     );
+    // An ordinary sub-agent is offered the review tools but is not push-gated.
+    let ordinary_launch = controller
+        .current_worker_launch_config(
+            &worker.child_session_id,
+            &targets::TargetLocator::LocalBare {
+                worker_root: mj_core::config::data_dir()
+                    .join("workers")
+                    .join(&worker.child_session_id)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        )
+        .unwrap();
+    assert!(ordinary_launch.review_tools());
+    assert!(!ordinary_launch.review_gate());
     let child_record = controller
         .state
         .sessions

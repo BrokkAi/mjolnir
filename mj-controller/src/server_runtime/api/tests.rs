@@ -4367,6 +4367,116 @@ fn isolated_parked_test(test: &str) -> bool {
     false
 }
 
+/// A sub-agent that asked for review and then handed back and parked still
+/// receives the verdict: the review host enqueues it to start the child's
+/// worker again, and it is enqueued that way for no top-level session.
+#[tokio::test]
+async fn a_review_verdict_for_a_parked_sub_agent_starts_it_and_reaches_its_relay() {
+    if !isolated_parked_test(
+        "a_review_verdict_for_a_parked_sub_agent_starts_it_and_reaches_its_relay",
+    ) {
+        return;
+    }
+    use crate::review_host::ReviewEnvironment;
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let verdict = |key: &str| mj_core::mailbox::MailboxEvent {
+        key: key.into(),
+        source: "review".into(),
+        wake: true,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::ReviewVerdict {
+            review_id: "review-1".into(),
+            repository: "/workspace/app".into(),
+            base_commit: "aaaaaaa".into(),
+            head_commit: "bbbbbbb".into(),
+            tree: "ccccccc".into(),
+            verdict: mj_core::review::verdict::ReviewVerdict::Clean,
+        },
+    };
+    let environment = crate::review_host::ControllerEnvironment::default();
+    environment
+        .enqueue_verdict("parent-1", &verdict("push-review:parent"))
+        .unwrap();
+    environment
+        .enqueue_verdict("child-1", &verdict("push-review:child"))
+        .unwrap();
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    let unpark_of = |target: &str| {
+        pending
+            .iter()
+            .find(|row| row.target_session_id == target)
+            .unwrap()
+            .unpark
+    };
+    assert!(!unpark_of("parent-1"));
+    assert!(unpark_of("child-1"));
+
+    let exports = ParkingExports::with_modern_worker(SessionState::Parked, None, true);
+    let mut remote = crate::session_manager::spawn_remote_session_manager().unwrap();
+    remote
+        .targets
+        .send_replace(vec![crate::session_manager::RelaySessionTarget {
+            session_id: "child-1".into(),
+            spec: crate::targets::CommandSpec::new("true", Vec::<String>::new()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+    let mut view = ready_view("model");
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.materialized.session_id = "child-1".into();
+    snapshot.operational.session_id = "child-1".into();
+    remote
+        .publisher
+        .publish("child-1".into(), view)
+        .await
+        .unwrap();
+    remote
+        .control
+        .wait_for_session("child-1", Duration::from_secs(5))
+        .await
+        .unwrap();
+    let row = pending
+        .iter()
+        .find(|row| row.target_session_id == "child-1")
+        .unwrap()
+        .clone();
+    let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(&row.event_json).unwrap();
+    let state: Arc<dyn ExportRuntime> = exports.clone();
+    let sessions = remote.control.clone();
+    let delivery = tokio::spawn(async move {
+        crate::mailbox_outbox::deliver_mailbox_event(
+            state,
+            &sessions,
+            &row.target_session_id,
+            event,
+            row.unpark,
+        )
+        .await
+    });
+    let command = tokio::time::timeout(Duration::from_secs(2), remote.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let crate::session_manager::RemoteSessionRequest::Submit { command, reply, .. } = command
+    else {
+        panic!("the verdict must be submitted to the child relay")
+    };
+    assert_eq!(exports.unparks(), 1, "the parked child starts first");
+    let RelayCommand::DeliverMailboxEvent { event } = command else {
+        panic!("the verdict arrives as a mailbox event")
+    };
+    assert!(matches!(
+        event.body,
+        mj_core::mailbox::MailboxEventBody::ReviewVerdict { .. }
+    ));
+    reply.send(Ok(3)).unwrap();
+    assert_eq!(
+        delivery.await.unwrap().unwrap(),
+        crate::mailbox_outbox::MailboxEventDelivery::Accepted(3)
+    );
+}
+
 /// #1161: a child that handed back is parked, and the parent's next
 /// `send_input` has to start it again before the prompt can run. A prompt
 /// that a finishing park turned away is known not to have been delivered, so

@@ -249,7 +249,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     };
     let supervisor_path = root.join("acp-supervisor.json");
     supervisor_spec.write_spec(&supervisor_path)?;
-    let review_gate = config.review_gate();
+    let review_tools = config.review_tools();
     let worker_executable = std::env::current_exe().context("locate Hel worker executable")?;
     let reviewer = Arc::new(ReviewCapture {
         session_id: config.session_id.clone(),
@@ -355,7 +355,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             role,
             agent_mailboxes_enabled: config.agent_mailboxes_enabled,
             subtle_subagents: config.subtle_subagents,
-            review_gate,
+            review_tools,
             profile_registration,
         }),
         project_memory: config.project_memory,
@@ -1405,10 +1405,7 @@ async fn prepare_and_start_harness(
         native_session_may_have_history,
     } = setup;
     let managed_subagent = config.is_managed_subagent();
-    if managed_subagent {
-        config.review_trigger = Default::default();
-    }
-    let review_gate = config.review_gate();
+    let review_tools = config.review_tools();
     let subagent_role = config.subagent_mcp_role();
     let root = root_path.as_path();
     let login_budget = preparation_step(
@@ -1583,7 +1580,7 @@ async fn prepare_and_start_harness(
                             agent_mailboxes_enabled: mailboxes_enabled,
                             subtle_subagents,
                         },
-                        review_gate,
+                        review_tools,
                     )?;
                     Ok((registered, environment))
                 })
@@ -1629,7 +1626,7 @@ async fn prepare_and_start_harness(
                         role,
                         mailboxes_enabled,
                         subtle_subagents,
-                        review_gate,
+                        review_tools,
                     )?;
                     let mailbox_hook_available =
                         super::subagents::configure_claude_mailbox_hook(&root, &session_id, &home)?;

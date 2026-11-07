@@ -546,7 +546,7 @@ mod tests {
             if protocol < 43 {
                 assert_eq!(
                     wire["body"]["text"],
-                    "Review clean for commits aaaaaaa..bbbbbbb in /repo. Tree ccccccc is recorded as reviewed; you may push."
+                    "Review clean for commits aaaaaaa..bbbbbbb in /repo. Tree ccccccc is recorded as reviewed."
                 );
             }
             assert_eq!(

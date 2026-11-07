@@ -43,6 +43,10 @@ static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+/// Policy for the separate `mj-review` server of a managed child, delivered
+/// through initialization. A child does not push; it reviews before it reports.
+const CHILD_REVIEW_SERVER_INSTRUCTIONS: &str = "Commit your work and call `request_review` before you hand back your report. It replies immediately; the verdict arrives later as a Mjolnir message. After calling it, end your turn without handing back: the verdict starts your next turn, and a report handed back first leaves the verdict unread. Pass `path` for a worktree other than your working directory. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Hand back once the review is clean or you have overridden its findings. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
+
 /// Policy for the separate `mj-review` server, delivered through initialization.
 const REVIEW_SERVER_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or `gh pr create`. It replies immediately; the verdict arrives later as a Mjolnir message. Pass `path` when pushing from another worktree. A push is allowed after every reviewer is clean, or after `override_review` on the reviewed commits. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
 
@@ -1079,9 +1083,21 @@ fn call_review(
 
 /// Serve the before-push review tools over MCP stdio as `mj-review`. The tools
 /// reach the controller through the same worker queue as `mj-agents`.
-pub fn run_review_mcp_stdio(socket: &Path, harness: Option<HarnessKind>) -> Result<()> {
+pub fn run_review_mcp_stdio(
+    socket: &Path,
+    harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
+) -> Result<()> {
     let stdin = std::io::stdin();
-    run_review(stdin.lock(), std::io::stdout(), socket, harness)
+    run_review(stdin.lock(), std::io::stdout(), socket, harness, role)
+}
+
+/// A managed child reviews before it reports; a top-level session, before it pushes.
+fn review_instructions(role: SubagentMcpRole) -> &'static str {
+    match role {
+        SubagentMcpRole::Child | SubagentMcpRole::FetchOnly => CHILD_REVIEW_SERVER_INSTRUCTIONS,
+        SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly => REVIEW_SERVER_INSTRUCTIONS,
+    }
 }
 
 fn run_review<R: BufRead, W: Write + Send + Sync + 'static>(
@@ -1089,6 +1105,7 @@ fn run_review<R: BufRead, W: Write + Send + Sync + 'static>(
     writer: W,
     socket: &Path,
     harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
     crate::mcp_stdio::serve(
@@ -1096,7 +1113,7 @@ fn run_review<R: BufRead, W: Write + Send + Sync + 'static>(
         writer,
         crate::mcp_stdio::McpServer {
             name: mj_core::subagent::REVIEW_MCP_SERVER,
-            instructions: REVIEW_SERVER_INSTRUCTIONS,
+            instructions: review_instructions(role),
             tools: review_tool_definitions(),
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
@@ -1482,6 +1499,7 @@ mod tests {
                 writer,
                 Path::new("unused.sock"),
                 Some(HarnessKind::Claude),
+                SubagentMcpRole::Parent,
             )
         });
         assert_eq!(initialize["serverInfo"]["name"], "mj-review");
@@ -1494,6 +1512,21 @@ mod tests {
         assert_eq!(instructions, REVIEW_SERVER_INSTRUCTIONS);
         // Claude cuts server instructions at 2048 characters.
         assert!(instructions.chars().count() <= 2048);
+        for role in [SubagentMcpRole::Child, SubagentMcpRole::FetchOnly] {
+            let (initialize, _) = mcp_exchange(|input, writer| {
+                run_review(
+                    input,
+                    writer,
+                    Path::new("unused.sock"),
+                    Some(HarnessKind::Claude),
+                    role,
+                )
+            });
+            let instructions = initialize["instructions"].as_str().unwrap();
+            assert_eq!(instructions, CHILD_REVIEW_SERVER_INSTRUCTIONS);
+            assert!(instructions.chars().count() <= 2048);
+            assert!(instructions.contains("end your turn without handing back"));
+        }
 
         let by_name = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
         let override_review = by_name("override_review");
