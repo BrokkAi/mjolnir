@@ -171,7 +171,7 @@ PromptInput rect=(3, 20, 95, 2)
 │/detach  — leave Mjolnir without stopping the worker [mj]                     │
 │/model <value>  — change the active model, queued while the agent is busy [mj]│
 │/effort <value>  — change the active reasoning effort, queued while the agent…│
-│/review <status>  — review the finished turn now, or report how review is con…│
+│/review <status>  — review committed work now, or report how review is config…│
 │/attach <path>  — add an image file (PNG, JPEG or WebP) to the prompt [mj]    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────────────────────────────────────────╮

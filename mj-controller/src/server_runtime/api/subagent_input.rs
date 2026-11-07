@@ -327,6 +327,7 @@ impl ApiBackend {
         message: &str,
         request: &SubagentToolRequest,
     ) -> Result<SubagentInputDelivery> {
+        let picked_up = tokio::time::Instant::now();
         ensure!(
             !self.exports.close_is_requested(child),
             "child session is closing; queued message was not delivered"
@@ -390,11 +391,11 @@ impl ApiBackend {
             return Ok(SubagentInputDelivery::Mailbox);
         }
 
-        let elapsed_ms = mj_core::clock::epoch_millis()
-            .saturating_sub(request.created_at_ms)
-            .max(0) as u64;
-        let remaining = START_DEADLINE.saturating_sub(Duration::from_millis(elapsed_ms));
-        let deadline = tokio::time::Instant::now() + remaining;
+        // The window runs from this daemon's first look at the request. The
+        // request's own creation stamp is not the start: it comes from the
+        // parent's clock, and a request that waited in the durable queue while
+        // the daemon was away (#1445) has spent no time with a child yet.
+        let deadline = picked_up + START_DEADLINE;
         loop {
             ensure!(
                 !self.exports.close_is_requested(child),
@@ -432,6 +433,15 @@ impl ApiBackend {
                     {
                         tracing::debug!(child, %error, "child wake admission deferred; retaining queued input");
                         tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                    // The wake was accepted and the child is starting under
+                    // its durable boot intent; slow readiness is not a failed
+                    // delivery. Wait for it within the delivery deadline. A
+                    // reattach can fail at once, so pause before asking again
+                    // rather than restarting the worker in a tight loop.
+                    Err(error) if error.downcast_ref::<super::WakeNotReady>().is_some() => {
+                        tracing::debug!(child, %error, "accepted child wake is not ready yet; retaining queued input");
+                        tokio::time::sleep(INPUT_POLL).await;
                     }
                     result => {
                         result?;
@@ -807,12 +817,23 @@ impl InputProgress {
         }
     }
 
+    /// The child's state with queued messages taken into account. A message
+    /// that is queued for a child that can take it means the child is about
+    /// to run, whatever its last turn said. Nothing else changes the state: a
+    /// delivery that failed is a fact about the message (see
+    /// [`Self::last_failed_delivery`]), not about the child, whose record
+    /// alone says whether it can be given work (#1381).
     pub fn status(
         &self,
         child: &str,
+        record: Option<&mj_core::state::SessionRecord>,
         current: (String, Option<String>, bool),
     ) -> (String, Option<String>, bool) {
-        if matches!(current.0.as_str(), "stopping" | "stopped") {
+        // `stopping` is how `subagent_status` reports an accepted close while
+        // the record is still `Running`; a queued message cannot run then.
+        if matches!(current.0.as_str(), "stopping" | "stopped")
+            || !record.is_some_and(|record| record.state.can_receive_child_work())
+        {
             return current;
         }
         if self
@@ -822,20 +843,19 @@ impl InputProgress {
         {
             return ("running".into(), None, false);
         }
-        if let Some(last) = self.deliveries.get(child).and_then(|items| items.last())
-            && last["status"] == "failed"
-        {
-            return (
-                "failed".into(),
-                Some(format!(
-                    "Message {}: {}",
-                    last["request_id"].as_str().unwrap_or_default(),
-                    last["error"].as_str().unwrap_or("delivery failed")
-                )),
-                true,
-            );
-        }
         current
+    }
+
+    /// The request id and error of the child's newest message delivery, when
+    /// that delivery failed. A later delivery that succeeded supersedes it.
+    pub fn last_failed_delivery(&self, child: &str) -> Option<(&str, &str)> {
+        let last = self.deliveries.get(child)?.last()?;
+        (last["status"] == "failed").then(|| {
+            (
+                last["request_id"].as_str().unwrap_or_default(),
+                last["error"].as_str().unwrap_or("delivery failed"),
+            )
+        })
     }
 
     pub fn annotate(&self, child: &str, entry: &mut serde_json::Value) {
@@ -851,5 +871,30 @@ impl InputProgress {
             // Earlier parents already consume these field names.
             entry["input_deliveries"] = deliveries;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hard-won: 60adf13fe: a queued message turned a child whose close was running back to "running".
+    #[test]
+    fn a_queued_message_does_not_hide_a_running_close() {
+        let mut record = crate::controller::test_support::checkpoint_test_session("child");
+        record.state = SessionState::Running;
+        let progress = InputProgress {
+            pending: BTreeMap::from([("child".to_owned(), vec!["message-1".to_owned()])]),
+            deliveries: BTreeMap::new(),
+        };
+        assert_eq!(
+            progress.status("child", Some(&record), ("stopping".into(), None, false)),
+            ("stopping".into(), None, false)
+        );
+        assert_eq!(
+            progress.status("child", Some(&record), ("completed".into(), None, true)),
+            ("running".into(), None, false),
+            "a child that can take the queued message is about to run"
+        );
     }
 }

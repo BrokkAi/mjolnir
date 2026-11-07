@@ -139,9 +139,11 @@ impl ScopeSelection {
     }
 }
 
-/// Relationships stay for counts and navigation unless their session is archived.
-fn keeps_relation(full: &RuntimeProjection, id: &str) -> bool {
-    full.records.get(id).is_some_and(|record| !record.archived)
+/// Relationships stay for counts and navigation unless their session is
+/// archived. A lifecycle can retain an archived row; its relationship stays
+/// too, so clients still recognize it as a child throughout cleanup.
+fn keeps_relation(full: &RuntimeProjection, id: &str, row_kept: bool) -> bool {
+    row_kept || full.records.get(id).is_some_and(|record| !record.archived)
 }
 
 impl ScopedProjection {
@@ -152,7 +154,10 @@ impl ScopedProjection {
             .records
             .filtered(|id, _| selection.keeps(full, &parents, id));
         result.subagent_parents = parents;
-        result.subagents.retain(|id, _| keeps_relation(full, id));
+        let kept = &result.records;
+        result
+            .subagents
+            .retain(|id, _| keeps_relation(full, id, kept.contains_key(id)));
         result.sessions = full
             .sessions
             .filtered(|id, _| result.records.contains_key(id));
@@ -204,7 +209,7 @@ impl ScopedProjection {
             result.records.copy_entry(&after.records, id, keep);
             result
                 .subagents
-                .copy_entry(&after.subagents, id, keeps_relation(after, id));
+                .copy_entry(&after.subagents, id, keeps_relation(after, id, keep));
         }
 
         let records = &result.records;

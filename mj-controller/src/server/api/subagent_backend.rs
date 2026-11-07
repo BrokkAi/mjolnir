@@ -190,6 +190,17 @@ pub trait SubagentBackend: Send + Sync {
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::workspace::WorkspaceRecord>>> {
         Box::pin(async { tokio::task::spawn_blocking(crate::database::list_workspaces).await? })
     }
+    /// One listed workspace, read from the store. `None` means the list
+    /// would not contain it. Action validation asks this instead of the
+    /// published copy of the list, which can lag behind the store (#1334).
+    fn workspace(
+        &self,
+        id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::workspace::WorkspaceRecord>>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || crate::database::workspace_record(&id)).await?
+        })
+    }
     /// The workspace with this name, creating it when the store holds none.
     ///
     /// This is the daemon's own `CreateWorkspace` operation: create-or-get, so
@@ -248,6 +259,18 @@ pub trait SubagentBackend: Send + Sync {
         _created_at_ms: i64,
     ) -> BoxFuture<'_, AnyResult<SessionMessageResponse>> {
         Box::pin(async { anyhow::bail!("session messaging is unavailable") })
+    }
+
+    /// Record a prompt a person is about to send as `command_id` in their
+    /// prompt history. Agent messages, which also use
+    /// [`Self::prompt_with_id`], are not recorded.
+    fn record_user_prompt(
+        &self,
+        _session_id: String,
+        _command_id: String,
+        _text: String,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
     }
 
     /// Submit under a producer-owned identity, preserving the receipt on retries.

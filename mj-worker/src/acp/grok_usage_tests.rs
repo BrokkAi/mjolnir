@@ -2,7 +2,11 @@ use super::*;
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-fn spec(command: PathBuf, environment: BTreeMap<String, String>, cwd: PathBuf) -> LaunchSpec {
+pub(super) fn spec(
+    command: PathBuf,
+    environment: BTreeMap<String, String>,
+    cwd: PathBuf,
+) -> LaunchSpec {
     LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,

@@ -112,10 +112,13 @@ COPY --from=node /usr/local/ /usr/local/
 # the `libasound2-dev` install in the voice-worker CI job and the Linux
 # release builds. `eatmydata` lets sessions run build and test commands with
 # fsync turned into a no-op (LD_PRELOAD=libeatmydata.so), the way CI jobs that
-# commit many small SQLite transactions do. `python3-dev` supplies Python.h,
+# commit many small SQLite transactions do. `awscli` is Debian's AWS CLI v2.
+# `time` provides GNU `/usr/bin/time` (`-v` reports peak memory), which the
+# shell builtin lacks. `python3-dev` supplies Python.h,
 # python3-config, and libpython for native/PyO3 builds that embed Python.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        awscli \
         bash \
         build-essential \
         ca-certificates \
@@ -149,11 +152,14 @@ RUN apt-get update \
         ripgrep \
         rsync \
         sudo \
+        time \
         tmux \
         unzip \
         zip \
     && rm -rf /var/lib/apt/lists/* \
-    && ln -s /usr/bin/podman-remote /usr/local/bin/podman
+    && ln -s /usr/bin/podman-remote /usr/local/bin/podman \
+    && aws --version \
+    && /usr/bin/time --version
 
 # `docker-cli` and `podman-remote` (as `podman`) are clients only. A daemon run
 # in this image with `[daemon] runtime = "docker"` or `"podman"` reaches the

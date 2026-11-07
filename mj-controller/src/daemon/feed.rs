@@ -681,6 +681,47 @@ mod tests {
         assert_eq!(replica.projection.session_cpu.get("live"), Some(&value));
     }
 
+    // Hard-won: archived reviewers lost their parent link while suspend retained their rows.
+    #[test]
+    fn archived_reviewer_keeps_its_parent_during_suspend() {
+        let mut full = RuntimeProjection::default();
+        let mut child = record("review", SessionState::Closing);
+        child.archived = true;
+        full.records.insert("review".into(), child);
+        let mut relation = super::super::tests::runtime_test_subagent("review", "parent");
+        relation.kind = mj_core::subagent::SubagentKind::Reviewer;
+        full.subagents.insert("review".into(), relation.into());
+        full.metadata
+            .lifecycles
+            .push(mj_client::daemon::RuntimeLifecycleView {
+                operation_id: "suspend-review".into(),
+                move_operation_id: None,
+                cancellable: false,
+                session_id: "review".into(),
+                kind: mj_client::daemon::RuntimeLifecycleKind::Suspend,
+                started_at_epoch_seconds: 0,
+                active_stages: Vec::new(),
+                resume_destination: None,
+                notice: None,
+            });
+        let mut history = RuntimeHistory::default();
+        history.publish(full.clone()).unwrap();
+        let mut replica = RuntimeReplica::default();
+        replica.apply(history.frame(None)).unwrap();
+        assert!(replica.projection.records.contains_key("review"));
+        assert_eq!(
+            replica.projection.subagents["review"].parent_session_id,
+            "parent"
+        );
+        full.metadata.lifecycles.clear();
+        history.publish(full).unwrap();
+        replica
+            .apply(history.frame(replica.cursor.as_ref()))
+            .unwrap();
+        assert!(!replica.projection.records.contains_key("review"));
+        assert!(!replica.projection.subagents.contains_key("review"));
+    }
+
     #[test]
     fn historical_family_scope_bounds_bootstrap_and_replays_from_the_same_snapshot() {
         let mut full = RuntimeProjection::default();

@@ -52,7 +52,7 @@ away.
 - **Shared project memory.** Supported harnesses share synchronized project
   memory across sessions and targets. Muse currently cannot receive the
   injected memory tools; see the [harness limitations](https://mjolnir.brokk.ai/profiles/#harness-limitations).
-- **Adversarial review.** Choose end-of-turn or before-push review. Independent
+- **Adversarial review.** Review committed work before push. Independent
   reviewers, on a different provider when one is available, check the work and
   report actionable findings.
 - **Multi-repo projects.** Bundle several repositories so they provision,
@@ -131,7 +131,7 @@ session end to end.
 - [Terminal](https://mjolnir.brokk.ai/terminal-surface/) and
   [web and desktop](https://mjolnir.brokk.ai/web-viewer/): controls and remote
   access.
-- [Turn review](https://mjolnir.brokk.ai/turn-review/),
+- [Code review](https://mjolnir.brokk.ai/turn-review/),
   [configuration](https://mjolnir.brokk.ai/configuration/),
   [CLI reference](https://mjolnir.brokk.ai/cli-reference/), and
   [security](https://mjolnir.brokk.ai/security/).

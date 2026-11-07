@@ -9,9 +9,18 @@ pub struct SubagentMcpSocket {
     pub agent_mailboxes_enabled: bool,
     /// Whether a parent's spawn tool offers the subtle task type.
     pub subtle_subagents: bool,
+    /// Whether the launch's review gate is on. With a role that enforces the
+    /// push gate, the `mj-review` server is offered too.
     pub review_gate: bool,
     /// False for legacy shared Codex homes, which must retain ACP delivery.
     pub profile_registration: bool,
+}
+
+impl SubagentMcpSocket {
+    /// Whether this launch offers the `mj-review` server.
+    pub fn offers_review_server(&self) -> bool {
+        self.role.offers_review_server(self.review_gate)
+    }
 }
 
 /// One configured MCP server exposed to the reviewer harness.
@@ -226,9 +235,13 @@ pub(super) fn session_request_meta(
         if spec
             .subagent_mcp_socket
             .as_ref()
-            .is_some_and(|socket| socket.review_gate && socket.role.supports_push_gate())
+            .is_some_and(SubagentMcpSocket::offers_review_server)
         {
-            allowed.push("mcp__mj-agents__override_review".into());
+            allowed.extend(
+                mj_core::subagent::REVIEW_MCP_TOOLS
+                    .iter()
+                    .map(|tool| format!("mcp__{}__{tool}", mj_core::subagent::REVIEW_MCP_SERVER)),
+            );
         }
         options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
     }
@@ -259,6 +272,7 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
         Vec::new()
     };
     servers.extend(subagent_acp_mcp(spec));
+    servers.extend(review_acp_mcp(spec));
     servers
 }
 
@@ -288,9 +302,6 @@ fn subagent_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
         "--agent-mailboxes-enabled".into(),
         socket.agent_mailboxes_enabled.to_string(),
     ];
-    if socket.review_gate && socket.role.supports_push_gate() {
-        args.push("--review-gate".into());
-    }
     if !socket.subtle_subagents {
         // Only the non-default value is passed, for older workers.
         args.extend(["--subtle-subagents".into(), "false".into()]);
@@ -301,18 +312,59 @@ fn subagent_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
     )))
 }
 
-/// The names of the Mjolnir-owned MCP servers this launch registers over
-/// ACP: project history and delegation. Reviewer servers a person configured
-/// are not Mjolnir's, so they are never in this list.
-pub(super) fn owned_acp_mcp_server_names(spec: &LaunchSpec) -> Vec<String> {
-    project_history_mcp(spec)
-        .into_iter()
-        .chain(subagent_acp_mcp(spec))
-        .filter_map(|server| match server {
-            McpServer::Stdio(server) => Some(server.name),
-            _ => None,
-        })
-        .collect()
+/// The `mj-review` server, when this launch offers it and delivers it over
+/// ACP, on the same terms as `mj-agents`.
+fn review_acp_mcp(spec: &LaunchSpec) -> Option<McpServer> {
+    if spec.harness == HarnessKind::Claude {
+        return None;
+    }
+    let socket = spec.subagent_mcp_socket.as_ref()?;
+    if socket.profile_registration || !socket.offers_review_server() {
+        return None;
+    }
+    let worker = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hel"));
+    let args = vec![
+        "worker".into(),
+        "subagent-mcp".into(),
+        "--socket".into(),
+        socket.path.to_string_lossy().into_owned(),
+        "--harness".into(),
+        spec.harness.id().to_owned(),
+        "--review-server".into(),
+    ];
+    Some(McpServer::Stdio(approve_owned_mcp(
+        spec,
+        McpServerStdio::new(mj_core::subagent::REVIEW_MCP_SERVER, worker).args(args),
+    )))
+}
+
+/// The Mjolnir-owned MCP servers this launch registers over ACP, each with the
+/// tools it lists: project history, delegation and review. Reviewer servers a
+/// person configured are not Mjolnir's, so they are never in this list.
+pub(super) fn owned_acp_mcp_tools(spec: &LaunchSpec) -> Vec<(String, Vec<String>)> {
+    let names = |tools: &[&str]| tools.iter().map(|tool| (*tool).to_owned()).collect();
+    let mut owned = Vec::new();
+    for server in project_history_mcp(spec) {
+        if let McpServer::Stdio(server) = server {
+            // The history server lists its tools only with a history socket.
+            let tools = spec
+                .project_memory
+                .as_ref()
+                .is_some_and(|memory| memory.history_socket.is_some())
+                .then(crate::memory_mcp::tool_names)
+                .unwrap_or_default();
+            owned.push((server.name, tools));
+        }
+    }
+    if let (Some(McpServer::Stdio(server)), Some(socket)) =
+        (subagent_acp_mcp(spec), &spec.subagent_mcp_socket)
+    {
+        owned.push((server.name, names(socket.role.tool_names())));
+    }
+    if let Some(McpServer::Stdio(server)) = review_acp_mcp(spec) {
+        owned.push((server.name, names(mj_core::subagent::REVIEW_MCP_TOOLS)));
+    }
+    owned
 }
 
 /// Only owned registrations opt in; yolo and other harnesses stay unchanged.
@@ -337,19 +389,88 @@ fn session_mcp(spec: &LaunchSpec, include_history_tools: bool) -> Vec<McpServer>
     servers
 }
 
+/// Environment variables that name Mjolnir's build-tool cache directories. The
+/// worker adds these to the session's additional directories, and the notice
+/// for directories a harness cannot take uses them to say what was dropped.
+pub(crate) const TOOL_CACHE_DIRECTORY_VARIABLES: [&str; 3] =
+    ["MJ_TOOL_CACHE_DIR", "MJ_NX_HOME_DIR", "MJ_TOOL_CACHE_HOME"];
+
+/// The additional directories one ACP connection can take, and what could not
+/// be passed.
+///
+/// An agent that accepts `additionalDirectories` says so in
+/// `sessionCapabilities`. One that does not rejects a non-empty list and
+/// fails session creation (Grok Build: "a session works only in its cwd",
+/// #1433), so the list is withheld from it and the session starts with its
+/// working directory alone.
+pub(super) struct SessionDirectories {
+    pub accepted: Vec<PathBuf>,
+    /// Set when directories were withheld: what the person should know.
+    pub notice: Option<String>,
+}
+
+impl SessionDirectories {
+    pub(super) fn negotiate(
+        spec: &LaunchSpec,
+        capabilities: &agent_client_protocol::v1::schema::SessionCapabilities,
+    ) -> Self {
+        if capabilities.additional_directories.is_some() || spec.additional_directories.is_empty() {
+            return Self {
+                accepted: spec.additional_directories.clone(),
+                notice: None,
+            };
+        }
+        let tool_cache = TOOL_CACHE_DIRECTORY_VARIABLES
+            .iter()
+            .filter_map(|name| spec.environment.get(*name).map(PathBuf::from))
+            .collect::<Vec<_>>();
+        let described = spec
+            .additional_directories
+            .iter()
+            .map(|directory| {
+                let kind = if spec
+                    .project_memory
+                    .as_ref()
+                    .is_some_and(|memory| &memory.root == directory)
+                {
+                    "project memory"
+                } else if tool_cache.contains(directory) {
+                    "tool cache"
+                } else {
+                    "workspace directory"
+                };
+                format!("{kind} {}", directory.display())
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        Self {
+            accepted: Vec::new(),
+            notice: Some(format!(
+                "{} does not accept additional directories over ACP and limits a session to its working directory, so this session starts without them: {described}. The agent may not be able to read or write these directories.",
+                spec.harness.display_name()
+            )),
+        }
+    }
+}
+
 pub(super) fn new_session_request(
     spec: &LaunchSpec,
+    directories: &[PathBuf],
     include_history_tools: bool,
 ) -> NewSessionRequest {
     let request = NewSessionRequest::new(spec.cwd.clone())
-        .additional_directories(spec.additional_directories.clone())
+        .additional_directories(directories.to_vec())
         .meta(session_request_meta(spec, include_history_tools));
     request.mcp_servers(session_mcp(spec, include_history_tools))
 }
 
-pub(super) fn load_session_request(spec: &LaunchSpec, session_id: SessionId) -> LoadSessionRequest {
+pub(super) fn load_session_request(
+    spec: &LaunchSpec,
+    directories: &[PathBuf],
+    session_id: SessionId,
+) -> LoadSessionRequest {
     LoadSessionRequest::new(session_id, spec.cwd.clone())
-        .additional_directories(spec.additional_directories.clone())
+        .additional_directories(directories.to_vec())
         // The servers Mjolnir owns travel on every launch, because a bridge
         // that opens the session again is a new harness process: Codex builds
         // the resumed thread's MCP set from this request and recovers nothing
@@ -361,10 +482,11 @@ pub(super) fn load_session_request(spec: &LaunchSpec, session_id: SessionId) -> 
 
 pub(super) fn resume_session_request(
     spec: &LaunchSpec,
+    directories: &[PathBuf],
     session_id: SessionId,
 ) -> ResumeSessionRequest {
     ResumeSessionRequest::new(session_id, spec.cwd.clone())
-        .additional_directories(spec.additional_directories.clone())
+        .additional_directories(directories.to_vec())
         .mcp_servers(session_mcp(spec, true))
         .meta(session_request_meta(spec, true))
 }

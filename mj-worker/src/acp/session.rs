@@ -8,6 +8,11 @@ pub(super) fn accept_live_history(live_history_enabled: &AtomicBool) {
     live_history_enabled.store(true, Ordering::Release);
 }
 
+/// How long after a session opens OpenCode needs before its tool registry has
+/// reloaded for the MCP servers it was given: its 100 ms debounce, doubled and
+/// rounded up.
+const OPENCODE_TOOL_REGISTRY_SETTLE: Duration = Duration::from_millis(250);
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn serve_session(
     connection: &ConnectionTo<Agent>,
@@ -104,6 +109,14 @@ pub(super) async fn serve_session(
         .and_then(serde_json::Value::as_bool)
         == Some(true);
 
+    let opencode_whole_turns = spec.harness == HarnessKind::OpenCode
+        && opencode_usage::reports_whole_turns(
+            initialized
+                .agent_info
+                .as_ref()
+                .map(|info| info.version.as_str()),
+        );
+
     // Grok Build publishes its catalogue here rather than as `configOptions`.
     let mut grok_models = (spec.harness == HarnessKind::Grok)
         .then(|| grok::model_state(initialized.meta.as_ref()))
@@ -126,6 +139,12 @@ pub(super) async fn serve_session(
         },
     )
     .await?;
+
+    let directories =
+        SessionDirectories::negotiate(spec, &initialized.agent_capabilities.session_capabilities);
+    if let Some(message) = directories.notice.clone() {
+        emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
+    }
 
     if spec.harness == HarnessKind::Claude && !background_subagents_supported {
         emit_runtime_event(events, RuntimeEvent::Warning {
@@ -216,7 +235,7 @@ pub(super) async fn serve_session(
         {
             // `session/resume` does not replay, so everything it sends is live.
             accept_live_history(live_history_enabled);
-            let request = resume_session_request(spec, session_id.clone());
+            let request = resume_session_request(spec, &directories.accepted, session_id.clone());
             offered_mcp_servers = request.mcp_servers.len();
             let resumed = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
@@ -224,7 +243,7 @@ pub(super) async fn serve_session(
                 .with_context(|| format!("resume ACP session {existing}"))
                 .map(|resumed| (resumed.meta, resumed.config_options, resumed.modes))
         } else {
-            let request = load_session_request(spec, session_id.clone());
+            let request = load_session_request(spec, &directories.accepted, session_id.clone());
             offered_mcp_servers = request.mcp_servers.len();
             let loaded = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
@@ -322,7 +341,7 @@ pub(super) async fn serve_session(
             // this, a fallback from a failed reload dropped every reply the new
             // session sent for the rest of the worker's life (R8-1).
             accept_live_history(live_history_enabled);
-            let request = new_session_request(spec, true);
+            let request = new_session_request(spec, &directories.accepted, true);
             offered_mcp_servers = request.mcp_servers.len();
             let created = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
@@ -346,6 +365,15 @@ pub(super) async fn serve_session(
                 false,
             )
         };
+    // OpenCode 2.2.1 reloads its tool registry on a 100 ms debounce after an
+    // MCP server connects, and signals nobody when it is done. A prompt that
+    // starts a turn inside that window misses the `mj-agents` and `mj-memory`
+    // tools (measured: prompts 0-80 ms after `tools/list` missed them almost
+    // always, prompts at 120 ms or later had them). So the first prompt of
+    // this bridge waits until OPENCODE_TOOL_REGISTRY_SETTLE has passed since
+    // the open returned. Remove this once OpenCode signals readiness.
+    let mut first_prompt_not_before = (spec.harness == HarnessKind::OpenCode)
+        .then(|| tokio::time::Instant::now() + OPENCODE_TOOL_REGISTRY_SETTLE);
 
     // An adapter that withholds the servers it was offered says so only in
     // its log. Checked after the open, because a Muse host that could not
@@ -848,6 +876,9 @@ pub(super) async fn serve_session(
                     .await?;
                     continue;
                 }
+                if let Some(not_before) = first_prompt_not_before.take() {
+                    tokio::time::sleep_until(not_before).await;
+                }
                 let prompt = prompt_for_harness(spec.harness, prompt);
                 let mut updates_before = agent_output_count.get();
                 last_agent_message.clear();
@@ -968,6 +999,14 @@ pub(super) async fn serve_session(
                                     }
                                     if spec.harness == HarnessKind::Muse {
                                         usage = usage.map(|usage| muse_usage::attach_provider_details(usage, usage_meta.as_ref()));
+                                    }
+                                    if opencode_whole_turns
+                                        && let Some(usage) = usage.as_mut()
+                                        && let Err(error) = opencode_usage::normalize(usage, usage_meta.as_ref())
+                                    {
+                                        emit_runtime_event(events, RuntimeEvent::Warning {
+                                            message: format!("OpenCode usage could not be reconciled; turn accounting is incomplete: {error:#}"),
+                                        }).await?;
                                     }
                                     if spec.harness == HarnessKind::Grok {
                                         match grok_usage.complete(response.meta.as_ref(), usage.clone()).await {

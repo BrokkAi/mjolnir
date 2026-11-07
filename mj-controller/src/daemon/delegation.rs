@@ -19,6 +19,59 @@ enum ChildCompletion {
     RetryPark,
 }
 
+/// First wait after a child completion fails or finds the child busy.
+const COMPLETION_RETRY_BASE: Duration = Duration::from_secs(1);
+/// A completion that keeps failing is tried this rarely (#1456): reviewer
+/// completion reaches the worker restart queue, which a flat 1 s retry kept full.
+const COMPLETION_FAILURE_CAP: Duration = Duration::from_secs(300);
+/// A busy child is polled more often: it is working, not failing.
+const COMPLETION_BUSY_CAP: Duration = Duration::from_secs(30);
+
+/// When one child outcome's completion may run again, and how it has been
+/// going. Settling the child forgets it; a later outcome starts afresh.
+struct CompletionRetry {
+    ordinal: u64,
+    at: Instant,
+    failures: u32,
+    last_failure: Option<String>,
+}
+
+impl CompletionRetry {
+    /// Schedules the next attempt after `previous`. `failure` is the error of
+    /// an attempt that failed, or `None` when the child was only busy. Returns
+    /// whether the failure is news (the first, or a different cause), so a
+    /// persistent failure is warned about once rather than at every retry.
+    fn schedule(
+        previous: Option<Self>,
+        ordinal: u64,
+        now: Instant,
+        failure: Option<String>,
+    ) -> (Self, bool) {
+        let (failures, last_failure) = previous
+            .filter(|item| item.ordinal == ordinal)
+            .map_or((0, None), |item| (item.failures, item.last_failure));
+        let failures = failures.saturating_add(1);
+        let (cap, report, last_failure) = match failure {
+            Some(failure) => (
+                COMPLETION_FAILURE_CAP,
+                last_failure.as_ref() != Some(&failure),
+                Some(failure),
+            ),
+            None => (COMPLETION_BUSY_CAP, false, last_failure),
+        };
+        let delay = crate::recovery::backoff_delay(COMPLETION_RETRY_BASE, cap, failures);
+        (
+            Self {
+                ordinal,
+                at: now + delay,
+                failures,
+                last_failure,
+            },
+            report,
+        )
+    }
+}
+
 enum Completed {
     Executed(StoredDelegationResult, bool),
     Delivered,
@@ -63,7 +116,7 @@ async fn run(
     let mut completions = tokio::task::JoinSet::new();
     let mut completion_ids = BTreeMap::<tokio::task::Id, (String, u64)>::new();
     let mut noticed = BTreeMap::<String, u64>::new();
-    let mut retry = BTreeMap::<String, Instant>::new();
+    let mut retry = BTreeMap::<String, CompletionRetry>::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut quota_open = true;
@@ -85,6 +138,7 @@ async fn run(
                                     | SubagentToolAction::RequestReview { .. }
                                     | SubagentToolAction::AskOracle { .. }
                                     | SubagentToolAction::OverrideReview { .. }
+                                    | SubagentToolAction::SetReviewBaseline { .. }
                                     // Its lifecycle persists Closing before yielding
                                     // admission; the next daemon finishes the close.
                                     | SubagentToolAction::CloseAgent { .. }
@@ -126,7 +180,9 @@ async fn run(
                 };
                 if noticed.get(child) == Some(&outcome.completed_ordinal)
                     || completion_ids.values().any(|(id, _)| id == child)
-                    || retry.get(child).is_some_and(|at| *at > Instant::now())
+                    || retry.get(child).is_some_and(|retry| {
+                        retry.ordinal == outcome.completed_ordinal && retry.at > Instant::now()
+                    })
                 {
                     continue;
                 }
@@ -203,10 +259,17 @@ async fn run(
                 if let Some((id, ordinal)) = completion_ids.remove(&task_id) {
                     match result {
                         Ok(ChildCompletion::Settled) => { noticed.insert(id.clone(), ordinal); retry.remove(&id); }
-                        Ok(ChildCompletion::RetryPark) => { retry.insert(id, Instant::now() + Duration::from_secs(1)); }
+                        Ok(ChildCompletion::RetryPark) => {
+                            let (next, _) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), None);
+                            retry.insert(id, next);
+                        }
                         Err(error) => {
-                            tracing::warn!(child_session_id = %id, %error, "delegation child completion failed");
-                            retry.insert(id, Instant::now() + Duration::from_secs(1));
+                            let failure = format!("{error:#}");
+                            let (next, report) = CompletionRetry::schedule(retry.remove(&id), ordinal, Instant::now(), Some(failure.clone()));
+                            if report {
+                                tracing::warn!(child_session_id = %id, error = %failure, retry_in_seconds = (next.at - Instant::now()).as_secs(), "delegation child completion failed; retrying with backoff");
+                            }
+                            retry.insert(id, next);
                         }
                     }
                 }
@@ -272,7 +335,9 @@ async fn complete_child(
             .reviewer_finished(relation.parent_session_id, child_id.clone(), answer)
             .await
             .map_err(anyhow::Error::msg)?;
-        state.suspend_session(child_id).await?;
+        // The review host owns reviewer closes and retries a failing one with
+        // backoff; closing here as well resubmitted it every second (#1456).
+        state.review_host().close_child(child_id);
         return Ok(ChildCompletion::Settled);
     }
     if relation

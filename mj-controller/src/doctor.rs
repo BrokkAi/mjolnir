@@ -31,6 +31,7 @@ use mj_core::credentials::login_command;
 use mj_core::local_git::{MINIMUM_GIT_VERSION, parse_git_version};
 
 mod catalog;
+mod github;
 pub use catalog::{Catalogs, LARGE_CATALOG, catalog_checks, catalog_profile_ids};
 
 // Only the image for the Apple container smoke test when the config has no
@@ -224,6 +225,7 @@ pub fn run_with_config_path(
     let offered = offered.as_ref().map_err(|gap| *gap);
     checks.extend(podman);
     checks.extend(docker);
+    checks.extend(local_bare_github_checks(config, executor));
     checks.extend(ssh_bare_checks(config, executor));
     checks.extend(ssh_podman_checks(config, executor, options.smoke));
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
@@ -256,16 +258,11 @@ fn git_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<
         for (id, target) in &config.targets {
             if let TargetTemplate::SshBare { ssh, .. } = target {
                 let ssh = RuntimeSshTarget::from(ssh);
-                let mut command = ssh_validation_command(
+                let command = strict_ssh_validation_command(
                     &ssh,
                     vec!["git".into(), "--version".into()],
                     "check remote Git version",
                 );
-                // Like the connectivity probe, doctor must not accept a new
-                // host key, even when the target normally uses accept-new.
-                command
-                    .args
-                    .splice(0..0, ["-o".into(), "StrictHostKeyChecking=yes".into()]);
                 checks.push(git_version_check(
                     &format!("git.ssh-bare.{id}"),
                     &ssh.destination,
@@ -276,6 +273,20 @@ fn git_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<
         }
     }
     checks
+}
+
+/// [`ssh_validation_command`] that, like the connectivity probe, never accepts
+/// a new host key, even when the target normally uses accept-new.
+fn strict_ssh_validation_command(
+    ssh: &RuntimeSshTarget,
+    remote_args: Vec<String>,
+    purpose: &'static str,
+) -> CommandSpec {
+    let mut command = ssh_validation_command(ssh, remote_args, purpose);
+    command
+        .args
+        .splice(0..0, ["-o".into(), "StrictHostKeyChecking=yes".into()]);
+    command
 }
 
 fn git_version_check(
@@ -671,6 +682,18 @@ package include it. The worker installs the pinned harness version itself.\n\
 Node-based harnesses reuse Node.js 22 or newer with npm and npx when present;\n\
 otherwise Mjolnir installs its own pinned Node.js and needs curl. Kimi and Grok\n\
 need curl and Bash. Mjolnir does not install those shell prerequisites.\n\n\
+## GitHub access on bare targets\n\n\
+A bare target (local or SSH) runs Git as that host's own account, so the host\n\
+needs its own way to reach GitHub without a person present. Either add a GitHub\n\
+SSH key to the host and trust GitHub's host key (check `ssh -T git@github.com`\n\
+there), or use HTTPS: run `gh auth login` and `gh auth setup-git` on the host,\n\
+then send SSH GitHub URLs over HTTPS:\n\n\
+```console\n\
+git config --global --add url.https://github.com/.insteadOf git@github.com:\n\
+git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/\n\
+```\n\n\
+`mj doctor` reports `github.*` checks per bare target. A target that never uses\n\
+GitHub can ignore them.\n\n\
 ## Linux container-runtime postconditions\n\n{}\n\n{}",
             crate::targets::PODMAN_DOCUMENTATION,
             crate::targets::DOCKER_DOCUMENTATION
@@ -705,6 +728,18 @@ The worker installs the pinned harness version itself. Node-based harnesses\n\
 reuse Node.js 22 or newer with npm and npx when present; otherwise Mjolnir\n\
 installs its own pinned Node.js and needs curl. Kimi and Grok need curl and\n\
 Bash. Mjolnir does not install those shell prerequisites.\n\n\
+## GitHub access on bare targets\n\n\
+A bare target (local or SSH) runs Git as that host's own account, so the host\n\
+needs its own way to reach GitHub without a person present. Either add a GitHub\n\
+SSH key to the host and trust GitHub's host key (check `ssh -T git@github.com`\n\
+there), or use HTTPS: run `gh auth login` and `gh auth setup-git` on the host,\n\
+then send SSH GitHub URLs over HTTPS:\n\n\
+```console\n\
+git config --global --add url.https://github.com/.insteadOf git@github.com:\n\
+git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/\n\
+```\n\n\
+`mj doctor` reports `github.*` checks per bare target. A target that never uses\n\
+GitHub can ignore them.\n\n\
 ## Podman\n\n\
 A local Podman target on macOS uses a rootless `podman machine`. Install\n\
 Podman and create the machine:\n\n\
@@ -1231,7 +1266,7 @@ fn subagent_policy_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
 fn subagent_policy_check(config: &Config) -> DoctorCheck {
     let subagents = &config.subagents;
     let detail = format!(
-        "Claude, Codex, and DSH sessions may opt in, up to {} sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.",
+        "Claude, Codex, DSH, and OpenCode sessions may opt in, up to {} sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.",
         subagents.max_concurrent
     );
     DoctorCheck::ready("subagents.policy", "Sub-agent policy", detail)
@@ -1869,6 +1904,8 @@ fn ssh_identity_file(ssh: &RuntimeSshTarget) -> Option<&str> {
 }
 
 /// One check per `ssh-bare` target: can Hel reach the host noninteractively?
+/// A reachable host also gets its GitHub access check; an unreachable one has
+/// one problem, not two.
 fn ssh_bare_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
     let Ok(config) = config else {
         return Vec::new();
@@ -1876,35 +1913,79 @@ fn ssh_bare_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) ->
     config
         .targets
         .iter()
-        .filter_map(|(id, target)| match target {
+        .flat_map(|(id, target)| match target {
             TargetTemplate::SshBare { ssh, .. } => {
-                Some(ssh_bare_check(id, &RuntimeSshTarget::from(ssh), executor))
+                let ssh = RuntimeSshTarget::from(ssh);
+                let (check, reachable) = ssh_bare_check(id, &ssh, executor);
+                let mut checks = vec![check];
+                if reachable {
+                    checks.push(github::github_access_check(
+                        format!("github.ssh-bare.{id}"),
+                        format!("GitHub access from target {id}"),
+                        github::BareHost::Ssh(&ssh),
+                        executor,
+                    ));
+                }
+                checks
             }
-            _ => None,
+            _ => Vec::new(),
         })
         .collect()
 }
 
+/// One GitHub access check per local bare target, run on this machine.
+fn local_bare_github_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    // `localhost` is usually a default target rather than a saved one.
+    config
+        .clone()
+        .with_local_targets()
+        .targets
+        .into_iter()
+        .filter(|(_, target)| matches!(target, TargetTemplate::LocalBare))
+        .map(|(id, _)| {
+            github::github_access_check(
+                format!("github.local-bare.{id}"),
+                format!("GitHub access from target {id}"),
+                github::BareHost::Local,
+                executor,
+            )
+        })
+        .collect()
+}
+
+/// The SSH access check, and whether the host answered.
 fn ssh_bare_check(
     id: &str,
     ssh: &RuntimeSshTarget,
     executor: &impl CommandExecutor,
-) -> DoctorCheck {
+) -> (DoctorCheck, bool) {
     let check_id = format!("runtime.ssh-bare.{id}");
     let title = format!("SSH access for target {id}");
     match ssh_connectivity(ssh, executor) {
-        SshConnectivity::Reachable => DoctorCheck::ready(
-            check_id,
-            title,
-            format!(
-                "`ssh {} true` succeeds noninteractively from this host.",
-                ssh.destination
+        SshConnectivity::Reachable => (
+            DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "`ssh {} true` succeeds noninteractively from this host.",
+                    ssh.destination
+                ),
             ),
+            true,
         ),
         SshConnectivity::Failed {
             detail,
             remediation,
-        } => DoctorCheck::fixable(check_id, title, detail, remediation),
+        } => (
+            DoctorCheck::fixable(check_id, title, detail, remediation),
+            false,
+        ),
     }
 }
 

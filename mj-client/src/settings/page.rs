@@ -197,6 +197,9 @@ pub fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
             value["kind"].as_str() != Some("codex")
         }
         ["machines", mj_core::config::LOCAL_MACHINE_ID] => key == "kind",
+        // Present only while reviewers still have to be chosen automatically:
+        // it is not a setting. Review is on exactly when reviewers exist.
+        ["review"] => key == "trigger",
         // Approvals are a remote-machine setting: a bare runtime here always
         // uses the configured approvals.
         ["targets", _] => {

@@ -63,6 +63,10 @@ impl ActiveChat {
             self.apply_session_view(view);
         }
         self.publish_conversation_notices();
+        // Applying an update can queue a history page or listing; every
+        // wakeup ends here, so neither waits for a key press.
+        dispatch_history_search_request(self.session.clone(), &mut self.state);
+        dispatch_session_history_request(self.session.clone(), &mut self.state, &self.chat_io_tx);
     }
 
     pub(super) fn publish_conversation_notices(&mut self) {
@@ -96,7 +100,7 @@ impl ActiveChat {
         self.surface_reviewer_elicitations();
     }
 
-    /// Asks the daemon to review the turn that just finished.
+    /// Asks the daemon to review committed work.
     pub(crate) fn request_turn_review(&mut self) {
         let session_id = self.session.session_id().to_owned();
         self.state.set_notice("Starting a review…");
@@ -182,7 +186,6 @@ impl ActiveChat {
         if let PrefixRebuild::Needed { attempt } = apply_chat_io_update(&mut self.state, update) {
             self.rebuild_transcript_prefix(attempt);
         }
-        dispatch_history_search_request(self.session.clone(), &mut self.state);
         dispatch_diffstat_requests(
             &mut self.state,
             &self.chat_io_tx,

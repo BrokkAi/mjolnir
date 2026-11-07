@@ -186,11 +186,6 @@ pub struct DurableRelay {
     /// and no model cycle, so no result would settle a harness turn opened
     /// for that chunk.
     claude_pending_stops: BTreeMap<String, BTreeSet<String>>,
-    /// The first ordinal of the Claude harness turn a stop was applied to,
-    /// while that turn is still open. Claude Code answers a stop of a running
-    /// cycle with the cycle's result; a turn it never ran gets no answer, so
-    /// the coordinator ends it after [`HARNESS_TURN_STOP_GRACE`].
-    harness_turn_stop: Option<u64>,
     /// Kimi detached agents and processes confirmed by its native journal.
     kimi_background_tasks: BTreeMap<String, KimiTaskEntry>,
     /// Positive ACP launch evidence retained until the native journal
@@ -511,7 +506,6 @@ impl DurableRelay {
             replied_verdict: Default::default(),
             air_tasks: BTreeMap::new(),
             claude_pending_stops: BTreeMap::new(),
-            harness_turn_stop: None,
             kimi_background_tasks: BTreeMap::new(),
             kimi_provisional_tasks: BTreeMap::new(),
             kimi_observed_task_ids: BTreeSet::new(),
@@ -1264,22 +1258,21 @@ impl DurableRelay {
         )
     }
 
-    /// Remember a stop applied during a Claude harness turn, so the turn can
-    /// be ended if Claude Code never answers it.
-    fn note_harness_turn_stop(&mut self) {
-        if self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
-            && self.snapshot.active_prompt.is_none()
-            && let Some(turn) = self.snapshot.harness_turn
-        {
-            self.harness_turn_stop = Some(turn.first_ordinal);
-        }
-    }
-
     /// The first ordinal of the open Claude harness turn a stop was applied
-    /// to, while nothing has answered that stop yet.
+    /// to, while nothing has answered that stop yet. Claude Code answers a
+    /// stop of a running cycle with the cycle's result; a turn it never ran
+    /// gets no answer, so the coordinator ends it after
+    /// [`HARNESS_TURN_STOP_GRACE`]. The snapshot owns the stop: a journal
+    /// event records it, so it is the same on every path and after a restart.
     pub fn unanswered_harness_turn_stop(&self) -> Option<u64> {
-        let turn = self.snapshot.harness_turn?;
-        (self.harness_turn_stop == Some(turn.first_ordinal)).then_some(turn.first_ordinal)
+        if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter {
+            return None;
+        }
+        let turn = self.snapshot.autonomous_harness_turn()?;
+        self.snapshot
+            .cancelling_harness_turn
+            .is_some_and(|stop| stop.applied && stop.first_ordinal == turn.first_ordinal)
+            .then_some(turn.first_ordinal)
     }
 
     /// End the harness turn a stop was applied to, if it is still open. A
@@ -1290,7 +1283,6 @@ impl DurableRelay {
         if self.unanswered_harness_turn_stop() != Some(first_ordinal) {
             return Ok(false);
         }
-        self.harness_turn_stop = None;
         tracing::warn!(
             session_id = %self.snapshot.session_id,
             first_ordinal,
@@ -1327,7 +1319,20 @@ impl DurableRelay {
                     .filter(|_| self.snapshot.active_prompt.is_none())
                     .map(|turn| mj_core::relay::SettledHarnessTurn {
                         start_ordinal: turn.first_ordinal,
-                        stop_reason: stop_reason.into(),
+                        // claude-agent-acp 0.99.0 / Claude Code 2.1.308 (2026-11-06)
+                        // forwards SDK results, including error-shaped interrupted cycles.
+                        // Its interrupt has no yield deadline: a result can arrive after
+                        // stop_unanswered. The snapshot's recorded stop owns the
+                        // cancellation reason.
+                        stop_reason: if self
+                            .snapshot
+                            .cancelling_harness_turn
+                            .is_some_and(|stop| stop.first_ordinal == turn.first_ordinal)
+                        {
+                            "cancelled".into()
+                        } else {
+                            stop_reason.into()
+                        },
                     }),
                 origin,
                 // The projection cannot see `active_prompt`, so the event has

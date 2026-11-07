@@ -18,6 +18,8 @@ mod session_config;
 pub(crate) mod verdict_client;
 use air_tasks::*;
 use drive::*;
+#[cfg(unix)]
+pub(crate) use launch::TOOL_CACHE_DIRECTORY_VARIABLES;
 use launch::*;
 pub use launch::{ContextReset, LaunchSpec, ReviewerMcpServer, SubagentMcpSocket};
 pub use opencode_logins::ImportedLogins;
@@ -35,6 +37,9 @@ mod grok_usage;
 mod grok_usage_tests;
 mod kimi_tasks;
 mod muse_usage;
+mod opencode_usage;
+#[cfg(test)]
+mod session_directories_tests;
 pub use kimi_tasks::resolve_session_dir as resolve_kimi_session_dir;
 pub use kimi_tasks::*;
 #[cfg(test)]
@@ -539,12 +544,25 @@ async fn run_bridge(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| {
-            format!(
-                "launch ACP bridge {} in working directory {}",
-                spec.command.display(),
-                spec.cwd.display()
-            )
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound && !spec.cwd.is_dir() {
+                anyhow::anyhow!(
+                    "ACP bridge working directory {} does not exist or is not a directory: {error}",
+                    spec.cwd.display()
+                )
+            } else if error.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "ACP bridge executable {} was not found while starting in working directory {}: {error}",
+                    spec.command.display(),
+                    spec.cwd.display()
+                )
+            } else {
+                anyhow::anyhow!(
+                    "launch ACP bridge {} in working directory {}: {error}",
+                    spec.command.display(),
+                    spec.cwd.display()
+                )
+            }
         })?;
     let stdin = child.stdin.take().context("ACP bridge stdin unavailable")?;
     let stdout = child

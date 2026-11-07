@@ -4,7 +4,7 @@ warning Host limits for target remote-podman: The login user on dev@docker.examp
   remediation: Raise `kernel.keys.maxkeys` and `kernel.keys.maxbytes` with sysctl on dev@docker.example.test, and close finished sessions promptly.
 warning Host limits for target missing-ssh: Could not read the kernel keyring quota or sshd MaxStartups from dev@docker.example.test: ssh executable is unavailable
   remediation: Read them by hand on dev@docker.example.test: `cat /proc/key-users /proc/sys/kernel/keys/maxkeys` and `grep -ri maxstartups /etc/ssh/sshd_config /etc/ssh/sshd_config.d`.
-ready Sub-agent policy: Claude, Codex, and DSH sessions may opt in, up to 3 sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.
+ready Sub-agent policy: Claude, Codex, DSH, and OpenCode sessions may opt in, up to 3 sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.
 fixable Git on this machine: git version 2.25.1 is older than 2.39.5, the oldest Git version Mjolnir supports. Before-push review cannot review merged work with it.
   remediation: Install or upgrade to Git 2.39.5 or newer on this machine, ensure it is the `git` found on PATH, then rerun `mj doctor`.
 fixable Git on this machine: git version 2.39.4 is older than 2.39.5, the oldest Git version Mjolnir supports. Before-push review cannot review merged work with it.

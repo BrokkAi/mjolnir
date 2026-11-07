@@ -1357,6 +1357,16 @@ pub struct StoredHarnessTurn {
     pub first_ordinal: u64,
 }
 
+/// A stop aimed at one open autonomous harness turn, named by the ordinal that
+/// opened it. The journal's `Cancel`/`CancelTurn` events own it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessTurnCancel {
+    pub first_ordinal: u64,
+    /// The runtime acknowledged a stop of this turn.
+    pub applied: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandledRelayCommand {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1543,6 +1553,13 @@ pub struct RelaySnapshot {
     pub harness_turn: Option<StoredHarnessTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_harness_turn_started_ordinal: Option<u64>,
+    /// The stop aimed at the open autonomous harness turn, while that turn is
+    /// open. Set when a `Cancel` or `CancelTurn` is accepted with no prompt of
+    /// ours running, so every settle the stop causes finds it however the
+    /// harness's result and the acknowledgement race. Never serialized once
+    /// the turn settles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelling_harness_turn: Option<HarnessTurnCancel>,
     /// Ignored. Protocol 26 workers persisted durable command receipts here;
     /// the field stays so their stores still open after an upgrade.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -1622,6 +1639,7 @@ impl RelaySnapshot {
             checkpoint_ready_digest: None,
             harness_turn: None,
             last_harness_turn_started_ordinal: None,
+            cancelling_harness_turn: None,
             retained_command_receipts: BTreeSet::new(),
             cancelled_command_admissions: BTreeSet::new(),
             handled_commands: BTreeMap::new(),

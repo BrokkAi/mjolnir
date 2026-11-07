@@ -59,7 +59,16 @@ pub trait ExportRuntime: Send + Sync {
     fn override_review(
         &self,
         _session_id: String,
-        _reason: String,
+        _overrides: Vec<mj_core::subagent::ReviewOverride>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async { bail!("push review is unavailable") })
+    }
+
+    fn set_review_baseline(
+        &self,
+        _session_id: String,
+        _commit: String,
+        _path: Option<String>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async { bail!("push review is unavailable") })
     }
@@ -243,13 +252,27 @@ impl ExportRuntime for RuntimeState {
     fn override_review(
         &self,
         session_id: String,
-        reason: String,
+        overrides: Vec<mj_core::subagent::ReviewOverride>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
         Box::pin(async move {
             self.review_host()
-                .override_push(&session_id, reason)
+                .override_push(&session_id, overrides)
                 .await
                 .map_err(|error| anyhow!("override_review refused: {}", error.0))
+        })
+    }
+
+    fn set_review_baseline(
+        &self,
+        session_id: String,
+        commit: String,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        Box::pin(async move {
+            self.review_host()
+                .set_push_base(&session_id, commit, path)
+                .await
+                .map_err(|error| anyhow!("set_review_baseline refused: {}", error.0))
         })
     }
 
@@ -434,6 +457,22 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// How long a restarted sub-agent's session actor has to connect to the
 /// worker the restart already proved ready.
 const UNPARK_ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The daemon accepted a parked child's wake, so its record is `Running` with
+/// a durable boot intent, but the session was not ready for a prompt within
+/// [`UNPARK_ATTACH_TIMEOUT`]. The child is still starting; the wake did not
+/// fail. A caller with a delivery deadline keeps waiting for readiness
+/// instead of reporting the delivery as failed (#1395).
+#[derive(Debug)]
+struct WakeNotReady(String);
+
+impl std::fmt::Display for WakeNotReady {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for WakeNotReady {}
 /// Clap's exit code for a usage failure, which is what a worker binary too old
 /// to know the export subcommands answers.
 const CLAP_USAGE_EXIT_CODE: i32 = 2;
@@ -929,9 +968,14 @@ impl ApiBackend {
                 self.ask_oracle(parent_session_id, request, prepared, message)
                     .await
             }
-            SubagentToolAction::OverrideReview { reason } => {
+            SubagentToolAction::OverrideReview { overrides } => {
                 self.exports
-                    .override_review(parent_session_id.to_owned(), reason.to_owned())
+                    .override_review(parent_session_id.to_owned(), overrides.clone())
+                    .await
+            }
+            SubagentToolAction::SetReviewBaseline { commit, path } => {
+                self.exports
+                    .set_review_baseline(parent_session_id.to_owned(), commit.clone(), path.clone())
                     .await
             }
             SubagentToolAction::ListProfiles => {
@@ -1083,6 +1127,7 @@ impl ApiBackend {
                             });
                         let (state, _, _) = inputs.status(
                             &relation.child_session_id,
+                            record.as_ref(),
                             subagent_status(
                                 record.as_ref(),
                                 summary,
@@ -1103,6 +1148,7 @@ impl ApiBackend {
                         });
                         inputs.annotate(&relation.child_session_id, &mut entry);
                         mark_parked(&mut entry, record.as_ref());
+                        mark_promptable(&mut entry, &state, progress, record.as_ref());
                         entry
                     })
                     .collect::<Vec<_>>();
@@ -1340,7 +1386,11 @@ impl ApiBackend {
             .sessions
             .wait_for_session(child_id, UNPARK_ATTACH_TIMEOUT)
             .await
-            .context("the restarted sub-agent did not reattach")?;
+            .map_err(|error| {
+                anyhow::Error::new(WakeNotReady(format!(
+                    "the restarted sub-agent did not reattach: {error:#}"
+                )))
+            })?;
         loop {
             let view = handle.view();
             if view.connected
@@ -1351,11 +1401,12 @@ impl ApiBackend {
             {
                 return Ok(true);
             }
-            ensure!(
-                tokio::time::Instant::now() < deadline,
-                "the restarted sub-agent was not ready for a prompt within {} seconds",
-                UNPARK_ATTACH_TIMEOUT.as_secs()
-            );
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow::Error::new(WakeNotReady(format!(
+                    "the restarted sub-agent was not ready for a prompt within {} seconds",
+                    UNPARK_ATTACH_TIMEOUT.as_secs()
+                ))));
+            }
             let _ = tokio::time::timeout(START_POLL, handle.changed()).await;
         }
     }
@@ -1576,6 +1627,7 @@ impl ApiBackend {
                 let record = self.exports.session_record(&id);
                 let (state, output, finished) = inputs.status(
                     &id,
+                    record.as_ref(),
                     subagent_status(
                         record.as_ref(),
                         summary.as_ref(),
@@ -1585,8 +1637,14 @@ impl ApiBackend {
                         &progress,
                     ),
                 );
-                let identity =
-                    finished.then(|| finish_identity(&state, output.as_deref(), &progress));
+                let identity = report_identity(
+                    &state,
+                    output.as_deref(),
+                    finished,
+                    inputs.last_failed_delivery(&id),
+                    &progress,
+                    relation.reported_finish.as_ref(),
+                );
                 NotificationChildSnapshot {
                     relation,
                     progress,
@@ -1661,6 +1719,12 @@ impl ApiBackend {
             entry["task_name"] = child.relation.task_name.into();
             inputs.annotate(id, &mut entry);
             mark_parked(&mut entry, child.record.as_ref());
+            mark_promptable(
+                &mut entry,
+                &child.state,
+                &child.progress,
+                child.record.as_ref(),
+            );
             let report = serde_json::from_value::<mj_core::mailbox::SubagentFinishedReport>(entry)?;
             notifications.push((
                 child.identity.expect("ready report has a finish identity"),
@@ -1845,6 +1909,48 @@ impl ApiBackend {
         }
         Ok(())
     }
+}
+
+/// What makes a child's report new for its parent: its finish, or a message
+/// delivery to it that failed. The failed delivery keeps the child's own
+/// state (#1381); the parent still hears of it, once per failed request, in
+/// a report that carries the state and the `Message <id> failed` line. A
+/// finish that is still unreported travels in the same report.
+///
+/// Whether a failed delivery is news is decided against what the parent was
+/// last told (`reported`). A finished child's identity carries its state, so
+/// every finish after the failure reaches the parent, including one that
+/// settles without a new turn. A child that is not finished has news only if
+/// this failure was never reported: a message queued after it turns a
+/// finished child "running" with nothing new to say.
+fn report_identity(
+    state: &str,
+    output: Option<&str>,
+    finished: bool,
+    failed_delivery: Option<(&str, &str)>,
+    progress: &ChildProgress,
+    reported: Option<&mj_core::subagent::SubagentFinishIdentity>,
+) -> Option<mj_core::subagent::SubagentFinishIdentity> {
+    let Some((request_id, error)) = failed_delivery else {
+        return finished.then(|| finish_identity(state, output, progress));
+    };
+    let detail = format!("Message {request_id}: {error}");
+    if !finished
+        && let Some(
+            reported @ mj_core::subagent::SubagentFinishIdentity::Terminal {
+                detail: Some(reported_detail),
+                ..
+            },
+        ) = reported
+        && *reported_detail == detail
+    {
+        return Some(reported.clone());
+    }
+    Some(mj_core::subagent::SubagentFinishIdentity::Terminal {
+        state: if finished { state } else { "message-failed" }.to_owned(),
+        detail: Some(detail),
+        last_completed_ordinal: progress.last_completed_ordinal,
+    })
 }
 
 fn finish_identity(
@@ -2243,6 +2349,27 @@ fn live_child_name(record: Option<&mj_core::state::SessionRecord>, task_name: &s
 fn mark_parked(entry: &mut serde_json::Value, record: Option<&mj_core::state::SessionRecord>) {
     if record.is_some_and(|record| record.state == SessionState::Parked) {
         entry["parked"] = serde_json::Value::Bool(true);
+    }
+}
+
+/// Say in a notification or `list_agents` entry that a child whose last turn
+/// failed or was interrupted can still be given work: `send_message` runs it
+/// again. [`SessionState::can_receive_child_work`] decides this for every
+/// delivery, so this statement and a later `send_message` cannot disagree. A
+/// child whose login the provider refused is repaired first, so it is not
+/// marked.
+fn mark_promptable(
+    entry: &mut serde_json::Value,
+    state: &str,
+    progress: &ChildProgress,
+    record: Option<&mj_core::state::SessionRecord>,
+) {
+    if matches!(state, "failed" | "interrupted")
+        && progress.failed_turn.is_some()
+        && progress.login_failure.is_none()
+        && record.is_some_and(|record| record.state.can_receive_child_work())
+    {
+        entry["promptable"] = serde_json::Value::Bool(true);
     }
 }
 
@@ -3190,6 +3317,17 @@ impl SubagentBackend for ApiBackend {
                 .await?;
             Ok(turn)
         })
+    }
+
+    fn record_user_prompt(
+        &self,
+        session_id: String,
+        command_id: String,
+        text: String,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(super::actions::record_user_prompt(
+            session_id, command_id, text,
+        ))
     }
 
     fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, Result<String>> {

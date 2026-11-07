@@ -585,6 +585,14 @@ impl ActiveLifecycle {
         !matches!(self.phase, LifecyclePhase::Completed(_))
     }
 
+    /// The stages this operation is in, oldest stage first.
+    fn stage_labels(&self) -> Vec<String> {
+        self.active_stages
+            .keys()
+            .map(|stage| stage.label())
+            .collect()
+    }
+
     fn pending_upgrade_failed(&self) -> bool {
         self.kind == LifecycleKind::UpgradeContainer
             && self.restart_intent.is_some()

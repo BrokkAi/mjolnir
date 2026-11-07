@@ -26,12 +26,19 @@ then get an `ask_oracle` tool whatever their delegation choice. **Create** and
 **Move…** show an Oracle row when a model is set.
 
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
-requires a Claude, Codex, or DSH profile and a configured Straightforward task.
+requires a Claude, Codex, DSH, or OpenCode profile and a configured Straightforward task.
 DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
 **None** instead. A DSH session starts on Mjolnir when the last choice was
 Mjolnir and Straightforward is configured, and on None otherwise. Its choice
 becomes the remembered one on interactive creation only when it is Mjolnir, so choosing None for DSH
 does not change what the next Claude or Codex session starts with.
+OpenCode has no steering, so a child's report reaches an OpenCode parent when
+its current turn ends, not between its tool calls. OpenCode loads MCP tools
+shortly after it connects to their servers and does not say when it is done, so
+the worker holds an OpenCode session's first prompt until 250 ms after the
+session opens, which gives the `mj-agents` tools time to reach the model.
+Under configured approvals OpenCode asks the person before each `mj-agents`
+call; choose "always allow" to stop it asking for the rest of the session.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.
 
@@ -572,7 +579,7 @@ configuration copy and stores native history under that copy's `.data/muse/`
 tree, including on a bare runtime on this machine. Do not override `XDG_CONFIG_HOME` or
 `XDG_DATA_HOME` in the profile environment.
 
-For OpenCode, configure `kind = "opencode"` and a home ending in `opencode`,
+For OpenCode, configure `kind = "open-code"` and a home ending in `opencode`,
 for example `home = "/home/me/.config/opencode"` or
 `/home/me/accounts/work/opencode`. Discovery uses `$XDG_CONFIG_HOME/opencode`
 when set. OpenCode 2 keeps its logins in its database, `opencode.db`, in its
@@ -602,6 +609,33 @@ variables a provider in your `opencode.json` or `opencode.jsonc` lists under
 wins over a key for the same provider, as it does in OpenCode. Export the key
 before running `mj`, and run `mj daemon restart` after exporting a new one;
 `mj doctor` names the keys a profile is using.
+
+Mjolnir copies the profile's `opencode.json` to each session unchanged and adds
+its own permission rules on top, so any OpenCode setting in it applies. For example, to set a
+default model and send every OpenRouter request for it to one provider, with
+no fallback to others:
+
+```json
+{
+  "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+  "provider": {
+    "openrouter": {
+      "models": {
+        "deepseek/deepseek-v4.1-flash-1017": {
+          "options": {
+            "provider": { "only": ["morph"], "allow_fallbacks": false }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The `provider` object under `options` is OpenRouter's provider routing
+preference, sent with each request. Provider names are the endpoint tags that
+`https://openrouter.ai/api/v1/models/<model>/endpoints` lists, such as
+`morph` for `morph/fp8`.
 
 For DSH, configure `kind = "dsh"`, for example with
 `home = "/home/me/.dsh"`. Detection accepts DeepSeek's own `dsh` CLI, its
@@ -809,6 +843,14 @@ Mjolnir then adds its own files to the staged home:
 - for Muse, the permission profile in its settings;
 - for OpenCode under an unconstrained policy, the `"permission": "allow"`
   setting in `opencode.json`;
+- for every OpenCode session, permission rules in `OPENCODE_CONFIG_CONTENT`
+  that turn off OpenCode's `execute` tool, so the `mj-agents` tools are
+  ordinary tools named `mj-agents_spawn` and so on instead of reachable only
+  through scripts, and, unless the session uses OpenCode's own delegation
+  (Native), its own `subagent` tool. OpenCode names a tool
+  `<server>_<tool>`, so another server can carry the same name as a Mjolnir
+  tool; the worker therefore never answers OpenCode's permission requests,
+  and under configured approvals the person approves Mjolnir's tools too;
 - for DSH, the staged `AGENTS.md` in the session's `DSH_ACP_DATA_DIR` (with
   `DSH_ACP_SYSTEM_PROMPT` cleared), and dsh-acp's `permission_mode` on every
   session open: `ask` under configured approvals, `allow` under an

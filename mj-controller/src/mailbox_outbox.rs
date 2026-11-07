@@ -555,4 +555,45 @@ mod tests {
             );
         }
     }
+    // Hard-won: 60adf13fe: a worker before protocol 54 headed a report about a failed message to a running child "finished".
+    #[test]
+    fn a_child_report_that_is_not_a_finish_reaches_older_workers_as_text() {
+        let report: mj_core::mailbox::SubagentFinishedReport =
+            serde_json::from_value(serde_json::json!({
+                "child_session_id": "child-1",
+                "task_name": "Run suites",
+                "state": "running",
+                "finished": false,
+                "message_deliveries": [{
+                    "request_id": "message-1",
+                    "status": "failed",
+                    "error": "child was not ready for queued message within 30 minutes"
+                }],
+                "output": null,
+                "report_dir": null
+            }))
+            .unwrap();
+        let event = mj_core::mailbox::MailboxEvent {
+            key: "report-1".into(),
+            source: "mjolnir".into(),
+            wake: true,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
+                report: Box::new(report),
+            },
+        };
+        for protocol in [53, 54] {
+            let mut delivered = event.clone();
+            super::downgrade_review_or_report(&mut delivered, protocol);
+            let wire = serde_json::to_value(&delivered).unwrap();
+            if protocol < 54 {
+                assert_eq!(wire["body"]["type"], "plain_text");
+                let text = wire["body"]["text"].as_str().unwrap();
+                assert!(text.contains("was not delivered"), "{text}");
+                assert!(!text.contains("finished"), "{text}");
+            } else {
+                assert_eq!(delivered, event);
+            }
+        }
+    }
 }
