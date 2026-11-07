@@ -1751,7 +1751,10 @@ sys.stdin.read()
         .await
         .unwrap();
     let before = client.next_request;
-    let facts = client.work_facts(true, true).await.unwrap();
+    let observation = client.work_facts(true, true).await.unwrap();
+    let facts = observation.facts;
+    // An old worker says nothing of accepted work either.
+    assert_eq!(observation.accepted_ordinal, None);
     // Unknown, never zero: a parent must not read "0 processes" from a worker
     // that cannot count them.
     assert!(matches!(

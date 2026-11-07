@@ -1688,35 +1688,89 @@ impl ApiBackend {
 
     /// Commit each new finish and its durable mailbox event together.
     pub(crate) async fn reconcile_parent_reports(&self, parent_id: &str) -> Result<()> {
+        self.reconcile_children(parent_id).await.map(|_| ())
+    }
+
+    /// Reconcile the parent's reports and say, for one child's finish at
+    /// `ordinal`, whether the parent has been told. The report and the
+    /// `reported_finish` marker it moves are written in one transaction, so that
+    /// marker is the fact: it is read from the store after the reconcile, not
+    /// from the committed snapshot, which refreshes after the write returns.
+    pub(crate) async fn reconcile_child_report(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+        ordinal: u64,
+    ) -> Result<ChildReport> {
+        let reconciled = self.reconcile_children(parent_id).await?;
+        if reconciled.parent_closing {
+            return Ok(ChildReport::NotNews("the parent is closing"));
+        }
+        match reconciled.children.get(child_id) {
+            None => Ok(ChildReport::NotNews(
+                "the child is not a worker of this parent",
+            )),
+            Some(ChildDisposition::NotNews(why)) => Ok(ChildReport::NotNews(why)),
+            Some(ChildDisposition::NotFinished) => Ok(ChildReport::NotFinished),
+            Some(ChildDisposition::Held) => Ok(ChildReport::Awaiting),
+            Some(ChildDisposition::Reported) => {
+                let child = child_id.to_owned();
+                let marker = blocking("read the child's reported finish", move || {
+                    crate::database::load_subagent(&child)
+                })
+                .await?
+                .and_then(|relation| relation.reported_finish);
+                Ok(if marker.is_some_and(|marker| marker.covers(ordinal)) {
+                    ChildReport::Told
+                } else {
+                    ChildReport::Awaiting
+                })
+            }
+        }
+    }
+
+    async fn reconcile_children(&self, parent_id: &str) -> Result<Reconciled> {
+        let mut reconciled = Reconciled::default();
         if self.exports.close_is_requested(parent_id) {
-            return Ok(());
+            reconciled.parent_closing = true;
+            return Ok(reconciled);
         }
         let (inputs, children) = self.notification_children(parent_id).await?;
-        let ready = children
-            .into_iter()
-            .filter(|child| {
-                child.relation.kind != mj_core::subagent::SubagentKind::Reviewer
-                    && !self
-                        .exports
-                        .close_is_requested(&child.relation.child_session_id)
-                    && !matches!(child.state.as_str(), "stopping" | "stopped")
-                    && child.identity.as_ref().is_some_and(|identity| {
-                        child.relation.reported_finish.as_ref() != Some(identity)
-                    })
-            })
-            .collect::<Vec<_>>();
+        // Each child has one of a few ends here: not news (and why), not seen as
+        // finished, held for its facts, or its finish is reported (by an earlier
+        // reconcile or by this one).
+        let mut ready = Vec::new();
+        for child in children {
+            let id = child.relation.child_session_id.clone();
+            let disposition = if child.relation.kind == mj_core::subagent::SubagentKind::Reviewer {
+                ChildDisposition::NotNews("a reviewer is reported by its review")
+            } else if self.exports.close_is_requested(&id) {
+                ChildDisposition::NotNews("a close of the child was requested")
+            } else if matches!(child.state.as_str(), "stopping" | "stopped") {
+                ChildDisposition::NotNews("the child is stopping or stopped")
+            } else {
+                match &child.identity {
+                    None => ChildDisposition::NotFinished,
+                    Some(identity) if child.relation.reported_finish.as_ref() == Some(identity) => {
+                        ChildDisposition::Reported
+                    }
+                    Some(_) => {
+                        ready.push(child);
+                        continue;
+                    }
+                }
+            };
+            reconciled.children.insert(id, disposition);
+        }
         if ready.is_empty() {
-            return Ok(());
+            return Ok(reconciled);
         }
         // Facts are never asked of a worker here: this runs for every parent in
         // the mailbox sweep, and one slow worker must not hold up any other
-        // report. The child's own completion task collects them once per
-        // finish and stores them, so a connected worker's report follows its
-        // storing. A report never waits on a worker that is not connected: no
-        // task can store facts for it then, possibly ever (a daemon restarted
-        // while the worker was down), so the facts are recorded as unavailable
-        // and the report goes out. The write is once per finish: a collection
-        // that was under way cannot overwrite it, nor it the collection.
+        // report. The reconcile also never writes them. A finish whose facts are
+        // not stored is held: the collection of its facts (started here if it is
+        // not running) records something, the worker's answer or why it could not
+        // be asked, and reports this parent again.
         let ids = ready
             .iter()
             .map(|child| child.relation.child_session_id.clone())
@@ -1762,6 +1816,7 @@ impl ApiBackend {
                     self.exports
                         .clone()
                         .ensure_finish_facts(id.clone(), completed_ordinal);
+                    reconciled.children.insert(id, ChildDisposition::Held);
                     continue;
                 };
                 work_facts.insert(id, facts);
@@ -1770,7 +1825,7 @@ impl ApiBackend {
         }
         let ready = reportable;
         if ready.is_empty() {
-            return Ok(());
+            return Ok(reconciled);
         }
         let spans = ready
             .iter()
@@ -1786,8 +1841,10 @@ impl ApiBackend {
         })
         .await?;
         let mut notifications = Vec::with_capacity(ready.len());
+        let mut enqueued = Vec::with_capacity(ready.len());
         for child in ready {
             let id = &child.relation.child_session_id;
+            enqueued.push(id.clone());
             let output = if child.state == "completed" {
                 match &child.progress.report {
                     ReportState::Delivered(message) => Some(message.clone()),
@@ -1829,7 +1886,10 @@ impl ApiBackend {
             crate::database::enqueue_subagent_reports(parent, notifications)
         })
         .await?;
-        Ok(())
+        for id in enqueued {
+            reconciled.children.insert(id, ChildDisposition::Reported);
+        }
+        Ok(reconciled)
     }
 
     async fn require_owned_child(&self, parent_id: &str, child_id: &str) -> Result<()> {
@@ -2205,6 +2265,54 @@ fn subagent_status(
             None => ("preparing".into(), None, false),
         },
     }
+}
+
+/// A child's turns as the readers see them (the committed snapshot, or the
+/// store in a process without the writer): the completion ordinal of its last
+/// finished turn, and whether a turn is running now.
+pub(crate) fn load_child_turns(child_id: &str) -> Result<(Option<u64>, bool)> {
+    let state = match crate::database::committed_state()? {
+        Some(committed) => committed.turns.get(child_id).map(|turn| turn.state.clone()),
+        None => crate::database::load_materialized_turn_outcome(child_id)?,
+    };
+    Ok(state.map_or((None, false), |(_, active, last)| {
+        (last.map(|turn| turn.completed_ordinal), active.is_some())
+    }))
+}
+
+/// What a reconcile found for each of a parent's children.
+#[derive(Default)]
+struct Reconciled {
+    parent_closing: bool,
+    children: BTreeMap<String, ChildDisposition>,
+}
+
+enum ChildDisposition {
+    /// The child's finish is reported, now or earlier.
+    Reported,
+    /// There is no report to make, and why.
+    NotNews(&'static str),
+    /// The reconcile's view of the child is that it has not finished. That is not
+    /// "not news": it can be a child that did finish seen through a view that is
+    /// behind, or one that went on to a newer turn; the caller, which holds the
+    /// ending it asks about, tells which.
+    NotFinished,
+    /// News, held until the facts of the finish are collected.
+    Held,
+}
+
+/// Whether the parent has been told of one child's finish.
+pub(crate) enum ChildReport {
+    /// The report is enqueued and the child's marker covers the finish.
+    Told,
+    /// There is nothing to tell, for the reason given: the finish is not news.
+    NotNews(&'static str),
+    /// The reconcile does not see the child as finished.
+    NotFinished,
+    /// News, but not reported yet: the readers' snapshot has not caught up with
+    /// the finish, its facts are being collected, or the enqueue skipped it.
+    /// Ask again.
+    Awaiting,
 }
 
 /// What the store says about a child's answer to its parent's newest prompt.

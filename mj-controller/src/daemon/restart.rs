@@ -826,7 +826,7 @@ impl RuntimeState {
                     ensure_target_unavailable_for_fallback(controller, session_id, executor)?;
                     controller.cleanup_stopped_target(session_id, executor)?;
                 }
-                DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
+                DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(..) => {
                     unreachable!("Restart fallback suspension returned another lifecycle result")
                 }
             }

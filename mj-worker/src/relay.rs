@@ -1035,6 +1035,18 @@ impl DurableRelay {
         &self.root
     }
 
+    /// The journal ordinal of the newest work this worker accepted: a prompt, or
+    /// a turn the harness started on its own. Zero before any. The worker's own
+    /// answer to whether work arrived after a finish.
+    pub fn newest_accepted_work_ordinal(&self) -> u64 {
+        self.snapshot
+            .latest_prompt_accepted_ordinal
+            .into_iter()
+            .chain(self.snapshot.last_harness_turn_started_ordinal)
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn latest_ordinal(&self) -> u64 {
         self.snapshot.latest_ordinal
     }

@@ -133,7 +133,7 @@ impl RuntimeState {
         self.remove_completed_lifecycle(&channel);
         match result? {
             DaemonLifecycleResult::Done => {}
-            DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
+            DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(..) => {
                 unreachable!("resume cannot return a move outcome")
             }
             DaemonLifecycleResult::DeferredCleanup => {

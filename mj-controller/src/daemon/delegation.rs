@@ -514,12 +514,50 @@ async fn complete_child(
         }
     }
     let _work = work;
-    state
-        .reconcile_parent_reports(&relation.parent_session_id)
-        .await?;
-    // The park proceeds as soon as the report is out. A working-tree read still
-    // in flight is only an observation: the park stops the worker that runs it,
-    // and the tree is then stored as unavailable, with why, and delivered so.
+    // Park only once the parent has been told, or when this ending is not news.
+    // The report and the marker that covers this ending are written together,
+    // so the marker, read after the reconcile, says which it is. A finish that
+    // is news but not yet covered is asked again: the readers' snapshot may not
+    // have caught up with the observation (the session actor runs ahead of it),
+    // or the report is held for its facts. The retry backs off and ends when the
+    // report is enqueued; no path parks a child whose parent has not heard of it.
+    match backend
+        .reconcile_child_report(
+            &relation.parent_session_id,
+            &child_id,
+            outcome.completed_ordinal,
+        )
+        .await?
+    {
+        crate::server_runtime::api::ChildReport::Told => {}
+        crate::server_runtime::api::ChildReport::NotNews(why) => {
+            tracing::debug!(child_session_id = %child_id, why, "a child's ending is not news; it is not parked for it");
+            return Ok(ChildCompletion::Settled);
+        }
+        // The reconcile's view says the child has not finished. A view that is
+        // behind the observation is not news, so it is asked again; a child that
+        // went on to a newer turn is: that turn's ending is what will be
+        // reported.
+        crate::server_runtime::api::ChildReport::NotFinished => {
+            let child = child_id.clone();
+            let (last, active) = tokio::task::spawn_blocking(move || {
+                crate::server_runtime::api::load_child_turns(&child)
+            })
+            .await??;
+            return Ok(if last > Some(outcome.completed_ordinal) || active {
+                ChildCompletion::Settled
+            } else {
+                ChildCompletion::RetryPark
+            });
+        }
+        crate::server_runtime::api::ChildReport::Awaiting => {
+            return Ok(ChildCompletion::RetryPark);
+        }
+    }
+    // The park proceeds once the report is out, and does not wait for the working
+    // tree: that read has no fixed duration and can still be running. The park
+    // stops the worker that runs it, and the tree is then stored as unavailable,
+    // with why, and delivered so.
     match backend.park_subagent(&child_id).await? {
         crate::controller::ParkOutcome::Busy => Ok(ChildCompletion::RetryPark),
         crate::controller::ParkOutcome::Parked => {
@@ -597,9 +635,9 @@ mod tests {
     struct BusyThenParked(AtomicUsize);
     impl ExportRuntime for BusyThenParked {
         fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
-            (session_id == "parent").then(|| {
+            matches!(session_id, "parent" | "child").then(|| {
                 crate::daemon::tests::runtime_test_session(
-                    "parent",
+                    session_id,
                     "workspace",
                     mj_core::state::SessionState::Running,
                 )
@@ -620,6 +658,52 @@ mod tests {
                 })
             })
         }
+    }
+
+    /// The session actor's view of the child: connected and idle after `turn`,
+    /// which is what a delegation observation is made from.
+    async fn publish_idle_child(
+        manager: &crate::daemon::tests::TestRemoteManager,
+        turn: &mj_core::state::MaterializedTurnOutcome,
+    ) {
+        let mut view = crate::daemon::tests::ready_startup_view();
+        view.snapshot
+            .as_mut()
+            .unwrap()
+            .materialized
+            .last_turn_outcome = Some(turn.clone());
+        manager
+            .publisher
+            .publish("child".into(), view)
+            .await
+            .unwrap();
+    }
+
+    /// A child's stored last turn: what the readers' snapshot knows of it.
+    fn store_finished_turn(
+        child: &str,
+        command_id: &str,
+        completed_ordinal: u64,
+    ) -> mj_core::state::MaterializedTurnOutcome {
+        let turn = mj_core::state::MaterializedTurnOutcome {
+            answered_through: None,
+            diagnostic: None,
+            usage: None,
+            command_id: command_id.into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: None,
+            completed_ordinal,
+            completed_at_ms: 1,
+            outcome: mj_core::state::TurnOutcomeKind::Completed {
+                stop_reason: "end_turn".into(),
+            },
+        };
+        let mut conversation = mj_core::state::MaterializedSession::empty(child);
+        conversation.applied_event_ordinal = completed_ordinal;
+        conversation.applied_event_digest = format!("{completed_ordinal:064x}");
+        conversation.last_turn_outcome = Some(turn.clone());
+        crate::database::save_materialized_session(&conversation).unwrap();
+        turn
     }
 
     /// The park proceeds with a working-tree read still in flight (a hung
@@ -663,7 +747,8 @@ mod tests {
         let mut facts = mj_core::work_facts::WorkFacts::unavailable("not needed");
         facts.worktree = mj_core::work_facts::Observed::Pending;
         crate::database::record_finish_facts("child".into(), 10, facts.clone()).unwrap();
-        let state = crate::daemon::tests::test_runtime_state();
+        let manager = crate::daemon::tests::TestRemoteManager::for_session("child").await;
+        let state = crate::daemon::tests::test_runtime_state_with_manager(&manager);
         let parks = Arc::new(BusyThenParked(AtomicUsize::new(1)));
         let backend = Arc::new(ApiBackend::new(
             state.session_manager.client(),
@@ -671,24 +756,15 @@ mod tests {
             parks.clone(),
         ));
         state.install_report_backend(&backend);
+        // The readers' snapshot holds the turn the observation reports.
+        let turn = store_finished_turn("child", "turn", 10);
+        publish_idle_child(&manager, &turn).await;
         let observation = DelegationObservation {
             requests: Vec::new(),
             completed: Vec::new(),
             in_flight: Vec::new(),
             credential_signal: None,
-            outcome: Some(mj_core::state::MaterializedTurnOutcome {
-                answered_through: None,
-                diagnostic: None,
-                usage: None,
-                command_id: "turn".into(),
-                accepted_ordinal: Some(1),
-                turn_start_position: None,
-                completed_ordinal: 10,
-                completed_at_ms: 1,
-                outcome: mj_core::state::TurnOutcomeKind::Completed {
-                    stop_reason: "end_turn".into(),
-                },
-            }),
+            outcome: Some(turn),
         };
         assert!(matches!(
             complete_child(
@@ -711,18 +787,20 @@ mod tests {
         ));
     }
 
-    /// A prompt accepted while a finish's process scan is in flight makes the
-    /// scan unfit for that finish: it may show the new work's processes. It is
-    /// stored as unavailable, with that reason, by the same predicate the working
-    /// tree uses; with no newer prompt the scan stands.
+    /// The worker owns acceptance: a scan whose answer says the worker had
+    /// accepted newer work makes the scan unfit for that finish (it may show the
+    /// new work's processes), whatever the store and the actor's view say yet.
+    /// It is stored as unavailable, with that reason; an answer that does not say
+    /// is an unknown, which is unavailable too; and with no newer work the scan
+    /// stands.
     #[tokio::test]
-    async fn processes_read_after_a_newer_prompt_was_accepted_are_not_the_finishs() {
+    async fn processes_the_worker_says_newer_work_may_have_changed_are_not_the_finishs() {
         const CHILD: &str = "MJ_TEST_DELEGATION_PROCESS_SCAN_RACE";
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
             IsolatedTest::new(test_name(
                 module_path!(),
-                "processes_read_after_a_newer_prompt_was_accepted_are_not_the_finishs",
+                "processes_the_worker_says_newer_work_may_have_changed_are_not_the_finishs",
             ))
             .env(CHILD, "1")
             .env("MJ_INSTANCE", "delegation-process-scan-race")
@@ -749,151 +827,192 @@ mod tests {
             &crate::daemon::tests::runtime_test_subagent("child", "parent"),
         )
         .unwrap();
-        let scan = || mj_core::work_facts::WorkFacts {
-            observed_at_ms: 1,
-            processes: Observed::Known(ProcessFacts {
-                unattributed: 0,
-                running: 1,
-                shown: vec![RunningProcess {
-                    pid: 41301,
-                    elapsed_secs: 5,
-                    command: "cargo build".into(),
-                    detached: false,
-                }],
-                omitted: 0,
-                identities: vec![ProcessIdentity {
-                    pid: 41301,
-                    start: "boot:1".into(),
-                }],
-            }),
-            worktree: Observed::Pending,
+        let scan = |accepted_ordinal: Option<u64>| async move {
+            crate::daemon::views::FinishScan {
+                facts: mj_core::work_facts::WorkFacts {
+                    observed_at_ms: 1,
+                    processes: Observed::Known(ProcessFacts {
+                        unattributed: 0,
+                        running: 1,
+                        shown: vec![RunningProcess {
+                            pid: 41301,
+                            elapsed_secs: 5,
+                            command: "cargo build".into(),
+                            detached: false,
+                        }],
+                        omitted: 0,
+                        identities: vec![ProcessIdentity {
+                            pid: 41301,
+                            start: "boot:1".into(),
+                        }],
+                    }),
+                    worktree: Observed::Pending,
+                },
+                accepted_ordinal,
+            }
         };
         let state = crate::daemon::tests::test_runtime_state();
-        // Nothing newer was accepted: the scan stands.
+        let stored = || {
+            crate::database::load_work_facts(&["child".to_owned()]).unwrap()["child"]
+                .finish
+                .clone()
+                .unwrap()
+                .processes
+        };
+        // Nothing newer was accepted (the newest work is the finish's own turn):
+        // the scan stands.
         state
-            .collect_finish_facts_from("child", 9, async { scan() })
+            .collect_finish_facts_from("child", 9, scan(Some(8)))
             .await
             .unwrap();
-        let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
-        assert!(matches!(
-            recorded["child"].finish.as_ref().unwrap().processes,
-            Observed::Known(_)
-        ));
+        assert!(matches!(stored(), Observed::Known(_)));
 
-        // The parent's next prompt is accepted while the scan of the next
-        // finish is in flight.
+        // The worker accepted a prompt after the finish, while the store and the
+        // actor's view know nothing of it yet.
         state
-            .collect_finish_facts_from("child", 10, async {
-                let mut conversation = mj_core::state::MaterializedSession::empty("child");
-                conversation.applied_event_ordinal = 12;
-                conversation.applied_event_digest = format!("{:064x}", 12);
-                conversation
-                    .queued_prompts
-                    .push(mj_core::state::MaterializedQueuedPrompt {
-                        command_id: "next".into(),
-                        kind: Default::default(),
-                        content: Vec::new(),
-                        queued_at_ms: 2,
-                        accepted_ordinal: Some(12),
-                    });
-                crate::database::save_materialized_session(&conversation).unwrap();
-                scan()
-            })
+            .collect_finish_facts_from("child", 10, scan(Some(12)))
             .await
             .unwrap();
-        let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
-        let finish = recorded["child"].finish.as_ref().unwrap();
-        assert_eq!(recorded["child"].finish_ordinal, Some(10));
         assert!(
             matches!(
-                &finish.processes,
+                &stored(),
                 Observed::Unavailable { reason }
                     if reason.contains("started new work before its processes were read")
             ),
             "{:?}",
-            finish.processes
+            stored()
+        );
+
+        // A worker that does not say is an unknown.
+        state
+            .collect_finish_facts_from("child", 11, scan(None))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &stored(),
+                Observed::Unavailable { reason }
+                    if reason.contains("did not say whether the child had accepted new work")
+            ),
+            "{:?}",
+            stored()
         );
     }
 
-    /// The collection records something for every finish it is asked for. A
-    /// worker that cannot be reached gets facts that say so, with the connect
-    /// error, and the parent is reported again afterwards; two asks for one
-    /// finish share one collection.
+    // A completion is decided from the readers' snapshot, which refreshes after
+    // the write that makes a turn durable returns, while the observation comes
+    // from the session actor and can run ahead of it. Behind the observation the
+    // snapshot says nothing yet: no report, no park, and the completion asks
+    // again. Once it has caught up the report is still held until the finish's
+    // facts are collected, and the child is parked only after the report is
+    // enqueued, once.
     #[tokio::test]
-    async fn an_unreachable_worker_gets_unavailable_facts_naming_the_connect_error() {
-        const CHILD: &str = "MJ_TEST_DELEGATION_UNREACHABLE_FACTS";
+    async fn a_child_is_not_parked_until_the_parent_has_its_report() {
+        const CHILD: &str = "MJ_TEST_DELEGATION_PARK_AFTER_REPORT";
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
             IsolatedTest::new(test_name(
                 module_path!(),
-                "an_unreachable_worker_gets_unavailable_facts_naming_the_connect_error",
+                "a_child_is_not_parked_until_the_parent_has_its_report",
             ))
             .env(CHILD, "1")
-            .env("MJ_INSTANCE", "delegation-unreachable-facts")
+            .env("MJ_INSTANCE", "delegation-park-after-report")
             .isolated_store(root.path())
             .run();
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
-        let workspace = crate::database::create_workspace("unreachable facts").unwrap();
-        let root = tempfile::tempdir().unwrap();
+        let workspace = crate::database::create_workspace("park after report").unwrap();
         let parent = crate::daemon::tests::runtime_test_session(
             "parent",
             &workspace.id,
             mj_core::state::SessionState::Running,
         );
-        let mut child = crate::daemon::tests::runtime_test_session(
+        let child = crate::daemon::tests::runtime_test_session(
             "child",
             &workspace.id,
             mj_core::state::SessionState::Running,
         );
-        // Recorded as running with a worker that does not exist.
-        child.target = Some(mj_core::state::TargetLocator::LocalBare {
-            worker_root: root.path().join("child"),
-        });
         crate::database::save_session(&parent).unwrap();
         crate::database::save_subagent_session(
             &child,
             &crate::daemon::tests::runtime_test_subagent("child", "parent"),
         )
         .unwrap();
-        let mut held = mj_core::state::State::default();
-        held.sessions.insert(parent.id.clone(), parent);
-        held.sessions.insert(child.id.clone(), child);
-        held.subagents.insert(
-            "child".into(),
-            crate::daemon::tests::runtime_test_subagent("child", "parent").into(),
-        );
-        let state = crate::daemon::tests::test_runtime_state_holding(held);
-
-        state.ensure_finish_facts_collected("child".into(), 9);
-        state.ensure_finish_facts_collected("child".into(), 9);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-        let facts = loop {
-            let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
-            if let Some(finish) = recorded.get("child").and_then(|r| r.finish.clone()) {
-                break finish;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "nothing was recorded for the finish"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        };
-        assert!(
-            matches!(
-                &facts.processes,
-                mj_core::work_facts::Observed::Unavailable { reason }
-                    if reason.contains("could not be reached")
-            ),
-            "{:?}",
-            facts.processes
-        );
-        assert!(matches!(
-            facts.worktree,
-            mj_core::work_facts::Observed::Unavailable { .. }
+        let manager = crate::daemon::tests::TestRemoteManager::for_session("child").await;
+        let state = crate::daemon::tests::test_runtime_state_with_manager(&manager);
+        // Every park attempt succeeds, so a park can only be refused by the rule.
+        let parks = Arc::new(BusyThenParked(AtomicUsize::new(1)));
+        let backend = Arc::new(ApiBackend::new(
+            state.session_manager.client(),
+            Arc::new(|_| None),
+            parks.clone(),
         ));
-        assert!(state.fact_collections.lock().unwrap().is_empty());
+        state.install_report_backend(&backend);
+
+        // The snapshot holds the child's earlier turn; the observation is the
+        // turn after it.
+        let earlier = store_finished_turn("child", "earlier-turn", 5);
+        let newer = mj_core::state::MaterializedTurnOutcome {
+            command_id: "turn".into(),
+            completed_ordinal: 10,
+            ..earlier
+        };
+        publish_idle_child(&manager, &newer).await;
+        let observation = DelegationObservation {
+            requests: Vec::new(),
+            completed: Vec::new(),
+            in_flight: Vec::new(),
+            credential_signal: None,
+            outcome: Some(newer),
+        };
+        let complete = || {
+            complete_child(
+                state.clone(),
+                backend.clone(),
+                "child".into(),
+                observation.clone(),
+                crate::upgrade::activity("test completion").unwrap(),
+            )
+        };
+        let told = || crate::database::pending_mailbox_events(10).unwrap().len();
+        assert!(matches!(
+            complete().await.unwrap(),
+            ChildCompletion::RetryPark
+        ));
+        assert_eq!(parks.0.load(Ordering::SeqCst), 1, "no park while behind");
+        assert_eq!(told(), 0, "nothing is reported from a snapshot behind");
+
+        // The snapshot catches up, but the finish's facts are not collected:
+        // the report is held, and so is the park.
+        store_finished_turn("child", "turn", 10);
+        assert!(matches!(
+            complete().await.unwrap(),
+            ChildCompletion::RetryPark
+        ));
+        assert_eq!(parks.0.load(Ordering::SeqCst), 1, "no park while held");
+        assert_eq!(told(), 0, "no report before its facts");
+
+        // The facts are stored: the report is enqueued, and then the child is
+        // parked.
+        crate::database::record_finish_facts(
+            "child".into(),
+            10,
+            mj_core::work_facts::WorkFacts::unavailable("not needed here"),
+        )
+        .unwrap();
+        assert!(matches!(
+            complete().await.unwrap(),
+            ChildCompletion::Settled
+        ));
+        assert_eq!(parks.0.load(Ordering::SeqCst), 2, "parked once, after");
+        assert_eq!(told(), 1, "the parent has its report");
+        let marker = crate::database::load_subagent("child")
+            .unwrap()
+            .unwrap()
+            .reported_finish
+            .expect("the report's marker is written with it");
+        assert!(marker.covers(10));
     }
 
     #[tokio::test]
@@ -1015,7 +1134,8 @@ mod tests {
         crate::database::save_session(&parent).unwrap();
         let relation = crate::daemon::tests::runtime_test_subagent("child", "parent");
         crate::database::save_subagent_session(&child, &relation).unwrap();
-        let state = crate::daemon::tests::test_runtime_state();
+        let manager = crate::daemon::tests::TestRemoteManager::for_session("child").await;
+        let state = crate::daemon::tests::test_runtime_state_with_manager(&manager);
         let parks = Arc::new(BusyThenParked(AtomicUsize::new(0)));
         // The parent has no actor. Durable report enqueue must not need one
         // or prevent either park attempt.
@@ -1025,24 +1145,23 @@ mod tests {
             parks.clone(),
         ));
         state.install_report_backend(&backend);
+        // The finish's facts are stored before its completion runs, as the
+        // child's own task does.
+        crate::database::record_finish_facts(
+            "child".into(),
+            10,
+            mj_core::work_facts::WorkFacts::unavailable("not needed here"),
+        )
+        .unwrap();
+        // The readers' snapshot holds the turn the observation reports.
+        let turn = store_finished_turn("child", "turn", 10);
+        publish_idle_child(&manager, &turn).await;
         let observation = DelegationObservation {
             requests: Vec::new(),
             completed: Vec::new(),
             in_flight: Vec::new(),
             credential_signal: None,
-            outcome: Some(mj_core::state::MaterializedTurnOutcome {
-                answered_through: None,
-                diagnostic: None,
-                usage: None,
-                command_id: "turn".into(),
-                accepted_ordinal: Some(1),
-                turn_start_position: None,
-                completed_ordinal: 10,
-                completed_at_ms: 1,
-                outcome: mj_core::state::TurnOutcomeKind::Completed {
-                    stop_reason: "end_turn".into(),
-                },
-            }),
+            outcome: Some(turn),
         };
         assert!(matches!(
             complete_child(
@@ -1072,11 +1191,11 @@ mod tests {
         // The child's own facts task asks once for this finish (this child has
         // no worker, so they are stored as unknown, with why), and asking again
         // for the same finish changes nothing.
-        state.collect_finish_facts("child", 10).await.unwrap();
-        state.collect_finish_facts("child", 10).await.unwrap();
+        state.collect_finish_facts("child", 11).await.unwrap();
+        state.collect_finish_facts("child", 11).await.unwrap();
         let recorded = crate::database::load_work_facts(&["child".to_owned()]).unwrap();
         let recorded = &recorded["child"];
-        assert_eq!(recorded.finish_ordinal, Some(10));
+        assert_eq!(recorded.finish_ordinal, Some(11));
         assert!(matches!(
             &recorded.finish.as_ref().unwrap().processes,
             mj_core::work_facts::Observed::Unavailable { reason }

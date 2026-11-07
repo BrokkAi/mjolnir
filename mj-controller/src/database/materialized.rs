@@ -366,27 +366,6 @@ pub fn load_materialized_turn_outcome(session_id: &str) -> Result<Option<Materia
     load_materialized_turn_outcome_from(&database_path(), session_id)
 }
 
-/// Whether the session accepted a prompt after the turn that completed at
-/// `finish_ordinal`: one queued, one running, or a later turn finished. The
-/// store's copy can trail the live session by a moment; the caller also asks
-/// the live view.
-pub fn accepted_work_since(session_id: &str, finish_ordinal: u64) -> Result<bool> {
-    let Some((_, active, last)) = load_materialized_turn_outcome(session_id)? else {
-        return Ok(false);
-    };
-    let reader = open_reader(&database_path())?;
-    let queued: Vec<Option<u64>> = reader
-        .prepare("SELECT accepted_ordinal FROM materialized_queued_prompts WHERE session_id=?1")?
-        .query_map([session_id], |row| row.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(mj_core::state::accepted_work_since(
-        queued.into_iter().flatten(),
-        active.as_ref(),
-        last.as_ref(),
-        finish_ordinal,
-    ))
-}
-
 /// Reconcile a replayed input after the worker has collected its command ledger.
 /// Queued, active and historical turns are read from one projection transaction.
 pub fn load_prompt_acceptance(session_id: &str, command_id: &str) -> Result<Option<u64>> {

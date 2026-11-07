@@ -2177,10 +2177,16 @@ pub(super) async fn serve_client_with_memory(
                     },
                     None => mj_core::work_facts::WorkFacts::unavailable("this worker does not observe work"),
                 };
+                // Sampled after the observation, under the relay lock briefly:
+                // work accepted while it ran is work it may have seen.
+                let accepted_ordinal = relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .newest_accepted_work_ordinal();
                 let response = RelayResponseEnvelope {
                     request_id: envelope.request_id,
                     protocol_version: envelope.protocol_version,
-                    body: RelayResponseBody::Ok { payload: RelayResponsePayload::WorkFacts { facts } },
+                    body: RelayResponseBody::Ok { payload: RelayResponsePayload::WorkFacts { facts, accepted_ordinal: Some(accepted_ordinal) } },
                 };
                 write_logged_response(&mut writer, &response, &session_id, "work_facts").await?;
                 continue;

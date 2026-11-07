@@ -661,6 +661,14 @@ pub enum RelayResponsePayload {
     },
     WorkFacts {
         facts: crate::work_facts::WorkFacts,
+        /// The journal ordinal of the newest work the worker had accepted (a
+        /// prompt, or a turn the harness started itself), sampled after the
+        /// observation completed. The worker owns acceptance, so this is how a
+        /// caller tells an observation of a finish from one that newer work may
+        /// have changed: it is newer than the finish when this exceeds the
+        /// finish's ordinal. `None` from a worker that does not say.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accepted_ordinal: Option<u64>,
     },
     CredentialState {
         present: bool,

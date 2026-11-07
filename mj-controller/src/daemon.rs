@@ -705,7 +705,11 @@ enum DaemonLifecycleResult {
     Done,
     DeferredCleanup,
     Move(MoveOutcome),
-    Park(crate::controller::ParkOutcome),
+    /// How the park ended, and the park it recorded when it stopped a worker.
+    Park(
+        crate::controller::ParkOutcome,
+        Option<crate::database::StartedPark>,
+    ),
 }
 
 /// How one lifecycle operation ended when it failed.

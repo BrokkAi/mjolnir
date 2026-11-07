@@ -543,15 +543,56 @@ pub(crate) fn record_finish_worktree(
     Ok(())
 }
 
+/// Which start of each park is the current one, by (child, finish). In memory
+/// only: a park can start again for the same finish (the child is resumed and
+/// parked with no new turn between), and its marker is then equal to the one a
+/// settlement still running for the earlier start holds. The writes that start
+/// a park and the ones that settle it all run on the writer thread, so comparing
+/// the generation there is one decision: a settlement of an earlier start never
+/// settles a later one. A daemon that starts afresh has nothing in flight.
+static PARK_GENERATIONS: std::sync::Mutex<BTreeMap<(String, u64), u64>> =
+    std::sync::Mutex::new(BTreeMap::new());
+static NEXT_PARK_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A park as it was started: the identity its settlement settles, and only that.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StartedPark {
+    /// The finish the park follows.
+    pub ordinal: u64,
+    /// The record as stored, with its unfinished marker.
+    pub marker: mj_core::work_facts::ParkFacts,
+    /// Which start of this finish's park it is.
+    pub generation: u64,
+}
+
+impl StartedPark {
+    pub(crate) fn expectation(&self) -> ParkExpectation {
+        ParkExpectation {
+            marker: self.marker.clone(),
+            generation: Some(self.generation),
+        }
+    }
+}
+
+/// What a settlement requires of the park it settles.
+#[derive(Clone, Debug)]
+pub(crate) struct ParkExpectation {
+    /// The record must still be this pending marker.
+    pub marker: mj_core::work_facts::ParkFacts,
+    /// And, when known, this start of it. A startup settlement has none: no
+    /// stop is in flight then, whatever is pending is its to settle.
+    pub generation: Option<u64>,
+}
+
 /// Write a park's record with its unfinished marker, before the irreversible
 /// stop. It is keyed by the finish the park follows (0 for a child never
 /// reported), and its processes are the ones that finish listed, read in the
 /// same transaction: the park does not scan the child itself, so nothing is
 /// held for it, and a later finish cannot change what this park is about. The
 /// record is the park's own, which a later finish does not clear and a
-/// settlement alone writes. The finish's ordinal and the marker as stored are
-/// returned.
-pub(crate) fn record_park_started(child: String) -> Result<(u64, mj_core::work_facts::ParkFacts)> {
+/// settlement alone writes. What is returned identifies this park for its
+/// settlement.
+pub(crate) fn record_park_started(child: String) -> Result<StartedPark> {
     submit_database_write("record park start", move |connection| {
         let transaction = connection.transaction()?;
         let ordinal = current_finish_ordinal(&transaction, &child)?;
@@ -576,7 +617,16 @@ pub(crate) fn record_park_started(child: String) -> Result<(u64, mj_core::work_f
             params![child, ordinal, serde_json::to_string(&park)?],
         )?;
         transaction.commit()?;
-        Ok((ordinal, park))
+        let generation = NEXT_PARK_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        PARK_GENERATIONS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("park generations lock poisoned"))?
+            .insert((child, ordinal), generation);
+        Ok(StartedPark {
+            ordinal,
+            marker: park,
+            generation,
+        })
     })
 }
 
@@ -648,9 +698,10 @@ pub(crate) fn record_park_outcome(
 }
 
 /// Record the outcome of the park that followed the finish at `ordinal`. With
-/// `expected`, the park's own marker, it is written only if that marker is still
-/// the pending park of that finish, so a settlement that ran long never
-/// overwrites a record it does not own. The outcome carries what the marker
+/// `expected`, the park's own marker and start, it is written only if that
+/// marker is still the pending park of that finish and that start is still the
+/// current one, so a settlement that ran long never overwrites a record it does
+/// not own. The outcome carries what the marker
 /// recorded of that finish, so a finish recorded since changes nothing about
 /// it. The event's key names the parent, the child and the finish, so a repeat
 /// cannot tell the parent twice. A child whose record is gone has nobody to
@@ -660,10 +711,11 @@ pub(crate) fn record_park_outcome_expecting(
     ordinal: u64,
     child_name: String,
     park: mj_core::work_facts::ParkFacts,
-    expected: Option<mj_core::work_facts::ParkFacts>,
+    expected: Option<ParkExpectation>,
 ) -> Result<()> {
     let enqueued = submit_database_write("record park outcome", move |connection| {
         let transaction = connection.transaction()?;
+        let mut settled_generation = None;
         let current: Option<String> = transaction
             .query_row(
                 "SELECT park_json FROM subagent_park_facts
@@ -675,10 +727,19 @@ pub(crate) fn record_park_outcome_expecting(
         let marker = current
             .map(|text| serde_json::from_str::<mj_core::work_facts::ParkFacts>(&text))
             .transpose()?;
-        if let Some(expected) = &expected
-            && marker.as_ref() != Some(expected)
-        {
-            return Ok(false);
+        if let Some(expected) = &expected {
+            if marker.as_ref() != Some(&expected.marker) {
+                return Ok(false);
+            }
+            if let Some(generation) = expected.generation {
+                let generations = PARK_GENERATIONS
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("park generations lock poisoned"))?;
+                if generations.get(&(child.clone(), ordinal)) != Some(&generation) {
+                    return Ok(false);
+                }
+                settled_generation = Some(generation);
+            }
         }
         let stored: Option<String> = transaction
             .query_row(
@@ -730,6 +791,14 @@ pub(crate) fn record_park_outcome_expecting(
             }
         }
         transaction.commit()?;
+        // This start is settled; nothing of it is left to compare. After the
+        // commit, so a write that failed can be tried again.
+        if let Some(generation) = settled_generation
+            && let Ok(mut generations) = PARK_GENERATIONS.lock()
+            && generations.get(&(child.clone(), ordinal)) == Some(&generation)
+        {
+            generations.remove(&(child.clone(), ordinal));
+        }
         Ok(enqueued)
     })?;
     if enqueued {
@@ -845,7 +914,10 @@ pub(crate) fn settle_owed_followup(owed: &OwedFollowup) -> Result<()> {
                 *ordinal,
                 name,
                 settled,
-                Some(park.clone()),
+                Some(ParkExpectation {
+                    marker: park.clone(),
+                    generation: None,
+                }),
             )
         }
         OwedFollowup::Tree { child, ordinal } => record_finish_worktree(

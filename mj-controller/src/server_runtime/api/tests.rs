@@ -5246,41 +5246,6 @@ async fn startup_settles_the_park_and_tree_follow_ups_the_previous_daemon_owed()
         before
     );
 }
-
-/// The store answers whether a child accepted a prompt after a finish, which
-/// decides whether a late working-tree read still describes that finish.
-#[tokio::test]
-async fn the_store_tells_a_prompt_accepted_after_a_finish_from_the_finish_itself() {
-    if !isolated_parked_test(
-        "the_store_tells_a_prompt_accepted_after_a_finish_from_the_finish_itself",
-    ) {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    store_parent_and_child("child-1");
-    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
-    conversation.applied_event_ordinal = 9;
-    conversation.applied_event_digest = format!("{:064x}", 9);
-    conversation.last_turn_outcome = Some(finished_turn("task"));
-    crate::database::save_materialized_session(&conversation).unwrap();
-    assert!(!crate::database::accepted_work_since("child-1", 9).unwrap());
-    // The parent sends new work right after the report.
-    conversation.applied_event_ordinal = 12;
-    conversation.applied_event_digest = format!("{:064x}", 12);
-    conversation
-        .queued_prompts
-        .push(mj_core::state::MaterializedQueuedPrompt {
-            command_id: "next".into(),
-            kind: Default::default(),
-            content: Vec::new(),
-            queued_at_ms: 2,
-            accepted_ordinal: Some(12),
-        });
-    crate::database::save_materialized_session(&conversation).unwrap();
-    assert!(crate::database::accepted_work_since("child-1", 9).unwrap());
-    assert!(!crate::database::accepted_work_since("child-1", 12).unwrap());
-}
-
 /// Reconciling reports never asks a worker. A finish whose connected worker's
 /// completion task has not stored its facts yet is left for the pass after it
 /// does, and nothing else waits for it: this test has no worker to ask at all.
@@ -5457,11 +5422,11 @@ async fn an_unconfirmed_park_and_its_later_outcome_are_both_told_to_the_parent()
     let known = observed_work();
     crate::database::record_finish_facts("child-1".into(), 9, known.clone()).unwrap();
     let attempt = |settled: bool| {
-        let (_, marker) = crate::database::record_park_started("child-1".into()).unwrap();
+        let started = crate::database::record_park_started("child-1".into()).unwrap();
         let outcome = if settled {
-            mj_core::work_facts::ParkFacts::settled(marker.snapshot, &[41301])
+            mj_core::work_facts::ParkFacts::settled(started.marker.snapshot, &[41301])
         } else {
-            mj_core::work_facts::ParkFacts::unconfirmed(marker.snapshot, "the stop failed")
+            mj_core::work_facts::ParkFacts::unconfirmed(started.marker.snapshot, "the stop failed")
         };
         crate::database::record_park_outcome("child-1".into(), "audit deps".into(), outcome)
             .unwrap();

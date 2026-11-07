@@ -129,21 +129,22 @@ impl RuntimeState {
                     if state.close_is_requested(&session_id) {
                         return Ok(DaemonLifecycleResult::Park(
                             crate::controller::ParkOutcome::NotRunning,
+                            None,
                         ));
                     }
                     let controller = blocking(Controller::load).await?;
                     let executor = CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);
-                    let outcome = match &failure {
+                    let (outcome, started) = match &failure {
                         None => {
                             controller
-                                .park_subagent_worker(
+                                .park_subagent_worker_started(
                                     &session_id,
                                     &executor,
                                     &state.session_manager,
                                 )
                                 .await?
                         }
-                        Some(cause) => {
+                        Some(cause) => (
                             controller
                                 .fail_subagent_start_worker(
                                     &session_id,
@@ -151,19 +152,25 @@ impl RuntimeState {
                                     &executor,
                                     &state.session_manager,
                                 )
-                                .await?
-                        }
+                                .await?,
+                            None,
+                        ),
                     };
                     tracing::info!(%session_id, ?outcome, "sub-agent park finished");
-                    Ok(DaemonLifecycleResult::Park(outcome))
+                    Ok(DaemonLifecycleResult::Park(outcome, started))
                 },
             )
             .await?;
         self.publish_revision();
         match result {
-            DaemonLifecycleResult::Park(outcome) => {
-                if outcome == crate::controller::ParkOutcome::Parked && !is_failed_start {
-                    self.spawn_park_settlement(child_session_id_for_settlement);
+            DaemonLifecycleResult::Park(outcome, started) => {
+                // Settled by identity: the park this lifecycle recorded, and no
+                // other that may be pending for the child by the time it runs.
+                if outcome == crate::controller::ParkOutcome::Parked
+                    && !is_failed_start
+                    && let Some(started) = started
+                {
+                    self.spawn_park_settlement(child_session_id_for_settlement, started);
                 }
                 Ok(outcome)
             }
@@ -179,16 +186,14 @@ impl RuntimeState {
     /// synchronous command that must not run on an async worker. The park's
     /// record was written before its stop; a daemon that is replaced first has
     /// that follow-up sent at the next startup from the same record.
-    fn spawn_park_settlement(self: &Arc<Self>, child_session_id: String) {
+    fn spawn_park_settlement(
+        self: &Arc<Self>,
+        child_session_id: String,
+        started: crate::database::StartedPark,
+    ) {
         tokio::spawn(async move {
             let executor = Arc::new(CancellableProcessExecutor::with_timeout(PARK_TIMEOUT));
-            if let Err(error) = finish_stopped_parks_of(child_session_id.clone(), executor).await {
-                tracing::warn!(
-                    session_id = %child_session_id,
-                    error = format!("{error:#}"),
-                    "could not tell what a park did to the sub-agent's processes"
-                );
-            }
+            finish_stopped_park_of(child_session_id, started, executor).await;
         });
     }
 
@@ -353,53 +358,48 @@ where
     }
 }
 
-/// Check, for each park of this child whose check is still owed, which of its
-/// processes survived, and record the outcome. Each check is a synchronous
-/// command on the target, so it runs on the blocking pool and the async worker
-/// stays free; nothing here takes a lifecycle or handoff admission. A check
-/// that cannot be made is itself the outcome (see
-/// [`Controller::finish_stopped_park`]), and only the write is retried.
-async fn finish_stopped_parks_of<E>(child_session_id: String, executor: Arc<E>) -> Result<()>
-where
+/// Check which of the processes the park `started` listed survived its stop,
+/// and record the outcome. Each check is a synchronous command on the target, so
+/// it runs on the blocking pool and the async worker stays free; nothing here
+/// takes a lifecycle or handoff admission. A check that cannot be made is itself
+/// the outcome (see [`Controller::finish_stopped_park`]), and only the write is
+/// retried. The settlement is of this park alone: it is written only while this
+/// park's marker and start are the current ones, so a later park of the same
+/// child, whose stop may not have run yet, is not its to settle.
+async fn finish_stopped_park_of<E>(
+    child_session_id: String,
+    started: crate::database::StartedPark,
+    executor: Arc<E>,
+) where
     E: crate::targets::CommandExecutor + Send + Sync + 'static,
 {
-    let wanted = child_session_id.clone();
-    let parks = retry_until_written("read the parks that are owed a check", &wanted, || {
-        crate::database::load_unfinished_parks()
-    })
-    .await;
-    for (child, ordinal, park) in parks {
-        if child != child_session_id {
-            continue;
-        }
-        let executor = executor.clone();
-        retry_until_written("record what a park did", &child.clone(), move || {
-            match Controller::load() {
-                Ok(controller) => {
-                    controller.finish_stopped_park(&child, ordinal, park.clone(), &*executor)
-                }
-                // No controller means no target to ask: the park could not be
-                // confirmed, and the parent is told so.
-                Err(error) => {
-                    let name = crate::database::load_subagent(&child)?
-                        .map(|relation| relation.task_name)
-                        .unwrap_or_default();
-                    crate::database::record_park_outcome_expecting(
-                        child.clone(),
-                        ordinal,
-                        name,
-                        mj_core::work_facts::ParkFacts::unconfirmed(
-                            park.snapshot.clone(),
-                            format!("the controller could not be loaded: {error:#}"),
-                        ),
-                        Some(park.clone()),
-                    )
-                }
+    retry_until_written(
+        "record what a park did",
+        &child_session_id.clone(),
+        move || match Controller::load() {
+            Ok(controller) => {
+                controller.finish_stopped_park(&child_session_id, started.clone(), &*executor)
             }
-        })
-        .await;
-    }
-    Ok(())
+            // No controller means no target to ask: the park could not be
+            // confirmed, and the parent is told so.
+            Err(error) => {
+                let name = crate::database::load_subagent(&child_session_id)?
+                    .map(|relation| relation.task_name)
+                    .unwrap_or_default();
+                crate::database::record_park_outcome_expecting(
+                    child_session_id.clone(),
+                    started.ordinal,
+                    name,
+                    mj_core::work_facts::ParkFacts::unconfirmed(
+                        started.marker.snapshot.clone(),
+                        format!("the controller could not be loaded: {error:#}"),
+                    ),
+                    Some(started.expectation()),
+                )
+            }
+        },
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -442,7 +442,7 @@ mod tests {
         })
     }
 
-    fn parked_child_with_marker(root: &std::path::Path) {
+    fn parked_child_with_marker(root: &std::path::Path) -> crate::database::StartedPark {
         use crate::controller::test_support::checkpoint_test_session;
         crate::database::save_session(&checkpoint_test_session("parent-1")).unwrap();
         let mut child = checkpoint_test_session("park-check-child");
@@ -470,7 +470,7 @@ mod tests {
             },
         )
         .unwrap();
-        crate::database::record_park_started("park-check-child".into()).unwrap();
+        crate::database::record_park_started("park-check-child".into()).unwrap()
     }
 
     /// A write that fails is tried again, with a longer wait each time, until it
@@ -516,7 +516,7 @@ mod tests {
         }
         let _writer = crate::database::install_isolated_test_writer();
         let root = tempfile::tempdir().unwrap();
-        parked_child_with_marker(root.path());
+        let started = parked_child_with_marker(root.path());
         let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let ticker = tokio::spawn({
             let ticks = ticks.clone();
@@ -527,12 +527,12 @@ mod tests {
                 }
             }
         });
-        finish_stopped_parks_of(
+        finish_stopped_park_of(
             "park-check-child".into(),
+            started,
             Arc::new(SlowTarget(Duration::from_millis(600))),
         )
-        .await
-        .unwrap();
+        .await;
         ticker.abort();
         assert!(
             ticks.load(std::sync::atomic::Ordering::SeqCst) >= 10,

@@ -702,6 +702,11 @@ mod tests {
         let mut current = event.clone();
         super::downgrade_review_or_report(&mut current, mj_core::relay::RELAY_WORK_FACTS_PROTOCOL);
         assert_eq!(current, event);
+        // A check that could not run is shown as unknown, not as zero counts.
+        assert_eq!(
+            mj_core::mailbox::describe_mailbox_event(&event).transcript_line,
+            "Child task Run suites parked; whether its processes survived could not be checked"
+        );
     }
 
     #[test]

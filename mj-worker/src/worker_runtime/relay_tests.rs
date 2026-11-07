@@ -7935,7 +7935,7 @@ async fn work_facts_answer_on_the_connection_without_journaling() {
     .unwrap();
     let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
     let RelayResponseBody::Ok {
-        payload: RelayResponsePayload::WorkFacts { facts },
+        payload: RelayResponsePayload::WorkFacts { facts, .. },
     } = response.body
     else {
         panic!("{line}");
@@ -8017,7 +8017,7 @@ async fn a_slow_working_tree_read_on_one_connection_never_delays_processes_on_an
     assert!(asked.elapsed() < std::time::Duration::from_secs(3));
     let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
     let RelayResponseBody::Ok {
-        payload: RelayResponsePayload::WorkFacts { facts },
+        payload: RelayResponsePayload::WorkFacts { facts, .. },
     } = response.body
     else {
         panic!("{line}");
@@ -8035,6 +8035,81 @@ async fn a_slow_working_tree_read_on_one_connection_never_delays_processes_on_an
     .unwrap()
     .unwrap();
     assert!(line.contains("work_facts"), "{line}");
+}
+
+/// The worker owns acceptance, and says what it had accepted when the
+/// observation ended, not when it began: work accepted while a slow Git read
+/// ran is work the read may have seen.
+#[cfg(unix)]
+#[tokio::test]
+async fn work_facts_report_the_work_accepted_while_the_observation_ran() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+    ));
+    let slow_git = temp.path().join("slow-git");
+    std::fs::write(&slow_git, "#!/bin/sh\nsleep 1\nexit 1\n").unwrap();
+    std::fs::set_permissions(&slow_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (wake, _wakes) = mpsc::channel(1);
+    let (fatal, _errors) = mpsc::channel(1);
+    let (server, client) = tokio::net::UnixStream::pair().unwrap();
+    tokio::spawn(unix::serve_client_with_memory(
+        server,
+        relay.clone(),
+        wake,
+        Err("no credentials".into()),
+        unix::ConnectionRuntime {
+            work: Some(crate::work_facts::WorkObserver {
+                session_id: SESSION_ID.into(),
+                worker_pid: std::process::id(),
+                directory: temp.path().to_path_buf(),
+                git: slow_git.into(),
+                harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
+                children: Default::default(),
+            }),
+            ..Default::default()
+        },
+        fatal,
+    ));
+    let mut client = BufReader::new(client);
+    let request = RelayRequestEnvelope {
+        request_id: "facts".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::WorkFacts {
+            processes: false,
+            worktree: true,
+        },
+    };
+    let mut bytes = serde_json::to_vec(&request).unwrap();
+    bytes.push(b'\n');
+    client.get_mut().write_all(&bytes).await.unwrap();
+    // A prompt is accepted while the read runs.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let accepted = {
+        let mut relay = relay.lock().unwrap();
+        submit(&mut relay, "during-the-read", prompt("one more thing"));
+        relay.newest_accepted_work_ordinal()
+    };
+    assert!(accepted > 0);
+    let mut line = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.read_line(&mut line),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::WorkFacts {
+            accepted_ordinal, ..
+        },
+    } = response.body
+    else {
+        panic!("{line}");
+    };
+    assert_eq!(accepted_ordinal, Some(accepted));
 }
 
 #[cfg(unix)]

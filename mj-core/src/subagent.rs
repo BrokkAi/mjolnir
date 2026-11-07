@@ -345,6 +345,14 @@ pub enum SubagentFinishIdentity {
 }
 
 impl SubagentFinishIdentity {
+    /// Whether a report with this identity was made after the turn that
+    /// completed at `ordinal`, or for a later one: the parent has been told of
+    /// that turn's ending.
+    pub fn covers(&self, ordinal: u64) -> bool {
+        self.completed_ordinal()
+            .is_some_and(|completed| completed >= ordinal)
+    }
+
     /// The ordinal of the turn this finish completed, whatever the kind of
     /// identity: a terminal one carries the last completed turn, and has none
     /// for a child that never completed a turn. The one place that says which

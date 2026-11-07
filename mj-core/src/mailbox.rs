@@ -695,6 +695,14 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
                     ),
                     format!("Child task {name}: park could not be confirmed"),
                 )
+            } else if park.unverified.is_some() {
+                // The counts mean nothing when the check could not run.
+                (
+                    format!("Mjolnir: parked child task {name} ({child_session_id})."),
+                    format!(
+                        "Child task {name} parked; whether its processes survived could not be checked"
+                    ),
+                )
             } else {
                 (
                     format!("Mjolnir: parked child task {name} ({child_session_id})."),

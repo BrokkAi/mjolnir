@@ -1083,6 +1083,7 @@ fn latch_relay_child_serves_stdio() {
                     writeln!(log, "worktree={worktree}").expect("log a work facts request");
                     mj_core::relay::RelayResponsePayload::WorkFacts {
                         facts: serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap(),
+                        accepted_ordinal: Some(0),
                     }
                 })
             }
