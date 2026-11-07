@@ -112,6 +112,17 @@ not make copied secrets unreadable inside the target. Likewise, provider-side
 handling of prompts and repository content is governed by the selected
 harness and account, not by Mjolnir.
 
+Mjolnir stores what agents print as they printed it. Transcripts, checkpoints,
+and worker diagnostics keep any secret that appears in agent output, for
+example after an agent runs `env` or reads a token file, and the dashboard and
+web viewer show it. The evidence sent to the Jev classifier, and its local copy
+in `jev-decisions/`, first has every unbroken run of 24 or more letters,
+digits, `-`, `_`, `.`, or `+` replaced. That catches many API keys and tokens
+but not every credential: an AWS secret key containing `/`, or a short access
+key ID, passes through. A secret an agent prints can therefore still reach the
+hosted classifier; turn Jev off, as described above, to stop sending turn text
+to it.
+
 ## Sessions are not isolated from each other's agents
 
 Mjolnir does not keep one session's agent away from another session's data.
@@ -134,7 +145,9 @@ tokens for any repository the App can reach.
 Mjolnir does not scope this token to one session. An agent in a bare local
 session already runs with your account's authority: it can read your files,
 your credentials, and Mjolnir's data directory directly, so a narrower API token
-would not contain it. No `/api/v1` route edits Mjolnir's configuration:
+would not contain it. Each worker's control socket follows the same rule: any
+process running as the same user on the worker's machine can connect to it and
+use every method it serves. No `/api/v1` route edits Mjolnir's configuration:
 profiles, targets, and the other settings in `config.toml` change only through
 the dashboard, the cookie-authenticated web viewer settings, or the file
 itself.
@@ -224,6 +237,37 @@ That token is stored in Mjolnir's private controller data, outside the Claude
 profile home, and is passed to new and resumed Claude sessions as
 `CLAUDE_CODE_OAUTH_TOKEN`. It authorizes model requests; it does not enable
 Claude Remote Control or claude.ai connectors.
+
+## SSH host keys are trusted on first use
+
+By default, Mjolnir's own SSH connections accept a host key they have never
+seen, record it in `known_hosts`, and refuse a key that later changes
+(`StrictHostKeyChecking=accept-new`). That covers its connections to SSH
+machines and EC2 instances, whose key is always new at first contact, and the
+Git fetches it runs for its clone cache and checkpoint checks, whether those run
+on the controller or on an SSH machine that hosts a target's containers. Someone
+who can intercept a first connection can present their own key, and it is
+trusted from then on. Other Git commands that run on a target follow that
+target's own SSH settings. A `StrictHostKeyChecking` option in a machine's
+`extra_args` (or an EC2 machine's `ssh_args`) changes the checking for
+Mjolnir's connections to that machine. Setting `GIT_SSH_COMMAND` does not
+reliably change it for Mjolnir's Git fetches: some of them set their own
+command.
+
+A key that is already in `known_hosts` is checked, not trusted anew, unless an
+SSH option you set turns checking off. To avoid first-use trust:
+
+- Before the first connection, add the verified key of each Git host and each
+  machine to the `known_hosts` file of the account Mjolnir uses, on every
+  machine involved: the controller and each SSH machine you use as a target.
+  Take the expected fingerprint from a source you trust, such as the SSH key
+  fingerprints your Git host publishes, and compare it with the key you add.
+  `ssh-keyscan` only reports what the network presents, so it is not a check by
+  itself.
+- To refuse unknown keys outright on an SSH machine, add
+  `"-o", "StrictHostKeyChecking=yes"` to its `extra_args`; Mjolnir puts
+  `extra_args` first, so it wins. EC2 machines take the same option in
+  `ssh_args`. This covers Mjolnir's connection to the machine, not Git.
 
 ## Isolated sessions use independent network clones
 

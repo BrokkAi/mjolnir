@@ -6,15 +6,6 @@ ARG NODE_IMAGE=docker.io/library/node:24-trixie
 # installs can corrupt components).
 ARG RUST_IMAGE=docker.io/library/rust:1.99.1-trixie
 ARG MJ_RUST_TOOLCHAIN=1.99.1
-# Bifrost is the semantic-analysis tool every turn review depends on: the
-# review's `analyze_diff` pre-pass and the analyzer/navigation MCP servers the
-# reviewing agents call are both this one binary. Baking a pinned crates.io
-# release into the image means a review never fetches anything at review time,
-# and the version moves only when someone edits this line. Build in a separate
-# stage so the installed binary does not carry its build dependencies.
-# Keep REQUIRED_BIFROST_VERSION in mj-review/src/bifrost.rs equal to this value.
-ARG BIFROST_VERSION=0.12.0
-ARG BIFROST_BUILDER_IMAGE=docker.io/library/rust:1.97.1-trixie
 # Go installs below from go.dev's official tarball, not apt: Debian's golang
 # package trails upstream by months. GO_VERSION plays the role
 # rust-toolchain.toml plays for Rust; the build checks a per-arch sha256 and
@@ -22,11 +13,6 @@ ARG BIFROST_BUILDER_IMAGE=docker.io/library/rust:1.97.1-trixie
 ARG GO_VERSION=1.27.3
 
 FROM ${NODE_IMAGE} AS node
-
-FROM ${BIFROST_BUILDER_IMAGE} AS bifrost
-ARG BIFROST_VERSION
-RUN cargo install brokk-bifrost@${BIFROST_VERSION} --locked --bin bifrost --root /opt/bifrost \
-    && /opt/bifrost/bin/bifrost --version
 
 # The session worker, compiled from the same commit as the image, so a release's
 # `mj` and its image agree on the worker by construction. Git is not in the build
@@ -337,10 +323,6 @@ RUN cargo install --locked flamegraph@${FLAMEGRAPH_VERSION} \
     && samply --version \
     && cargo llvm-cov --version \
     && genhtml --version
-
-# The turn-review feature requires this binary; a review whose worker cannot
-# run it fails loudly and names an image rebuild as the fix.
-COPY --from=bifrost /opt/bifrost/bin/bifrost /usr/local/bin/bifrost
 
 # Debian's /etc/profile overwrites PATH, so a login shell drops the Rust image's
 # cargo bin directory and everything installed into it (cargo itself,

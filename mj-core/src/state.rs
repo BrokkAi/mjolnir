@@ -2612,6 +2612,17 @@ impl<'a> Checkout<'a> {
         }
     }
 
+    /// The record that owns a borrowed checkout, following nested borrowing
+    /// to the session that holds the workspace. `None` for a checkout the
+    /// session owns itself.
+    #[must_use]
+    pub fn owner(&self) -> Option<&'a SessionRecord> {
+        match self {
+            Self::Borrowed { owner, checkout } => checkout.owner().or(Some(*owner)),
+            Self::Attached { .. } | Self::ManagedWorktree { .. } | Self::ManagedWorkspace => None,
+        }
+    }
+
     /// The concrete repository directory when the record stores one.
     /// Bundle workspace paths are target-specific and are not in the record.
     #[must_use]
@@ -2736,6 +2747,19 @@ impl State {
             });
         }
         Ok(session.checkout())
+    }
+
+    /// The record whose workspace `session_id` works in: the session itself,
+    /// or, for a sub-agent, the parent it borrows from. Facts about how the
+    /// workspace was created (its exact checkout, its history cutoff) belong
+    /// to that record, so a reader asks here instead of the child's own
+    /// fields, which a child leaves empty.
+    pub fn workspace_owner(&self, session_id: &str) -> Result<&SessionRecord> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        Ok(self.checkout(session_id)?.owner().unwrap_or(session))
     }
 
     /// How a notice names a session: the title the session list shows
