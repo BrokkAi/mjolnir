@@ -793,7 +793,12 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
     assert_ne!(sessions, controller.state.sessions, "the record changed");
     controller.state.sessions = sessions;
     dashboard.set_state(controller.state.clone());
-    crate::dashboard::drains::refresh_open_chats(&mut chats, &controller, &dashboard);
+    crate::dashboard::drains::refresh_open_chats(
+        &mut chats,
+        &controller,
+        &dashboard,
+        &Default::default(),
+    );
 
     assert_eq!(
         dashboard.session_record(session_id).unwrap().listed_title(),

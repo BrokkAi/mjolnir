@@ -258,6 +258,7 @@ pub enum ImageRefreshReport {
 pub fn spawn_image_refresher(
     plan: impl Fn() -> Vec<ImageRefresh> + Send + 'static,
     report: impl Fn(ImageRefreshReport) + Send + Sync + 'static,
+    apple_container_settled: tokio_util::sync::CancellationToken,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let report: Arc<dyn Fn(ImageRefreshReport) + Send + Sync> = Arc::new(report);
@@ -279,7 +280,14 @@ pub fn spawn_image_refresher(
                 biased;
                 _ = cancellation.cancelled() => return,
                 _ = interval.tick() => {
-                    refresh_images(plan(), &report, &mut last_failures, &cancellation).await;
+                    refresh_images(
+                        plan(),
+                        &report,
+                        &mut last_failures,
+                        &apple_container_settled,
+                        &cancellation,
+                    )
+                    .await;
                 }
             }
         }
@@ -334,10 +342,87 @@ pub(super) fn local_engine_installed(host: &ImageHost, path: Option<&std::ffi::O
     }
 }
 
+/// Whether a host's engine is up, so a background refresh may use it.
+///
+/// A refresh is a chore, not a launch: it only observes Apple's service and
+/// never starts one the user stopped. The next launch preflight starts it
+/// when a session needs it.
+pub(super) fn host_is_running(host: &ImageHost, executor: &impl CommandExecutor) -> Result<bool> {
+    match host {
+        ImageHost::AppleContainer => Ok(matches!(
+            crate::targets::apple_container_runtime_status(executor)?,
+            crate::targets::AppleContainerStatus::Running
+        )),
+        _ => Ok(true),
+    }
+}
+
+/// One host's turn in a refresh tick. Answers `None` when there is nothing to
+/// record: the host is stopped, or the daemon is leaving.
+pub(super) fn refresh_one_host(
+    refresh: ImageRefresh,
+    executor: &impl CommandExecutor,
+    report: &dyn Fn(ImageRefreshReport),
+) -> Option<(String, String, Option<String>)> {
+    let host = refresh.host.label();
+    // `None` means the host's engine is stopped: nothing to refresh.
+    let outcome = host_is_running(&refresh.host, executor).and_then(|running| {
+        if !running {
+            return Ok(None);
+        }
+        // A launch that needs this image waits on the same lock, so it
+        // never starts a second download of what this tick is fetching.
+        let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
+        let held = crate::image_pull_gate::hold_image_pull(
+            &lock,
+            || executor.cancellation_requested(),
+            || {},
+        );
+        held.and_then(|guard| {
+            let outcome = refresh_host_image(&refresh, executor, report);
+            drop(guard);
+            outcome.map(Some)
+        })
+    });
+    let error = match outcome {
+        Ok(Some(_)) => None,
+        Ok(None) => {
+            tracing::debug!(
+                host,
+                image = refresh.image,
+                "the container engine is not running; skipping the image refresh"
+            );
+            return None;
+        }
+        Err(error) if executor.cancellation_requested() => {
+            // The daemon is leaving. That is not a fault of the host,
+            // and it is not news for the user either.
+            tracing::debug!(
+                host,
+                image = refresh.image,
+                error = format!("{error:#}"),
+                "container image refresh cancelled"
+            );
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(
+                host,
+                image = refresh.image,
+                error = format!("{error:#}"),
+                "could not refresh a container image"
+            );
+            Some(format!("{error:#}"))
+        }
+    };
+    Some((host, refresh.image, error))
+}
+
 pub(super) async fn refresh_images(
     plan: Vec<ImageRefresh>,
     report: &Arc<dyn Fn(ImageRefreshReport) + Send + Sync>,
     last_failures: &mut BTreeMap<String, String>,
+    apple_container_settled: &tokio_util::sync::CancellationToken,
     cancellation: &tokio_util::sync::CancellationToken,
 ) {
     if plan.is_empty() {
@@ -362,57 +447,14 @@ pub(super) async fn refresh_images(
             );
             continue;
         }
-        // ProcessExecutor is synchronous, and a pull is long: it belongs on a
-        // blocking thread, never on the runtime.
         let executor = CancellableProcessExecutor::new(cancelled.clone());
         let report = report.clone();
-        hosts.spawn_blocking(move || {
-            let host = refresh.host.label();
-            let ensure = if refresh.host == ImageHost::AppleContainer {
-                crate::targets::ensure_apple_container_runtime(&executor).map(|_| ())
-            } else {
-                Ok(())
-            };
-            let outcome = ensure.and_then(|()| {
-                // A launch that needs this image waits on the same lock, so it
-                // never starts a second download of what this tick is fetching.
-                let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
-                let held = crate::image_pull_gate::hold_image_pull(
-                    &lock,
-                    || executor.is_cancelled(),
-                    || {},
-                );
-                held.and_then(|guard| {
-                    let outcome = refresh_host_image(&refresh, &executor, &*report);
-                    drop(guard);
-                    outcome
-                })
-            });
-            let error = match outcome {
-                Ok(_) => None,
-                Err(error) if executor.is_cancelled() => {
-                    // The daemon is leaving. That is not a fault of the host,
-                    // and it is not news for the user either.
-                    tracing::debug!(
-                        host,
-                        image = refresh.image,
-                        error = format!("{error:#}"),
-                        "container image refresh cancelled"
-                    );
-                    return None;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        host,
-                        image = refresh.image,
-                        error = format!("{error:#}"),
-                        "could not refresh a container image"
-                    );
-                    Some(format!("{error:#}"))
-                }
-            };
-            Some((host, refresh.image, error))
-        });
+        hosts.spawn(refresh_host_after_startup(
+            refresh,
+            apple_container_settled.clone(),
+            cancellation.clone(),
+            move |refresh| refresh_one_host(refresh, &executor, &*report),
+        ));
     }
     let mut cancelling = false;
     loop {
@@ -432,6 +474,35 @@ pub(super) async fn refresh_images(
                     tracing::warn!(%error, "container image refresh task failed");
                 }
             },
+        }
+    }
+}
+
+/// One host's refresh task. The local Apple container refresh first waits
+/// for daemon startup's start of the service to finish: the refresh only looks
+/// at the service and never starts it, and a look mid-start would read
+/// "stopped" and skip the whole interval. Every other host starts at once, so
+/// a slow Apple start holds no other host's refresh.
+pub(super) async fn refresh_host_after_startup(
+    refresh: ImageRefresh,
+    apple_container_settled: tokio_util::sync::CancellationToken,
+    cancellation: tokio_util::sync::CancellationToken,
+    run: impl FnOnce(ImageRefresh) -> Option<(String, String, Option<String>)> + Send + 'static,
+) -> Option<(String, String, Option<String>)> {
+    if matches!(refresh.host, ImageHost::AppleContainer) {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return None,
+            _ = apple_container_settled.cancelled() => {}
+        }
+    }
+    // ProcessExecutor is synchronous, and a pull is long: it belongs on a
+    // blocking thread, never on the runtime.
+    match tokio::task::spawn_blocking(move || run(refresh)).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(%error, "container image refresh task failed");
+            None
         }
     }
 }

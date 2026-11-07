@@ -25,36 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:21",
-          "role": "user",
-          "text": "go through the transcripts of the last two automerge sessions and propose tools we could build so it doesn't have to keep doing the same action sequence repeatedly"
-        },
-        {
-          "id": "user:1758",
-          "role": "user",
-          "text": "which of those can actually be implemented in a way that satisfies the majority of use cases, deterministically? no magic oracles"
-        },
-        {
-          "id": "user:2466",
-          "role": "user",
-          "text": "1. i still think you're smoking something, there's no way this generalizes\n\n2. why isn't this just \"git merge <heads>\"? is the agent overcomplicating things?\n\n3. ok \"mm_autopr\" could be useful yes\n\n4. mm_db tool?\n\n5. good idea but defer this\n\n6. so basically a diff of `git checkout $x; bash $y` and `git checkout $`; bash $y`, done in parallel?"
-        },
-        {
-          "id": "user:2911",
-          "role": "user",
-          "text": "1. pull bc master moved here\n\n2. ok, worth scripting; i still think we try octomerge first, fall back to manual if it fails\n\nyes to the others, i think we add these as skills?\n\npush & deploy when ready + tested"
-        },
-        {
-          "id": "user:5798",
-          "role": "user",
-          "text": "i got a bunch of email from the bot like this\n\nIntegration PR #4550 landed, but GitHub does not yet show this constituent PR as merged"
-        },
-        {
-          "id": "user:6326",
-          "role": "user",
-          "text": "we have a bunch of rows in https://github.com/BrokkAi/bifrost-dev/issues/4519 labeled already fixed / obsolete. what should delete those, and why didn't it? if a bug, fix, push, deploy"
-        },
-        {
           "id": "user:6825",
           "role": "user",
           "text": "How is automerge looking after several runs? Is it using our tools effectively, or are there confusing affordances that we should fix / additional functionality we should provide? ? And is the agent selecting tests well, or is it doing dumb things like running tests from crates that nobody edited? How about the fixer agent? "

@@ -210,7 +210,15 @@ impl AcpSessionSurface {
             }
             .into(),
         );
-        if self.harness_kind == Some(HarnessKind::Claude) && !active {
+        // Claude and Kimi carry their execution mode on the same selector as
+        // Plan, so leaving Plan is the worker's to decide: it restores the
+        // target policy's mode (or the harness default when the policy sets
+        // none) rather than a mode named here.
+        if matches!(
+            self.harness_kind,
+            Some(HarnessKind::Claude | HarnessKind::Kimi)
+        ) && !active
+        {
             self.sync_plan_mode();
         }
     }
@@ -235,7 +243,15 @@ impl AcpSessionSurface {
     }
 
     pub fn plan_control(&self, active: bool) -> Result<PlanControl, PlanControlError> {
-        if self.harness_kind == Some(HarnessKind::Claude) && !active {
+        // Claude and Kimi carry their execution mode on the same selector as
+        // Plan, so leaving Plan is the worker's to decide: it restores the
+        // target policy's mode (or the harness default when the policy sets
+        // none) rather than a mode named here.
+        if matches!(
+            self.harness_kind,
+            Some(HarnessKind::Claude | HarnessKind::Kimi)
+        ) && !active
+        {
             return self
                 .supports_plan_mode()
                 .then_some(PlanControl::RestoreExecutionMode)

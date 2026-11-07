@@ -44,6 +44,7 @@ fn runtime_view(
     projection_digest: &str,
 ) -> crate::daemon::RuntimeSessionView {
     crate::daemon::RuntimeSessionView {
+        policy_config_keys: Vec::new(),
         session_id: session_id.to_owned(),
         projection_ordinal,
         projection_digest: projection_digest.to_owned(),
@@ -1591,6 +1592,78 @@ impl RefreshReports {
     }
 }
 
+// Hard-won: #1358: the image refresher restarted an Apple container service the user had stopped
+#[test]
+fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_it() {
+    struct AppleExecutor {
+        service_running: bool,
+        commands: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for AppleExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let line = format!("{} {}", command.program, command.args.join(" "));
+            let stopped = line == "container system status" && !self.service_running;
+            self.commands.lock().unwrap().push(line);
+            Ok(CommandOutput {
+                status: i32::from(stopped),
+                stdout: b"sha256:1111\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let refresh = || {
+        crate::targets::image_refresh(
+            crate::targets::ImageHost::AppleContainer,
+            "ghcr.io/example/dev:latest",
+            None,
+            mj_core::config::ImagePullPolicy::Auto,
+        )
+        .expect("a remote latest image is refreshed")
+    };
+    let reports = RefreshReports::default();
+
+    let stopped = AppleExecutor {
+        service_running: false,
+        commands: std::sync::Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        refresh_one_host(refresh(), &stopped, &reports.record()),
+        None
+    );
+    assert_eq!(
+        *stopped.commands.lock().unwrap(),
+        ["container system status"],
+        "a stopped service is observed, never started, and nothing is pulled"
+    );
+    assert!(reports.taken().is_empty());
+
+    let running = AppleExecutor {
+        service_running: true,
+        commands: std::sync::Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        refresh_one_host(refresh(), &running, &reports.record()),
+        Some((
+            "apple container".to_owned(),
+            "ghcr.io/example/dev:latest".to_owned(),
+            None
+        ))
+    );
+    let commands = running.commands.lock().unwrap();
+    assert!(
+        commands
+            .iter()
+            .any(|line| line.starts_with("container image pull")),
+        "{commands:?}"
+    );
+    assert!(
+        !commands.iter().any(|line| line.contains("system start")),
+        "{commands:?}"
+    );
+}
+
 /// A background refresh is a chore, not a launch. One host that cannot
 /// reach its registry must not cost the other hosts their pull, and the
 /// failure has to say which host, which image, and what the engine
@@ -2122,4 +2195,45 @@ fn cancelled_operation_leaves_the_running_recovery_copy_alone() {
         waiting.join().unwrap()
     });
     assert!(reservation.is_ok());
+}
+
+// Hard-won: c2d74db67: the refresher's first look could run while daemon startup was still starting Apple's container service, read it as stopped, and skip a whole interval.
+#[tokio::test(start_paused = true)]
+async fn only_the_apple_container_refresh_waits_for_its_startup() {
+    let refresh = |host| {
+        crate::targets::image_refresh(
+            host,
+            "ghcr.io/example/dev:latest",
+            None,
+            mj_core::config::ImagePullPolicy::Auto,
+        )
+        .expect("a remote latest image is refreshed")
+    };
+    let settled = tokio_util::sync::CancellationToken::new();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let ran = |name: &'static str| move |_| Some((name.to_owned(), String::new(), None));
+    let apple = tokio::spawn(refresh_host_after_startup(
+        refresh(crate::targets::ImageHost::AppleContainer),
+        settled.clone(),
+        cancellation.clone(),
+        ran("apple"),
+    ));
+    // A slow Apple start holds no other host's refresh.
+    let docker = refresh_host_after_startup(
+        refresh(crate::targets::ImageHost::LocalDocker),
+        settled.clone(),
+        cancellation.clone(),
+        ran("docker"),
+    )
+    .await;
+    assert_eq!(docker.map(|(host, ..)| host).as_deref(), Some("docker"));
+
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    assert!(
+        !apple.is_finished(),
+        "the Apple refresh looked before startup finished"
+    );
+    settled.cancel();
+    let apple = apple.await.unwrap();
+    assert_eq!(apple.map(|(host, ..)| host).as_deref(), Some("apple"));
 }

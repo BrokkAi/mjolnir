@@ -1,0 +1,295 @@
+{
+  "id": "L2511",
+  "title": "Go Flip none",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "44b46942f128f9411222bc345e99d2fc",
+    "session_title": "bifrost via claude4",
+    "reply_position": 106676,
+    "captured_at": "2026-10-27T22:44:59.784Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:133",
+          "role": "user",
+          "text": "pls ask 61f0abcccf634f1496fc07478093eb5d to review your plan before you start impl"
+        },
+        {
+          "id": "user:2716",
+          "role": "user",
+          "text": "remember that this host is shared so cpu time is useful, wall time is not\n\nif you need wall time, start an ec2 vm"
+        },
+        {
+          "id": "user:3237",
+          "role": "user",
+          "text": "who is working on the table design? pls have the reviewer session weigh in on that as well when you have a draft"
+        },
+        {
+          "id": "user:7043",
+          "role": "user",
+          "text": "What latency bar should block the Go native graph flip? Today native is 30-100x legacy: cli/cli whole about 4 min vs 10 s, zshellcheck whole about 8 min vs 4-9 s, cli rooted depth 3 about 4 min vs 3.7 s (wall on the shared host, rough; CPU on CLIProxyAPI whole 777 s vs 19 s). Constant-factor fixes (wasted Rust/staged queries, freshness PRAGMAs, endpoint renaming, clock checks) look worth 1.5-2x; a package-scoped fact operation is the main structural lever, size unknown until the counters land.\n\nLatency bar: Decide after fixes (Recommended)"
+        },
+        {
+          "id": "user:7082",
+          "role": "user",
+          "text": "god i thought we did a whole week of work to generalize the rust native engine cache for go to use to address latency, i guess it got derailed?"
+        },
+        {
+          "id": "user:7311",
+          "role": "user",
+          "text": "ok. as usual have 61f0abcccf634f1496fc07478093eb5d review your plan when you have more details"
+        },
+        {
+          "id": "user:33214",
+          "role": "user",
+          "text": "The Go flip (#6643) misses the owner's bar: at the 60 s default budget it fails 6 of 10 real Go requests that legacy answers in 1-10 s, and it loses correct cross-module edges (#6665). How should I proceed?\n\nGo flip: Hold; fix #6665, measure parallel (Recommended)"
+        },
+        {
+          "id": "user:37833",
+          "role": "user",
+          "text": "After the fixes the native Go graph is 2-2.7x faster but still 9-41x legacy, and most whole and cli requests still miss the 60 s default. Which latency direction should I take next (the OTel closure blocker gets fixed regardless)?\n\nLatency: Parallelism + counts (Recommended)"
+        },
+        {
+          "id": "user:53345",
+          "role": "user",
+          "text": "M4 is done (native Go graph, 16-vCPU VM, W=8, wall time; legacy in parentheses): zshellcheck whole 15 s (1.5), cli whole 32 s (9.5), cli rooted 21 s (3.3), OTel rooted 13 s (3.2), CLIProxyAPI rooted 33 s (1.6). Two whole graphs miss the 60 s budget: CLIProxyAPI 67 s and OTel 111 s; legacy finishes them in 8 and 13 s. Native finds more edges everywhere (cli whole 13,057 vs 10,900; OTel whole 19,863 vs 16,734) and costs 15-50x legacy CPU. Each miss is capped by one heavy unit (72 s and 77 s) that the byte-based chunking doesn't split. What next for the Go flip?\n\nGo flip: Hold; fix chunk balance (Recommended)"
+        },
+        {
+          "id": "user:56582",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nNested mods: Accept for flip (Recommended)\nOther: what does goland or vscode lsp do?\nBuild config: Keep current (Recommended)\nOther: again, let's follow goland / lsp precedent\nWithheld: Fix before flip (Recommended)"
+        },
+        {
+          "id": "user:59384",
+          "role": "user",
+          "text": "is there anything else we can do productively while waiting?"
+        },
+        {
+          "id": "user:59529",
+          "role": "user",
+          "text": "yes, all 3"
+        },
+        {
+          "id": "user:64766",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nM2 CPU: Land M2 (Recommended)\nFlip: Fix #6979, then flip"
+        },
+        {
+          "id": "user:68597",
+          "role": "user",
+          "text": "the next thing we need for Go is a gap analysis vs CodeQL and then close that gap, primarily for policies but also any engine pieces we need to add for those policies\n\ni'd like you to own this, let's get started while waiting for the sql profiling\n\n(pls spin up EC2 VM(s) as needed if you want to run CodeQL live)"
+        },
+        {
+          "id": "user:70277",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nx/ placement: Public bifrost-packs (Recommended)\nName rules: Port as review findings (Recommended)\nPriority: Taint first (Recommended)\nScope: security-and-quality (Recommended)"
+        },
+        {
+          "id": "user:71212",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nNumeric bar.: Approve (Recommended)\nOther: is this actually useful? we don't need to ape codeql feature-for-misfeature\nBranch sanit.: Approve (Recommended)"
+        },
+        {
+          "id": "user:74560",
+          "role": "user",
+          "text": "did go flip land?"
+        },
+        {
+          "id": "user:76305",
+          "role": "user",
+          "text": "is flip still running or did it die when host restarted?"
+        },
+        {
+          "id": "user:82408",
+          "role": "user",
+          "text": "Native Go dead code (#6567) fails at the product's warm 60 s deadline on cli/cli and zshellcheck, where legacy finishes in 5 s and 10 s. On ttlcache it finishes in 15 s against legacy's 1.3 s. On a timeout the user gets an error, not a report. It adds no false positives and drops none of legacy's true findings. How should I proceed?\n\nDead code: Hold, fix cost first (Recommended)"
+        },
+        {
+          "id": "user:82548",
+          "role": "user",
+          "text": "fix obvious problems but we're optimizing native for incremental, not batch, so when we hit diminishing returns we should just ship it"
+        },
+        {
+          "id": "user:89749",
+          "role": "user",
+          "text": "go flip status?"
+        },
+        {
+          "id": "user:89867",
+          "role": "user",
+          "text": "will 6566 also delete go-legacy then?"
+        },
+        {
+          "id": "user:90242",
+          "role": "user",
+          "text": "> file a separate issue to retire the rest of the legacy Go code\n\ni mean come on this is part of the flip but separate issue is fine ig"
+        },
+        {
+          "id": "agent:105509",
+          "role": "assistant",
+          "text": "**#7597 is back in the queue.** The reviewer confirmed the rework: the only change is removing the assertion, while the fail-closed branch stays. It agreed with the broader point: an assertion on pack content was a wrong assumption, not an invariant. The new head clears the rejection by itself, so I did not merge master.\n\nD2 is stacked on #7597's old head, so I told the C# session to merge the new head (`5c4ace9d56`) before marking D2 ready, and to drop the same assertion if it copied it into its per-group recomputation. My own PR A lane will pick up the new head when it merges D2. I also added a note to memory: never assert on pack content, not even in debug builds.\n\nWaiting on:\n- the #7616 and #7617 lanes, and the coordinator's identity pairs for them;\n- the D2 final head;\n- the #7544 head;\n- the #7470 fix;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "agent:105571",
+          "role": "assistant",
+          "text": "D2 merged #7597's new head cleanly. It calls the Go promotion function directly, so it inherits the fail-closed version, and nothing it measured depended on the old assertion.\n\nD2 adds one `debug_assert!` of its own, a group-backing check. I asked the C# session to confirm that pack content can't reach it. If it is purely an internal invariant of D2's grouping code, it can stay. If conflicting or partial pack data could violate it, it should become a fail-closed Unknown or Ambiguous answer, so it doesn't hit the same queue rejection #7597 did.\n\nWaiting on:\n- the D2 final head, after D1 is merged in and validation finishes;\n- the #7616 and #7617 lanes, and the coordinator's identity pairs for them;\n- the #7544 head;\n- the #7470 fix;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "agent:105631",
+          "role": "assistant",
+          "text": "The group-backing assertion already exists on master; D2 only moved one call. It requires every pack behind one alias group to share the same backing, either decoded packs or catalog rows. The C# session thinks pack data could reach it only through a symbol whose language differs from its manifest's, or through one language with mixed backings. Its lane is checking per-symbol language validation, mixed-backing paths and existing fixtures. If external data can reach the assertion, D2 will fail closed instead. The answer comes with D2's final head.\n\nWaiting on:\n- the D2 final head;\n- the #7616 and #7617 lanes, and the coordinator's identity pairs for them;\n- the #7544 head;\n- the #7470 fix;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "agent:105700",
+          "role": "assistant",
+          "text": "The #7470 round-4 head (`d5f0574091`) is under review. The author fixed the labeled-statement hole and found a second problem along the way: a `for` loop's initializer was not bound in the loop's own scope. The binding-lookup walk now classifies all 24 Go statement kinds explicitly, and any kind it doesn't know stops at \"unknown\". One golden answer moved, a false negative becoming unknown; everything else is unchanged or newly added.\n\nThe round-3 reviewer is checking:\n- nested labels, labels on loops and blocks, and `goto`;\n- the 24-kind list against the pinned grammar, and that the fallback really stops;\n- loop-header shadowing, closures and `for x := x`;\n- that the label handling reads a structural grammar table and not source text;\n- the identity pair and how it composes with #7499.\n\nWaiting on:\n- the #7470 round-4 re-check;\n- the #7616 and #7617 lanes, and the coordinator's identity pairs for them;\n- the D2 final head;\n- the #7544 head;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "agent:105790",
+          "role": "assistant",
+          "text": "The C# session found a real bug through that assertion. Grouping by owner ID reads members from every active pack regardless of language. So a valid Rust pack and Go pack that happen to share an owner ID put a Go member into a Rust group. Debug builds trip the assertion, and every build gives the Rust answer a foreign member. The bug has been on master since an earlier change. The fix (reads for one group come only from packs of that group's language) goes into D1, and D2 inherits it.\n\nI confirmed no Go path legitimately spans languages in one group. Go pack symbols are produced and tagged as Go, and the Go promotion code already filters on language, so the language-scoped read is right for Go. I'll check the Go side of it when D2's final head arrives.\n\nWaiting on:\n- the D2 final head;\n- the #7470 round-4 re-check;\n- the #7616 and #7617 lanes, and the coordinator's identity pairs for them;\n- the #7544 head;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "agent:105871",
+          "role": "assistant",
+          "text": "**#7470 is approved, with no findings.** It fixes failure-handler error checks and Go's nearest-binding lookup. I told the author to mark it ready after merging master. The reviewer confirmed:\n- Labels are unwrapped through structural grammar data.\n- All 24 statement kinds in the pinned grammar are classified as claimed, and unknown kinds really stop.\n- Loop-header scopes are right.\n- Every Go program it wrote passes `go run` and `go vet`.\n- The earlier golden rows are unchanged.\n- The identity pair doesn't collide with any other open PR.\n- #7499's receiver work is intact.\n\nOne limit is on record: the author's evidence had no raw baseline output, so the reviewer could not independently confirm that only one golden answer moved. The source supports the stated causes. I closed that review child; the #7507/#7470 review thread is finished.\n\nWaiting on:\n- the D2 final head;\n- the #7616 and #7617 lanes, and the coordinator's identity pairs for them;\n- the #7544 head;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "agent:105953",
+          "role": "assistant",
+          "text": "The #7617 lane finished the capability change. Java and Go now both opt into direct type shapes, other languages stay unchanged, and three Go golden rows moved, each audited. All checks passed except the pack drift check, which hit a known line-ending false positive.\n\nIt stopped on one question: the store's shape renderer is JVM-specific, so it couldn't add a Go golden without a new test API. I decided against adding one. The regression goes at the Go native-points boundary, through the same public request the sanitizer bridge and the #7616 test use. It asserts structured `Slice` and `Map` forms, plus today's honest results for function types (no shape) and channels (unsupported). The lane is also rerunning the drift check with the line-ending override.\n\nWaiting on:\n- the #7616 and #7617 lanes, and the coordinator's identity pairs for both;\n- the D2 final head;\n- the #7544 head;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "agent:106054",
+          "role": "assistant",
+          "text": "The #7616 fix is done, reviewed and committed (`9cef6fd5e8`); only the identity edits are left.\n- **What changed.** Any selected Go package without source files (pack-modeled, or discovered without sources) now carries the \"unindexed external\" marker. Results of calls into it become incomplete with the existing open-boundary reason. The package binding and its name stay complete, and calls into source packages or calls proven to return nothing keep their answers.\n- **Regression.** A hard-won native-points test covers both of `filepath.Rel`'s results and `filepath.Base`'s result, with unmodeled controls. All validation passed: 1,887 library tests, the Go engine and suite filters, and the Go policy and barrier goldens, all unchanged.\n\nOne part reaches beyond Go, and I flagged it to the coordinator. To keep the new reason a content gap, the lane registered two reason labels in the read-ledger registry as content. They were unregistered on master, so other languages that already emit them defaulted to \"operational\", which disables unit reuse. Registering them changes reuse behavior for those languages too. The PR's substrate token covers that, but I asked whether \"content\" is right for every language and whether a JVM gate run is needed. I'm also still waiting on the coordinator's identity pairs for #7616 and #7617.\n\nWaiting on:\n- the coordinator's identity pairs, and its ruling on the reason labels;\n- the #7617 test round;\n- the D2 final head;\n- the #7544 head;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "agent:106172",
+          "role": "assistant",
+          "text": "The Java session's Go bridge is up as draft **#7624**, and a reviewer is checking its Go side. It checks:\n- each type answer the bridge gives (named, unnamed with a shape, or undecided), traced back to the native evidence behind it;\n- that \"complete but empty\" and shape-less answers stay undecided until #7616 and #7617 land;\n- that several possible values combine only when they agree, never as a union;\n- that type parameters and aliases are handled as agreed;\n- that the operand is picked structurally, from syntax nodes;\n- that the new string-constant hook reads only a structurally selected literal, including escapes, raw strings and invalid UTF-8.\n\nWaiting on:\n- the #7624 Go review;\n- the coordinator's identity pairs for #7616 and #7617, and its ruling on the reason labels;\n- the #7617 test round;\n- the D2 final head;\n- the #7544 head;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "agent:106295",
+          "role": "assistant",
+          "text": "Both Go fixes found by the sanitizer bridge are open as drafts and with the reviewer:\n- **#7625 (#7616):** results of calls into source-less Go packages now stay unknown, not \"complete and empty\".\n- **#7626 (#7617):** unnamed Go composite types now get structured shapes (slice, map, array) through a shared capability. Java output is unchanged.\n\nEach still needs one identity commit, and I've reminded the coordinator about both pairs and the reason-label ruling.\n\nThe Java session accepted my review of its Go bridge (#7624). The reviewer flagged one thing: a \"complete and empty\" frontier mixed with a string frontier could make the bridge say \"string\". My ruling is that skipping a genuinely complete, empty frontier is logically correct. The real defect was the false emptiness, which #7625 fixes at the root, for the bridge and for the earlier value-type barriers that share the same code. So #7624 will merge #7625's final head and add a mixed-evidence test that must come out undecided. The type-parameter decline stays as agreed.\n\n`★ Insight ─────────────────────────────────────`\n- This is a recurring choice: guard at the consumer, or fix the producer. Treating every empty frontier as undecided in the shared loop would make every consumer give up precision for unreachable paths. Fixing the producer, so \"complete and empty\" is only published when it is true, keeps the consumer logic simple and correct for every caller at once.\n- The landing order is enforced through Git history: #7624 merges #7625's head, so MergeMarshall can't land the bridge before the fix it depends on.\n`─────────────────────────────────────────────────`\n\nWaiting on:\n- the coordinator's identity pairs for #7625 and #7626, and its ruling on the reason labels;\n- the reviewer on #7625 and #7626;\n- the D2 final head;\n- the #7544 head;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "agent:106448",
+          "role": "assistant",
+          "text": "I approved #7544's Go side. The producer-version constant is wired correctly into both cache keys. The standard-library audit shows 66 of about 20,700 members change, every one a type correction, with no change to argument counts or hierarchy. The regression pins the corrected forms by type reference and member ID.\n\nI also flagged a landing hazard. My #7614 (in the queue) and #7544 both edit the same resolution-facts Go fixture and its expected counts, and both add a Go salt token. Whichever lands second has to keep both fixture additions, re-bless the counts with a cause for each line, and keep both tokens in landing order. The queue can't do that automatically.\n\nWaiting on:\n- the coordinator's identity pairs for #7625 and #7626, and its ruling on the reason labels;\n- the reviewer on #7625 and #7626;\n- the D2 final head;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "agent:106512",
+          "role": "assistant",
+          "text": "#7544's author is sending the shared producer-version and identity parts to the reviewer (61f0abcc) before marking it ready. If #7614 lands first, the author will merge by hand: keep both fixture additions, re-bless the counts with causes, and keep both Go salt tokens in landing order.\n\nWaiting on:\n- the coordinator's identity pairs for #7625 and #7626, and its ruling on the reason labels;\n- the reviewer on #7625 and #7626;\n- the D2 final head;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "agent:106575",
+          "role": "assistant",
+          "text": "The reviewer approved both #7625 and #7626. Each becomes ready as soon as the coordinator's identity commit is on it.\n\nIt also answered my two questions on #7625:\n- **The two reason labels are registered correctly.** They match the spellings the engine actually emits. \"Content\" is the right classification, because whether a package has source files depends only on unit-key inputs. Leaving them unregistered had been blocking reuse for Rust and JVM for no reason.\n- **The query plan is safe.** The import-rows query is already pinned in the planner tests, which reject any base-table scan in both statistics states, and that test passed. I added this evidence to #7625's description.\n\nThe reviewer noted one thing for G1a-ii PR B. After #7625, a Go modeled call result carries exactly the open-boundary reason that JVM's existing projection pass already closes. PR B can therefore record its pack-type ID through the shared recorder and let that existing code close the boundary, with no Go-specific branch. I added that to the plan notes.\n\nIts recommended product-surface assertion is optional, so I'm leaving it out unless the coordinator wants it.\n\nWaiting on:\n- the coordinator's identity pairs for #7625 and #7626 (its reason-label question is now answered by the reviewer);\n- the D2 final head;\n- the one-column fix on #146;\n- #7567, #7597 and #7614 in the merge queue."
+        },
+        {
+          "id": "user:106673",
+          "role": "user",
+          "text": "go flip status?"
+        },
+        {
+          "id": "agent:106676",
+          "role": "assistant",
+          "text": "The Go flip itself is done. Native Go usage graphs have been the default since #6643 landed. What remains is retiring the legacy Go resolver (#7509), plus a few native defects and fixes that are still open.\n\n**Landed since the flip:**\n- **#6567:** native dead-code analysis, with its cost problem fixed.\n- **#7521 (#6566):** removes the legacy targeted-usage engine and ports its tests.\n- **#7527:** Milestone 1 of #7509, deleting the dead scan and graph code.\n- **#7533:** interface-dispatch edges now count as references (#7519, #7520).\n- **#7499:** open member calls.\n- **#7454, #7293 and #7295.**\n\n**Legacy retirement (#7509), in progress:**\n- **G1, pack-owned receivers and results.** The contract is frozen. G1a-i (#7567) is ready in the queue, and G1a-ii-pre (#7597) is back in the queue after I fixed a rejection. Next comes the C# session's D2, then my PR A (the shared contract; its first half is committed and the rest waits for D2), then PR B (the Go walk), then G1b.\n- **Milestone 2, legacy syntax helpers.** It waits on #7507 and #7470, both approved.\n- **Milestones 3, 5 and 6** (the rest of the resolver, the diagnostics edge index, and G2 hierarchy) have not started.\n\n**Native Go defects still open from the port:** #7516, #7517 and #7518. Their tests are marked ignored on master.\n\n**Go fixes in flight:**\n- **#7614** (#7571, the syncthing index crash) is ready in the queue.\n- **#7625** (#7616, modeled-package call results claiming a complete, empty type) and **#7626** (#7617, unnamed composite type shapes) are approved and wait only on the coordinator's identity numbers.\n- **#7544** (d8443f17's PR) is approved on the Go side.\n\nTwo new issues just appeared:\n- **#7627,** about type-argument walks counting comment nodes, looks like a follow-up from the #7544 review's inventory of raw child walks.\n- **#7628** is a general issue about generated-pack cache keys.\n\nI haven't taken either. I'm continuing to wait for the coordinator's pairs and D2's head."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "go flip status?",
+    "assistant_text_tail": "The Go flip itself is done. Native Go usage graphs have been the default since #6643 landed. What remains is retiring the legacy Go resolver (#7509), plus a few native defects and fixes that are still open.\n\n**Landed since the flip:**\n- **#6567:** native dead-code analysis, with its cost problem fixed.\n- **#7521 (#6566):** removes the legacy targeted-usage engine and ports its tests.\n- **#7527:** Milestone 1 of #7509, deleting the dead scan and graph code.\n- **#7533:** interface-dispatch edges now count as references (#7519, #7520).\n- **#7499:** open member calls.\n- **#7454, #7293 and #7295.**\n\n**Legacy retirement (#7509), in progress:**\n- **G1, pack-owned receivers and results.** The contract is frozen. G1a-i (#7567) is ready in the queue, and G1a-ii-pre (#7597) is back in the queue after I fixed a rejection. Next comes the C# session's D2, then my PR A (the shared contract; its first half is committed and the rest waits for D2), then PR B (the Go walk), then G1b.\n- **Milestone 2, legacy syntax helpers.** It waits on #7507 and #7470, both approved.\n- **Milestones 3, 5 and 6** (the rest of the resolver, the diagnostics edge index, and G2 hierarchy) have not started.\n\n**Native Go defects still open from the port:** #7516, #7517 and #7518. Their tests are marked ignored on master.\n\n**Go fixes in flight:**\n- **#7614** (#7571, the syncthing index crash) is ready in the queue.\n- **#7625** (#7616, modeled-package call results claiming a complete, empty type) and **#7626** (#7617, unnamed composite type shapes) are approved and wait only on the coordinator's identity numbers.\n- **#7544** (d8443f17's PR) is approved on the Go side.\n\nTwo new issues just appeared:\n- **#7627,** about type-argument walks counting comment nodes, looks like a follow-up from the #7544 review's inventory of raw child walks.\n- **#7628** is a general issue about generated-pack cache keys.\n\nI haven't taken either. I'm continuing to wait for the coordinator's pairs and D2's head.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "Still open / needs you turn-ending label",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_positions": [],
+    "user_position": 106673,
+    "input_rationale": "The user asked 'go flip status?'; the reply answers it. The open items are in-flight PRs and issues, and the agent says it is waiting for the coordinator and D2, not the user. The two new issues are not put to the user.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-27T22:46:45.024Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-10-27T22:47:02.613Z",
+        "kind": "user",
+        "text": "is there work we can do in parallel?"
+      },
+      {
+        "at": "2026-10-27T22:51:35.703Z",
+        "kind": "agent",
+        "text": "Yes, there is parallel work. Here is what's available and what I'm starting.  **Can run now, without touching PR A or PR B:** 1. **#7625's read-ledger evidence.** The coordinator wants proof, for ever"
+      },
+      {
+        "at": "2026-10-27T22:53:19.521Z",
+        "kind": "user",
+        "text": "launch all zig"
+      },
+      {
+        "at": "2026-10-27T22:55:42.017Z",
+        "kind": "agent",
+        "text": "I launched all six:  | Lane | Work | |---|---| | `7625-read-ledger-evidence` | For each language that emits the two reason labels, find and cite the recorded read whose key changes when a package beco"
+      },
+      {
+        "at": "2026-10-27T22:55:47.990Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task 7509-g2-design-map finished: error     State: error     Report directory: /home/jonathan/Projects/bifrost/.mj/clones/44b46942f128f9411222bc345e99d2fc/.mj/agents/781403fa"
+      }
+    ]
+  }
+}

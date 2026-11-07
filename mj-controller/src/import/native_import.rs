@@ -467,8 +467,10 @@ pub(super) fn import_delta_base(path: &Path, fetch_url: &str) -> Result<String> 
             continue;
         };
         let same_source = url == fetch_url
-            || mj_core::state::ProjectSourceIdentity::git_remote(&url).is_some_and(|identity| {
-                Some(identity) == mj_core::state::ProjectSourceIdentity::git_remote(fetch_url)
+            // `url` comes from `git remote get-url`, where `owner/repo` is a
+            // relative path; `fetch_url` is a resolved source.
+            || mj_core::state::ProjectSourceIdentity::git_remote(&url, mj_core::remote_git::Shorthand::Rejected).is_some_and(|identity| {
+                Some(identity) == mj_core::state::ProjectSourceIdentity::git_remote(fetch_url, mj_core::remote_git::Shorthand::Allowed)
             });
         if !same_source {
             continue;

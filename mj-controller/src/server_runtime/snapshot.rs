@@ -812,6 +812,11 @@ pub(super) fn viewer_snapshot_selected(
                     .as_ref()
                     .expect("live operational state always has ACP session facts"),
             );
+            session.policy_config_keys = crate::server::filter_policy_config_options(
+                &mut session.config_options,
+                session.execution_enforcement,
+                &state.config_options,
+            );
             // Share activity classification with the terminal. The browser
             // retains its detailed turn/step/background clock presentation.
             let turn_started_at_ms = state

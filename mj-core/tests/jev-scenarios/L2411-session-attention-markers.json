@@ -1,0 +1,133 @@
+{
+  "id": "L2411",
+  "title": "session attention markers",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "e965bcdb8c5c3036d6dcfbeb6120fe68",
+    "session_title": "mjolnir via claude",
+    "reply_position": 4727,
+    "captured_at": "2026-10-23T11:45:19.867Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:4586",
+          "role": "user",
+          "text": ". ! status in a session should be cleared after the session is focused"
+        },
+        {
+          "id": "user:4632",
+          "role": "user",
+          "text": "Please answer the following questions.\n\nClient: TUI dashboard (mj)\nStatus: Awaiting input / blocked\nOther: i just know it's marked with ! (at this writing d8443f17cb24506c5ee26277fcf319f4 is an example)"
+        },
+        {
+          "id": "agent:4665",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- The dashboard tracks \"read\" status with a per-session read point (`viewed_through_event_ordinal`), not a yes/no flag. Opening a session moves that point forward to the latest event, and the change is saved as a read receipt.\n- That only clears states that are worked out from unread events. A marker for a pending question or a warning may depend on other data that focusing never changes. That is the main idea the child is testing.\n`─────────────────────────────────────────────────`\n\nA child agent is working out which state draws the `!` on session `d8443f17…` and why focusing does not clear it. I'll report back when it finishes."
+        },
+        {
+          "id": "agent:4727",
+          "role": "assistant",
+          "text": "The `!` on session `d8443f17…` is not a stale status. The marker is designed to stay until one of the session's child agents gets an answer to its question, and focusing the parent does not answer it. **Confirmed** from the session data and the code.\n\n**Why it stays:**\n- The parent session itself is idle. It has no pending question and no unread output. Its read point is already at the latest event (274515).\n- One of its running child agents, `9645b51a…` (`6542-m1b-producer-repairs`), has an unanswered question (`elicitation-1`). The question asks whether direct negative facts can prove non-implementation on their own, or whether completeness flags must gate both branches.\n- A parent row shows `!` (Waiting) when any active child has a pending question. This is on purpose. The comment at `mj-tui/src/session_view.rs:169-172` says child agents have no row of their own, so without this nothing would show that the child needs you.\n- Focusing a session only moves its read point forward (`acknowledge_chat`, `mj-cli/src/dashboard.rs:1482`). It never clears questions or failures. The \"mark read\" notice states the same rule: \"questions and failures stay flagged\" (`mj-tui/src/dashboard_sessions.rs:1228`).\n\n**A second `!` on the same row:** after the title there is a separate warning, \"! Recovery copy … old\". The last checkpoint failed on an unsupported untracked file type under `bifrost/.mj/lanes/6409-m4e1b/`. The last good copy is from 2026-10-22 05:00 UTC. That warning clears only after a checkpoint succeeds (`mj-tui/src/render/sessions.rs:1848`). Focusing has no effect on it either.\n\n**My recommendation:** don't clear the marker when you focus the session. For a parent, it is the only sign that a child agent is waiting for you, so clearing it on focus would hide an open question. These changes would fix the confusion instead:\n1. Make the parent row say which child has a question, for example \"child 6542-m1b… has a question\". `DashboardState::subagent_question` (`mj-tui/src/dashboard_sessions.rs:881`) already gets this information.\n2. Use a different glyph for the recovery warning. Right now both states draw `!` (`mj-chat/src/theme.rs:747,768`).\n3. Possibly: stop flagging a parent as Waiting when the child's question is non-blocking. This question says \"Work can continue while you answer\". Whether a non-blocking question should count as \"needs you\" is your call.\n\nIf you do want \"seen but unanswered\" to look different from \"unseen\", that is a larger change: it adds a third state for the row.\n\n`★ Insight ─────────────────────────────────────`\n- The dashboard works out a session's attention level from several sources: unread events, its own pending questions, failures, and its child agents' pending questions. Only the first one depends on what you have viewed.\n- A row's level is the most urgent of its own state and its children's (`attention_level`, `session_view.rs:173`). So an idle parent can show Waiting because of work you can't see from its row.\n`─────────────────────────────────────────────────`\n\nWhich of these changes do you want, if any? I haven't changed anything yet."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Please answer the following questions.\n\nClient: TUI dashboard (mj)\nStatus: Awaiting input / blocked\nOther: i just know it's marked with ! (at this writing d8443f17cb24506c5ee26277fcf319f4 is an example)",
+    "assistant_text_tail": "ter the title there is a separate warning, \"! Recovery copy … old\". The last checkpoint failed on an unsupported untracked file type under `bifrost/.mj/lanes/6409-m4e1b/`. The last good copy is from 2026-10-22 05:00 UTC. That warning clears only after a checkpoint succeeds (`mj-tui/src/render/sessions.rs:1848`). Focusing has no effect on it either.\n\n**My recommendation:** don't clear the marker when you focus the session. For a parent, it is the only sign that a child agent is waiting for you, so clearing it on focus would hide an open question. These changes would fix the confusion instead:\n1. Make the parent row say which child has a question, for example \"child 6542-m1b… has a question\". `DashboardState::subagent_question` (`mj-tui/src/dashboard_sessions.rs:881`) already gets this information.\n2. Use a different glyph for the recovery warning. Right now both states draw `!` (`mj-chat/src/theme.rs:747,768`).\n3. Possibly: stop flagging a parent as Waiting when the child's question is non-blocking. This question says \"Work can continue while you answer\". Whether a non-blocking question should count as \"needs you\" is your call.\n\nIf you do want \"seen but unanswered\" to look different from \"unseen\", that is a larger change: it adds a third state for the row.\n\n`★ Insight ─────────────────────────────────────`\n- The dashboard works out a session's attention level from several sources: unread events, its own pending questions, failures, and its child agents' pending questions. Only the first one depends on what you have viewed.\n- A row's level is the most urgent of its own state and its children's (`attention_level`, `session_view.rs:173`). So an idle parent can show Waiting because of work you can't see from its row.\n`─────────────────────────────────────────────────`\n\nWhich of these changes do you want, if any? I haven't changed anything yet.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      4727
+    ],
+    "user_position": 4632,
+    "input_rationale": "The diagnosis of why the ! persists is delivered; the reply lists three possible changes (name the child, distinct glyph, stop flagging non-blocking questions) and asks which the user wants. Item 3 is called 'your call'.",
+    "label": "required_final",
+    "triggers": [
+      "needs you"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "next_work_menu",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "menu": "solicited",
+    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent.",
+    "request_message_ids": [
+      "agent:4727"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-23T11:46:46.394Z",
+        "kind": "user",
+        "text": "did the parent not see that child stopped w question?  child statuses should be surfaced to parent not to human"
+      },
+      {
+        "at": "2026-10-23T11:47:09.806Z",
+        "kind": "agent",
+        "text": "I can't answer the first question with a quick search. I'll send it to the child agent that did the first diagnosis, since it already has this session's data loaded."
+      },
+      {
+        "at": "2026-10-23T11:47:32.081Z",
+        "kind": "agent",
+        "text": "I agree with your design position. For a child agent, its \"user\" is the parent agent. The child's question about how to prove non-implementation is the kind of thing the parent can answer from its own"
+      },
+      {
+        "at": "2026-10-23T11:50:27.692Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task diagnose-bang-marker-not-cleared finished: completed     State: completed     Report directory: /home/jonathan/Projects/mjolnir/.mj/clones/e965bcdb8c5c3036d6dcfbeb6120fe"
+      },
+      {
+        "at": "2026-10-23T11:50:27.785Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-10-23T11:50:50.739Z",
+        "kind": "agent",
+        "text": "No, the parent never saw it. The child didn't stop either. It is still running and waiting for an answer that nothing sends to the parent. **Confirmed** from the session records and the code.  **Timel"
+      }
+    ]
+  }
+}

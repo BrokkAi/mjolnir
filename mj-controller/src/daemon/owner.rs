@@ -174,10 +174,16 @@ impl RuntimeStateOwner {
                 self.transcripts.remove(&session_id);
             }
         }
-        self.sessions.insert(
-            session_id.clone(),
-            RuntimeSessionView::from_managed(session_id, view),
-        );
+        let mut runtime = RuntimeSessionView::from_managed(session_id.clone(), view);
+        if let Some(record) = self.controller.state.sessions.get(&session_id) {
+            let config = &self.controller.config;
+            runtime.policy_config_keys = record
+                .execution_enforcement(config)
+                .zip(runtime.operational.as_ref())
+                .map(|(enforcement, state)| enforcement.owned_config_keys(&state.config_options))
+                .unwrap_or_default();
+        }
+        self.sessions.insert(session_id, runtime);
     }
 
     pub(super) fn install_config(&mut self, config: Config) {

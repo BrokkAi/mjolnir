@@ -1709,11 +1709,9 @@ impl DurableRelay {
                 (RelayCommand::SetConfig { key, value }, RelayCommandOutcome::Configured) => {
                     Some(format!("{key} set to {value}"))
                 }
-                (RelayCommand::RestoreExecutionMode, RelayCommandOutcome::Configured) => self
-                    .snapshot
-                    .config
-                    .get("mode")
-                    .map(|mode| format!("mode restored to {mode}")),
+                (RelayCommand::RestoreExecutionMode, RelayCommandOutcome::Configured) => {
+                    Some("Execution policy restored".to_owned())
+                }
                 (RelayCommand::SetSessionMode { mode_id }, RelayCommandOutcome::SessionModeSet) => {
                     Some(format!("Session mode: {mode_id}"))
                 }

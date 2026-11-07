@@ -1,0 +1,304 @@
+{
+  "id": "L2206",
+  "title": "L2206",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "98a402c3b416f81315eff1d59c43f9b9",
+    "session_title": "eval37 3684 sonnetxhigh",
+    "reply_position": 2312,
+    "captured_at": "2026-10-09T16:31:55.872Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3684: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 53e61919ae07e44c7603e755b9b14e1f29fade7f\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls (a cargo command that starts no compiler for\nmore than ten minutes), you may run that command through plain cargo\n(/usr/local/cargo/bin/cargo) and say so in your report; do not move target/\nor change shared cache settings.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the reposi\n[... 1859 bytes omitted from the middle of this message ...]\nhe field, such as the then-branch of a negated `instanceof`. Then review the conservative A3 handling of pattern-variable names (`pattern_variable_unresolved` in `assignment_facts.rs`, and the matching case in `tests/suite_bench_policy/policy_assignment_suspension.rs`) against the new lowering, and state which version or epoch inputs your change affects. Run `-p brokk-bifrost-analysis --lib`, `-p brokk-bifrost-jvm --lib`, `--test suite_bench_policy --run-ignored all` filtered to the assignment and branch-relation modules, and `--test suite_semantic` and `--test suite_analyzers` filtered to `java`.\n\n# Issue\n\nIssue #3684: Java lowering binds pattern variables to same-named fields\n\nJava pattern variables (`o instanceof String s`, record and switch patterns) are not in the Java semantic lowering's lexical environment.\n\nEvidence (source at `9c961ab22`):\n\n- The local collection in `LoweringContext` (`java/semantic/values.rs`) registers `variable_declarator`, `catch_formal_parameter` and enhanced-`for` names, but not pattern variables.\n- As a result, `lexical_reference_binding` does not find a pattern variable. When the enclosing class has a field with the same name, `implicit_instance_field_locator` binds the name to that field. For example, in `class C { String s; void f(Object o) { if (o instanceof String s) { s = s; } } }` the write `s = s` is lowered as a store to the field `this.s`.\n\nEffect:\n\n- Value flow reads and writes the wrong location for a pattern variable that shadows a field.\n- Lint A3 (#3548) used to report the example above as complete with no finding. It now keeps any target that shares a name with a pattern variable open (`pattern_variable_unresolved`).\n- Lint A1 keeps arms with pattern binders open (OI-2 in `.agents/records/lint-a-acceptance/lint-a-acceptance-matrix.md`).\n\nExpected: register pattern variables with their JLS 6.3.1 flow scope (true set, false set, and after a statement whose other branch cannot complete normally), so that names resolve to the pattern variable exactly where Java does.\n\n"
+        },
+        {
+          "id": "agent:24",
+          "role": "assistant",
+          "text": "I'll start by checking that the checkout is clean and detached at the base commit."
+        },
+        {
+          "id": "agent:39",
+          "role": "assistant",
+          "text": "The checkout is clean and detached at `53e61919ae07e44c7603e755b9b14e1f29fade7f`. Next I'll read the routed guidance."
+        },
+        {
+          "id": "agent:104",
+          "role": "assistant",
+          "text": "I'm reading how Java lowering resolves local names and where pattern binders appear in the grammar. Next I'll look at the lowering control flow and the A3 handling."
+        },
+        {
+          "id": "agent:139",
+          "role": "assistant",
+          "text": "Now the tree-sitter-java grammar's pattern node shapes. I'll find the grammar source in the cargo registry."
+        },
+        {
+          "id": "agent:185",
+          "role": "assistant",
+          "text": "I'm checking whether cargo can fetch crate dependencies, since none are cached offline. Without them I can't build or read the grammar."
+        },
+        {
+          "id": "agent:202",
+          "role": "assistant",
+          "text": "Crates.io is reachable, so the dependencies download. Now the grammar source."
+        },
+        {
+          "id": "agent:246",
+          "role": "assistant",
+          "text": "I'm now reading how `control.rs` lowers `instanceof`, conditions, `if` and `switch`. That decides where binder values get established."
+        },
+        {
+          "id": "agent:300",
+          "role": "assistant",
+          "text": "I've read enough to settle the design. Next I'll check for an existing \"can complete normally\" helper, then write the failing regression tests before changing anything."
+        },
+        {
+          "id": "agent:353",
+          "role": "assistant",
+          "text": "I'm looking at the existing Java golden fixtures to pick a product surface for the regression test. Then I'll write the failing test."
+        },
+        {
+          "id": "agent:404",
+          "role": "assistant",
+          "text": "Baseline first: I'll build the analysis lib tests in the background to warm the cache while I write the new code."
+        },
+        {
+          "id": "agent:454",
+          "role": "assistant",
+          "text": "Status: I've confirmed the lowering is the only place pattern binders are missing. I'm now checking which version and epoch constants the Java semantic output feeds."
+        },
+        {
+          "id": "agent:556",
+          "role": "assistant",
+          "text": "I've written the flow-scope module. Now I'm registering it in the jvm crate and building its unit tests. The analysis build is still running in the background."
+        },
+        {
+          "id": "agent:577",
+          "role": "assistant",
+          "text": "The on-disk change notice is my own `sed` edit. Now I'll run the jvm module's tests, in the background so I can poll."
+        },
+        {
+          "id": "agent:600",
+          "role": "assistant",
+          "text": "The analysis crate takes several minutes to compile in debug, so I'll edit it while that runs. First, reuse the jvm boundary predicate instead of keeping a duplicate in `syntax.rs`:"
+        },
+        {
+          "id": "agent:690",
+          "role": "assistant",
+          "text": "The in-progress analysis build compiles sources I've since changed, so it is stale. I'll stop it, run the quick jvm tests first, then build the analysis tests once with everything in place."
+        },
+        {
+          "id": "agent:732",
+          "role": "assistant",
+          "text": "Two of the four tests fail. The record/switch mismatches are my own expectation mistakes (an unused binder reports empty), but I need to see the loops failure properly."
+        },
+        {
+          "id": "agent:754",
+          "role": "assistant",
+          "text": "All four failures are test-expectation mistakes, not module defects: unused binders report empty, and a use before the binder can't be counted. Fixing the table:"
+        },
+        {
+          "id": "agent:773",
+          "role": "assistant",
+          "text": "The scope module passes all its table cases. Next the lowering test: I'll build the analysis lib tests with the new lowering in the background and run the new regression first."
+        },
+        {
+          "id": "agent:884",
+          "role": "assistant",
+          "text": "Status: the analysis test build is still compiling. I'll wait for it with a bounded poll."
+        },
+        {
+          "id": "agent:919",
+          "role": "assistant",
+          "text": "The new regression passes with the fix, in 2 seconds. To show it fails on the base behavior, I'll temporarily restore the base `values.rs` (backed up first) and rerun the same test."
+        },
+        {
+          "id": "agent:942",
+          "role": "assistant",
+          "text": "While the \"before\" build runs (about 18 minutes), I'll look for an end-to-end taint test. A tainted write to a pattern variable should not reach a later read of the shadowed field."
+        },
+        {
+          "id": "agent:1022",
+          "role": "assistant",
+          "text": "Status: the \"before\" build is still compiling. I'll wait on it with a bounded poll."
+        },
+        {
+          "id": "agent:1129",
+          "role": "assistant",
+          "text": "Before evidence captured: at the base lowering, 20 of 20 \"pattern variable owns the probe\" rows fail and 0 of 19 near-miss rows do. Now I'll format the changed files and checkpoint the work."
+        },
+        {
+          "id": "agent:1158",
+          "role": "assistant",
+          "text": "Formatting touched only the intended files. Now the checkpoint commit, with only the files I changed staged."
+        },
+        {
+          "id": "agent:1173",
+          "role": "assistant",
+          "text": "Checkpoint committed. Now the full validation. First the whole analysis lib suite (under `eatmydata`, per the repo guidance), in the background."
+        },
+        {
+          "id": "agent:1200",
+          "role": "assistant",
+          "text": "While the builds run, I'll look for real Java in this repository to use as a local census corpus for the scope code."
+        },
+        {
+          "id": "agent:1288",
+          "role": "assistant",
+          "text": "I now have about 9,600 Java files from seven libraries to run the scope code over. A quick check of how many pattern binders they contain, and of the background builds:"
+        },
+        {
+          "id": "agent:1342",
+          "role": "assistant",
+          "text": "The census binary built. First the javac oracle: all rows of my four scope tables, compared occurrence by occurrence against javac's own name resolution."
+        },
+        {
+          "id": "agent:1412",
+          "role": "assistant",
+          "text": "With the lock free, I'll rerun the jvm unit tests (with the corrected labeled-break rows). In parallel I'll rebuild the census against the fixed code."
+        },
+        {
+          "id": "agent:1577",
+          "role": "assistant",
+          "text": "Status: two commits are in. I'm now starting the full validation, beginning with the complete jvm and analysis lib suites in the background."
+        },
+        {
+          "id": "agent:1594",
+          "role": "assistant",
+          "text": "jvm lib: 184 of 184 pass. While the analysis lib compiles, I'll reread the final scope module in full as a quality check."
+        },
+        {
+          "id": "agent:1611",
+          "role": "assistant",
+          "text": "I want to tighten the comments. I'm not certain of the numbered JLS sub-sections I cited (6.3.1.x, 6.3.4), so I'll cite only the section I'm sure of rather than risk wrong references."
+        },
+        {
+          "id": "agent:1669",
+          "role": "assistant",
+          "text": "Still compiling the analysis lib tests. I'll keep polling in bounded waits."
+        },
+        {
+          "id": "agent:1716",
+          "role": "assistant",
+          "text": "The analysis lib run has started: 4,697 tests. I'll wait for the summary."
+        },
+        {
+          "id": "agent:1842",
+          "role": "assistant",
+          "text": "Both builds are running. I'll commit the comment cleanup now so the tree being built matches the commits."
+        },
+        {
+          "id": "agent:1909",
+          "role": "assistant",
+          "text": "Status: waiting on the root test build, which compiles the analysis library and then links three large test binaries. In the meantime I'll run the cheap checks that don't need cargo."
+        },
+        {
+          "id": "agent:1939",
+          "role": "assistant",
+          "text": "The classification check fails at the base for 17 unrelated tracked paths, and none of them is mine: `pattern_scope.rs` is classified and isn't listed. Back to the root test build:"
+        },
+        {
+          "id": "agent:1998",
+          "role": "assistant",
+          "text": "Status: the root test binaries are still compiling (about 20 minutes in). I'll keep polling."
+        },
+        {
+          "id": "agent:2105",
+          "role": "assistant",
+          "text": "`suite_semantic` filtered to `java`: 158 of 158 pass. Now `suite_analyzers`."
+        },
+        {
+          "id": "agent:2126",
+          "role": "assistant",
+          "text": "The machine has plenty of memory and disk, so I'll run the workspace-wide clippy gate in parallel using the repo's documented isolated-target helper."
+        },
+        {
+          "id": "agent:2158",
+          "role": "assistant",
+          "text": "Both required Java suites pass: `suite_analyzers` 64 of 64. While clippy runs, the formatting check:"
+        },
+        {
+          "id": "agent:2257",
+          "role": "assistant",
+          "text": "The Java issue suite passes: 119 of 119. Clippy is still working through the workspace."
+        },
+        {
+          "id": "agent:2298",
+          "role": "assistant",
+          "text": "Everything is validated. Let me collect the exact final hashes and confirm the tree is clean."
+        },
+        {
+          "id": "agent:2312",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nJava lowering now resolves a pattern variable to that variable, not to a same-named field, wherever the syntax proves its JLS flow scope. Everywhere else the name still means the field. Base `53e61919ae07e44c7603e755b9b14e1f29fade7f`, final `346eab30d06c50b74fed20745af39543145b0412`, detached, tree clean.\n\n## 1. Confirmed cause\n\n- `emit_local_bindings` in `java/semantic/values.rs` registered only what `java_local_binding` in `syntax.rs` returns: `variable_declarator`, `catch_formal_parameter` and enhanced-`for` names. `java_pattern_binding_name` already existed in the jvm crate, but the lowering never used it.\n- A pattern name therefore failed both `local_at` and `parameters` in `lexical_reference_binding`. It then reached `implicit_instance_field_locator`, which found the field `String s` and emitted `MemoryStore` and `MemoryLoad` of kind Field.\n- Confirmed by running the new regression against the base `values.rs`. All 20 rows where the pattern variable should own the probe were lowered to the field, including the issue's own `if (o instanceof String s) { s = s; }`. The 17 near-miss rows passed at base.\n- Grammar shapes (tree-sitter-java 0.23.5): `instanceof_expression` field `name`, `type_pattern` and `record_pattern_component` identifier children, and `switch_label` > `pattern` and `guard`.\n\n## 2. Changes and reasons\n\n- **Commit `4546f3e5ecfc66bfca8991abb38798f5c8fc2b2e`**: the fix.\n  - New `brokk-bifrost-jvm/src/java/pattern_scope.rs` is a pure tree-sitter module. `java_pattern_variable_scopes` climbs from the pattern through `()`, `!`, `&&`, `||` and `?:` to `if`, `while`, `do`, `for` and `guard`. It returns byte intervals, because one variable can need several disjoint ones, such as the right operand of `&&` plus the `then` branch.\n  - A variable a statement introduces extends over the rest of the block when the other branch provably cannot complete normally. That analysis uses an iterative stack machine, so a long `else if` chain cannot overflow the stack.\n  - `emit_local_bindings` registers one `LocalBinding` per interval, all sharing one `ValueId`, with the declared type. `local_at` is unchanged.\n  - The nested-boundary predicate moved to the jvm crate and `syntax.rs` re-exports it.\n  - `ADAPTER_VERSION` moves from v27 to v28.\n  - The A3 guard comment is refreshed, the CHANGELOG and the lint acceptance record are updated, and the new file is added to `.open-core/public-paths.d`.\n- **Commit `e2a0a24472e99cd6d3316a0b29d5e4c15e0df105`**: the javac oracle found a defect in my scope code, fixed here.\n  - javac counts only breaks whose target is the loop itself, so a `break` to an outer label does not stop the inner loop from introducing its variable. My code followed the literal JLS wording and ended the scope too early.\n  - The commit message of `4546f3e5ec` says \"39 rows, 19 near misses\". The correct figures are 37 rows, 20 plus 17. This commit states the correction.\n- **Commit `346eab30d06c50b74fed20745af39543145b0412`**: comments only. It drops JLS sub-section numbers I had not checked against the text.\n- **Design choice**: the scope code errs toward the smaller scope. A name outside the proven scope resolves as it did before, to the field. A name wrongly placed inside a scope would take a field reference away, which would be a new bug.\n- **A3 review**:\n  - I kept `pattern_variable_unresolved`. Inside a proven scope the lowering now binds the pattern variable, and `ordinary_local_declaration` returns `None` for it, so the result stays open anyway.\n  - Outside every proven scope, the syntax cannot tell a legitimate field reference from a form the proof does not cover. A switch-terminated branch is one such form.\n  - Removing the guard would turn those forms into a silent \"complete, no finding\" result. This comes from reading the code path; I did not measure it with the guard removed.\n  - A1 reads the structural lexical environment, not the lowering, so it is unaffected (OI-2).\n- **Version and epoch inputs**:\n  - Moved: the Java semantic `AdapterSemanticsVersion`, v27 to v28.\n  - Not moved: the lower\n[... 6252 bytes omitted from the middle of this message ...]\nerval. The syntax work lives in a new `brokk-bifrost-jvm` module next to `java_pattern_binding_name`, and the rest of the block after a guard counts only when the other branch provably cannot complete normally. Where the syntax cannot prove a rule, the scope is smaller, so the name still resolves to the field, which is the old behavior rather than a new mistake. I checked the rules against javac, which found one real mistake about labeled breaks that is now fixed. Over 13,290 real Java files, no declaration sits inside a computed scope and no reference falls outside one without another declaration to explain it. The regression pins 37 methods; against the base lowering all 20 positive rows fail and all 17 near misses pass. The Java semantic adapter version moves from v27 to v28, and no persisted language fact or language epoch changes. Lint A3 keeps its `pattern_variable_unresolved` guard, because a same-named target outside every proven scope cannot be told apart from a form the proof does not cover. Still open: defining the binder at the match so taint and loop kills see it, and recording binders in the structural lexical environment for A1.\n\n`★ Insight ─────────────────────────────────────`\n- Using javac as an oracle was the highest-value step. Compiling each snippet with no field of that name turns every wrong scope into a \"cannot find symbol\" error, and it caught a rule my reading of the JLS text got wrong.\n- Making the code err toward smaller scopes means every limitation fails back to the old behavior, never to a new misbinding. The negative controls show the census can detect errors in both directions.\n- The two long builds were avoidable noise. Splitting the pure-syntax work into the small jvm crate gave 40-second feedback loops, while each analysis test build took 18 to 56 minutes.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "t pattern variables.\n- As a result, `lexical_reference_binding` does not find a pattern variable. When the enclosing class has a field with the same name, `implicit_instance_field_locator` binds the name to that field. For example, in `class C { String s; void f(Object o) { if (o instanceof String s) { s = s; } } }` the write `s = s` is lowered as a store to the field `this.s`.\n\nEffect:\n\n- Value flow reads and writes the wrong location for a pattern variable that shadows a field.\n- Lint A3 (#3548) used to report the example above as complete with no finding. It now keeps any target that shares a name with a pattern variable open (`pattern_variable_unresolved`).\n- Lint A1 keeps arms with pattern binders open (OI-2 in `.agents/records/lint-a-acceptance/lint-a-acceptance-matrix.md`).\n\nExpected: register pattern variables with their JLS 6.3.1 flow scope (true set, false set, and after a statement whose other branch cannot complete normally), so that names resolve to the pattern variable exactly where Java does.\n\n",
+    "assistant_text_tail": "erval. The syntax work lives in a new `brokk-bifrost-jvm` module next to `java_pattern_binding_name`, and the rest of the block after a guard counts only when the other branch provably cannot complete normally. Where the syntax cannot prove a rule, the scope is smaller, so the name still resolves to the field, which is the old behavior rather than a new mistake. I checked the rules against javac, which found one real mistake about labeled breaks that is now fixed. Over 13,290 real Java files, no declaration sits inside a computed scope and no reference falls outside one without another declaration to explain it. The regression pins 37 methods; against the base lowering all 20 positive rows fail and all 17 near misses pass. The Java semantic adapter version moves from v27 to v28, and no persisted language fact or language epoch changes. Lint A3 keeps its `pattern_variable_unresolved` guard, because a same-named target outside every proven scope cannot be told apart from a form the proof does not cover. Still open: defining the binder at the match so taint and loop kills see it, and recording binders in the structural lexical environment for A1.\n\n`★ Insight ─────────────────────────────────────`\n- Using javac as an oracle was the highest-value step. Compiling each snippet with no field of that name turns every wrong scope into a \"cannot find symbol\" error, and it caught a rule my reading of the JLS text got wrong.\n- Making the code err toward smaller scopes means every limitation fails back to the old behavior, never to a new misbinding. The negative controls show the census can detect errors in both directions.\n- The two long builds were avoidable noise. Splitting the pure-syntax work into the small jvm crate gave 40-second feedback loops, while each analysis test build took 18 to 56 minutes.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "Final eval report with the fix committed and validated. The still-open items are listed limitations and separate findings, plus a draft comment; nothing asks the judge for a decision.",
+    "label": "none",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-09T16:33:35.211Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

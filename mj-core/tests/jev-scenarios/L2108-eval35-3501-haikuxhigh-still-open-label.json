@@ -1,0 +1,381 @@
+{
+  "id": "L2108",
+  "title": "eval35 3501 haikuxhigh still-open label",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "bbd599ae02f9f5886eb2a1bb1a62a3e9",
+    "session_title": "eval35 3501 haikuxhigh",
+    "reply_position": 4489,
+    "captured_at": "2026-10-08T15:42:49.317Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3501: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 0722dea6bcb52ef5335695a701631d157c31cbf4\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls (a cargo command that starts no compiler for\nmore than ten minutes), you may run that command through plain cargo\n(/usr/local/cargo/bin/cargo) and say so in your report; do not move target/\nor change shared cache settings.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the reposi\n[... 3008 bytes omitted from the middle of this message ...]\n|---|---|\n| containers__buildah | go | `vendor/github.com/mattn/go-sqlite3/sqlite3-binding.c` | 9,515,492 |\n| containers__podman-tui | go | same | 9,515,492 |\n| containers__skopeo | go | same | 9,514,430 |\n| clusterpedia-io__clusterpedia | go | same | 9,029,884 |\n| root-gg__plik | go | same | 9,029,884 |\n| balerter__balerter | go | same | 8,469,484 |\n| tdlib__td | cpp | `sqlite/sqlite/sqlite3.c` | 8,274,268 |\n| emweb__wt | cpp | `src/Wt/Dbo/backend/amalgamation/sqlite3.c` | 8,268,891 |\n\n**82 repos in the window carry a C/C++ error span over 50 KB.** Other large offenders include `miniaudio.h` (4,025,780 bytes, in a ts repo) and vendored OpenSSL headers.\n\nGrouped by the language of the *failing file* rather than the window, the family is: c-header 122 repos / 598 occurrences, c 61 / 301, cpp 16 / 80. (The window language is the wrong axis here -- a Go or TypeScript repo reports these because the workspace indexes every language it contains.)\n\n### Why this matters beyond the I1 violation\n\nThis is very likely the same root cause as **#3486**, where `get_symbol_sources` costs 17-46 s per call on repos with vendored C trees and `perf` puts ~57% of CPU in tree-sitter parsing, led by `ts_parser__do_all_potential_reductions` with `ts_parser__recover` present. A file that parses to one multi-megabyte `ERROR` is exactly what makes the GLR recovery path thrash. Fixing the parse may fix the latency; at minimum the two should be investigated together.\n\n### Expected\n\nEither the grammar handles the amalgamation, or the analyzer recognises a total parse failure and records the file as unparsed rather than publishing a declaration range that overlaps an 8 MB error region. Publishing declarations whose ranges sit inside a whole-file `ERROR` means every downstream answer about them is unsound.\n\n### Reproduce\n\nAny of the repos above at their tier-21 pinned heads; the ledger records are at `m4-tier21.jsonl` lines 3304 (buildah), 844 (td), 754 (wt). The full family grouped by failing-file language is in `t21-i1-by-file-language.txt`.\n"
+        },
+        {
+          "id": "agent:2949",
+          "role": "assistant",
+          "text": "The measurement build is running. I'll write the final test draft now, in `/tmp`, while the build is in progress. The control source moves to a raw string, which is clearer than the line-continuation escapes in my first draft."
+        },
+        {
+          "id": "agent:2975",
+          "role": "assistant",
+          "text": "The draft is in place. I'll tighten the last assertion to name the reduced fixture's function exactly, rather than matching a substring, and then wait for the build."
+        },
+        {
+          "id": "agent:3006",
+          "role": "assistant",
+          "text": "The rebuild took 2 minutes 12 seconds, so the incremental path is fast. I'll locate the new test binary, copy it aside as the before-measurement binary, and run the before-probes on both witnesses with fresh caches."
+        },
+        {
+          "id": "agent:3028",
+          "role": "assistant",
+          "text": "The before-probe ran past the foreground limit and moved to the background. That itself is a signal: with the complete path enabled, the td analyzer build is slow. I'll check the interim output file."
+        },
+        {
+          "id": "agent:3049",
+          "role": "assistant",
+          "text": "The td before-run completed on the complete path after 225 seconds. It published declarations that overlap the whole-file error, which is the I1 violation the issue describes. The go run is still in progress. I'll pull the summary lines from the td output."
+        },
+        {
+          "id": "agent:3070",
+          "role": "assistant",
+          "text": "The td before-state is now recorded on the complete path, with structured evidence:\n\n- `parse_errors`: one entry, `ERROR` spanning 0..8,274,268, which equals the file size.\n- Declarations published: 11,883, and every one of them has a range inside that error.\n- Analyzer build: 224.7 s, which is the declaration-extraction cost behind the #3486 latency.\n\nI'll wait for the go before-run to finish."
+        },
+        {
+          "id": "agent:3105",
+          "role": "assistant",
+          "text": "The go before-state matches td: 12,825 declarations, all overlapping the 9,515,492-byte root `ERROR`, with a 248.8-second analyzer build. Next I'll revert the temporary budget edit exactly and confirm it."
+        },
+        {
+          "id": "agent:3134",
+          "role": "assistant",
+          "text": "The tree is back to baseline: the only tracked change is the temporary probe `mod` line, and the budget reads 10 seconds again. To watch the regression fail before the fix, I'll add a temporary copy of the test to the analysis-crate probe module, using the same fixture through a path relative to the manifest. I'll then build and run it against the pre-fix code."
+        },
+        {
+          "id": "agent:3175",
+          "role": "assistant",
+          "text": "The reduced fixture reproduces the defect in the analyzer: one parse error spanning 0..453 (the whole file), and the function `tdsqlite3CompileOptions` published at 0..66, inside that error. The regression copy did not match my filter because `--exact` needs the full module path. I'll rerun it with the full name."
+        },
+        {
+          "id": "agent:3203",
+          "role": "assistant",
+          "text": "The regression fails on the pre-fix code, as the brief requires:\n\n- `parse_errors`: one `ERROR` at 0..453, the whole file.\n- Declarations: `tdsqlite3CompileOptions`, published from inside that error.\n\nNow I'll make the fix. The edit tool requires reading each region first, so I'll read the insertion points in `tree_sitter_analyzer.rs`."
+        },
+        {
+          "id": "agent:3240",
+          "role": "assistant",
+          "text": "I have the insertion points. First the trait: a new default hook that adapters override, placed before the `reparse_grammar_gap` documentation."
+        },
+        {
+          "id": "agent:3259",
+          "role": "assistant",
+          "text": "Next, the shared parse helper skips the included-range discovery and second parse for an unparsed tree. A second parse of such a tree would only refine declarations that are never published."
+        },
+        {
+          "id": "agent:3283",
+          "role": "assistant",
+          "text": "Now `analyze_source_with_budget`. I'll read its current lines so the edit matches exactly."
+        },
+        {
+          "id": "agent:3304",
+          "role": "assistant",
+          "text": "Next, the shared helper. It goes beside `file_state_from_parsed`, whose doc comment also needs updating. I'll read that region first."
+        },
+        {
+          "id": "agent:3330",
+          "role": "assistant",
+          "text": "The helper is in and its doc comment is updated. Next, the C++ override. I'll read the adapter's included-range method so the edit anchors on exact text."
+        },
+        {
+          "id": "agent:3356",
+          "role": "assistant",
+          "text": "Next is the epoch. Persisted facts change for these files, so the C++ salt needs a new token and a comment in the house style. I'll read the end of the comment block and the salt line first."
+        },
+        {
+          "id": "agent:3396",
+          "role": "assistant",
+          "text": "The fix is in place: the trait hook, the shared parse helper, the analyzer call site, the C++ override, and the epoch bump. I'll now install the integration regression in `tests/suite_issues`, registering it in the harness in issue order."
+        },
+        {
+          "id": "agent:3436",
+          "role": "assistant",
+          "text": "The harness entry is registered. Before copying the test in, I'll confirm the root crate exports the names it imports, `ParseErrorKind` and `IAnalyzer`."
+        },
+        {
+          "id": "agent:3459",
+          "role": "assistant",
+          "text": "The working tree now holds exactly the intended changes, plus the temporary probe that I will remove before committing. I'll rebuild the analysis lib test binary so I can run the in-crate regression copy and the after-probes."
+        },
+        {
+          "id": "agent:3488",
+          "role": "assistant",
+          "text": "The post-fix build compiles with no errors or warnings. I'll run the regression copy and the reduced-fixture probe on the fixed binary."
+        },
+        {
+          "id": "agent:3503",
+          "role": "assistant",
+          "text": "The fix behaves as intended on the reduced fixture. Declarations are empty, and the whole-file `ERROR` is still reported as the parse error. Next are the witnesses, with the production 10-second budget. Each witness gets a cold run and a warm run against the same cache. These are long, so I'll run them as a background script."
+        },
+        {
+          "id": "agent:3538",
+          "role": "assistant",
+          "text": "While the witness probes run, I'll check one consequence I can verify from code rather than assume: whether a C++ file marked incomplete changes answers for the whole C++ analyzer. I'll find the callers of the inventory-completeness accessors."
+        },
+        {
+          "id": "agent:3565",
+          "role": "assistant",
+          "text": "This is confirmed by code: `try_persisted_package_may_exist` returns \"may exist\" whenever the inventory is incomplete (`tree_sitter_analyzer.rs:12413`). So while a C++ workspace contains a whole-file-error file, C++ package-absence answers become conservative workspace-wide. That is consistent with the existing unparsed semantics, and I'll report it as a cost I have not measured. Now the witness runs."
+        },
+        {
+          "id": "agent:3603",
+          "role": "assistant",
+          "text": "The after-state is clean on both witnesses, cold and warm:\n\n- Declarations: 0 on both witnesses (before: 11,883 and 12,825 overlapping the whole-file error).\n- Parse errors: one `ERROR` spanning the whole file, which is now the diagnostic.\n- Analyzer build: about 10–12 s, down from 225 s and 249 s in the unbounded baseline.\n\nWarm runs are no faster than cold, which I expected, since unparsed states are never persisted. The remaining 10 s is still more than one parse should cost (~5.4 s debug), so I'll find where a second parse happens before reporting timings."
+        },
+        {
+          "id": "agent:3657",
+          "role": "assistant",
+          "text": "Those two events repeat results I already have. The remaining question is the warm path. Before the fix, the complete-tree state was persisted, so a warm open may have been fast. After the fix, the unparsed state is not persisted, so each open re-parses. I'll measure the warm open of the baseline on the td cache from the earlier 600-second run, which is still on disk."
+        },
+        {
+          "id": "agent:3690",
+          "role": "assistant",
+          "text": "While the warm baseline runs, I'll confirm the edition for the formatting check. Then I'll check that run's result."
+        },
+        {
+          "id": "agent:3714",
+          "role": "assistant",
+          "text": "The warm baseline on td took 268 s, almost the same as its cold run (225 s), so the pre-fix store did not serve the complete state either. Warm opens therefore do not regress with the fix. Before the fix they took about 225–269 s, and after it they take about 11 s. The timing table is complete.\n\nNext I'll remove the temporary probe, keeping a copy outside the repository, and confirm that only the intended changes remain."
+        },
+        {
+          "id": "agent:3754",
+          "role": "assistant",
+          "text": "The tracked diff now holds exactly the four intended source changes, plus the new test, fixture, and licence files. I'll check formatting on the changed Rust files."
+        },
+        {
+          "id": "agent:3772",
+          "role": "assistant",
+          "text": "Formatting is clean. Now the validation runs. I'll run them sequentially in one background script, with each step logged and a completion marker, so nothing contends for the cargo lock: the analysis lib tests (required by the brief), the C++ crate, the relevant root integration suites, and the workspace clippy gate."
+        },
+        {
+          "id": "agent:3811",
+          "role": "assistant",
+          "text": "While the suites run, I'll review the full production diff myself before committing."
+        },
+        {
+          "id": "agent:3822",
+          "role": "assistant",
+          "text": "The diff reads correctly. One doc comment in `file_state_from_parsed` wraps raggedly after my edit, so I'll reflow it now, before the validation steps reach the cargo builds that would pick it up."
+        },
+        {
+          "id": "agent:3873",
+          "role": "assistant",
+          "text": "Two failures so far in the analysis lib run: a Go native-points test and a store test about an unwritable workspace root. My change does not touch Go, and the store test is probably sensitive to running as root. I'll let the step finish, then read both failure messages before deciding whether they pre-date my change."
+        },
+        {
+          "id": "agent:3907",
+          "role": "assistant",
+          "text": "The two failures look environmental rather than related to this change:\n\n1. The Go test reports an `Incomplete` import binding. That usually means the Go toolchain or standard-library model is missing from this container.\n2. The store test expects an unwritable directory to refuse opening a store. This container runs as root, and root ignores directory permissions.\n\nThe brief requires checking pre-existing failures against the base, so I'll verify both on the base commit after the validation run finishes. Stashing now would corrupt the suites still running. First, the cheap evidence: the Go toolchain and the user id."
+        },
+        {
+          "id": "agent:3956",
+          "role": "assistant",
+          "text": "The evidence points to the environment. The container runs as uid 0, and there is no `go` toolchain on PATH. Both are consistent with the failures. I'll confirm them on the base commit once the validation sequence completes. Now I'll wait for the next steps."
+        },
+        {
+          "id": "agent:3983",
+          "role": "assistant",
+          "text": "The C++ crate passes (exit 0). The root `suite_issues` binary is compiling now, which is the largest build in this run. I'll keep waiting."
+        },
+        {
+          "id": "agent:4015",
+          "role": "assistant",
+          "text": "Those two events are expiry notices from old monitors, so they add nothing. The issue suite is at 624 of 1,539 tests. I'll continue waiting."
+        },
+        {
+          "id": "agent:4034",
+          "role": "assistant",
+          "text": "The issue suite has two failures, and both are C++ tests from `issue_2275`, so these are likely caused by my change. I'll read the failure output and the fixtures to see whether those trees have a root `ERROR`."
+        },
+        {
+          "id": "agent:4063",
+          "role": "assistant",
+          "text": "These two failures are the real regression risk I had flagged, and the cause is structural. The `issue_2275` fixture is a protobuf-style header with unclosed namespaces, and it deliberately relies on recovered declarations inside an error region. Its root is almost certainly `ERROR` too. So \"root `ERROR` means unparsed\" is broader than the issue's sqlite case. I'll measure the fixture's root shape before choosing a narrower rule."
+        },
+        {
+          "id": "agent:4102",
+          "role": "assistant",
+          "text": "The probe printed nothing that matched. I'll run it without the filter to see what it reports."
+        },
+        {
+          "id": "agent:4116",
+          "role": "assistant",
+          "text": "The standalone probe binary is missing, even though I built it earlier. I'll check what remains under `/tmp/t3501` before going further."
+        },
+        {
+          "id": "agent:4133",
+          "role": "assistant",
+          "text": "The probe source and `target/` directory are still there, so the binary may simply be at a different path or need a rebuild. I'll check and rebuild if needed."
+        },
+        {
+          "id": "agent:4154",
+          "role": "assistant",
+          "text": "`target` inside the probe directory is a file, not a directory, so the probe's build output went somewhere unexpected earlier. The probe is a standalone scratch crate outside the repository, so I'll build it into a separate scratch directory under `/tmp/t3501`."
+        },
+        {
+          "id": "agent:4179",
+          "role": "assistant",
+          "text": "The probe rebuilt. Its `target` was a symlink into the shim's store, which explains the earlier confusion. Now I'll run it on the extracted 2275 fixture and on the reduced sqlite fixture for comparison."
+        },
+        {
+          "id": "agent:4202",
+          "role": "assistant",
+          "text": "The 2275 fixture also roots as a whole-file `ERROR` (1..660 with leading newline). So the root-`ERROR` rule catches protobuf headers whose recovered declarations the repository explicitly tests. That makes the rule too broad, and the issue's own language offers a finer distinction: a \"total parse failure\" is one where \"the parse produces no usable structure at all\". I need a structural test for \"no usable structure\". I'll count the root's direct children by kind for the three inputs, to see whether any top-level declaration-bearing child separates them."
+        },
+        {
+          "id": "agent:4253",
+          "role": "assistant",
+          "text": "The histogram rules out a cheap structural separator. The sqlite root has 2,229 `function_definition` and 886 `declaration` children, so it is not a structure-free failure. The issue's claim that it has \"no usable structure at all\" is not true of the tree. That leaves an open contract question: a root `ERROR` is the same shape for the sqlite amalgamation and for the protobuf headers that the repository pins in issue 2275.\n\nI'll check how much of the suite is still running, so the question I ask reports the full effect of the current design."
+        },
+        {
+          "id": "agent:4300",
+          "role": "assistant",
+          "text": "`suite-analyzers` is at 456 of 835. I'll let it finish so the question reports the full blast radius, not just the two `issue_2275` failures."
+        },
+        {
+          "id": "agent:4317",
+          "role": "assistant",
+          "text": "`suite-analyzers` passes completely (835 of 835). The only failures so far are the two `issue_2275` tests, plus the two environmental analysis-lib failures still to be confirmed on base. I'll wait for the persistence and remaining suites."
+        },
+        {
+          "id": "agent:4352",
+          "role": "assistant",
+          "text": "Persistence passes (106 of 106 in that suite). Next are the usages suite, the symbols and cross-language suites, and the workspace clippy gate. I'll keep waiting."
+        },
+        {
+          "id": "agent:4378",
+          "role": "assistant",
+          "text": "A third C++ failure appears, in `suite_symbols`. I'll read its message and the fixture to see whether it has the same root-`ERROR` cause."
+        },
+        {
+          "id": "agent:4395",
+          "role": "assistant",
+          "text": "This third failure is a different mode, and it matters more. The repository's own test models \"a macro-heavy header [that] can leave the C++ parser at an ERROR root\", and it expects a location query to return an answer. With my change, the query instead fails with \"required C/C++ source publication unavailable\", because the unparsed state is not publishable. So root-`ERROR` → unparsed also changes query behaviour, not just declarations.\n\nI'll wait for the last suite, cross-language, so the report covers every suite."
+        },
+        {
+          "id": "agent:4437",
+          "role": "assistant",
+          "text": "Cross-language passes (747 of 747). The clippy gate has just started on the current design, which may change, and it holds the cargo lock that any base check needs. I'll stop it now and keep the process state clean for the decision."
+        },
+        {
+          "id": "agent:4463",
+          "role": "assistant",
+          "text": "The `pkill` pattern matched my own shell command, which is why the exit status is 144. I'll find the validation processes by PID and stop only those."
+        },
+        {
+          "id": "agent:4489",
+          "role": "assistant",
+          "text": "I've stopped before committing. The fix is in the working tree, but it breaks two pinned C++ behaviours, and the repository and the issue disagree on the contract.\n\n**Question for the judge:** Should every C or C++ file whose tree-sitter root is `ERROR` be published as unparsed, even though that breaks the pinned tests below? Or should the rule apply only to large files, with a threshold you choose?\n\n**What the evidence shows**\n\n- **Witnesses (debug test build, measurement-only budget of 600 s to reach the complete-tree path).** Before the fix, td publishes 11,883 declarations and go publishes 12,825. Every one has a range inside the whole-file `ERROR`. After the fix, both publish zero declarations and report one parse error spanning the whole file.\n- **Timing.** Analyzer build for td: 225 s cold and 269 s warm before the fix, 10.4 s cold and 10.9 s warm after. At the production 10-second budget, the before-fix debug build takes the timed-out path (12.9 s, no diagnostic).\n- **Regression.** `tests/suite_issues/issue_3501_cpp_whole_file_error_unparsed.rs` on a 453-byte reduction of the amalgamation fails before the fix and passes after.\n- **Breakage.**\n  - `issue_2275`, two tests: a protobuf-style header whose root is `ERROR` loses its classes. That test pins this recovery.\n  - `suite_symbols::cpp_macro_namespace_template_forward_declaration_name_is_not_reference`: a location query now fails with \"required C/C++ source publication unavailable\" instead of returning an answer.\n- **No structural separator.** The sqlite root has 2,229 `function_definition` and 886 `declaration` children, while the 2275 fixture has 1 and 2. The issue's \"no usable structure at all\" is not literally true of the tree.\n\n**Options**\n\n- **A.** Keep the current rule. It matches the issue's stated outcome. It requires retiring the two `issue_2275` expectations and changing unparsed files so location queries return an empty answer instead of a store error.\n- **B.** Apply the rule only to root-`ERROR` files above a size threshold, for example 1 MiB. This keeps the small-header behaviour the repository pins. Whole-file errors between 50 KB and the threshold keep their I1 violations. This needs a threshold from you.\n\nI lean B, because it avoids a silent loss of declarations in common protobuf headers. The threshold is arbitrary, so I need your number.\n\n**Still open:** two analysis-lib failures (`go_native_point_binds_standard_package_and_external_member_identity` and `unwritable_workspace_root_reports_the_ways_out`) are not yet checked against the base. Both look environmental, since the container runs as uid 0 and has no Go toolchain. The clippy workspace gate is also still to run. Nothing is committed."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "e same root cause as **#3486**, where `get_symbol_sources` costs 17-46 s per call on repos with vendored C trees and `perf` puts ~57% of CPU in tree-sitter parsing, led by `ts_parser__do_all_potential_reductions` with `ts_parser__recover` present. A file that parses to one multi-megabyte `ERROR` is exactly what makes the GLR recovery path thrash. Fixing the parse may fix the latency; at minimum the two should be investigated together.\n\n### Expected\n\nEither the grammar handles the amalgamation, or the analyzer recognises a total parse failure and records the file as unparsed rather than publishing a declaration range that overlaps an 8 MB error region. Publishing declarations whose ranges sit inside a whole-file `ERROR` means every downstream answer about them is unsound.\n\n### Reproduce\n\nAny of the repos above at their tier-21 pinned heads; the ledger records are at `m4-tier21.jsonl` lines 3304 (buildah), 844 (td), 754 (wt). The full family grouped by failing-file language is in `t21-i1-by-file-language.txt`.\n",
+    "assistant_text_tail": "he fix, both publish zero declarations and report one parse error spanning the whole file.\n- **Timing.** Analyzer build for td: 225 s cold and 269 s warm before the fix, 10.4 s cold and 10.9 s warm after. At the production 10-second budget, the before-fix debug build takes the timed-out path (12.9 s, no diagnostic).\n- **Regression.** `tests/suite_issues/issue_3501_cpp_whole_file_error_unparsed.rs` on a 453-byte reduction of the amalgamation fails before the fix and passes after.\n- **Breakage.**\n  - `issue_2275`, two tests: a protobuf-style header whose root is `ERROR` loses its classes. That test pins this recovery.\n  - `suite_symbols::cpp_macro_namespace_template_forward_declaration_name_is_not_reference`: a location query now fails with \"required C/C++ source publication unavailable\" instead of returning an answer.\n- **No structural separator.** The sqlite root has 2,229 `function_definition` and 886 `declaration` children, while the 2275 fixture has 1 and 2. The issue's \"no usable structure at all\" is not literally true of the tree.\n\n**Options**\n\n- **A.** Keep the current rule. It matches the issue's stated outcome. It requires retiring the two `issue_2275` expectations and changing unparsed files so location queries return an empty answer instead of a store error.\n- **B.** Apply the rule only to root-`ERROR` files above a size threshold, for example 1 MiB. This keeps the small-header behaviour the repository pins. Whole-file errors between 50 KB and the threshold keep their I1 violations. This needs a threshold from you.\n\nI lean B, because it avoids a silent loss of declarations in common protobuf headers. The threshold is arbitrary, so I need your number.\n\n**Still open:** two analysis-lib failures (`go_native_point_binds_standard_package_and_external_member_identity` and `unwritable_workspace_root_reports_the_ways_out`) are not yet checked against the base. Both look environmental, since the container runs as uid 0 and has no Go toolchain. The clippy workspace gate is also still to run. Nothing is committed.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      4489
+    ],
+    "user_position": 21,
+    "input_rationale": "The agent stopped before committing because the fix breaks pinned #2275 tests and asks for the rule (A) or a size threshold (B). The judge answered in the next message.",
+    "label": "required_final",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:4489"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-08T15:42:59.884Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-08T15:44:09.472Z",
+        "kind": "user",
+        "text": "Judge answer to your question (asked by message at 15:43Z): neither A nor B. A blanket root-ERROR gate and a size threshold are both refused: no blanket gate, no size-based or path-based narrowing, an"
+      },
+      {
+        "at": "2026-10-08T15:44:51.465Z",
+        "kind": "agent",
+        "text": "The judge's answer changes the design, so I'll restate it before acting:  - **Rule:** the root `ERROR`'s direct children decide it. A direct child that is an unreduced `{` or an unclosed conditional d"
+      },
+      {
+        "at": "2026-10-08T15:45:34.038Z",
+        "kind": "agent",
+        "text": "This check changes the picture, and it contradicts the judge's premise. The #2275 fixture's root does hold direct `{` tokens (7 of them) and a `#ifdef`, plus `;`, `class`, and `namespace` tokens. Its "
+      },
+      {
+        "at": "2026-10-08T15:46:03.060Z",
+        "kind": "agent",
+        "text": "The stack check shows that the naive tree-token separator is not clean. In the #2275 fixture the `#ifdef` at line 22 has no matched `#endif` in the tree, even though the source text contains one. If t"
+      },
+      {
+        "at": "2026-10-08T15:46:50.297Z",
+        "kind": "agent",
+        "text": "This is the decisive observation. The tree drops closing tokens. In the #2275 fixture the text has one `#ifdef` and one `#endif`, but the tree has no `#endif` leaf. It also has 14 `{` leaves against 8"
+      }
+    ]
+  }
+}

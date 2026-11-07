@@ -88,13 +88,14 @@ pub(super) async fn set_config(
     )?);
     // The snapshot has not caught up with the change that just succeeded, so
     // the answer reports what the session itself holds.
-    if let Some(options) = crate::server::live_session_config_options(
+    if let Some((mut options, owned)) = crate::server::live_session_config_options(
         &state,
         &session_id,
         session.harness_kind.parse()?,
     )
     .await
     {
+        options.retain(|option| !owned.contains(&option.key));
         session.config_options = options;
     }
     Ok(Json(session))

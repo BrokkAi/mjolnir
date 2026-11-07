@@ -30,11 +30,6 @@
           "text": "my local mbx space used (physical=compressed) is about 50:70:4400 targets:actions:incremental, i think this is a bug? incremental is so large that it's crowding out the others which i think is not what we want"
         },
         {
-          "id": "user:140",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "user:150",
           "role": "user",
           "text": "bump"
@@ -85,24 +80,9 @@
           "text": "Three surveys are running: local cache measurements, morannon cache measurements, and a source map of what each storage class saves and what reuse evidence mbx records. I'll synthesize a design proposal against your three goals once they report."
         },
         {
-          "id": "user:981",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:995",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:1055",
           "role": "assistant",
           "text": "Waiting on the local survey (du over 3.9 TB of incremental state is slow). I'll write the design proposal once it lands."
-        },
-        {
-          "id": "user:1083",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:1260",
@@ -110,19 +90,9 @@
           "text": "Two investigations still running. I'll draft the proposal when they report."
         },
         {
-          "id": "user:1287",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:1331",
           "role": "assistant",
           "text": "One child still running (unit-churn diagnosis). I'll write the design once it reports."
-        },
-        {
-          "id": "user:1350",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:1357",

@@ -1,0 +1,128 @@
+{
+  "id": "L2005",
+  "title": "bifrost via claude3",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "8da523f69b6798ccd3cafaf9e5b112e7",
+    "session_title": "bifrost via claude3",
+    "reply_position": 59,
+    "captured_at": "2026-10-04T15:34:37.425Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "we have thousands of saved reports and audit artifacts under `.agents/`\n\nhow should we clean these up to reduce noise while retaining still-useful results\n\nand how should we revise our standing AGENTS.md instructions so we don't need to do a Big Bang cleanup pass again\n\nnb: we can keep pointers to git history as one technique, but if the artifact is particularly irrelevant we don't need to preserve even a pointer live, we can just go look for it in the unexpected case that we want to reference it later"
+        },
+        {
+          "id": "agent:43",
+          "role": "assistant",
+          "text": "Survey done; checking one last thing before I answer: what the 44 outside references to the CodeQL Python records are."
+        },
+        {
+          "id": "agent:59",
+          "role": "assistant",
+          "text": "## Short answer\n\nKeep a file in the working tree only if a future agent should read it before doing new work. Everything else belongs in git history. The cleanup follows from that rule. To make sure it never has to happen again, give every artifact class a defined end of life, and add one CI check, so files get deleted as part of normal work.\n\n## What is there now (measured today)\n\n- **10,738 tracked files, 298 MB** under `.agents/`.\n- **About 7,700 files (53 MB)** are the six `codeql-*-rules-2026-10` campaign directories: per-rule tickets, verdicts, `.rqlp` drafts, and fixtures. The conclusions already live in GitHub epics #4304, #4321, #4343, #4365, #4379 and #4385.\n- **1,057 ExecPlans.** 713 have every Progress box checked, 326 still have open boxes, and 884 have not changed since 2026-09-15.\n- **534 loose files at the top of `.agents/docs/`.** They mix maintained guidance (`architecture-and-analyzer-store.md`, runbooks) with records (`issue-*-current-hardab80.md`, `m4-*-lane.md`, 2-3 MB `type-flow-m9-*.json` baselines).\n- **179 distinct `.agents/` paths are cited from outside `.agents/`.** For example, `.agents/plans/impact-sliced-diff-base.md` \"Decision Log (5b)\" is cited 43 times in `crates/bifrost-flow` and `crates/bifrost-analysis` comments. Tests in `tests/suite_bench_policy` and `crates/bifrost-rql/.../tests` cite the rule-campaign directories. I have not checked whether those tests only mention the paths or actually read the files.\n- **`.open-core/public-paths.d/.agents.tsv` lists every one of these files.** So each new artifact also adds a line to the open-core policy. Deleting files makes that shard smaller too.\n\n## How to clean up\n\n1. **Run a census (mechanical, delegated).** Give every file one label, based on signals a script can collect:\n   - whether code, workflows or `Cargo.toml` cite it\n   - whether it is routed guidance named in AGENTS.md\n   - when it last changed\n   - whether a plan still has open boxes\n   - whether its linked issue is open or closed (via `gh`)\n\n   Only the uncertain middle needs a person or agent to read it.\n\n2. **Keep the maintained set as is.** That means AGENTS.md routed guidance, runbooks, `PLANS.md`, `.agents/scripts` used by workflows, and plans with open boxes or open issues.\n\n3. **Fix inbound citations before deleting anything.** The `impact-sliced-diff-base.md` pattern is the main problem: code comments use a plan's decision log as their source of reasoning. For each cited decision, choose one of:\n   - put the reasoning into the comment itself\n   - move it into the matching `docs/.../design` chapter\n   - cite the issue number instead\n\n   Do not swap these for commit-hash links. That keeps the dependency on the record and only hides it. For the test files, first find out whether they read the files (then they are fixtures and should move under `tests/`) or only mention them (then fix the comment).\n\n4. **Distill, then delete completed plans and records.** If a finished plan holds a still-true decision that no maintained doc states, move that decision into the architecture guidance or a design chapter. Then delete the plan. Most plans will need no distillation, because the code and the closed issue already hold the outcome.\n\n5. **Delete bulk evidence outright.** This covers the CodeQL and mined-rule campaign directories, `*.stderr`, raw JSON baselines, and `competition-*` and `first-principles-audit-*` outputs. Their summaries are in the epics. As you said, they need no pointer: `git log --diff-filter=D --name-only -- .agents/` finds any deleted file, and `git show <commit>^:<path>` restores it.\n\n6. **Do it in a few commits, one per category** (campaign evidence, completed plans, loose records). Each commit message should say what class was removed and why. That message is the only pointer you need. Then regenerate the open-core shard.\n\nThis will not make clones smaller, because history keeps the 298 MB. It does make `grep`, file listings and agent searches stop returning stale results, and that was the goal.\n\n## How to revise AGENTS.md so this does not build up again\n\nThe cu\n[... 1886 bytes omitted from the middle of this message ...]\n to plans and records.**\n\n> Code, tests, workflows and `docs/` may cite guidance files and issue numbers. They must not cite `.agents/plans/` or records. Put the reasoning in the comment or in a design chapter.\n\nEnforce this with a small CI check: `git grep` for `.agents/plans/` or records paths under `crates/`, `tests/`, `.github/`, and fail if any are found. This is the only change here that a machine enforces, so it is the one most likely to hold. Without it, citations come back and make records impossible to delete.\n\n**6. (Optional) Make the classes visible in paths.** For example, move records to `.agents/records/<issue-or-topic>/` and leave guidance at the top of `.agents/docs/`. Then \"delete records for closed issues\" becomes a directory operation, and a periodic check can list record directories whose issue has closed. I would wait on this until rules 1–5 have been tried. It means renaming ~500 files, and the closeout rule may be enough.\n\n`★ Insight ─────────────────────────────────────`\n- The 43 code citations of one plan's decision log are the real coupling in this repo. Most records are never cited and can be deleted safely; the ones that are cited are the ones that have to stay. Rule 5 breaks that link.\n- `.open-core/public-paths.d/.agents.tsv` lists every file one by one, so each artifact costs a policy line as well as a file. That is a second, measurable reason to keep the tree small.\n- \"Commit, then delete at closeout\" stores records the way git is designed to: available from history when needed, and not present in the working tree.\n`─────────────────────────────────────────────────`\n\nIf you want to go ahead, I would start by giving a child the census as a read-only task. It would produce the label table plus a list of every inbound citation, which gives you a concrete deletion list to approve. I have not started any of this."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "we have thousands of saved reports and audit artifacts under `.agents/`\n\nhow should we clean these up to reduce noise while retaining still-useful results\n\nand how should we revise our standing AGENTS.md instructions so we don't need to do a Big Bang cleanup pass again\n\nnb: we can keep pointers to git history as one technique, but if the artifact is particularly irrelevant we don't need to preserve even a pointer live, we can just go look for it in the unexpected case that we want to reference it later",
+    "assistant_text_tail": " to plans and records.**\n\n> Code, tests, workflows and `docs/` may cite guidance files and issue numbers. They must not cite `.agents/plans/` or records. Put the reasoning in the comment or in a design chapter.\n\nEnforce this with a small CI check: `git grep` for `.agents/plans/` or records paths under `crates/`, `tests/`, `.github/`, and fail if any are found. This is the only change here that a machine enforces, so it is the one most likely to hold. Without it, citations come back and make records impossible to delete.\n\n**6. (Optional) Make the classes visible in paths.** For example, move records to `.agents/records/<issue-or-topic>/` and leave guidance at the top of `.agents/docs/`. Then \"delete records for closed issues\" becomes a directory operation, and a periodic check can list record directories whose issue has closed. I would wait on this until rules 1–5 have been tried. It means renaming ~500 files, and the closeout rule may be enough.\n\n`★ Insight ─────────────────────────────────────`\n- The 43 code citations of one plan's decision log are the real coupling in this repo. Most records are never cited and can be deleted safely; the ones that are cited are the ones that have to stay. Rule 5 breaks that link.\n- `.open-core/public-paths.d/.agents.tsv` lists every file one by one, so each artifact costs a policy line as well as a file. That is a second, measurable reason to keep the tree small.\n- \"Commit, then delete at closeout\" stores records the way git is designed to: available from history when needed, and not present in the working tree.\n`─────────────────────────────────────────────────`\n\nIf you want to go ahead, I would start by giving a child the census as a read-only task. It would produce the label table plus a list of every inbound citation, which gives you a concrete deletion list to approve. I have not started any of this.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      59
+    ],
+    "user_position": 9,
+    "input_rationale": "The user asked how to clean up .agents/ and revise AGENTS.md; the agent delivered a rule set and a staged proposal and waits for the user to choose to proceed. 'Still open' appears only inside a proposed rule.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "next_work_menu",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "menu": "solicited",
+    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent.",
+    "request_message_ids": [
+      "agent:59"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-04T15:37:23.146Z",
+        "kind": "user",
+        "text": "excellent, i do want the optional path cleanup, but no to the CI rule unless/until we see it creeping back after the cleanup, and we have no reason to expect that at this point if we do our job right."
+      },
+      {
+        "at": "2026-10-04T15:38:40.318Z",
+        "kind": "agent",
+        "text": "Scale is clear. I'm sending three read-only census tasks to children: plans, docs/records, and inbound citations. I'll start deleting and moving files once their tables come back."
+      },
+      {
+        "at": "2026-10-04T15:39:22.849Z",
+        "kind": "agent",
+        "text": "While the census runs, I'll draft the instruction changes."
+      },
+      {
+        "at": "2026-10-04T16:03:40.347Z",
+        "kind": "system",
+        "text": "Subagent \"census-citations\" (e0972227) finished turn 26 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-04T16:11:13.728Z",
+        "kind": "system",
+        "text": "Subagent \"census-plans\" (ac7093c0) finished turn 26 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-04T16:13:55.229Z",
+        "kind": "system",
+        "text": "Subagent \"census-docs\" (2a932355) finished turn 26 (completed, end of turn)."
+      }
+    ]
+  }
+}

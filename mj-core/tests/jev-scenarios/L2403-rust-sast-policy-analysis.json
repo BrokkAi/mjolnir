@@ -1,0 +1,153 @@
+{
+  "id": "L2403",
+  "title": "Rust SAST policy analysis",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "0090c97b3f1c2d0f0fd4fd7d654d2808",
+    "session_title": "bifrost via claude4",
+    "reply_position": 409,
+    "captured_at": "2026-10-21T09:18:13.495Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "what policies would we need to catch the problems described in /tmp/rust-sast.md? what features would we need to add to our engine?"
+        },
+        {
+          "id": "agent:42",
+          "role": "assistant",
+          "text": "I can't answer yet because `/tmp/rust-sast.md` does not exist on this host.\n\nI checked:\n- `/tmp`, from inside and outside the sandbox. The file is not there, and nothing in `/tmp` has \"sast\" in its name.\n- The whole root filesystem, for `*sast*.md` files changed since 2026-10-14. There were none.\n- Markdown files changed in the last 10 hours under your home directory and `/tmp`. None looked like a SAST write-up.\n\nPossible reasons: you wrote the file on another machine, in another container, or under a different name. Or it hasn't been saved yet.\n\nPlease send the correct path, or paste the content. Then I'll map each problem it describes to one of three outcomes:\n1. A policy we can write today with the current RQL and taint features.\n2. A policy that needs a pack model (sources, sinks, sanitizers) that bifrost-packs doesn't have yet.\n3. A gap in the engine that has to be fixed first. I'll check this against the current code, not against old records.\n\n`★ Insight ─────────────────────────────────────`\n- In Bifrost, these are usually separate jobs. Rule and model content now ships from bifrost-packs because of the pack freeze (#4438). Engine gaps are fixed in the bifrost repository itself.\n- The earlier CodeQL Rust parity work (epic #4304, CQ01-CQ15) already lists many Rust engine gaps. Once I can read the document, I'll compare its problems against that list first, so we don't end up with duplicate issues.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:155",
+          "role": "user",
+          "text": "mb, copied"
+        },
+        {
+          "id": "agent:163",
+          "role": "assistant",
+          "text": "Got it. It's an arXiv paper (\"Evaluating and Improving Static Application Security Testing Tools for Rust\"). I'm reading the body now."
+        },
+        {
+          "id": "agent:208",
+          "role": "assistant",
+          "text": "I've read the paper's findings. Now I'm pulling out its table of 17 code transformations, then checking which of these problems Bifrost can already detect."
+        },
+        {
+          "id": "agent:236",
+          "role": "assistant",
+          "text": "I've read the paper. Next I'm checking what Bifrost has today: existing Rust policies in bifrost-packs, the earlier Rust gap issues, and the RQL guidance file."
+        },
+        {
+          "id": "agent:379",
+          "role": "assistant",
+          "text": "I'm checking three last details: whether Rust declarations expose `unsafe`, what `rust_pointer_findings` can detect today, and whether any range (interval) analysis exists."
+        },
+        {
+          "id": "agent:409",
+          "role": "assistant",
+          "text": "Catching the paper's main bug classes would take about nine Rust policies. Two of them are mostly pack work on features the engine already has. The others need engine features that we mostly don't have yet. The biggest gaps are already filed: #3854, #3855, #3858, #4318 and #4319.\n\nI checked against `origin/master` at 4ce078cdf6 (today) and bifrost-packs `origin/main` at 332c6db. Note that your local `bifrost` checkout is three weeks behind master, at 7d57768812. bifrost-packs has only six Rust policies today, plus `cleartext-logging` in open PR #94, and none of them covers these classes.\n\n## What the paper says\n\nThe paper studied 320 RustSec/GHSA/NVD vulnerabilities and six tools: Rudra, MirChecker, LockBud, Semgrep, MIRAI and Prusti. Two results matter most for us:\n- **Most common bug types:** CWE-362 race condition (25), CWE-119 buffer overflow (21) and CWE-908 uninitialized memory (20). The rest of the top 10 is only in a figure, which I can't read from the text.\n- **Most false positives (FPs):** deadlock (15/15 FP), integer overflow (248/261), use-after-free (38/39) and out-of-bounds read (105/109). The causes were imprecise pointer, range and dependency analysis, plus missing models for lock lifetimes, ownership transfer (`into_raw`), and `match`/macro control flow.\n\n## Policies we would need\n\n| # | Policy | Paper evidence | What blocks it |\n|---|---|---|---|\n| P1 | `unsafe impl Send/Sync` with a missing bound. Example: `V: Clone + Debug` with no `V: Send`/`V: Sync` | Fig. 11 (missed bug), Fig. 7 (FP on a lock-like type) | Engine: #3855 (G06). Open and unassigned. Its fixture M77 is exactly this case. |\n| P2 | Panic safety in unsafe code: `ptr::read`, `set_len` or `assume_init`, then a call into caller-supplied code before the value is fixed up. A panic in that code then causes a double drop or a drop of uninitialized memory | Rudra's main check; Fig. 5 is its FP | Engine: unwind edges (#3854), \"callee is caller-supplied\", and value dependency instead of CFG adjacency |\n| P3 | Uninitialized memory exposed (CWE-908). Examples: `with_capacity` then `set_len`, `mem::uninitialized`, or an uninitialized buffer passed to a generic `Read::read` | 20 samples | A typestate protocol (exists; authored in packs) plus API models (pack) plus the P2 \"caller-supplied callee\" fact |\n| P4 | Use after free or dangling pointer (CWE-416/825): access after scope end, `from_raw` used twice, `CString::new(..).unwrap().as_ptr()` | Figs. 1, 9 (FPs on `into_raw`), Fig. 10 (missed bug through `and_then` closures) | Engine: partly exists. `rust_pointer_findings` landed in #4577 on 2026-10-09. #3858 and #4318 are still open. |\n| P5 | Double lock, opposite lock order, guard held across `.await` (CWE-833/667) | Fig. 4, CVE-2024-41815 FP (ignored `drop`), `match` on a lock result | Engine: guard live ranges (#3854) and lock-set summaries (not filed) |\n| P6 | Races (CWE-362/367): filesystem time-of-check-to-time-of-use (TOCTOU), and an atomic `load` followed by a dependent `store` without compare-and-swap | Top category; Fig. 8 shows the thread-ID FP | Filesystem identity #3861 (open). The atomic case can ship only as a review prompt. |\n| P7 | Out-of-bounds access through `get_unchecked`, `ptr.add`, `from_raw_parts` or `copy_nonoverlapping` when no bounds check against the right length dominates the access | 21 samples; Fig. 6 FP | Engine: guards that relate two values (`i < v.len()`); the extent work deferred from #3858 (M65) |\n| P8 | Untrusted integer reaches an allocation size, index or truncating `as` without a checked or saturating operation or a guard. Untrusted divisor without a non-zero check. | Table III: general overflow rules are 91-95% FP | Pack: CQ12 #4316 and CQ01 #4305 sources. Engine: guard barriers, #4319 |\n| P9 | Path traversal (CWE-22) as taint, with `canonicalize` plus `starts_with` as a barrier | Semgrep's single-API rule is the FP example | Pack: CQ03 #4307. Engine: #4319 |\n\nP8 and P9 are mostly pack work on the taint engine we already have. P1 through P7 need engine work first.\n\n## Engine features we would need\n\nOrdered by how\n[... 2505 bytes omitted from the middle of this message ...]\nwere 95% FP. P8's taint-scoped form avoids that.\n\n## Recommendation\n\n1. **Start with P1 via #3855.** It needs no dataflow: it is a declaration-level check, so it can be precise. From memory (not checked against the benchmark), unsound Send/Sync impls are also a large share of RustSec's race-condition advisories.\n2. **Then measure P4 on today's master.** The relation exists, so this is the cheapest way to learn whether #4318 is close to done.\n3. **Then #3854.** It unblocks three policies.\n\nThe paper's test method also fits us. It checks that rewriting a program without changing its meaning doesn't change the findings: wrap a function body in an immediately called closure, pass a reference instead of a value, wrap a value in `RefCell`, or write `fmt::format(format_args!(..))` instead of `format!`. The original program's own findings serve as the expected result, which meets the CLAUDE.md requirement that a property test have an oracle independent of the implementation. The `format!` rewrite targets the macro-lowering code that broke master twice in October (#5371, #5517).\n\n`★ Insight ─────────────────────────────────────`\n- Almost half of the tools' false negatives (41.8%) were crashes or hangs, mostly from depending on nightly compiler internals. Bifrost reads source with tree-sitter, so it avoids that whole category. The cost is that we must model ownership and drop ourselves, which is why #3854 blocks so much here.\n- The paper's FP examples also mark where our rules should not flag: `into_raw` (Fig. 1/9), an explicit `drop(guard)` (Fig. 4), lock-like `Sync` impls (Fig. 7) and thread-owner checks (Fig. 8). Each could become a fixture for a rule that should stay silent.\n`─────────────────────────────────────────────────`\n\nI haven't filed issues or changed anything. If you want, I can file items 4 and 5, which are the unfiled gaps, under #3849."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "mb, copied",
+    "assistant_text_tail": "were 95% FP. P8's taint-scoped form avoids that.\n\n## Recommendation\n\n1. **Start with P1 via #3855.** It needs no dataflow: it is a declaration-level check, so it can be precise. From memory (not checked against the benchmark), unsound Send/Sync impls are also a large share of RustSec's race-condition advisories.\n2. **Then measure P4 on today's master.** The relation exists, so this is the cheapest way to learn whether #4318 is close to done.\n3. **Then #3854.** It unblocks three policies.\n\nThe paper's test method also fits us. It checks that rewriting a program without changing its meaning doesn't change the findings: wrap a function body in an immediately called closure, pass a reference instead of a value, wrap a value in `RefCell`, or write `fmt::format(format_args!(..))` instead of `format!`. The original program's own findings serve as the expected result, which meets the CLAUDE.md requirement that a property test have an oracle independent of the implementation. The `format!` rewrite targets the macro-lowering code that broke master twice in October (#5371, #5517).\n\n`★ Insight ─────────────────────────────────────`\n- Almost half of the tools' false negatives (41.8%) were crashes or hangs, mostly from depending on nightly compiler internals. Bifrost reads source with tree-sitter, so it avoids that whole category. The cost is that we must model ownership and drop ourselves, which is why #3854 blocks so much here.\n- The paper's FP examples also mark where our rules should not flag: `into_raw` (Fig. 1/9), an explicit `drop(guard)` (Fig. 4), lock-like `Sync` impls (Fig. 7) and thread-owner checks (Fig. 8). Each could become a fixture for a rule that should stay silent.\n`─────────────────────────────────────────────────`\n\nI haven't filed issues or changed anything. If you want, I can file items 4 and 5, which are the unfiled gaps, under #3849.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      409
+    ],
+    "user_position": 155,
+    "input_rationale": "The analysis the user asked for is delivered and the reply ends by offering to file two unfiled engine gaps; the user decides whether to file them.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "next_work_menu",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "menu": "unsolicited",
+    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent.",
+    "request_message_ids": [
+      "agent:409"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-21T09:20:01.064Z",
+        "kind": "system",
+        "text": "model set to fable"
+      },
+      {
+        "at": "2026-10-21T09:20:04.433Z",
+        "kind": "system",
+        "text": "effort set to high"
+      },
+      {
+        "at": "2026-10-21T09:20:42.677Z",
+        "kind": "user",
+        "text": "Fable, pls file 4 and 5, then write plans for each (use subagents to explore where necessary); then I'll turn the wheel over to Opus to supervise implementation"
+      },
+      {
+        "at": "2026-10-21T09:20:57.366Z",
+        "kind": "agent",
+        "text": "I'll start by reading the ExecPlan standard and the local repository state, then file the two issues, then spawn exploration children before writing the plans."
+      },
+      {
+        "at": "2026-10-21T09:21:02.098Z",
+        "kind": "agent",
+        "text": "Local master is clean and behind origin; I'll fast-forward it so the plans are written against current code."
+      },
+      {
+        "at": "2026-10-21T09:23:22.910Z",
+        "kind": "system",
+        "text": "Interrupted"
+      }
+    ]
+  }
+}

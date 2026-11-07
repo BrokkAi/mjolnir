@@ -99,7 +99,7 @@ pub fn spawn_gc_on(
             interval.tick().await;
             let root = root.clone();
             let result = tokio::task::spawn_blocking(move || {
-                gc_harness_root(&root.join(harness.id()), pin(harness).install_id)
+                collect_obsolete_installs(&root.join(harness.id()), pin(harness).install_id)
             })
             .await;
             match result {
@@ -548,9 +548,7 @@ async fn resolve_at_async(
                     return Err(error).context("lock invalid managed harness for repair");
                 }
             };
-            std::fs::remove_dir_all(&install).with_context(|| {
-                format!("remove incomplete managed harness {}", install.display())
-            })?;
+            set_aside_incomplete(&harness_root, &install, "managed harness")?;
         }
         install_into(&harness_root, &install, harness, selected, &environment).await?;
     }
@@ -677,6 +675,11 @@ async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> 
     }
 }
 
+/// Delete the staging and set-aside directories earlier installers and repairs
+/// left in `harness_root`. The caller holds the install lock, so no installer
+/// is still writing into them. A directory that will not go is reported and
+/// retried by the next resolution; it must not block a launch, because
+/// nothing but this sweep ever looks at it.
 fn remove_abandoned_staging(harness_root: &Path) -> Result<()> {
     for entry in std::fs::read_dir(harness_root)
         .with_context(|| format!("scan managed harness staging in {}", harness_root.display()))?
@@ -688,12 +691,36 @@ fn remove_abandoned_staging(harness_root: &Path) -> Result<()> {
         if !name.starts_with(".install-") || !entry.file_type()?.is_dir() {
             continue;
         }
-        std::fs::remove_dir_all(entry.path()).with_context(|| {
-            format!(
-                "remove abandoned harness staging {}",
-                entry.path().display()
-            )
-        })?;
+        if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+            tracing::warn!(%error, path = %entry.path().display(), "could not remove abandoned harness staging");
+        }
+    }
+    Ok(())
+}
+
+/// Take an unusable installation out of the way so a fresh one can be
+/// published at `install`. The caller holds the install lock and the
+/// installation's exclusive lease, so no session runs from it and no installer
+/// writes into it. The directory is renamed to a unique sibling that
+/// [`remove_abandoned_staging`] owns, then deleted; `rename` is atomic, so
+/// nothing else that still names `install` (an older release's collector, for
+/// one) can reach the tree being deleted. A directory that cannot be deleted
+/// now is left for the next sweep.
+fn set_aside_incomplete(parent: &Path, install: &Path, what: &str) -> Result<()> {
+    let aside = tempfile::Builder::new()
+        .prefix(".install-abandoned-")
+        .tempdir_in(parent)
+        .with_context(|| format!("create set-aside directory in {}", parent.display()))?
+        .keep();
+    std::fs::rename(install, &aside).with_context(|| {
+        format!(
+            "set aside incomplete {what} {} as {}",
+            install.display(),
+            aside.display()
+        )
+    })?;
+    if let Err(error) = std::fs::remove_dir_all(&aside) {
+        tracing::warn!(%error, path = %aside.display(), "could not remove incomplete {what}; the next installation will retry");
     }
     Ok(())
 }
@@ -743,13 +770,13 @@ async fn install_into(
     open_lock(&staging.path().join(LEASE_FILE))?;
     let manifest = ManagedHarnessManifest::for_install(harness, selected.install_id);
     let body = serde_json::to_vec_pretty(&manifest)?;
+    // The receipt goes in before the rename: a published directory is always
+    // complete, so nothing can observe or collect a half-installed tree.
+    crate::config::atomic_write(&staging.path().join(MANIFEST_FILE), &body)?;
     let staging_path = staging.keep();
     match std::fs::rename(&staging_path, final_path) {
-        Ok(()) => {
-            validate_entrypoint(final_path, selected, harness)
-                .context("validate relocated managed harness")?;
-            crate::config::atomic_write(&final_path.join(MANIFEST_FILE), &body)
-        }
+        Ok(()) => validate_entrypoint(final_path, selected, harness)
+            .context("validate relocated managed harness"),
         Err(error) if final_path.exists() => {
             std::fs::remove_dir_all(&staging_path).with_context(|| {
                 format!("remove losing harness staging {}", staging_path.display())
@@ -1215,9 +1242,7 @@ async fn install_managed_node(
                     return Err(error).context("lock invalid managed Node.js for repair");
                 }
             };
-            std::fs::remove_dir_all(&install).with_context(|| {
-                format!("remove incomplete managed Node.js {}", install.display())
-            })?;
+            set_aside_incomplete(root, &install, "managed Node.js")?;
         }
 
         let staging = tempfile::Builder::new()
@@ -1800,6 +1825,28 @@ fn open_lock(path: &Path) -> Result<File> {
         .with_context(|| format!("open managed harness lock {}", path.display()))
 }
 
+/// Collect the obsolete installations in `harness_root` under the install
+/// lock, the same lock that publishes and repairs them, so a collector never
+/// removes an installation another process is publishing. It skips the pass
+/// when an installer holds the lock; the next tick collects.
+fn collect_obsolete_installs(harness_root: &Path, keep_install_id: &str) -> Result<()> {
+    if !harness_root.is_dir() {
+        return Ok(());
+    }
+    let lock = open_lock(&harness_root.join(INSTALL_LOCK_FILE))?;
+    match lock.try_lock() {
+        Ok(()) => {
+            let _lock = FileLock::new(lock);
+            gc_harness_root(harness_root, keep_install_id)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Ok(()),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(error).context("lock managed harness installer for collection")
+        }
+    }
+}
+
+/// The caller holds the install lock for `root`.
 fn gc_harness_root(root: &Path, keep_install_id: &str) -> Result<()> {
     for entry in std::fs::read_dir(root)
         .with_context(|| format!("scan managed harness cache {}", root.display()))?
@@ -2806,6 +2853,107 @@ mod tests {
 
         assert!(!abandoned.exists());
         assert!(managed.command.exists());
+    }
+
+    // Hard-won: #1434: repairing an incomplete install deleted it in place and
+    // failed with ENOTEMPTY while an older release's collector recreated files in it.
+    #[test]
+    fn repair_of_an_incomplete_install_survives_a_writer_in_the_old_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let install = managed_harness_install_dir(&cache, HarnessKind::Codex);
+        let install_counter = temp.path().join("installs");
+        let environment = fake_node_tools(temp.path(), &install_counter);
+        // A tree with many entries and no receipt: what a collector that
+        // removed half of a fresh installation leaves behind.
+        for index in 0..200 {
+            let directory = install.join(format!("node_modules/package-{index}"));
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("index.js"), b"partial").unwrap();
+        }
+        let stop = std::sync::atomic::AtomicBool::new(false);
+
+        let managed = std::thread::scope(|scope| {
+            // The older collector opens `.lease` with create on every pass.
+            let writer = scope.spawn(|| {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = open_lock(&install.join(LEASE_FILE));
+                    let _ = std::fs::write(install.join("late-file"), b"late");
+                }
+            });
+            let managed = resolve_at(
+                &cache,
+                HarnessKind::Codex,
+                ExecutionPolicy::ConfiguredApprovals,
+                &environment,
+            );
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            writer.join().unwrap();
+            managed.unwrap()
+        });
+
+        assert!(managed.command.exists());
+        assert!(complete_install(&install, HarnessKind::Codex, pin(HarnessKind::Codex)).unwrap());
+        assert!(!install.join("node_modules/package-0").exists());
+    }
+
+    // Hard-won: #1434: a directory the repair could not delete failed the launch.
+    #[test]
+    fn repair_proceeds_when_the_set_aside_tree_cannot_be_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let install = managed_harness_install_dir(&cache, HarnessKind::Codex);
+        let locked = install.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("file"), b"partial").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        // Root ignores directory permissions, so deletion would succeed.
+        let can_delete_anyway = std::fs::remove_file(locked.join("file")).is_ok();
+        if !can_delete_anyway {
+            let install_counter = temp.path().join("installs");
+            let environment = fake_node_tools(temp.path(), &install_counter);
+            let managed = resolve_at(
+                &cache,
+                HarnessKind::Codex,
+                ExecutionPolicy::ConfiguredApprovals,
+                &environment,
+            )
+            .unwrap();
+            assert!(managed.command.exists());
+            assert!(!install.join("locked").exists());
+        }
+        // Allow the temporary directory to be removed.
+        for entry in std::fs::read_dir(cache.join(HarnessKind::Codex.id())).unwrap() {
+            let leftover = entry.unwrap().path().join("locked");
+            if leftover.exists() {
+                std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+        }
+    }
+
+    // Hard-won: #1434: the collector removed a newer installation while its installer held the lock.
+    #[test]
+    fn collector_leaves_installations_alone_while_an_installer_holds_the_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("codex");
+        std::fs::create_dir_all(&root).unwrap();
+        complete_fake(&root, HarnessKind::Codex, "newer", "bin/bridge");
+        let installer = lock_file_blocking(&root.join(INSTALL_LOCK_FILE));
+
+        collect_obsolete_installs(&root, "older").unwrap();
+        assert!(root.join("newer").exists());
+
+        drop(installer);
+        collect_obsolete_installs(&root, "older").unwrap();
+        assert!(!root.join("newer").exists());
+    }
+
+    fn lock_file_blocking(path: &Path) -> FileLock {
+        let file = open_lock(path).unwrap();
+        file.lock().unwrap();
+        FileLock::new(file)
     }
 
     #[test]

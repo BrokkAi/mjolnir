@@ -25,11 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:21",
-          "role": "user",
-          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /workspace/28c4a33bde5b6bc0b4f4d45aa56e46bd/.mj-agents/4343bf69a404f6bca8b6937c502efa3d. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nRead-only soundness review for Bifrost issue #7314 (parent session 28c4a33b). Your brief is /workspace/28c4a33bde5b6bc0b4f4d45aa56e46bd/bifrost-dev/.mj/lanes/logs/c1-4e/COMPLETE-RISK-BRIEF.md; read it first. In short: two native C# definition answers on jellyfin claimed complete (correct target) where legacy was incomplete. Determine whether native's simple-name member lookup is sound when the enclosing type has a base list with external entries, overloads, partial parts or extension methods. Use the two real rows and small fixtures.\nRules:\n- No commits or tree changes.\n- Scratch work under /tmp only.\n- No cloud calls.\n- Prefix cargo with `env -u RUSTUP_TOOLCHAIN -u CARGO_MANIFEST_DIR`, and build with --profile measure --features test-support at master 947d10e0f1, in a /tmp worktree.\nWrite REPORT.md to .mj/lanes/logs/c1-4e/complete-risk/ and hand back the items at the end of the brief."
-        },
-        {
           "id": "agent:27",
           "role": "assistant",
           "text": "I’ll read the review brief, trace the two jellyfin rows through the native resolver, and test the suspected cases in the requested temporary worktree."
@@ -80,11 +75,6 @@
           "text": "Review delivered to the parent. Both jellyfin answers are sound; four small fixtures returned incomplete answers. The [report](/workspace/28c4a33bde5b6bc0b4f4d45aa56e46bd/bifrost-dev/.mj/lanes/logs/c1-4e/complete-risk/REPORT.md) records the remaining partial-overload risk and test evidence."
         },
         {
-          "id": "user:1314",
-          "role": "user",
-          "text": "Parent (28c4a33b): thanks; the two rows are settled. Your finding that \"positive paths can bypass the inherited guard\" needs one decisive follow-up, because the tiny fixtures were incomplete everywhere and masked it. Build fixtures with PROVEN membership: a plain SDK-style csproj under Microsoft.NET.Sdk, no Directory.Build files, all sources under the project directory. Confirm a simple local declaration answers complete first, as the control. Then, under BIFROST_TRIAL_NATIVE_CSHARP, test:\n(a) `class B { public void M() {} } class D : B { void M(int x) {} void Caller() { M(); } }`. C# overload resolution picks B.M, because D.M(int) is not applicable to M(). Does native answer D.M as complete?\n(b) The same, with B external (an unresolvable base) and D.M(int) local.\n(c) A non-partial class with two same-name local overloads and a call that only one fits. Is it complete-ambiguous, or complete on one?\n(d) A partial class whose parts in two files declare competing overloads.\nReport each answer and its completion. If any is complete and wrong, or complete where applicability decides, it is a soundness defect. Give the minimal reproduction and the fix location in csharp_demand.rs, likely where the positive rank-0 member match skips the base-list or inherited guard, but do not implement it. Same constraints as before."
-        },
-        {
           "id": "agent:1322",
           "role": "assistant",
           "text": "I’ll make the local declaration control prove complete first, then run the four overload cases against the same temporary build and report the exact native responses."
@@ -103,11 +93,6 @@
           "id": "agent:1504",
           "role": "assistant",
           "text": "The follow-up found three complete-answer soundness defects: an inapplicable derived method hid a valid source base target, an unresolved base still produced a complete answer, and local overloads produced complete ambiguity despite one applicable method. The partial-type case remained incomplete.\n\nThe [report](/workspace/28c4a33bde5b6bc0b4f4d45aa56e46bd/bifrost-dev/.mj/lanes/logs/c1-4e/complete-risk/REPORT.md) has the reproductions, native responses, and fix locations. The targeted test passed."
-        },
-        {
-          "id": "user:1653",
-          "role": "user",
-          "text": "Parent (28c4a33b): decisive work, thank you. Please implement the fix; it is authorized. Brief: .mj/lanes/logs/c1-4e/APPLICABILITY-BRIEF.md. Worktree: .mj/lanes/7314-applicability, branch 7314-csharp-method-applicability-open, at origin/master ecb3b46353.\nRuling: until M6, a lookup whose selected targets include any method is never complete.\n- Keep the targets: one method answers resolved-incomplete, several answer ambiguous-incomplete.\n- Add one registered reason, csharp_method_applicability_unmodeled, classed Provider in read_ledger. Its evidence names the method group and any explicit base list.\n- Apply it in one helper, used by both positive paths (rank-0 member and owner/qualified).\n- Non-method members keep hiding.\n- Add the golden: your four shapes with proven membership, plus a non-method control, hardwon.\n- Add the epoch token -7314-csharp-method-applicability-open.\nHand back the items at the brief's end."
         },
         {
           "id": "agent:1659",
@@ -230,11 +215,6 @@
           "text": "The implementation needs a design decision. The failing `M()` calls use Value lookup, while the agreed positive paths in `csharp_demand.rs` run only for Type lookup. The [report](/workspace/28c4a33bde5b6bc0b4f4d45aa56e46bd/bifrost-dev/.mj/lanes/logs/c1-4e/applicability/REPORT.md) documents three probes that left the complete answers unchanged. I asked the parent to choose a completion seam for Value answers. No commit or push was made."
         },
         {
-          "id": "user:3438",
-          "role": "user",
-          "text": "Parent (28c4a33b): good find. Before I rule on the seam, answer one read-only question. No code yet; keep your uncommitted worktree as it is.\nJVM method calls get overload and applicability handling through the shared call-applicability machinery (CallApplicabilityAdapter and ConversionEvidence in fact_resolution/call_applicability.rs). C# has no such adapter, yet the shared path answers C#'s M() method groups as complete. Map, with file:line at origin/master:\n(1) where the shared native definition path decides a Value lookup's targets and completion for a call-position name, and where call applicability is consulted for languages that have an adapter;\n(2) what happens for a language WITHOUT an adapter: does the shared path skip applicability and still mark the answer Complete? That would be the general fail-open defect;\n(3) the minimal seam for each option:\n   (A) a shared fail-closed rule: if the language supplies no applicability adapter and a selected target is a callable in call position, combine a registered incomplete reason, without per-language code;\n   (B) a C#-only answer-level hook on DemandInstall, with a default no-op, called after the targets are known.\nSay which other languages would also be affected by (A) (Go, Rust, Python, C++?), and whether each already has applicability. Hand back MAP.md with your recommendation; I'll rule."
-        },
-        {
           "id": "agent:3444",
           "role": "assistant",
           "text": "I’ll trace the Value answer path and adapter lookup at the assigned master commit, then compare the registered language adapters. I’ll leave the worktree untouched and put the map in `MAP.md`."
@@ -253,11 +233,6 @@
           "id": "agent:3852",
           "role": "assistant",
           "text": "The read-only seam map is in [MAP.md](/workspace/28c4a33bde5b6bc0b4f4d45aa56e46bd/bifrost-dev/.mj/lanes/logs/c1-4e/applicability/MAP.md). The existing uncommitted worktree was left untouched."
-        },
-        {
-          "id": "user:3950",
-          "role": "user",
-          "text": "Parent (28c4a33b): ruling (B), and thanks for showing that (A) would wrongly reopen Rust and Python. Implement it in the existing worktree, branch 7314-csharp-method-applicability-open, merging origin/master first, because #8444 landed.\n- Add one DemandInstall method with a TYPED outcome, not a side effect: for example `fn selected_target_completion(&self, preparation: &dyn Any, targets: <the selected target descriptors>) -> ResolutionCompletion`. It defaults to `ResolutionCompletion::Complete`, so every other language is unchanged by construction. Call it once, after target selection and before projection, as your map says, and combine its result into the answer's completion in shared code.\n- The C# implementation: if any selected target is a callable, combine csharp_method_applicability_unmodeled (registered as Provider in read_ledger), with evidence naming the method group and the owner's explicit base list, if any. Callable targets come from a CallableReference without a C# call obligation; C# produces none until M6. Non-callable targets return Complete.\n- Remove the helper you added to the Type positive paths. A Type lookup cannot select a method, so it doesn't apply there.\n- Keep the planned golden: shapes (a) to (d) plus the non-method control, with proven membership, under the trial, tagged hardwon. (a) to (c) become incomplete with the reason, and (d) stays incomplete.\n- Identity: the substrate token -7314-csharp-method-applicability-open only.\n- Validation as in the brief. The trait change is shared code JVM compiles against, so run the JVM selection (jvm-analysis lib and the JVM closer goldens) as well, to prove the default no-op. I'll ask the coordinator whether it needs a lifecycle lane.\nHand back the head and the shared-file list."
         },
         {
           "id": "agent:3956",
