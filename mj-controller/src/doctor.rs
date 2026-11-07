@@ -982,12 +982,22 @@ fn aws_scope_check(
     targets: &BTreeMap<String, TargetTemplate>,
     executor: &impl CommandExecutor,
 ) -> Option<DoctorCheck> {
-    if !profile.enabled || profile.auth_scheme() != mj_core::config::AuthScheme::AwsCredentialChain
-    {
+    if !profile.enabled {
         return None;
     }
     let check_id = format!("harness.{id}.aws-scope");
     let title = format!("AWS credentials for profile {id}");
+    if profile.auth_scheme() != mj_core::config::AuthScheme::AwsCredentialChain {
+        // Sessions run, without scoping; they are not refused.
+        return crate::aws_credentials::unused_role_notice(id, profile).map(|notice| {
+            DoctorCheck::warning(
+                check_id,
+                title,
+                notice,
+                format!("Remove `[profiles.{id}.aws]`, or configure Bedrock (the AWS credential chain) for this profile."),
+            )
+        });
+    }
     // The same question launch and the sync ask, per configured target.
     let receiving = targets
         .iter()

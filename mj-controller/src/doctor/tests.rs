@@ -2115,6 +2115,25 @@ fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
         &AlwaysFailingExecutor,
     ));
 
+    // A table on a profile that does not use the AWS chain has no effect;
+    // sessions run, and doctor says so.
+    let not_bedrock = HarnessProfile {
+        aws: Some(mj_core::config::AwsRoleConfig {
+            role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+            session_policy: None,
+            session_policy_arns: Vec::new(),
+            duration_seconds: None,
+            source_identity: false,
+        }),
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
+    };
+    checks.extend(aws_scope_check(
+        "claude",
+        &not_bedrock,
+        &containers,
+        &AlwaysFailingExecutor,
+    ));
+
     let mut rendered = Vec::new();
     render_human(&checks, &mut rendered).expect("render doctor checks");
     mj_core::golden::assert_golden(

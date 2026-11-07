@@ -1701,13 +1701,6 @@ impl HarnessProfile {
                     self.describe_codex_config()
                 );
             }
-            // Whether a profile authenticates with the AWS credential chain
-            // depends on its environment and, for Codex, its home.
-            if self.aws.is_some() && self.auth_scheme() != AuthScheme::AwsCredentialChain {
-                bail!(
-                    "[profiles.{id}.aws] applies only to a profile that authenticates with the AWS credential chain (Amazon Bedrock); remove it, or configure Bedrock for this profile"
-                );
-            }
             self.ensure_instructions_deliverable(None)
         };
         ready().map_err(|error| profile_refusal(id, &error))

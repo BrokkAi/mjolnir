@@ -96,6 +96,17 @@ pub(crate) fn receives_synced_credentials(
         && !has_credential_source(profile.environment.resolved())
 }
 
+/// What to tell the person when a profile has a `[profiles.<id>.aws]` table
+/// but does not authenticate with the AWS credential chain, so the table cannot
+/// apply. The session runs without it rather than being refused.
+pub(crate) fn unused_role_notice(profile_id: &str, profile: &HarnessProfile) -> Option<String> {
+    (profile.aws.is_some() && profile.auth_scheme() != AuthScheme::AwsCredentialChain).then(|| {
+        format!(
+            "[profiles.{profile_id}.aws] has no effect: profile {profile_id} does not authenticate with the AWS credential chain (Amazon Bedrock), so this session runs without role-scoped credentials. Remove the table, or configure Bedrock for the profile."
+        )
+    })
+}
+
 /// Explicit target credentials and EC2 instance roles stay target-owned.
 pub(crate) fn source(
     profile: &HarnessProfile,
@@ -331,5 +342,42 @@ mod tests {
                     .all(|(_, event)| !event.contains("private-secret"))
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+
+    // Hard-won: 96c0993ac: sessions of a non-Bedrock profile with an `aws` table were refused instead of running with a notice.
+    #[test]
+    fn a_role_table_that_cannot_apply_is_a_notice_not_a_refusal() {
+        let home = tempfile::tempdir().unwrap();
+        let role = mj_core::config::AwsRoleConfig {
+            role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+            session_policy: None,
+            session_policy_arns: Vec::new(),
+            duration_seconds: None,
+            source_identity: false,
+        };
+        let mut plain = HarnessProfile::new(mj_core::config::HarnessKind::Claude, home.path());
+        assert_eq!(unused_role_notice("work", &plain), None);
+        plain.aws = Some(role.clone());
+        let notice = unused_role_notice("work", &plain).unwrap();
+        assert!(
+            notice.contains("[profiles.work.aws] has no effect"),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("runs without role-scoped credentials"),
+            "{notice}"
+        );
+        // On a Bedrock profile the table applies, so there is nothing to say.
+        let mut bedrock = HarnessProfile::new(mj_core::config::HarnessKind::Claude, home.path());
+        bedrock
+            .environment
+            .insert("CLAUDE_CODE_USE_BEDROCK".to_owned(), "1".to_owned());
+        bedrock.aws = Some(role);
+        assert_eq!(unused_role_notice("work", &bedrock), None);
     }
 }

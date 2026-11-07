@@ -266,7 +266,9 @@ fails to start with AWS's error and what to change. A running session keeps the
 scoped credentials Mjolnir issued until they expire, and has any other AWS
 credentials it holds (the host's own, from before you added the role) withdrawn;
 the session's other synchronization continues and the failure is reported. you can also remove the table to return to
-copying the host's credentials. This applies only to container and SSH
+copying the host's credentials. A table on a profile that does not
+authenticate with the AWS credential chain has no effect: sessions start without
+it, with a notice, and `mj doctor` warns. This applies only to container and SSH
 sessions that receive synced credentials: raw local sessions read the host's
 AWS files directly, EC2 sessions use their instance role, and a Bedrock API key
 (`AWS_BEARER_TOKEN_BEDROCK`) is not covered. The table is edited in

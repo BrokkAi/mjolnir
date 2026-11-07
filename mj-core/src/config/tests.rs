@@ -3506,3 +3506,19 @@ fn a_profile_models_allow_list_round_trips_and_is_omitted_when_empty() {
         [listed]
     );
 }
+
+// Hard-won: 96c0993ac: a profile with an `aws` table that does not authenticate with the AWS chain refused every session, leaving the person to edit configuration first.
+#[test]
+fn an_aws_role_table_on_a_profile_that_cannot_use_it_does_not_refuse_sessions() {
+    let home = tempfile::tempdir().unwrap();
+    let mut profile = HarnessProfile::new(HarnessKind::Claude, home.path());
+    profile.aws = Some(AwsRoleConfig {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        session_policy: None,
+        session_policy_arns: Vec::new(),
+        duration_seconds: None,
+        source_identity: false,
+    });
+    assert_ne!(profile.auth_scheme(), AuthScheme::AwsCredentialChain);
+    profile.ensure_ready("claude").unwrap();
+}

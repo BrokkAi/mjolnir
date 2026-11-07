@@ -207,6 +207,11 @@ impl Controller {
             "profile staging completed"
         );
         result?;
+        if let Some(notice) =
+            crate::aws_credentials::unused_role_notice(&session.last_profile, profile)
+        {
+            executor.notify_notice(&notice);
+        }
         if let Some(source) = self.aws_credential_source(session_id)? {
             let credentials = crate::aws_assume_role::obtain(
                 &session.last_profile,
