@@ -861,7 +861,9 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
 
 /// Records the purpose of every command. The worker-root probe either runs
 /// for real or fails as if SSH or Podman were unreachable; every other command
-/// fails, so a close that tries to reconnect or restart a worker is visible.
+/// fails, so a close that tries to restart a worker is visible. A close first
+/// tries the relay, which is not an executor command: a root without a worker
+/// binary, or whose binary exits at once, is a dead relay transport.
 struct RootProbeExecutor {
     probe_fails: bool,
     /// What the worker liveness probe answers.
@@ -924,7 +926,8 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
         .unwrap_err();
     assert_eq!(
         *unreachable.purposes.lock().unwrap().first().unwrap(),
-        "probe Mjolnir worker root"
+        "probe Mjolnir worker daemon liveness",
+        "a missing worker binary is a dead relay, so the close judges the worker next"
     );
     assert!(
         !unreachable
@@ -953,6 +956,7 @@ async fn closing_a_child_with_no_worker_root_skips_worker_recovery() {
     assert_eq!(
         *answered.purposes.lock().unwrap(),
         [
+            "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root",
             "probe Mjolnir worker daemon liveness",
             "stop a borrowed-target sub-agent and remove its private worker state"
@@ -980,7 +984,15 @@ async fn close_child_with_partial_root(
     let session_id = "0123456789abcdef0123456789abcdef";
     let worker_root = directory.path().join(session_id);
     std::fs::create_dir_all(&worker_root).unwrap();
-    std::fs::write(worker_root.join("hel"), b"").unwrap();
+    // A worker binary that exits at once: its relay proxy disconnects during
+    // hello, which is how a dead worker looks from the controller.
+    let hel = worker_root.join("hel");
+    std::fs::write(&hel, b"#!/bin/sh\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     std::fs::write(worker_root.join("worker-exit.json"), b"{}").unwrap();
     if has_state {
         std::fs::write(worker_root.join(mj_core::relay::RELAY_STATE_FILE), b"{}").unwrap();
@@ -1049,6 +1061,7 @@ async fn closing_a_child_whose_root_has_no_relay_state_skips_worker_recovery() {
     assert_eq!(
         purposes,
         [
+            "probe Mjolnir worker daemon liveness",
             "probe Mjolnir worker root",
             "probe Mjolnir worker daemon liveness",
             "stop a borrowed-target sub-agent and remove its private worker state"
@@ -1075,8 +1088,11 @@ async fn closing_a_child_whose_root_has_relay_state_keeps_worker_recovery() {
         return;
     };
     assert_eq!(
-        purposes.first().map(String::as_str),
-        Some("probe Mjolnir worker root")
+        purposes[..2],
+        [
+            "probe Mjolnir worker daemon liveness",
+            "probe Mjolnir worker root"
+        ]
     );
     assert!(
         !purposes
@@ -1106,13 +1122,9 @@ async fn closing_a_child_whose_worker_is_still_starting_keeps_worker_recovery() 
     else {
         return;
     };
-    assert_eq!(
-        purposes[..2],
-        [
-            "probe Mjolnir worker root",
-            "probe Mjolnir worker daemon liveness"
-        ]
-    );
+    // The worker is not confirmed dead, so the close stops at the liveness
+    // probe: it neither reads the root nor cleans it up.
+    assert_eq!(purposes, ["probe Mjolnir worker daemon liveness"]);
     assert!(
         !purposes
             .iter()
