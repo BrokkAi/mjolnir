@@ -829,7 +829,11 @@ impl InputProgress {
         record: Option<&mj_core::state::SessionRecord>,
         current: (String, Option<String>, bool),
     ) -> (String, Option<String>, bool) {
-        if !record.is_some_and(|record| record.state.can_receive_child_work()) {
+        // `stopping` is how `subagent_status` reports an accepted close while
+        // the record is still `Running`; a queued message cannot run then.
+        if matches!(current.0.as_str(), "stopping" | "stopped")
+            || !record.is_some_and(|record| record.state.can_receive_child_work())
+        {
             return current;
         }
         if self
@@ -867,5 +871,30 @@ impl InputProgress {
             // Earlier parents already consume these field names.
             entry["input_deliveries"] = deliveries;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hard-won: 60adf13fe: a queued message turned a child whose close was running back to "running".
+    #[test]
+    fn a_queued_message_does_not_hide_a_running_close() {
+        let mut record = crate::controller::test_support::checkpoint_test_session("child");
+        record.state = SessionState::Running;
+        let progress = InputProgress {
+            pending: BTreeMap::from([("child".to_owned(), vec!["message-1".to_owned()])]),
+            deliveries: BTreeMap::new(),
+        };
+        assert_eq!(
+            progress.status("child", Some(&record), ("stopping".into(), None, false)),
+            ("stopping".into(), None, false)
+        );
+        assert_eq!(
+            progress.status("child", Some(&record), ("completed".into(), None, true)),
+            ("running".into(), None, false),
+            "a child that can take the queued message is about to run"
+        );
     }
 }
