@@ -140,6 +140,12 @@ pub(super) async fn serve_session(
     )
     .await?;
 
+    let directories =
+        SessionDirectories::negotiate(spec, &initialized.agent_capabilities.session_capabilities);
+    if let Some(message) = directories.notice.clone() {
+        emit_runtime_event(events, RuntimeEvent::Warning { message }).await?;
+    }
+
     if spec.harness == HarnessKind::Claude && !background_subagents_supported {
         emit_runtime_event(events, RuntimeEvent::Warning {
             message: "This Claude adapter does not advertise backgroundSubagents. Foreground completion requires claude-agent-acp 0.95.0 or later; upgrade the container or worker to let prompts finish while background agents run.".into(),
@@ -229,7 +235,7 @@ pub(super) async fn serve_session(
         {
             // `session/resume` does not replay, so everything it sends is live.
             accept_live_history(live_history_enabled);
-            let request = resume_session_request(spec, session_id.clone());
+            let request = resume_session_request(spec, &directories.accepted, session_id.clone());
             offered_mcp_servers = request.mcp_servers.len();
             let resumed = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
@@ -237,7 +243,7 @@ pub(super) async fn serve_session(
                 .with_context(|| format!("resume ACP session {existing}"))
                 .map(|resumed| (resumed.meta, resumed.config_options, resumed.modes))
         } else {
-            let request = load_session_request(spec, session_id.clone());
+            let request = load_session_request(spec, &directories.accepted, session_id.clone());
             offered_mcp_servers = request.mcp_servers.len();
             let loaded = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();
@@ -335,7 +341,7 @@ pub(super) async fn serve_session(
             // this, a fallback from a failed reload dropped every reply the new
             // session sent for the rest of the worker's life (R8-1).
             accept_live_history(live_history_enabled);
-            let request = new_session_request(spec, true);
+            let request = new_session_request(spec, &directories.accepted, true);
             offered_mcp_servers = request.mcp_servers.len();
             let created = connection.send_request(request).block_task().await;
             spec.acp_activity.mark();

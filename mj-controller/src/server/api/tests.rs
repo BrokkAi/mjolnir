@@ -1391,6 +1391,21 @@ impl SubagentBackend for FakeBackend {
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::workspace::WorkspaceRecord>>> {
         Box::pin(async { Ok(self.workspaces.0.lock().unwrap().clone()) })
     }
+    fn workspace(
+        &self,
+        id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::workspace::WorkspaceRecord>>> {
+        Box::pin(async move {
+            Ok(self
+                .workspaces
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|workspace| workspace.id == id)
+                .cloned())
+        })
+    }
     fn create_workspace(
         &self,
         name: String,
@@ -4829,13 +4844,20 @@ async fn input_aware_wait_returns_the_form_without_needing_a_turn_summary() {
     assert_eq!(body["pending_elicitations"][0]["id"], "question-1");
 }
 
+/// A backend whose store holds the fixture session's workspace, which is
+/// where a resume of that session must find it.
+fn backend_holding_the_session_workspace() -> Arc<FakeBackend> {
+    let mut workspace = FakeWorkspaces::record("default");
+    workspace.id = "default".into();
+    Arc::new(FakeBackend {
+        workspaces: FakeWorkspaces(Mutex::new(vec![workspace])),
+        ..FakeBackend::default()
+    })
+}
+
 /// Make the fixture session look the way `mj suspend` leaves one: suspended, with
 /// resume as the thing it can do next.
 fn make_stopped(snapshot: &mut ViewerSnapshot) {
-    snapshot.workspaces.push(super::super::ViewerWorkspace {
-        id: snapshot.sessions[0].workspace_id.clone(),
-        name: "default".into(),
-    });
     let session = &mut snapshot.sessions[0];
     session.state = "stopped".into();
     session.lifecycle = ViewerLifecycleCategory::Suspended;
@@ -4849,7 +4871,7 @@ fn make_stopped(snapshot: &mut ViewerSnapshot) {
 #[tokio::test]
 async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operation() {
     let (app, mut actions, snapshot_tx, _) =
-        api_app(Arc::new(FakeBackend::default()), make_stopped);
+        api_app(backend_holding_the_session_workspace(), make_stopped);
     let mut response = tokio::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/resume"))
@@ -4983,7 +5005,7 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
 #[tokio::test]
 async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
     let (app, mut actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+        api_app(backend_holding_the_session_workspace(), |snapshot| {
             make_stopped(snapshot);
             // A launch that failed before its first checkpoint.
             let session = &mut snapshot.sessions[0];
@@ -5043,7 +5065,7 @@ fn a_published_session_says_whether_it_has_a_checkpoint() {
 #[tokio::test]
 async fn resuming_an_unknown_session_is_not_found() {
     let (app, _actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), make_stopped);
+        api_app(backend_holding_the_session_workspace(), make_stopped);
     let response = app
         .oneshot(
             bearer(Request::post("/api/v1/sessions/session-404/resume"))

@@ -122,6 +122,18 @@ the primary design not working. This includes options in third-party tools
 that quietly degrade, such as OpenSSH's `ControlMaster=auto` opening a direct
 connection when sharing fails: choose the configuration that fails visibly.
 
+Do not add protective caps on speculation: concurrency limits, admission
+gates, rate limits, retry budgets, size limits, or timeouts that guard against
+a failure nobody has observed. A fixed guess becomes the bottleneck as soon as
+conditions change, and it fails far from its cause. Prefer reacting to the
+real limit when the other side reports it, such as a refusal, an error, or
+backpressure. Add a cap only for a limit that is documented or measured, take
+its value from that limit (read it from the other side or its configuration
+where possible), and say in a comment where the number comes from. Remove a
+cap when the reason for it no longer holds, for example when the work it
+guarded moves to another path. A timeout covers only the work it names; time
+spent waiting in a queue for a slot must not count against it.
+
 Never leave the user stuck. When a request conflicts with a setting, or the
 setting cannot apply here, do not refuse and tell the user to change something
 before they can try again. Do the sensible thing for them, such as creating the
