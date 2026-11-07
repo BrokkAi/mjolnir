@@ -74,35 +74,6 @@ impl ScopedAwsCredentials {
         );
     }
 
-    /// Unexpired credentials this process issued for the session and source,
-    /// without issuing any. For a caller that must decide what a worker may
-    /// still hold when a new mint fails. `None` when there are none, or when
-    /// another caller is minting into the entry (the caller then assumes
-    /// nothing).
-    pub(crate) fn cached(
-        &self,
-        session_id: &str,
-        source: &AwsCredentialSource,
-    ) -> Option<AwsCredentials> {
-        let role = source.role.as_ref()?;
-        let now = (self.now)();
-        let cell = Arc::clone(
-            self.entries
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&ScopedKey {
-                    session_id: session_id.to_owned(),
-                    role: role.clone(),
-                    environment: source.environment.clone(),
-                })?,
-        );
-        let entry = cell.try_lock().ok()?;
-        entry
-            .as_ref()
-            .filter(|entry| entry.expires_at > now)
-            .map(|entry| entry.credentials.clone())
-    }
-
     pub(crate) fn shared() -> Arc<Self> {
         static SHARED: OnceLock<Arc<ScopedAwsCredentials>> = OnceLock::new();
         Arc::clone(SHARED.get_or_init(|| Arc::new(Self::with_clock(Arc::new(SystemTime::now)))))
@@ -165,7 +136,13 @@ impl ScopedAwsCredentials {
             &session_name(session_id),
             &source.environment,
         );
-        let minted = mint(&command, host_profile, executor).with_context(|| {
+        let minted = mint(&command, host_profile, executor)
+            .and_then(|credentials| {
+                // Recorded beside the secret on the worker, so what Mjolnir
+                // issued for this session's role is recognisable later.
+                credentials.issued_for(&role.role_arn, &session_name(session_id))
+            })
+            .with_context(|| {
             format!(
                 "Could not assume AWS role {} for this session. Check that the controller's AWS login can assume the role and that the role's trust policy allows it; or remove [profiles.{profile_id}.aws] to give sessions your AWS credentials unscoped",
                 role.role_arn

@@ -238,7 +238,11 @@ What a session receives depends on the profile:
   fix. A running session keeps the scoped credentials Mjolnir issued for it
   until they expire while the sync reports the failure, but a session that
   still holds the host's own credentials (installed before the role was
-  configured) has them withdrawn, because static host keys never expire.
+  configured) has them withdrawn, because static host keys never expire. The
+  worker records beside the secret which role and session Mjolnir issued
+  credentials for, so after a daemon restart Mjolnir still keeps what it issued
+  and withdraws everything else. A session on a worker too old to withdraw is
+  moved to a current worker automatically when it is idle, and withdrawn then.
   Mjolnir never falls back to the host's credentials, and the session's other
   synchronization (GitHub token, skills, logins) continues. See [Limiting the AWS credentials sessions receive](/profiles/#limiting-the-aws-credentials-sessions-receive).
 

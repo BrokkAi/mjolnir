@@ -147,7 +147,8 @@ impl CredentialSyncCoordinator {
         let mut targets_rx = targets_tx.subscribe();
         let handle_targets = targets_tx.clone();
         let (triggers_tx, mut triggers_rx) = mpsc::unbounded_channel::<SyncTrigger>();
-        let (completed_tx, mut completed_rx) = mpsc::unbounded_channel::<CredentialSyncResult>();
+        let (completed_tx, mut completed_rx) =
+            mpsc::unbounded_channel::<(CredentialSyncResult, Option<SyncTrigger>)>();
         let (results_tx, results_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval_at(
@@ -190,7 +191,12 @@ impl CredentialSyncCoordinator {
                     // A session finished: a trigger waiting for it can run.
                     _ = in_flight.released() => {}
                     completed = completed_rx.recv() => {
-                        let Some(result) = completed else { break };
+                        let Some((result, requeue)) = completed else { break };
+                        // A trigger whose session was held by another pass is
+                        // not dropped: it waits for the session to be free.
+                        if let Some(trigger) = requeue {
+                            enqueue(&mut queue, trigger);
+                        }
                         if result.trigger.is_some()
                             || result.failure.is_some()
                             || !result.outcomes.is_empty()
@@ -280,18 +286,29 @@ impl CredentialSyncCoordinator {
                             .await
                         })
                         .await;
-                        let (failure, outcomes) = match joined {
-                            Ok(outcomes) => (None, outcomes),
-                            Err(error) => (Some(format!("sync task stopped: {error}")), Vec::new()),
+                        let (failure, outcomes, skipped) = match joined {
+                            Ok(pass) => (None, pass.outcomes, pass.trigger_skipped),
+                            Err(error) => (
+                                Some(format!("sync task stopped: {error}")),
+                                Vec::new(),
+                                false,
+                            ),
                         };
                         let profile_id = trigger.profile_id.clone();
+                        // The sync that was asked for did not reach its
+                        // session, so it is reported to nobody as done and
+                        // runs again once the session is free.
+                        let requeue = skipped.then(|| trigger.clone());
                         if completed_tx
-                            .send(CredentialSyncResult {
-                                profile_id: trigger.profile_id,
-                                trigger: trigger.cause,
-                                failure,
-                                outcomes,
-                            })
+                            .send((
+                                CredentialSyncResult {
+                                    profile_id: trigger.profile_id,
+                                    trigger: if skipped { None } else { trigger.cause },
+                                    failure,
+                                    outcomes,
+                                },
+                                requeue,
+                            ))
                             .is_err()
                         {
                             tracing::debug!(
@@ -337,7 +354,9 @@ pub(super) async fn reconcile_profile(
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
 ) -> Vec<CredentialSyncOutcome> {
-    reconcile_profile_with(&SessionsInFlight::default(), targets, triggered_by).await
+    reconcile_profile_with(&SessionsInFlight::default(), targets, triggered_by)
+        .await
+        .outcomes
 }
 
 #[cfg(all(test, unix))]
@@ -345,7 +364,7 @@ pub(super) async fn reconcile_profile_with(
     in_flight: &SessionsInFlight,
     targets: &[CredentialSyncTarget],
     triggered_by: Option<&str>,
-) -> Vec<CredentialSyncOutcome> {
+) -> ProfilePass {
     reconcile_profile_guarded(
         &SessionRelays::Direct,
         targets,
@@ -377,18 +396,29 @@ pub(super) async fn reconcile_profile_guarded(
     runtime: Option<&Arc<crate::daemon::RuntimeState>>,
     slopcop_login: SlopcopLoginSource,
     in_flight: &SessionsInFlight,
-) -> Vec<CredentialSyncOutcome> {
-    // Sessions another pass is already working on are that pass's to finish.
-    // The claim that decides is taken per session below; this only spares the
-    // work of preparing for sessions that will be skipped.
-    let targets = targets
-        .iter()
-        .filter(|target| !in_flight.is_claimed(&target.session_id))
-        .cloned()
-        .collect::<Vec<_>>();
-    let targets = targets.as_slice();
+) -> ProfilePass {
+    // The one decision about who works on a session, taken before any work for
+    // it (the mint, the export, anything): a session another pass holds is
+    // that pass's to finish. The claim is held until the session's own
+    // reconciliation ends, so a session that never answers holds only itself.
+    let mut claims = Vec::new();
+    let mut claimed = Vec::new();
+    let mut trigger_skipped = false;
+    for target in targets {
+        match in_flight.claim(&target.session_id) {
+            Some(claim) => {
+                claims.push(Some(claim));
+                claimed.push(target.clone());
+            }
+            None => trigger_skipped |= triggered_by == Some(target.session_id.as_str()),
+        }
+    }
+    let targets = claimed.as_slice();
     let Some(first) = targets.first().cloned() else {
-        return Vec::new();
+        return ProfilePass {
+            outcomes: Vec::new(),
+            trigger_skipped,
+        };
     };
     // Read once per pass, and only when a session needs a copy: a raw
     // localhost session reads the host's own login.
@@ -475,7 +505,7 @@ pub(super) async fn reconcile_profile_guarded(
                 Err(error) => AwsSync::Unavailable {
                     error: format!("{error:#}"),
                     scoped_required: false,
-                    scoped_held: None,
+                    expected_scope: None,
                 },
             }),
         })
@@ -487,20 +517,31 @@ pub(super) async fn reconcile_profile_guarded(
         // known, and all of them together: a slow mint or a slow session actor
         // holds only itself. Results are taken as they finish.
         let mut running = futures::stream::FuturesUnordered::new();
-        let dispatch = |index: usize, aws: AwsSync, reported: bool| {
+        let dispatch = |index: usize, aws: AwsSync, reported: bool, claim: SessionClaim| {
             let target = &targets[index];
             let context = &pass_context;
             async move {
                 (
                     index,
-                    reconcile_target(context, target, aws, pass, reported).await,
+                    reconcile_target(context, target, aws, pass, reported, claim).await,
                 )
             }
         };
+        // The second pass claims each session again: the first released it
+        // when its reconciliation ended.
+        if pass == 1 {
+            for index in 0..targets.len() {
+                claims[index] = in_flight.claim(&targets[index].session_id);
+            }
+        }
         for index in 0..targets.len() {
-            if let Some(aws) = &aws_credentials[index] {
+            // Only a session whose credentials are known starts now; the claim
+            // of one still minting stays held until its mint arrives.
+            if let Some(aws) = &aws_credentials[index]
+                && let Some(claim) = claims[index].take()
+            {
                 let reported = outcomes.contains_key(&targets[index].session_id);
-                running.push(dispatch(index, aws.clone(), reported));
+                running.push(dispatch(index, aws.clone(), reported, claim));
             }
         }
         loop {
@@ -516,19 +557,28 @@ pub(super) async fn reconcile_profile_guarded(
                         Err(error) => AwsSync::Unavailable {
                             error: format!("{error:#}"),
                             scoped_required: true,
-                            // Scoped credentials the controller itself issued
-                            // and the worker may still hold.
-                            scoped_held: targets[index].aws_credentials.as_ref().and_then(
-                                |source| {
-                                    crate::aws_assume_role::ScopedAwsCredentials::shared()
-                                        .cached(&targets[index].session_id, source)
-                                },
-                            ),
+                            // What the worker's recorded scope must match for
+                            // its credentials to stay: issued for this role
+                            // and this session.
+                            expected_scope: targets[index]
+                                .aws_credentials
+                                .as_ref()
+                                .and_then(|source| source.role.as_ref())
+                                .map(|role| {
+                                    (
+                                        role.role_arn.clone(),
+                                        crate::aws_assume_role::session_name(
+                                            &targets[index].session_id,
+                                        ),
+                                    )
+                                }),
                         },
                     };
                     aws_credentials[index] = Some(aws.clone());
-                    let reported = outcomes.contains_key(&targets[index].session_id);
-                    running.push(dispatch(index, aws, reported));
+                    if let Some(claim) = claims[index].take() {
+                        let reported = outcomes.contains_key(&targets[index].session_id);
+                        running.push(dispatch(index, aws, reported, claim));
+                    }
                 }
                 Some((index, result)) = futures::StreamExt::next(&mut running),
                     if !running.is_empty() =>
@@ -545,7 +595,20 @@ pub(super) async fn reconcile_profile_guarded(
             break;
         }
     }
-    outcomes.into_values().collect()
+    ProfilePass {
+        outcomes: outcomes.into_values().collect(),
+        trigger_skipped,
+    }
+}
+
+/// What one pass over a profile found.
+#[derive(Debug)]
+pub(super) struct ProfilePass {
+    pub(super) outcomes: Vec<CredentialSyncOutcome>,
+    /// The session whose failure asked for this sync was held by another pass
+    /// and was not reached. The trigger must run again when it is free, not
+    /// be dropped.
+    pub(super) trigger_skipped: bool,
 }
 
 /// What a sync pass does about one session's AWS credentials.
@@ -565,10 +628,11 @@ pub(super) enum AwsSync {
         /// configured; unless it provably holds `scoped_held`, they are
         /// withdrawn rather than left in place. Static host keys never expire.
         scoped_required: bool,
-        /// Unexpired scoped credentials the controller issued for this
-        /// session, which the worker may still hold. Keeping them until they
-        /// expire is safe: they are limited to the role.
-        scoped_held: Option<mj_core::aws_credentials::AwsCredentials>,
+        /// The role and role session name credentials the worker holds must
+        /// have been issued for to stay (until they expire): the worker
+        /// records that beside the secret, so this holds across a daemon
+        /// restart. Anything else it holds is withdrawn.
+        expected_scope: Option<(String, String)>,
     },
 }
 
@@ -597,6 +661,7 @@ struct PassContext<'a> {
     skills: &'a Arc<CanonicalSkills>,
     slopcop_login: &'a HostSlopcopLogin,
     triggered_by: Option<&'a str>,
+    /// Only for the lock around rewriting the profile's canonical login.
     in_flight: &'a SessionsInFlight,
 }
 
@@ -627,6 +692,8 @@ async fn reconcile_target(
     aws_credentials: AwsSync,
     pass: usize,
     reported: bool,
+    // Held until this session's reconciliation ends, on any path.
+    _claim: SessionClaim,
 ) -> TargetResult {
     let PassContext {
         relays,
@@ -637,13 +704,6 @@ async fn reconcile_target(
         triggered_by,
         in_flight,
     } = context;
-    // Held until this session's reconciliation ends, on any path.
-    let Some(_claim) = in_flight.claim(&target.session_id) else {
-        return TargetResult {
-            outcome: None,
-            pulled: false,
-        };
-    };
     // A failed GitHub token lookup is that step's failure, not the session's:
     // the AWS credentials, skills and logins do not depend on it.
     let github_token = |target: &CredentialSyncTarget| {
@@ -1097,25 +1157,37 @@ async fn reconcile_aws(
             ..
         } => Ok(None),
         AwsSync::Unavailable {
-            scoped_held,
+            expected_scope,
             scoped_required: true,
             ..
         } => {
+            // A worker before relay protocol 55 can neither withdraw nor say
+            // what it holds. It is not a dead end: the worker upgrade
+            // coordinator replaces a worker whose build differs from this
+            // controller's as soon as its session is idle (a busy one waits
+            // for the turn), keeping its home, and the next pass then
+            // withdraws on the new worker.
+            anyhow::ensure!(
+                client.protocol_version() >= mj_core::relay::RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL,
+                "the session's worker (relay protocol {}) predates withdrawing AWS credentials, so the host's own may still be installed. Mjolnir is replacing that worker automatically as soon as the session is idle and will then withdraw them; nothing needs to be done",
+                client.protocol_version()
+            );
             let held = client.aws_credentials_state().await?;
-            // Credentials this controller issued for the role stay until they
-            // expire. Anything else the worker holds may be the host's own,
-            // installed before the role was configured, and static host keys
-            // never expire.
-            if let Some(scoped) = scoped_held
-                && mj_core::aws_credentials::snapshot(&scoped.encode()?) == held
+            // What the worker recorded when credentials were installed: kept
+            // while unexpired and issued for this session's role and session.
+            // Anything else, including credentials with no record, may be the
+            // host's own from before the role was configured, and static host
+            // keys never expire. The record is the worker's, so this holds
+            // across a daemon restart.
+            if held.present
+                && let Some((role_arn, role_session_name)) = expected_scope
+                && let Some(recorded) = client.aws_credentials_scope().await?
+                && recorded.role_arn == *role_arn
+                && recorded.role_session_name == *role_session_name
+                && recorded.expires_at_epoch_millis > mj_core::clock::epoch_millis()
             {
                 return Ok(None);
             }
-            anyhow::ensure!(
-                client.protocol_version() >= mj_core::relay::RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL,
-                "the session's worker (relay protocol {}) cannot withdraw AWS credentials; restart the session so a current worker replaces it",
-                client.protocol_version()
-            );
             // Always asked, whatever the reported state: the state is "absent"
             // when a provider file is missing or differs, though the secret
             // file may still exist. Removal is idempotent and deletes the
@@ -1185,26 +1257,44 @@ pub(super) async fn reconcile_credentials(
         }
         return Ok(());
     }
-    match reconcile(canonical, &session) {
-        SyncAction::None => {
-            if canonical.present
-                && session.present
-                && canonical.fingerprint != session.fingerprint
-                && canonical.freshness_epoch_ms.is_none()
-                && session.freshness_epoch_ms.is_none()
-            {
-                tracing::warn!(
-                    session_id = %target.session_id,
-                    profile_id = %target.profile_id,
-                    "credential copies differ but neither reports a refresh time; leaving both alone"
-                );
+    // Push and pull are one decision, taken against the canonical login as it
+    // is now, under the profile's lock: the snapshot this session was
+    // dispatched with may be minutes old, and another session may have pulled
+    // a fresher login since. Writing from the old snapshot could replace a
+    // fresher login with an older one, and rotated refresh tokens do not
+    // forgive that. The lock is released before any call to a worker.
+    let decision = {
+        let _deciding = login_pull
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (now, now_bytes) = read_credential_file(target.harness, canonical_path)?;
+        match reconcile(&now, &session) {
+            SyncAction::None => {
+                if now.present
+                    && session.present
+                    && now.fingerprint != session.fingerprint
+                    && now.freshness_epoch_ms.is_none()
+                    && session.freshness_epoch_ms.is_none()
+                {
+                    tracing::warn!(
+                        session_id = %target.session_id,
+                        profile_id = %target.profile_id,
+                        "credential copies differ but neither reports a refresh time; leaving both alone"
+                    );
+                }
+                None
             }
+            SyncAction::Push => Some((SyncAction::Push, now_bytes)),
+            SyncAction::Pull => Some((SyncAction::Pull, Vec::new())),
         }
-        SyncAction::Push => {
-            client.install_credentials(canonical_bytes).await?;
+    };
+    match decision {
+        None => {}
+        Some((SyncAction::Push, fresh_bytes)) => {
+            client.install_credentials(&fresh_bytes).await?;
             actions.push(CredentialSyncAction::Pushed);
         }
-        SyncAction::Pull => {
+        Some(_) => {
             let bytes = client.read_credentials().await?;
             validate_credential_payload(target.harness, &bytes).with_context(|| {
                 format!(
@@ -1212,11 +1302,8 @@ pub(super) async fn reconcile_credentials(
                     target.session_id
                 )
             })?;
-            // Sessions of a profile are reconciled together, and only this
-            // rewrite must not overlap: compare against the file as it is now,
-            // since another session may have pulled something fresher while
-            // this one's bytes were in flight, and write only if this is
-            // still the fresher copy.
+            // The session's bytes are in hand; decide again against the file
+            // as it is now, and write only if this is still the fresher copy.
             let _rewriting = login_pull
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);

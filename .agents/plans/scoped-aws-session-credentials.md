@@ -174,6 +174,18 @@ How to see it working: configure `[profiles.<id>.aws]` with a role ARN, start a 
 - Decision (fourth review): the wait for IMDSv2 to apply sleeps through the existing `targets::sleep_unless_cancelled`, and checks cancellation again before each poll. A `[profiles.<id>.aws]` table on a profile that does not use the AWS chain is no longer a refusal: the session starts without scoping, with a launch notice, and doctor warns. The cache's sweep runs once per sync pass, not on every call.
   Date/Author: 2026-11-07 / Claude, from review.
 
+- Decision (sixth review): what the worker holds is recognised from a record the worker keeps, not from the daemon's memory. `InstallAwsCredentials` carries an optional scope (role ARN, role session name, expiration); the worker writes it beside the secret (`aws-scope.json`, bound to the secret by fingerprint, written before the secret is published and removed with it), and a new request `AwsCredentialsScope` reports it. After a failed mint, credentials stay only if the worker's report names this session's role and role session name and has not expired; anything else, including credentials with no record, is withdrawn. The scope is sent only to workers at protocol 55 or later (older workers reject unknown fields), and the scope file is also written when launch stages the credentials. This replaces the earlier comparison with the cache entry, which a restart emptied. Relay protocol 55 is unreleased, so it was extended rather than bumped.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (sixth review): a worker before protocol 55 is not a dead end. It cannot withdraw, so the sync reports that Mjolnir is replacing it automatically; no new mechanism was added because the worker upgrade coordinator already replaces a worker whose build differs from the controller's, once its session is idle and keeping its home (`worker_upgrade::tests` pins that a quiet session with an old build is due and a busy one waits), and the next pass then withdraws on the new worker.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (sixth review): push and pull of the profile's login are one decision under the per-profile lock. The canonical file is re-read under the lock and compared with the session's copy before either a push (the bytes pushed are the fresh ones) or a pull (decided again after the session's bytes arrive, before the write). The lock is never held across a call to a worker.
+  Date/Author: 2026-11-07 / Claude, from review.
+
+- Decision (sixth review): the session claim is the single decision about who works on a session and is taken at the start of the pass, before the mint, the export or anything else for it; the earlier `is_claimed` filter is gone. A session's claim is released when its own reconciliation ends and taken again for the second pass. A pass that finds the triggering session held reports `trigger_skipped`; the coordinator requeues that trigger, holds it while the session is claimed and runs it when a freed session wakes it, so a cause-carrying trigger is never dropped.
+  Date/Author: 2026-11-07 / Claude, from review.
+
 ## Outcomes & Retrospective
 
 Implemented through Milestone 6 on 2026-11-07. A Bedrock profile with `[profiles.<id>.aws] role_arn = ...` now gives each container or SSH session credentials assumed for it alone (role session name `mj-<session id>`), narrowed by a session policy, renewed after half their lifetime through the existing credential sync, with no relay or database change. A refused role fails the launch with AWS's error line and a remedy, or fails the running session's sync outcome while the worker keeps what it has; nothing falls back to the unscoped export. Profiles without a role behave as before, and `mj doctor` warns about them and probes a configured role with a real throwaway AssumeRole. Every EC2 launch (ordinary and Move) requires IMDSv2, verified in the launch response, and doctor warns about a launch template that allows IMDSv1.
@@ -381,3 +393,5 @@ Revision note (2026-11-07, third review): withdrawal of unscoped credentials on 
 Revision note (2026-11-07, fourth review): independent sync steps, unconditional withdrawal, concurrent per-session dispatch, cancellable IMDS wait, step failures kept beside actions, sweep per pass, non-Bedrock table is a notice. Reason: fourth review.
 
 Revision note (2026-11-07, fifth review): per-session in-flight tracking replaces the per-profile busy flag; the canonical login rewrite has its own lock. Reason: a session that never answers must not hold the profile's other sessions.
+
+Revision note (2026-11-07, sixth review): scope recorded by the worker, pre-55 workers left to the automatic upgrade with an honest message, push and pull decided under the lock, claim before the mint with requeue of skipped triggers. Reason: sixth review.

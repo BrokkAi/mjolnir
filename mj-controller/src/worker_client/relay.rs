@@ -228,9 +228,28 @@ impl RelayClient {
         credential_snapshot(
             self.call(RelayRequest::InstallAwsCredentials {
                 data: BASE64.encode(credentials.encode()?),
+                // A worker before protocol 55 rejects the unknown field.
+                scope: credentials
+                    .scope()
+                    .filter(|_| {
+                        self.protocol_version
+                            >= mj_core::relay::RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL
+                    })
+                    .cloned(),
             })
             .await?,
         )
+    }
+
+    /// The scope the worker recorded beside the session's AWS credentials.
+    /// Needs a worker at relay protocol 55 or later.
+    pub async fn aws_credentials_scope(
+        &mut self,
+    ) -> Result<Option<mj_core::aws_credentials::AwsCredentialScope>> {
+        match self.call(RelayRequest::AwsCredentialsScope).await? {
+            RelayResponsePayload::AwsCredentialsScope { scope } => Ok(scope),
+            _ => bail!("relay returned an unexpected AWS credential scope response"),
+        }
     }
 
     /// Delete the session's AWS credentials. Needs a worker at relay protocol
