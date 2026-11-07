@@ -7,6 +7,48 @@ cargo build -p brokk-mjolnir -p brokk-mj-worker
 python3 tests/e2e/tui_components_tmux.py --seed 515
 ```
 
+## Running it on a busy or shared host
+
+The fixed waits (15 s for the TUI, 20 s for the lab, 8 s in the dialog probes)
+can expire before a daemon or session is up. Set `MJ_E2E_TIMEOUT_SCALE=4` to
+multiply the waits of 20 s or less (the 150 s review waits are left alone); the
+default, 1, changes nothing:
+
+```sh
+MJ_E2E_TIMEOUT_SCALE=4 python3 tests/e2e/tui_components_tmux.py --seed 515 --hel target/debug/mj
+```
+
+The scale does not rescue a host that is far too busy. At a load average of
+100 to 290 the first steps fail whatever the scale, so start the run when the
+load is below about 60. On a WSL host the figure is inflated by how the VM's
+processors map to the host's, but the failures still track it.
+
+The lab removes the host session's `CLAUDE*`, `CODEX_*` and `MJ_*` variables
+from the daemon's environment, so a real profile is not picked up when the
+harness runs from inside a Mjolnir session. If a lab config shows a
+`[profiles.claude]` table, that protection has regressed.
+
+Exit code 2 with no artifact directory and "live tmux setup gap" in the log
+means the shared build cache's garbage collection removed `target/debug/mj` and
+`target/debug/mj-worker`. Build them again with the command above; no source
+change is involved.
+
+When a step fails, the message keeps only the last 4000 characters of the pane,
+which cuts off the top of the dashboard. To see the whole screen, add a
+temporary `open("/path", "w").write(tmux.capture())` before and after the step
+in a copy of the script, and restore the file afterwards.
+
+The TUI applies a focus change, and registers a new step's click areas, when
+the next frame is drawn, and nothing on screen shows that has happened. A key
+or click sent right after a step change can therefore act on the previous
+frame. The script waits a short, scaled time before such a click or Enter
+(`click` in tui_components_actions.py, and the Shift-Tab then Enter at the start
+of the workflow). A lost click shows up as the next wait timing out.
+
+Last verified on 2026-11-06: seeds 61172 and 61173 passed with scale 4, 73
+captures each, on the final version of the scripts. The `--dialogs-only`, `--navigation-only` and `--subagents-only`
+modes, and scale 1, had not been run.
+
 Run outside the restricted sandbox because the application uses loopback and
 Unix sockets. The harness selects the freshly built worker explicitly. It uses
 a private tmux server and a seeded reliability_lab.Lab with disposable config,
@@ -14,12 +56,16 @@ profiles, project, and deterministic fake ACP responses. Short runtime paths
 under /tmp/hel-r-* avoid Unix socket length limits; build output and retained
 evidence stay under target/reliability-artifacts/.
 
-Chat scenarios cover model filtering, effort selection, Unicode bracketed
-paste, question submission, pointer release outside a button, reviewer setup
-with asynchronous discovery, cancellation restoring the unanswered plan, and
-turn-review tabs and cancellation. Dashboard scenarios cover rename and restore,
-target configuration, disabled review settings, nested Help during discovery,
-new/resume selectors, import search, and Web info. The main fixture is now
+Chat scenarios cover reverse search over prompts sent from the composer and
+through the web action, model filtering and effort selection from the menus
+above the composer, Unicode bracketed paste, the one-question-at-a-time form
+(Enter answers and moves on, a button pressed and released elsewhere does
+nothing, one unanswered question asks before sending), and the plan review.
+Dashboard scenarios cover rename and restore, target configuration, Settings
+(each level closes with its own Escape), review settings, the palette key held
+by an open dialog, the new-session wizard, the four-tab session picker
+(Live, Mjolnir, Import, Archived), import search, and Web info.
+Keys are the prefix chords (Ctrl+B then a letter), not function keys. The main fixture is now
 created through the actual New wizard: empty and relative path validation,
 bracketed paste, Back/Next, and mouse Create. The harness checks both exactly
 one durable new session and the final review dialog disappearing.
@@ -49,14 +95,12 @@ personal tmux server, real container runtime, or paid provider is used. These
 checks establish terminal input behavior; microphone device capture and an
 individual emulator's emoji glyph appearance require the actual device.
 
-Review settings acceptance also counts requests in fake-acp.log. Changing tier
-or effort and revisiting cached model choices must start no adapters. A model
-cache miss and explicit Refresh each start exactly one adapter, with no prompt
-or effort-setting request. Help may cover the dialog while choices arrive.
-Closing and reopening reuses the dashboard cache. After Stop, Refresh explains
-that a connected session is needed while keeping existing choices, and Save
-still closes the dialog. These checks live in tui_review_discovery.py and run
-as part of the main harness.
+Review settings acceptance counts requests in fake-acp.log. The dialog reads the
+daemon's cached choices, so opening it, adding a reviewer and cancelling must
+start no adapter, even with the session stopped and no worker to ask. This check
+lives in tui_review_discovery.py and runs as part of the main harness. (Earlier
+versions started an adapter per model and had a Refresh button; that design is
+gone.)
 
 Seed 416 completed all 55 recorded assertions at
 `target/reliability-artifacts/tui-components-seed-416-3625603/`. Earlier runs

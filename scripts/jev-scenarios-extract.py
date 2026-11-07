@@ -249,18 +249,33 @@ def trim_middle(text):
 
 
 # Ports of mj_core::continuation::is_generated_prompt / is_generated_prompt_text
-# and mj_core::archive::CONTEXT_BOUNDARY_PREFIX. Keep them in step with the Rust.
-GENERATED_PROMPT_PREFIXES = ("auto-continue-", "quota-retry-", "review-forward-", "archive-", "subagent-", "mailbox-wake-")
+# and mj_core::archive::CONTEXT_BOUNDARY_PREFIX. Keep them in step with the Rust:
+# a test in mj-core reads these two lists and compares them with
+# `GeneratedPrompt::ALL`, in the same order.
+GENERATED_PROMPT_PREFIXES = (
+    "auto-continue-",
+    "quota-retry-",
+    "review-forward-",
+    "archive-",
+    "subagent-",
+    "mailbox-wake-",
+    "handback-reminder-",
+    "session-message-turn-",
+    "server-retry-",
+    "capacity-retry-",
+)
+# Retry ids end in the ordinal of the turn they retry; nothing else matches.
+ORDINAL_PREFIXES = ("server-retry-", "capacity-retry-")
 PARENT_WAIT_PROMPT_TEXT = "One or more sub-agents finished. Call wait to collect their reports."
 CONTEXT_BOUNDARY_PREFIX = "context-cleared:"
 
 
 def is_generated_prompt(command_id):
-    for prefix in ("capacity-retry-", "server-retry-"):
-        ordinal = command_id[len(prefix):] if command_id.startswith(prefix) else None
-        if ordinal and ordinal.isascii() and ordinal.isdigit():
-            return True
-    return command_id.startswith(GENERATED_PROMPT_PREFIXES)
+    for prefix in GENERATED_PROMPT_PREFIXES:
+        if command_id.startswith(prefix):
+            ordinal = command_id[len(prefix):]
+            return prefix not in ORDINAL_PREFIXES or (ordinal.isascii() and ordinal.isdigit())
+    return False
 
 
 def is_generated_prompt_text(text):

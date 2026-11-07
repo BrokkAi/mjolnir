@@ -527,7 +527,7 @@ pub(super) async fn resume(
                 )
             } else {
                 (
-                    format!("quota-retry-{ordinal}"),
+                    mj_core::continuation::GeneratedPrompt::QuotaRetry.command_id(ordinal),
                     RelayCommand::ResumeAfterQuota {
                         expected: cursor(&current)?,
                         completed_command_id: recovery.completed_command_id.clone(),

@@ -924,6 +924,13 @@ test('an unanswered turn offers the prompt that was running', () => {
     null,
   );
   assert.equal(vm.runInContext('unansweredPromptFor', context)(warning, null), null);
+  // Hard-won: 9c2b74a01: a failed turn Mjolnir started offered an earlier, unrelated request.
+  const turnPromptText = vm.runInContext('turnPromptText', context);
+  const earlier = turnPromptText({ role: 'user', lines: ['rename the module'] }, null);
+  assert.equal(earlier, 'rename the module');
+  assert.equal(turnPromptText({ role: 'agent', lines: ['done'] }, earlier), earlier);
+  const continued = turnPromptText({ role: 'user', generated: true, lines: ['Continue'] }, earlier);
+  assert.equal(vm.runInContext('unansweredPromptFor', context)(warning, continued), null);
 });
 
 // Live path suggestions must never fight the person typing: a superseded

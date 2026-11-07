@@ -232,26 +232,188 @@ pub fn is_generated_prompt_text(text: &str) -> bool {
     is_control_origin_prompt(text) || text.trim() == PARENT_WAIT_PROMPT_TEXT
 }
 
-pub fn is_generated_prompt(command_id: &str) -> bool {
-    if crate::relay::is_capacity_retry_command(command_id) {
-        return true;
+/// Declares the producers once, so the enum, [`GeneratedPrompt::ALL`] and
+/// [`GeneratedPrompt::prefix`] cannot disagree: a variant left out of `ALL`
+/// would make its prompts look like the person's.
+macro_rules! generated_prompts {
+    (
+        $(#[doc = $enum_doc:literal])*
+        pub enum GeneratedPrompt {
+            $($(#[doc = $doc:literal])* $variant:ident => $prefix:literal,)*
+        }
+    ) => {
+        $(#[doc = $enum_doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum GeneratedPrompt {
+            $($(#[doc = $doc])* $variant,)*
+        }
+
+        impl GeneratedPrompt {
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
+
+            pub const fn prefix(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $prefix,)*
+                }
+            }
+        }
+    };
+}
+
+generated_prompts! {
+    /// Every producer of user-role prompts that Mjolnir submits itself rather
+    /// than the person typing them. This is the one owner of those command ids:
+    /// producers build their ids here and every reader asks [`is_generated_prompt`],
+    /// so a new producer cannot be added without being recognized (one
+    /// declaration lists every producer).
+    ///
+    /// A prompt that carries the person's own text (plan-review feedback, image
+    /// pastes, startup prompts, `prompt-`, `web-prompt-`) is not generated, and
+    /// neither is a command that is not a prompt (`auto-steer-`, a goal resume).
+    /// The id strings are stored in journals and transcripts; do not change them.
+    pub enum GeneratedPrompt {
+        /// Automatic continuation of unfinished work.
+        AutoContinue => "auto-continue-",
+        /// The retry a quota recovery submits.
+        QuotaRetry => "quota-retry-",
+        /// Review findings forwarded to the author. No current producer; older
+        /// transcripts still carry it.
+        ReviewForward => "review-forward-",
+        /// Restored archive context. No current producer; older transcripts still
+        /// carry it.
+        Archive => "archive-",
+        /// Sub-agent traffic: another session's input (`subagent-input-`), a
+        /// child's spawn brief (`subagent-spawn-`) and older wait notices.
+        Subagent => "subagent-",
+        /// A mailbox event that wakes an idle session.
+        MailboxWake => "mailbox-wake-",
+        /// The prompt that reminds a child to hand back its report.
+        HandbackReminder => "handback-reminder-",
+        /// Another session's message delivered as a turn.
+        SessionMessageTurn => "session-message-turn-",
+        /// A worker's retry after a provider failure.
+        ServerRetry => "server-retry-",
+        /// Older workers' name for [`Self::ServerRetry`].
+        CapacityRetry => "capacity-retry-",
     }
-    [
-        "auto-continue-",
-        "quota-retry-",
-        "review-forward-",
-        "archive-",
-        "subagent-",
-        "mailbox-wake-",
-    ]
-    .iter()
-    .any(|prefix| command_id.starts_with(prefix))
+}
+
+impl GeneratedPrompt {
+    /// The command id this producer gives a prompt: its prefix and `suffix`.
+    pub fn command_id(self, suffix: impl std::fmt::Display) -> String {
+        format!("{}{suffix}", self.prefix())
+    }
+
+    /// What follows this producer's prefix, when `command_id` carries it.
+    pub fn suffix(self, command_id: &str) -> Option<&str> {
+        command_id.strip_prefix(self.prefix())
+    }
+
+    /// The ordinal a retry id ends in: ASCII digits that fit a `u64`.
+    pub fn retry_ordinal(self, command_id: &str) -> Option<u64> {
+        let ordinal = self.suffix(command_id)?;
+        (!ordinal.is_empty() && ordinal.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| ordinal.parse().ok())
+            .flatten()
+    }
+
+    /// Retry ids end in the ordinal of the turn they retry, and nothing else
+    /// counts as one.
+    pub const fn is_retry(self) -> bool {
+        matches!(self, Self::ServerRetry | Self::CapacityRetry)
+    }
+
+    fn recognizes(self, command_id: &str) -> bool {
+        if self.is_retry() {
+            self.retry_ordinal(command_id).is_some()
+        } else {
+            self.suffix(command_id).is_some()
+        }
+    }
+
+    /// The producer that submitted the prompt with this command id.
+    pub fn of(command_id: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|producer| producer.recognizes(command_id))
+    }
+
+    /// Id of another session's input to a sub-agent, delivered as a turn.
+    pub fn subagent_input_id(request_id: &str) -> String {
+        Self::Subagent.command_id(format_args!("input-{request_id}"))
+    }
+
+    /// Id (and startup group id) of a child's spawn brief.
+    pub fn subagent_spawn_id(request_key: &str) -> String {
+        Self::Subagent.command_id(format_args!("spawn-{request_key}"))
+    }
+}
+
+pub fn is_generated_prompt(command_id: &str) -> bool {
+    GeneratedPrompt::of(command_id).is_some()
+}
+
+/// Whether a user-role transcript item is a message the person wrote. This is
+/// the one place the id and text rules are combined; every reader that asks
+/// for "the user's latest message" goes through it. `stable_id` is the item's
+/// id (`user:<command id>`, or a bare command id), `None` for a prompt the
+/// controller has not yet projected, which can only be the person's own.
+pub fn is_user_authored_message(stable_id: Option<&str>, text: &str) -> bool {
+    if is_generated_prompt_text(text) {
+        return false;
+    }
+    stable_id.is_none_or(|stable_id| {
+        let command_id = stable_id.strip_prefix("user:").unwrap_or(stable_id);
+        !is_generated_prompt(command_id)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // The mining script keeps its own copy of the rules, so the two sides
+    // can drift without either failing to compile.
+    #[test]
+    fn jev_extract_script_lists_the_same_generated_prompt_prefixes() {
+        let script = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../scripts/jev-scenarios-extract.py"
+        ))
+        .unwrap();
+        let quoted_list = |name: &str| -> Vec<String> {
+            let body = script
+                .split_once(&format!("\n{name} = ("))
+                .unwrap_or_else(|| panic!("{name} missing from the script"))
+                .1
+                .split_once(')')
+                .unwrap()
+                .0;
+            body.split('"')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_owned)
+                .collect()
+        };
+        let expected = |keep: fn(&GeneratedPrompt) -> bool| -> Vec<String> {
+            GeneratedPrompt::ALL
+                .iter()
+                .filter(|producer| keep(producer))
+                .map(|producer| producer.prefix().to_owned())
+                .collect()
+        };
+        assert_eq!(quoted_list("GENERATED_PROMPT_PREFIXES"), expected(|_| true));
+        assert_eq!(
+            quoted_list("ORDINAL_PREFIXES")
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected(|producer| producer.is_retry())
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+    }
 
     #[test]
     fn parent_wait_notice_is_generated_prompt_text() {
