@@ -204,14 +204,14 @@ impl HostState {
         else {
             return;
         };
-        if !slot
+        let Some(command_id) = slot
             .driver
             .awaited_commands()
-            .iter()
-            .any(|(name, _)| name == role)
-        {
+            .into_iter()
+            .find_map(|(name, command_id)| (name == role).then_some(command_id))
+        else {
             return;
-        }
+        };
         let epoch = slot.epoch;
         let role = role.to_owned();
         let environment = self.environment.clone();
@@ -223,22 +223,20 @@ impl HostState {
                 // a start error after a restart can be transient, so only the
                 // store's record that its session ended settles the role.
                 match reviewer_standing(&environment, &child).await {
-                    Ok(ChildStanding {
-                        ended: Some(state),
-                        handback,
-                    }) => {
-                        settle_ended_reviewer(
-                            &events,
-                            session_id,
-                            child,
-                            format!(
-                                "the reviewer's session ended before the review was restored ({state})"
-                            ),
-                            handback,
-                        );
-                        return;
+                    Ok(standing) => {
+                        if let Some(state) = standing.ended.clone() {
+                            settle_ended_reviewer(
+                                &events,
+                                session_id,
+                                child,
+                                format!(
+                                    "the reviewer's session ended before the review was restored ({state})"
+                                ),
+                                standing.answer_to(&command_id),
+                            );
+                            return;
+                        }
                     }
-                    Ok(_) => {}
                     // Starting a child that may have ended, or failing one that
                     // may be live, would each be a guess. The role stays
                     // pending and the read is repeated.
@@ -462,24 +460,40 @@ impl HostState {
     /// like every other reviewer outcome, so the group resolves like any other
     /// reviewer failure.
     pub(super) fn child_ended(&mut self, child: &str, reason: String) {
-        let Some((session_id, epoch, role)) = self.reviews.iter().find_map(|(session_id, slot)| {
-            let registration = slot
-                .state
-                .active_group
-                .as_ref()?
-                .registrations
-                .iter()
-                .find(|item| item.child_session_id.as_deref() == Some(child))?;
-            Some((session_id.clone(), slot.epoch, registration.role.clone()))
-        }) else {
+        let Some((session_id, epoch, role, command_id)) =
+            self.reviews.iter().find_map(|(session_id, slot)| {
+                let group = slot.state.active_group.as_ref()?;
+                let registration = group
+                    .registrations
+                    .iter()
+                    .find(|item| item.child_session_id.as_deref() == Some(child))?;
+                let command_id = group
+                    .driver
+                    .roles
+                    .iter()
+                    .find(|item| item.role == registration.role)?
+                    .command_id
+                    .clone();
+                Some((
+                    session_id.clone(),
+                    slot.epoch,
+                    registration.role.clone(),
+                    command_id,
+                ))
+            })
+        else {
             return;
         };
-        // A handback that is waiting behind a saving outcome settles the role.
-        if self.reviews.get(&session_id).is_some_and(|slot| {
-            slot.queued_outcomes
+        // A handback that is waiting behind a saving outcome settles the
+        // role, unless its save fails: the end is noted so that save's
+        // failure reports it again.
+        if let Some(slot) = self.reviews.get_mut(&session_id)
+            && slot
+                .queued_outcomes
                 .iter()
                 .any(|queued| queued.child_session_id == child)
-        }) {
+        {
+            slot.ended_while_queued.insert(child.to_owned(), reason);
             return;
         }
         let environment = self.environment.clone();
@@ -488,7 +502,7 @@ impl HostState {
         tokio::spawn(async move {
             // A handback the child recorded before it ended is its outcome.
             let handback = match reviewer_standing(&environment, &child).await {
-                Ok(standing) => standing.handback,
+                Ok(standing) => standing.answer_to(&command_id),
                 // Failing the role now could discard a handback the child
                 // saved, so the role stays pending and the read is repeated.
                 Err(error) => {
@@ -543,6 +557,10 @@ impl HostState {
             return;
         }
         let role = registration.role.clone();
+        let ended = slot
+            .ended_while_queued
+            .remove(&child_session_id)
+            .map(|reason| (child_session_id.clone(), reason));
         let command_id = group
             .driver
             .roles
@@ -576,7 +594,7 @@ impl HostState {
             answer(slot.start_reply.take(), Err(StartRefusal(reason.clone())));
             slot.state.active = None;
         }
-        slot.pending_outcome = Some(prior);
+        slot.pending_outcome = Some(PendingOutcome { prior, ended });
         let state = slot.state.clone();
         let epoch = slot.epoch;
         let request = PersistenceRequest::SaveReviewerOutcome {
@@ -616,18 +634,28 @@ impl HostState {
             .get_mut(&session_id)
             .filter(|slot| slot.epoch == epoch)
         {
-            let prior = slot.pending_outcome.take();
-            if result.is_err()
-                && let Some(prior) = prior
-                && let Some(group) = prior.active_group.as_ref()
-                && let Ok(driver) = TurnReviewDriver::restore(group.driver.clone())
+            let pending = slot.pending_outcome.take();
+            let mut ended = None;
+            if let Some(PendingOutcome { prior, ended: end }) = pending
+                && let Err(error) = &result
             {
-                slot.driver = driver;
-                slot.state = prior;
+                if let Some(group) = prior.active_group.as_ref()
+                    && let Ok(driver) = TurnReviewDriver::restore(group.driver.clone())
+                {
+                    slot.driver = driver;
+                    slot.state = prior;
+                }
+                ended = end.map(|(child, reason)| (child, reason, error.clone()));
             }
             if result.is_ok() {
                 self.run(&session_id, requests);
             } else {
+                // The delegation that handed this reviewer's report in may be
+                // gone with its session, and the end it superseded is on no
+                // other record: settle the role from the standing again.
+                if let Some((child, reason, error)) = ended {
+                    self.reviewer_end_not_saved(child, reason, error);
+                }
                 // A destroyed requester can never save this outcome, and no
                 // retry would change that.
                 self.drop_review_if_owner_gone(&session_id, epoch, None);

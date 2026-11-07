@@ -262,6 +262,8 @@ struct FakeEnvironment {
     save_gate: Mutex<Option<Arc<SaveGate>>>,
     sweep_gate: Mutex<Option<Arc<SaveGate>>>,
     save_error: Mutex<Option<String>>,
+    /// Saves that fail with "database busy" after `save_error` has been spent.
+    extra_save_failures: std::sync::atomic::AtomicUsize,
     final_save_error: Mutex<Option<String>>,
     /// The requesting session's record is gone: the store refuses the final
     /// save of its review, as the foreign key on its review state does.
@@ -345,6 +347,7 @@ impl FakeEnvironment {
             save_gate: Mutex::new(None),
             sweep_gate: Mutex::new(None),
             save_error: Mutex::new(None),
+            extra_save_failures: std::sync::atomic::AtomicUsize::new(0),
             final_save_error: Mutex::new(None),
             owner_deleted: std::sync::atomic::AtomicBool::new(false),
             deleted_owner_saves: std::sync::atomic::AtomicUsize::new(0),
@@ -600,6 +603,17 @@ impl ReviewEnvironment for FakeEnvironment {
         }
         if let Some(error) = self.save_error.lock().unwrap().take() {
             return Err(error);
+        }
+        if self
+            .extra_save_failures
+            .try_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err("database busy".into());
         }
         if state.active_group.is_none()
             && state.active.is_none()
@@ -2154,6 +2168,30 @@ fn delivered_findings(
     (verdict.is_complete(), evidence.reviewer_failures.clone())
 }
 
+/// A handback a reviewer recorded for the turn its role awaits.
+fn stored_handback(
+    environment: &FakeEnvironment,
+    role: &str,
+    message: &str,
+) -> Option<mj_core::subagent::SubagentHandback> {
+    let command_id = environment
+        .state()
+        .active_group
+        .expect("a restored group")
+        .driver
+        .roles
+        .iter()
+        .find(|item| item.role == role)
+        .expect("the role exists")
+        .command_id
+        .clone();
+    Some(mj_core::subagent::SubagentHandback {
+        command_id,
+        message: message.to_owned(),
+        recorded_at_ms: 0,
+    })
+}
+
 // Hard-won: f61b30a62: a restored reviewer whose session ended without a report left its review open forever
 #[tokio::test]
 async fn a_restored_reviewer_that_ends_without_an_outcome_leaves_an_incomplete_review() {
@@ -2310,7 +2348,7 @@ async fn an_ended_reviewer_whose_standing_cannot_be_read_is_read_again_before_it
         children[0].clone(),
         ChildStanding {
             ended: Some("stopped".into()),
-            handback: Some("real defect".into()),
+            handback: stored_handback(&environment, "reviewer-1", "real defect"),
         },
     );
 
@@ -2379,6 +2417,110 @@ async fn an_ended_reviewers_failure_is_applied_after_a_failed_outcome_save() {
         failures[0].reason.contains("session ended (error)"),
         "{failures:?}"
     );
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: pre-push review of 2442c5f00: a reviewer that ended while its handback was queued was never settled when that handback's save failed after the delegation observing it was gone
+#[tokio::test]
+async fn a_reviewer_that_ended_behind_a_failing_save_is_settled_from_its_standing() {
+    let session = session_id("ended-queued-save-fails");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+    environment.standings.lock().unwrap().insert(
+        children[1].clone(),
+        ChildStanding {
+            ended: Some("stopped".into()),
+            handback: None,
+        },
+    );
+
+    // Reviewer 1's outcome is saving, and both it and the next save fail.
+    let gate = SaveGate::new();
+    *environment.save_gate.lock().unwrap() = Some(gate.clone());
+    *environment.save_error.lock().unwrap() = Some("database busy".into());
+    environment
+        .extra_save_failures
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let first = tokio::spawn({
+        let host = host.clone();
+        let session = session.clone();
+        let child = children[0].clone();
+        async move {
+            host.reviewer_finished(session, child, Some("real defect".into()))
+                .await
+        }
+    });
+    gate.entered().await;
+    // Reviewer 2's handback queues behind that save, and its session ends.
+    // The delegation that carries the handback gives up on the failure.
+    let second = tokio::spawn({
+        let host = host.clone();
+        let session = session.clone();
+        let child = children[1].clone();
+        async move {
+            host.reviewer_finished(session, child, Some("late report".into()))
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    host.child_ended(
+        children[1].clone(),
+        "the reviewer's session ended (stopped)".into(),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    gate.release();
+    assert!(first.await.unwrap().unwrap_err().contains("database busy"));
+    assert!(second.await.unwrap().unwrap_err().contains("database busy"));
+
+    host.reviewer_finished(
+        session.clone(),
+        children[0].clone(),
+        Some("real defect".into()),
+    )
+    .await
+    .unwrap();
+    wait_until_review_resolves(&host, &session).await;
+
+    let (complete, failures) = delivered_findings(&environment);
+    assert!(!complete);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].label.contains("Reviewer 2"), "{failures:?}");
+    assert!(
+        failures[0].reason.contains("session ended (stopped)"),
+        "{failures:?}"
+    );
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: pre-push review of 2442c5f00: a stored handback of another command settled an ended reviewer's role as its answer
+#[tokio::test]
+async fn an_ended_reviewers_handback_for_another_command_is_not_its_answer() {
+    let session = session_id("ended-other-command");
+    let manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let (host, children) = restore_busy_group(&manager, &environment, 2, &[]).await;
+    let mut stale = stored_handback(&environment, "reviewer-1", "an earlier task's report");
+    stale.as_mut().unwrap().command_id = "another-command".into();
+    environment.standings.lock().unwrap().insert(
+        children[0].clone(),
+        ChildStanding {
+            ended: Some("stopped".into()),
+            handback: stale,
+        },
+    );
+
+    host.child_ended(
+        children[0].clone(),
+        "the reviewer's session ended (stopped)".into(),
+    );
+    finish_child(&host, &environment, &session, &children[1], Some("other")).await;
+    wait_until_review_resolves(&host, &session).await;
+
+    let (complete, failures) = delivered_findings(&environment);
+    assert!(!complete, "{failures:?}");
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].label.contains("Reviewer 1"), "{failures:?}");
     host.shutdown().await.unwrap();
 }
 
@@ -2499,7 +2641,7 @@ async fn a_reviewer_that_ends_with_an_undelivered_handback_resolves_with_it() {
         children[0].clone(),
         ChildStanding {
             ended: Some("stopped".into()),
-            handback: Some("real defect".into()),
+            handback: stored_handback(&environment, "reviewer-1", "real defect"),
         },
     );
 

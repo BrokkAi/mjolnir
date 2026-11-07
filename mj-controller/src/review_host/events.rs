@@ -262,8 +262,21 @@ pub(super) struct ReviewSlot {
     pub(super) finishing: bool,
     pub(super) retry_delay: std::time::Duration,
     pub(super) start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
-    pub(super) pending_outcome: Option<TurnReviewState>,
+    pub(super) pending_outcome: Option<PendingOutcome>,
     pub(super) queued_outcomes: Vec<ReviewerHandback>,
+    /// Reviewers that ended while their handback waited in
+    /// `queued_outcomes`, with the reason. That handback is their outcome, so
+    /// no standing read is made yet; the entry moves to the save of that
+    /// handback, which reports the end again if the save fails.
+    pub(super) ended_while_queued: BTreeMap<String, String>,
+}
+
+/// The outcome being saved: the state to return to if the save fails, and the
+/// reviewer end that save is the only record of.
+pub(super) struct PendingOutcome {
+    pub(super) prior: TurnReviewState,
+    /// The child and reason of an end noted while this handback was queued.
+    pub(super) ended: Option<(String, String)>,
 }
 
 impl ReviewSlot {

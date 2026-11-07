@@ -127,7 +127,17 @@ pub struct ChildStanding {
     /// Why its session can no longer run, or `None` while it still can.
     pub ended: Option<String>,
     /// The report it handed back, whether or not the review has taken it yet.
-    pub handback: Option<String>,
+    pub handback: Option<mj_core::subagent::SubagentHandback>,
+}
+
+impl ChildStanding {
+    /// The handback text, when the report answers the turn `command_id`
+    /// names: the same rule delegation applies to a finished reviewer turn.
+    pub(super) fn answer_to(self, command_id: &str) -> Option<String> {
+        self.handback
+            .filter(|handback| handback.answers(command_id))
+            .map(|handback| handback.message)
+    }
 }
 
 /// Keeps background work off a session while a review needs its worker.
@@ -258,8 +268,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         };
         let handback = crate::database::load_subagent_report(child)
             .map_err(|error| format!("{error:#}"))?
-            .handback
-            .map(|handback| handback.message);
+            .handback;
         Ok(ChildStanding { ended, handback })
     }
 

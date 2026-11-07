@@ -1169,6 +1169,15 @@ pub struct SubagentHandback {
     pub recorded_at_ms: i64,
 }
 
+impl SubagentHandback {
+    /// Whether this report answers the turn `command_id` names. A report from
+    /// an earlier or later task of the same child answers none of the others.
+    #[must_use]
+    pub fn answers(&self, command_id: &str) -> bool {
+        self.command_id == command_id
+    }
+}
+
 /// The reminder Mjolnir sent after the turn `for_command_id` ended without a
 /// report. `command_id` is the reminder prompt's own command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
