@@ -33,7 +33,7 @@ means the shared build cache's garbage collection removed `target/debug/mj` and
 `target/debug/mj-worker`. Build them again with the command above; no source
 change is involved.
 
-When a step fails, the message keeps only the last 4096 characters of the pane,
+When a step fails, the message keeps only the last 4000 characters of the pane,
 which cuts off the top of the dashboard. To see the whole screen, add a
 temporary `open("/path", "w").write(tmux.capture())` before and after the step
 in a copy of the script, and restore the file afterwards.
@@ -45,7 +45,7 @@ frame. The script waits a short, scaled time before such a click or Enter
 (`click` in tui_components_actions.py, and the Shift-Tab then Enter at the start
 of the workflow). A lost click shows up as the next wait timing out.
 
-Last verified on 2026-11-07: seeds 61172 and 61173 passed with scale 4, 73
+Last verified on 2026-11-06: seeds 61172 and 61173 passed with scale 4, 73
 captures each, on the final version of the scripts. The `--dialogs-only`, `--navigation-only` and `--subagents-only`
 modes, and scale 1, had not been run.
 
