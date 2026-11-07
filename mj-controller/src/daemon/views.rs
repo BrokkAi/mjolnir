@@ -418,20 +418,72 @@ impl RuntimeState {
         if !pending {
             return Ok(());
         }
-        let worktree = match self.connect_to_worker(child_id).await {
+        let read = match self.connect_to_worker(child_id).await {
             Ok(mut client) => client
                 .work_facts_unbounded(false, true)
                 .await
                 .map(|facts| facts.worktree)
                 .unwrap_or_else(|error| {
-                    mj_core::work_facts::Observed::unavailable(format!(
-                        "the worker could not be asked for its working tree: {error:#}"
-                    ))
+                    // The park stops the worker that runs this read; say so
+                    // rather than that the worker could not be asked.
+                    if self
+                        .session_record(child_id)
+                        .is_some_and(|record| record.state == SessionState::Parked)
+                    {
+                        mj_core::work_facts::Observed::unavailable(
+                            "the child was parked before its working tree could be read",
+                        )
+                    } else {
+                        mj_core::work_facts::Observed::unavailable(format!(
+                            "the worker could not be asked for its working tree: {error:#}"
+                        ))
+                    }
                 }),
             Err(reason) => mj_core::work_facts::Observed::unavailable(reason),
         };
+        // A parent may give the child new work right after the report, and a
+        // read that was still running then can have seen that work's changes.
+        // What a tree describes is the finish it was asked for: if the child
+        // accepted a newer prompt, it is not that.
+        let worktree = if matches!(read, mj_core::work_facts::Observed::Known(_))
+            && self.accepted_work_since(child_id, ordinal).await?
+        {
+            mj_core::work_facts::Observed::unavailable(
+                "the child started new work before its working tree was read",
+            )
+        } else {
+            read
+        };
         let child_id = child_id.to_owned();
         blocking(move || crate::database::record_finish_worktree(child_id, ordinal, worktree)).await
+    }
+
+    /// Whether the child accepted a prompt after the finish that completed turn
+    /// `ordinal`, from the store and from the live session, which can be ahead.
+    async fn accepted_work_since(&self, child_id: &str, ordinal: u64) -> Result<bool> {
+        let stored = blocking({
+            let child_id = child_id.to_owned();
+            move || crate::database::accepted_work_since(&child_id, ordinal)
+        })
+        .await?;
+        if stored {
+            return Ok(true);
+        }
+        let Ok(handle) = self.session_manager.session(child_id.to_owned()).await else {
+            return Ok(false);
+        };
+        Ok(handle.view().snapshot.is_some_and(|snapshot| {
+            mj_core::state::accepted_work_since(
+                snapshot
+                    .materialized
+                    .queued_prompts
+                    .iter()
+                    .filter_map(|prompt| prompt.accepted_ordinal),
+                snapshot.materialized.active_turn.as_ref(),
+                snapshot.materialized.last_turn_outcome.as_ref(),
+                ordinal,
+            )
+        }))
     }
 
     /// Open a relay connection for a question to the child's worker: the

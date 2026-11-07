@@ -4979,8 +4979,8 @@ async fn a_report_sent_with_the_tree_pending_is_followed_by_the_tree_exactly_onc
     let followups = working_tree_followups();
     assert_eq!(followups.len(), 1, "{followups:?}");
     assert!(
-        !followups[0].0,
-        "the tree follows quietly: the report already woke the parent"
+        followups[0].0,
+        "the tree wakes an idle parent, as the park follow-up does"
     );
     assert!(followups[0].1.contains("notes.txt"), "{}", followups[0].1);
 
@@ -5064,6 +5064,40 @@ async fn an_owed_tree_is_sent_when_it_raced_the_report_or_the_finish_was_superse
     crate::database::record_finish_worktree("child-1".into(), 12, observed_work().worktree)
         .unwrap();
     assert_eq!(working_tree_followups().len(), 2);
+}
+
+/// The store answers whether a child accepted a prompt after a finish, which
+/// decides whether a late working-tree read still describes that finish.
+#[tokio::test]
+async fn the_store_tells_a_prompt_accepted_after_a_finish_from_the_finish_itself() {
+    if !isolated_parked_test(
+        "the_store_tells_a_prompt_accepted_after_a_finish_from_the_finish_itself",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 9;
+    conversation.applied_event_digest = format!("{:064x}", 9);
+    conversation.last_turn_outcome = Some(finished_turn("task"));
+    crate::database::save_materialized_session(&conversation).unwrap();
+    assert!(!crate::database::accepted_work_since("child-1", 9).unwrap());
+    // The parent sends new work right after the report.
+    conversation.applied_event_ordinal = 12;
+    conversation.applied_event_digest = format!("{:064x}", 12);
+    conversation
+        .queued_prompts
+        .push(mj_core::state::MaterializedQueuedPrompt {
+            command_id: "next".into(),
+            kind: Default::default(),
+            content: Vec::new(),
+            queued_at_ms: 2,
+            accepted_ordinal: Some(12),
+        });
+    crate::database::save_materialized_session(&conversation).unwrap();
+    assert!(crate::database::accepted_work_since("child-1", 9).unwrap());
+    assert!(!crate::database::accepted_work_since("child-1", 12).unwrap());
 }
 
 /// Reconciling reports never asks a worker. A finish whose completion task has

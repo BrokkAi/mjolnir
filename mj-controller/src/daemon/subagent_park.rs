@@ -109,6 +109,8 @@ impl RuntimeState {
         child_session_id: String,
         failure: Option<String>,
     ) -> Result<crate::controller::ParkOutcome> {
+        let is_failed_start = failure.is_some();
+        let child_session_id_for_settlement = child_session_id.clone();
         let result = self
             .run_lifecycle(
                 child_session_id,
@@ -159,9 +161,49 @@ impl RuntimeState {
             .await?;
         self.publish_revision();
         match result {
-            DaemonLifecycleResult::Park(outcome) => Ok(outcome),
+            DaemonLifecycleResult::Park(outcome) => {
+                if outcome == crate::controller::ParkOutcome::Parked && !is_failed_start {
+                    self.spawn_park_settlement(child_session_id_for_settlement);
+                }
+                Ok(outcome)
+            }
             _ => unreachable!("a park returns its worker's reservation outcome"),
         }
+    }
+
+    /// Check what the park did to the processes it recorded, and tell the
+    /// parent. This runs apart from the park, which has returned: asking an
+    /// unreachable target can take the executor's whole timeout, and neither
+    /// the park's idle reservation, the completion that parked the child nor
+    /// the daemon's handoff admission may be held for that. The marker the park
+    /// wrote before its stop is durable, so a daemon that is replaced first has
+    /// the check done by the next one at startup.
+    fn spawn_park_settlement(self: &Arc<Self>, child_session_id: String) {
+        tokio::spawn(async move {
+            let settled = async {
+                let Some(park) = blocking({
+                    let child_session_id = child_session_id.clone();
+                    move || crate::database::load_unfinished_park(&child_session_id)
+                })
+                .await?
+                else {
+                    return Ok(());
+                };
+                let controller = blocking(Controller::load).await?;
+                let executor = CancellableProcessExecutor::with_timeout(PARK_TIMEOUT);
+                controller
+                    .finish_stopped_park(&child_session_id, park, &executor)
+                    .await
+            }
+            .await;
+            if let Err(error) = settled {
+                tracing::warn!(
+                    session_id = %child_session_id,
+                    error = format!("{error:#}"),
+                    "could not tell what a park did to the sub-agent's processes; startup will retry"
+                );
+            }
+        });
     }
 
     /// Settle the parks that began a stop and did not record an outcome, from

@@ -117,6 +117,8 @@ pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReade
             pid,
             ppid,
             age_ms: elapsed.saturating_mul(1000),
+            // `etime` is whole seconds.
+            age_granularity_ms: 1000,
             zombie: stat.starts_with('Z'),
             marker,
         });

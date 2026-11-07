@@ -255,7 +255,7 @@ pub enum MailboxEventBody {
         park: Box<crate::work_facts::ParkFacts>,
     },
     /// The working tree of a finished child, read after its finish report was
-    /// sent with the tree still being read. One per finish.
+    /// sent with the tree still being read. One per finish; it wakes the parent.
     SubagentWorkingTree {
         child_session_id: String,
         task_name: String,

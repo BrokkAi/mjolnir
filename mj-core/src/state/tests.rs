@@ -2151,3 +2151,48 @@ fn remembered_subagent_policy_reads_legacy_policy_objects_and_profile_maps() {
         Default::default()
     );
 }
+
+/// A tree read that was still running when the parent gave the child new work
+/// can have seen that work's changes: a newer accepted prompt, in any of its
+/// stages, makes the finish's observation not the finish's.
+#[test]
+fn work_accepted_after_a_finish_is_told_from_the_finish_itself() {
+    let outcome = |completed_ordinal: u64| MaterializedTurnOutcome {
+        answered_through: None,
+        diagnostic: None,
+        usage: None,
+        command_id: "turn".into(),
+        accepted_ordinal: Some(3),
+        turn_start_position: Some(3),
+        completed_ordinal,
+        completed_at_ms: 1,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: "end_turn".into(),
+        },
+    };
+    let running = |accepted: Option<u64>, start: u64| MaterializedTurn {
+        command_id: "next".into(),
+        accepted_ordinal: accepted,
+        turn_start_position: start,
+        started_at_ms: 1,
+        steered_into: None,
+    };
+    // Nothing newer than the finish at ordinal 9.
+    assert!(!accepted_work_since([], None, Some(&outcome(9)), 9));
+    assert!(!accepted_work_since([8, 9], None, Some(&outcome(9)), 9));
+    // A prompt queued, a turn accepted or started, or a later turn finished.
+    assert!(accepted_work_since([12], None, Some(&outcome(9)), 9));
+    assert!(accepted_work_since(
+        [],
+        Some(&running(Some(12), 5)),
+        Some(&outcome(9)),
+        9
+    ));
+    assert!(accepted_work_since(
+        [],
+        Some(&running(None, 12)),
+        Some(&outcome(9)),
+        9
+    ));
+    assert!(accepted_work_since([], None, Some(&outcome(15)), 9));
+}

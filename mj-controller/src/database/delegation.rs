@@ -423,7 +423,9 @@ fn enqueue_worktree_followup(
     let event = mj_core::mailbox::MailboxEvent {
         key: key.clone(),
         source: "mjolnir".into(),
-        wake: false,
+        // Woken, as the park follow-up is: a parent idle after the report has
+        // nothing else to bring it back to the tree it was promised.
+        wake: true,
         created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
         body: mj_core::mailbox::MailboxEventBody::SubagentWorkingTree {
             child_session_id: child.to_owned(),
@@ -437,7 +439,7 @@ fn enqueue_worktree_followup(
         &key,
         &relation.parent_session_id,
         &serde_json::to_string(&event)?,
-        false,
+        true,
         false,
     )?;
     Ok(true)
@@ -556,13 +558,43 @@ pub(crate) fn discard_unfinished_park(child: String) -> Result<()> {
 /// so a second park of the same finish (a child restarted before its record
 /// said parked) cannot tell the parent twice. A crash before this write
 /// records nothing, and the child's record still says it is running.
+#[cfg(test)]
 pub(crate) fn record_park_outcome(
     child: String,
     child_name: String,
     park: mj_core::work_facts::ParkFacts,
 ) -> Result<()> {
+    record_park_outcome_expecting(child, child_name, park, None)
+}
+
+/// [`record_park_outcome`] for a park settled from the marker it began with:
+/// the outcome is written only if that marker is still the child's pending
+/// park, so a settlement that ran long cannot overwrite a newer park's.
+pub(crate) fn record_park_outcome_expecting(
+    child: String,
+    child_name: String,
+    park: mj_core::work_facts::ParkFacts,
+    expected: Option<mj_core::work_facts::ParkFacts>,
+) -> Result<()> {
     let enqueued = submit_database_write("record park outcome", move |connection| {
         let transaction = connection.transaction()?;
+        if let Some(expected) = &expected {
+            let current: Option<String> = transaction
+                .query_row(
+                    "SELECT park_json FROM subagent_work_facts WHERE child_session_id=?1",
+                    [&child],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            let still_pending = current
+                .map(|text| serde_json::from_str::<mj_core::work_facts::ParkFacts>(&text))
+                .transpose()?
+                .is_some_and(|current| current == *expected);
+            if !still_pending {
+                return Ok(false);
+            }
+        }
         let stored: String = transaction.query_row(
             "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
             [&child],

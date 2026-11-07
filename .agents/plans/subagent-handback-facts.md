@@ -231,6 +231,24 @@ How to see it working: in an isolated instance, spawn a child that starts `setsi
   Date/Author: 2026-11-07 / implementing agent.
 
 
+- Decision (fifth review, 2026-11-07, REVERSES the fourth review's park hold): The park proceeds as soon as the finish report is out and never waits for a working-tree read. If that read is still in flight, the park stops the worker that runs it; the tree is then stored as unavailable ("the child was parked before its working tree could be read", stored by the completion once the park returns Parked, and by the read's own task when its connection ends on a parked child) and the follow-up delivers that. The hold (`hold_park`, the `RetryPark` it caused, and the retry clearing) is removed.
+  Rationale: A hung `git status` must not keep a worker, harness and slot alive for ever, and a reporting-only observation must not block a lifecycle transition; the user chose "parks as today". The fourth review's hold was my mistake. Test `a_park_does_not_wait_for_a_stalled_tree_read_and_stores_it_unavailable`.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (fifth review): The working-tree follow-up wakes the parent (`wake: true`), consistent with the park follow-up: a parent idle after the report has nothing else to bring it back to the tree it was promised. This reverses the fourth review's `wake: false`.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (fifth review): A tree that a late read returns is trusted only for the finish it was asked for. When the read ends successfully the daemon asks whether the child accepted a newer prompt than the finish's turn (`accepted_work_since`: a queued prompt accepted later, a running turn accepted or started later, or a later finish, from the store and from the live session, which can be ahead); if so the tree is stored as unavailable, "the child started new work before its working tree was read". The decision is on what the child accepted, not only on the finish ordinal, and is conservative: a newer prompt accepted at any point before the read's result is stored discards the tree.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (fifth review): Process ages carry their resolution (`ProcRow.age_granularity_ms`: 0 on Linux, 1000 on macOS where `ps etime` is whole seconds). A descendant is a helper if its age plus its resolution reaches the harness's age, so a process that started in the second before readiness on macOS is a helper rather than agent work; a process within that same second counts as a helper too, which is the deliberate error direction (the agent cannot have started work in the first second of the harness).
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+- Decision (fifth review): The check of which processes survived the stop no longer runs inside the park. The park stops the worker, saves the child as parked and returns; the pending marker written before the stop is already durable. The daemon then runs `finish_stopped_park` as a detached task that holds no handoff admission (`spawn_park_settlement`), and a daemon replaced first has the next startup settle the marker as before. The settlement does not look at the child's state (the stop is known to have run) and writes the outcome only if the marker it began with is still the child's pending park (`record_park_outcome_expecting`), so it cannot overwrite a newer park's outcome. A check that cannot run is recorded as "could not be checked", as before.
+  Rationale: The probe asks the target, and an unreachable target can hold it for the executor's whole 120 s timeout, inside the admitted completion and the park's idle reservation. Tests: the park test now asserts the park runs only the stop and leaves the marker, `a_settlement_never_overwrites_a_newer_parks_outcome`.
+  Date/Author: 2026-11-07 / implementing agent, from review.
+
+
 ## Outcomes & Retrospective
 
 Review round (2026-11-07): see the Decision Log entries marked "review fix". After them, live Claude runs 5 and 6 of `tests/e2e/handback_facts.py` passed, clippy was clean, and the isolated upgrade regressions in `mj-cli/tests/daemon_startup.rs` passed (21 of 21).

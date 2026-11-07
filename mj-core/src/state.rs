@@ -402,6 +402,27 @@ pub struct MaterializedSessionSummary {
     pub interruption_event_ordinals: Vec<u64>,
 }
 
+/// Whether a session accepted work after the turn that completed at
+/// `finish_ordinal`: a queued prompt accepted later, a running turn accepted or
+/// started later, or a later turn already finished. Used to tell an observation
+/// of a finish from one that a newer turn may have changed.
+pub fn accepted_work_since(
+    queued_ordinals: impl IntoIterator<Item = u64>,
+    active: Option<&MaterializedTurn>,
+    last: Option<&MaterializedTurnOutcome>,
+    finish_ordinal: u64,
+) -> bool {
+    queued_ordinals
+        .into_iter()
+        .any(|ordinal| ordinal > finish_ordinal)
+        || active.is_some_and(|turn| {
+            turn.accepted_ordinal
+                .is_some_and(|ordinal| ordinal > finish_ordinal)
+                || turn.turn_start_position > finish_ordinal
+        })
+        || last.is_some_and(|outcome| outcome.completed_ordinal > finish_ordinal)
+}
+
 impl MaterializedSession {
     pub fn empty(session_id: impl Into<String>) -> Self {
         Self {

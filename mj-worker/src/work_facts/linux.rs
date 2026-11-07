@@ -104,6 +104,7 @@ pub(super) fn read_table(session_id: &str) -> Result<(Vec<ProcRow>, ProcessReade
             pid,
             ppid: stat.ppid,
             age_ms: uptime.saturating_sub(start_ms).max(0),
+            age_granularity_ms: 0,
             zombie: stat.zombie,
             marker: session_marker(pid, &wanted),
         });

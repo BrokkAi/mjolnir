@@ -271,24 +271,13 @@ impl Controller {
             record.updated_at = super::now();
             crate::database::save_lifecycle_session(&record)
                 .context("record the stopped sub-agent")?;
-            // The record says parked before the outcome is written, so a marker
-            // that startup finds with no outcome belongs to a child that was
-            // parked: only then is the stop proven to have run. A failure to
-            // write the outcome must not undo the park; the marker stays.
-            if let Some(before_stop) = before_stop {
-                let park = check_survivors(executor, &backend, before_stop);
-                if let Err(error) = crate::database::record_park_outcome(
-                    session_id.to_owned(),
-                    session.message_name(),
-                    park,
-                ) {
-                    tracing::warn!(
-                        session_id,
-                        error = format!("{error:#}"),
-                        "could not record what the park did to the sub-agent's processes"
-                    );
-                }
-            }
+            // The outcome is not checked here. The check asks the target which
+            // processes survived, and an unreachable target can hold it for the
+            // executor's whole timeout, inside the daemon's admitted completion
+            // and the park's idle reservation. The snapshot is already durable
+            // with its unfinished marker, so the check runs afterwards, outside
+            // handoff admission, from that marker (`finish_stopped_park`), and a
+            // daemon that goes first has it settled at the next startup.
             let released = tokio::time::timeout(PARK_RELEASE_TIMEOUT, async {
                 while manager.session(session_id.to_owned()).await.is_ok() {
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -348,17 +337,33 @@ impl Controller {
             crate::database::save_lifecycle_session(&record)
                 .context("record the child whose park had completed as parked")?;
         }
-        let settled = match &park.snapshot {
-            Observed::Known(processes) => {
-                let survivors = surviving_pids(executor, &backend, &processes.identities)
-                    .context("check the processes of a park that did not finish")?;
-                ParkFacts::settled(park.snapshot.clone(), &survivors)
-            }
-            Observed::Unavailable { .. } | Observed::Pending => {
-                ParkFacts::settled(park.snapshot.clone(), &[])
-            }
+        self.finish_stopped_park(session_id, park, executor).await
+    }
+
+    /// Check which of the processes a park saw before its stop still run, and
+    /// record the outcome with its message. The stop is known to have run, so
+    /// this does not look at the child's state (it may have been started again
+    /// already); it is written only if the marker it started from is still the
+    /// child's pending park, so it never overwrites a newer park's outcome.
+    pub async fn finish_stopped_park(
+        &self,
+        session_id: &str,
+        park: ParkFacts,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        let Some(session) = self.state.sessions.get(session_id) else {
+            return crate::database::discard_unfinished_park(session_id.to_owned());
         };
-        crate::database::record_park_outcome(session_id.to_owned(), session.message_name(), settled)
+        let (backend, _) = self.worker_placement(session_id)?;
+        // A check that could not run is itself the outcome: the parent is told
+        // that what happened to the processes could not be checked, and why.
+        let settled = check_survivors(executor, &backend, park.snapshot.clone());
+        crate::database::record_park_outcome_expecting(
+            session_id.to_owned(),
+            session.message_name(),
+            settled,
+            Some(park),
+        )
     }
 
     /// Whether the worker an unfinished park recorded is gone and no other
@@ -1307,10 +1312,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome, ParkOutcome::Parked);
-        let purposes = executor.purposes.lock().unwrap().clone();
-        // The facts are asked of the worker before the stop and checked after.
+        // The park itself runs only the stop. The check of which processes
+        // survived asks the target, which can take the executor's whole timeout
+        // when it is unreachable, so it is not part of the park (the daemon
+        // runs it apart, outside handoff admission, from the durable marker).
         assert_eq!(
-            purposes,
+            executor.purposes.lock().unwrap().clone(),
+            ["stop Mjolnir worker daemon"]
+        );
+        let unfinished = crate::database::load_unfinished_parks().unwrap();
+        assert_eq!(unfinished.len(), 1, "the park's marker is durable");
+        assert!(
+            crate::database::pending_mailbox_events(10)
+                .unwrap()
+                .is_empty()
+        );
+        loaded_controller()
+            .finish_stopped_park(LATCH_RELAY_SESSION, unfinished[0].1.clone(), &executor)
+            .await
+            .unwrap();
+        assert_eq!(
+            executor.purposes.lock().unwrap().clone(),
             [
                 "stop Mjolnir worker daemon",
                 "check which processes survived a park"
@@ -1676,6 +1698,37 @@ mod tests {
         assert!(text.contains("pid 5001"), "{text}");
         assert!(text.contains("job 5003"), "{text}");
         assert!(text.contains("no longer running after the park"), "{text}");
+    }
+
+    /// A settlement that ran while the child was started again, finished and
+    /// parked again must not overwrite the newer park's outcome: it is written
+    /// only if the marker it started from is still the pending park.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_settlement_never_overwrites_a_newer_parks_outcome() {
+        if !isolated("a_settlement_never_overwrites_a_newer_parks_outcome") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let (_root, stale) = child_with_marker(SessionState::Parked);
+        // The newer park's outcome replaced the marker the settlement began with.
+        let newer = ParkFacts::settled(stale.snapshot.clone(), &[5001, 5002]);
+        crate::database::record_park_outcome(
+            LATCH_RELAY_SESSION.into(),
+            "map the parser".into(),
+            newer.clone(),
+        )
+        .unwrap();
+        let events_before = crate::database::pending_mailbox_events(10).unwrap().len();
+        loaded_controller()
+            .finish_stopped_park(LATCH_RELAY_SESSION, stale, &settling(&[""], "dead\n"))
+            .await
+            .unwrap();
+        let recorded = crate::database::load_work_facts(&[LATCH_RELAY_SESSION.to_owned()]).unwrap();
+        assert_eq!(recorded[LATCH_RELAY_SESSION].park.as_ref(), Some(&newer));
+        assert_eq!(
+            crate::database::pending_mailbox_events(10).unwrap().len(),
+            events_before
+        );
     }
 
     /// The finish report promised a later message about the processes it

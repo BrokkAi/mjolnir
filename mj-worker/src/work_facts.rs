@@ -80,8 +80,14 @@ pub struct ObserverChildren(Arc<tokio::sync::Mutex<std::collections::BTreeSet<u3
 pub(crate) struct ProcRow {
     pub pid: u32,
     pub ppid: u32,
-    /// Milliseconds the process has existed, on the host's monotonic clock.
+    /// Milliseconds the process has existed, on the host's monotonic clock,
+    /// rounded down to the platform's resolution.
     pub age_ms: i64,
+    /// The resolution of `age_ms`: the true age is somewhere in
+    /// `age_ms..age_ms + age_granularity_ms`. `ps` on macOS reports whole
+    /// seconds, so a process started in the second before the harness was
+    /// configured looks as if it started after it.
+    pub age_granularity_ms: i64,
     pub zombie: bool,
     pub marker: Marker,
 }
@@ -164,7 +170,15 @@ pub(crate) fn select_processes(
         }
         // A descendant that existed when the harness session was configured is
         // part of the harness. Before that moment nothing is the agent's.
-        if in_tree && ctx.harness_age_ms.is_none_or(|age| row.age_ms >= age) {
+        // A process that may have existed then, within the resolution of its age
+        // (the same whole second on macOS), is taken to be a helper: the agent
+        // cannot have started work in the first second of the harness, and a
+        // helper must not be reported as work.
+        if in_tree
+            && ctx
+                .harness_age_ms
+                .is_none_or(|age| row.age_ms.saturating_add(row.age_granularity_ms) >= age)
+        {
             continue;
         }
         let described = describe(row);
@@ -513,6 +527,7 @@ mod tests {
             pid,
             ppid,
             age_ms,
+            age_granularity_ms: 0,
             zombie: false,
             marker: if marked {
                 Marker::Present
@@ -938,5 +953,39 @@ mod tests {
             .collect();
         reading.abort();
         assert!(reported.is_empty(), "{reported:?}");
+    }
+    // `ps etime` is whole seconds while the harness's readiness age is in
+    // milliseconds: a helper that started a few hundred milliseconds before
+    // readiness reads as a second younger than it is and, compared in
+    // milliseconds, looked like work the agent started.
+    #[test]
+    fn a_process_in_the_same_second_as_readiness_is_a_helper_at_whole_second_resolution() {
+        let mut rows = busy_table();
+        // Readiness was 700.2 s ago. A helper that started 700.9 s ago shows as
+        // 700 s (whole seconds); the agent's work started well after.
+        let coarse = |pid: u32, ppid: u32, age_ms: i64| ProcRow {
+            age_granularity_ms: 1000,
+            ..row(pid, ppid, age_ms, false)
+        };
+        rows.push(coarse(500, 105, 700_000));
+        rows.push(coarse(501, 105, 695_000));
+        let mut ctx = context(Path::new("/bin/hel"));
+        ctx.harness_age_ms = Some(700_200);
+        let facts = select_processes(&rows, &ctx, describe);
+        let ids: Vec<u32> = facts
+            .identities
+            .iter()
+            .map(|identity| identity.pid)
+            .collect();
+        assert!(
+            !ids.contains(&500),
+            "a same-second process was reported as work: {ids:?}"
+        );
+        assert!(ids.contains(&501), "{ids:?}");
+        // At millisecond resolution the same readings would have put it in.
+        let same_second = rows.len() - 2;
+        rows[same_second].age_granularity_ms = 0;
+        let facts = select_processes(&rows, &ctx, describe);
+        assert!(facts.identities.iter().any(|identity| identity.pid == 500));
     }
 }
