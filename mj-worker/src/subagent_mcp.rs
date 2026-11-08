@@ -493,6 +493,8 @@ struct CallParams {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnArgs {
+    #[serde(default)]
+    no_github_credentials: bool,
     task_name: String,
     instructions: String,
     /// Required when the subtle type is offered. Without it, the spawn tool
@@ -663,6 +665,7 @@ fn call_with_budget_and_options(
                 None => bail!("missing field `task_type`"),
             };
             SubagentToolAction::Spawn {
+                no_github_credentials: args.no_github_credentials,
                 task_name: args.task_name,
                 instructions: instructions.to_owned(),
                 task_type,
@@ -851,6 +854,7 @@ fn spawn_tool(subtle_subagents: bool) -> Value {
         (SPAWN_ONE_TASK_TYPE, "the configured model and effort")
     };
     let mut properties = json!({
+        "no_github_credentials":{"type":"boolean","description":"Withhold GitHub credentials from this child and its descendants. A parent's credential opt-out is always inherited."},
         "task_name":{"type":"string"},
         "instructions":{"type":"string","description":"The assignment, context, constraints and required evidence. Point to relevant files, symbols, line ranges and earlier reports; the child reads them in the shared filesystem."},
         "task_type":{"type":"string","enum":["straightforward","subtle"],"description":"`subtle` gets a smarter, more expensive agent than `straightforward`; choose it for work that needs judgment or risks subtle bugs."},
@@ -1296,6 +1300,7 @@ mod tests {
                 request.action,
                 SubagentToolAction::Spawn {
                     task_type: mj_core::subagent::SubagentTaskType::Straightforward,
+                    no_github_credentials: true,
                     ..
                 }
             ));
@@ -1308,7 +1313,7 @@ mod tests {
             &socket,
             None,
             SubagentMcpRole::Parent,
-            Some(&json!({"name":"spawn", "arguments":{"task_name":"t", "instructions":"i"}})),
+            Some(&json!({"name":"spawn", "arguments":{"task_name":"t", "instructions":"i", "no_github_credentials":true}})),
             &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
             |_| Duration::from_secs(5),
             STRAIGHTFORWARD_ONLY,
@@ -1838,6 +1843,7 @@ mod tests {
                             keys,
                             [
                                 "instructions",
+                                "no_github_credentials",
                                 "task_name",
                                 "task_type",
                                 "working_directory"

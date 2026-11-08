@@ -1472,6 +1472,7 @@ pub(super) fn runtime_test_session(
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "local".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -6025,6 +6026,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: false,
             create_managed_worktree: Some(false),
             at: None,
             branch: None,
@@ -11490,6 +11492,7 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
         failing_controller_loader,
     ));
     let request = |kind, request_key: &str| crate::controller::RegisterSubagentRequest {
+        no_github_credentials: false,
         kind,
         reviewer_launch: None,
         parent_session_id: parent_id.into(),

@@ -66,7 +66,7 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 21
+version = 22
 ```
 
 The top-level keys are listed below. The legacy `[mailbox] enabled` switch is
@@ -74,7 +74,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `21`. |
+| `version` | integer | yes | none | Configuration schema version; use `22`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -101,7 +101,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 21 configuration. Older
+A missing or empty file is treated as an empty version 22 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -716,6 +716,31 @@ working everywhere.
 
 ## Session GitHub token `[github]`
 
+Use `mj new --no-github-credentials` to withhold GitHub authentication from a
+session and all its Mjolnir children, including oracles and reviewers. The API
+creation payload and child `spawn` tool accept `no_github_credentials: true`.
+A child can also opt out individually; it cannot undo its parent's opt-out.
+This choice is saved with the session and survives restart, resume and Move.
+`--no-github-events` independently controls watcher delivery.
+
+To withhold credentials by default from new sessions in this instance:
+
+```toml
+[github]
+session_credentials = false
+```
+
+Changing this default does not change existing sessions. Opted-out workers
+receive no GitHub token environment or token file, refuse token refreshes,
+and use separate unauthenticated `gh` and Git configurations. Git author
+name and email remain available. Public repositories and API data can still be
+read anonymously. A bare target shares the Unix account's readable files; this
+setting does not isolate the filesystem or prevent deliberate use of other
+credentials on that account. A child also shares its parent's filesystem.
+The daemon may still authenticate its own repository provisioning without
+passing the credential to the worker.
+
+
 Set a controller-side token file to give sessions a dedicated GitHub PAT instead
 of the host GitHub CLI login:
 
@@ -1190,7 +1215,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 21
+version = 22
 
 [phone]
 enabled = true

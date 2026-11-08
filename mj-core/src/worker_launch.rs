@@ -83,6 +83,9 @@ impl HarnessRuntimePolicy {
 #[serde(deny_unknown_fields)]
 pub struct WorkerOwnership {
     pub version: u32,
+    /// Retain the accepted credential policy if an orphan is adopted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     #[serde(default = "default_worker_workspace_id")]
     pub workspace_id: String,
     pub session_id: String,
@@ -146,6 +149,9 @@ pub enum WorkerRunMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
+    /// Accepted session policy; do not seed or accept GitHub authentication.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     /// Ordered input journaled before this worker accepts external commands.
     /// Kept in the launch description so a crash during initialization can
     /// finish the same prefix under its original command IDs.

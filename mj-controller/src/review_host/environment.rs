@@ -300,6 +300,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         launch.fast_mode = reviewer.main.fast_mode.then_some(true);
         controller
             .register_subagent(crate::controller::RegisterSubagentRequest {
+                no_github_credentials: false,
                 kind: mj_core::subagent::SubagentKind::Reviewer,
                 reviewer_launch: Some(launch),
                 parent_session_id: session_id.to_owned(),

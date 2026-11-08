@@ -995,5 +995,20 @@ pub fn enqueue(queue: &mut VecDeque<SyncTrigger>, trigger: SyncTrigger) {
     queue.push_back(trigger);
 }
 
+/// Authentication variables understood by GitHub CLI on github.com and
+/// enterprise hosts. A credential-free launch removes them after composition.
+pub fn remove_github_authentication_environment(
+    environment: &mut std::collections::BTreeMap<String, String>,
+) {
+    for name in [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+    ] {
+        environment.remove(name);
+    }
+}
+
 #[cfg(test)]
 mod tests;

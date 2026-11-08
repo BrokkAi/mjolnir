@@ -67,6 +67,7 @@ impl PushFixture {
             &mut environment,
             None,
             None,
+            false,
         )
         .unwrap();
         mj_core::credentials::remove_github_token(&fixture.root.join("github-token")).unwrap();
@@ -212,8 +213,14 @@ fn session_git_config_uses_saved_home_after_harness_home_changes() {
         ("HOME".into(), "/root".into()),
         ("PATH".into(), "/usr/bin:/bin".into()),
     ]);
-    mj_worker::worker_runtime::configure_github_cli(&root, &mut environment, Some(&home), None)
-        .unwrap();
+    mj_worker::worker_runtime::configure_github_cli(
+        &root,
+        &mut environment,
+        Some(&home),
+        None,
+        false,
+    )
+    .unwrap();
 
     let global_config = environment.get("GIT_CONFIG_GLOBAL").unwrap().clone();
     let mut resumed_environment = std::collections::BTreeMap::from([
@@ -226,6 +233,7 @@ fn session_git_config_uses_saved_home_after_harness_home_changes() {
         &mut resumed_environment,
         Some(&home),
         None,
+        false,
     )
     .unwrap();
     assert_eq!(
@@ -294,6 +302,7 @@ fn session_git_config_includes_explicit_container_config_after_home_changes() {
         &mut environment,
         Some(std::path::Path::new("/root")),
         Some(&inherited_config),
+        false,
     )
     .unwrap();
 
@@ -312,6 +321,7 @@ fn session_git_config_includes_explicit_container_config_after_home_changes() {
         &mut resumed_environment,
         Some(std::path::Path::new("/root")),
         Some(&inherited_config),
+        false,
     )
     .unwrap();
     assert_eq!(
@@ -669,7 +679,10 @@ fn checkpoint_worker_remains_visible_and_stoppable_after_clean_reexec() {
 /// Start a container worker whose launcher environment carries the GitHub
 /// token the controller put in the container, as `podman exec` does, and
 /// return the session's token once the worker has passed its GitHub setup.
-fn container_worker_token_after_start(existing: Option<&str>) -> Option<String> {
+fn container_worker_token_after_start(
+    existing: Option<&str>,
+    no_github_credentials: bool,
+) -> Option<String> {
     use std::time::Instant;
     let root = tempfile::tempdir().unwrap();
     let worker_root = root.path().join("worker");
@@ -684,9 +697,10 @@ fn container_worker_token_after_start(existing: Option<&str>) -> Option<String> 
         serde_json::to_vec(&serde_json::json!({
             "session_id": "018f9dd2-a3b4-7c8d-9000-123456789abc", "harness": "codex",
             "seed_image_environment": true,
+            "no_github_credentials": no_github_credentials,
             "bridge_command": "/missing-harness", "bridge_args": [],
             "environment": {"CODEX_HOME": root.path().join("profile")},
-            "target_environment": {}, "cwd": root.path(),
+            "target_environment": {"MJ_INSTANCE":"github-credentials-1474", "GITHUB_TOKEN":"target-token"}, "cwd": root.path(),
             "execution_policy": "configured_approvals"
         }))
         .unwrap(),
@@ -718,6 +732,8 @@ fn container_worker_token_after_start(existing: Option<&str>) -> Option<String> 
     {
         std::thread::sleep(Duration::from_millis(25));
     }
+    let prepared =
+        std::fs::read_to_string(&startup).is_ok_and(|steps| steps.contains("harness-resolve"));
     let script = mj_controller::targets::stop_worker_daemon_script(worker_root.to_str().unwrap());
     let _ = BoundedProcessExecutor::new(Duration::from_secs(8))
         .execute(&CommandSpec::new("sh", ["-c", &script]));
@@ -726,6 +742,10 @@ fn container_worker_token_after_start(existing: Option<&str>) -> Option<String> 
             assert!(!String::from_utf8_lossy(stream).contains("container-token"));
         }
     }
+    assert!(
+        prepared,
+        "worker must reach its GitHub setup before checking credentials"
+    );
     mj_core::credentials::read_github_token(&token_path)
         .unwrap()
         .1
@@ -739,7 +759,7 @@ fn container_worker_has_the_container_github_token_when_it_starts() {
     // it the first turn ran with no GitHub credentials until the controller's
     // periodic sync caught up (#1194).
     assert_eq!(
-        container_worker_token_after_start(None).as_deref(),
+        container_worker_token_after_start(None, false).as_deref(),
         Some("container-token")
     );
 }
@@ -749,7 +769,16 @@ fn container_worker_restart_keeps_a_newer_synced_github_token() {
     // The container's variable is fixed when the container is created. The
     // credential sync owns every later change, so a restart must not undo it.
     assert_eq!(
-        container_worker_token_after_start(Some("synced-token")).as_deref(),
+        container_worker_token_after_start(Some("synced-token"), false).as_deref(),
         Some("synced-token")
+    );
+}
+
+#[test]
+fn credential_free_container_worker_never_seeds_or_reuses_a_github_token() {
+    assert_eq!(container_worker_token_after_start(None, true), None);
+    assert_eq!(
+        container_worker_token_after_start(Some("synced-token"), true),
+        None
     );
 }

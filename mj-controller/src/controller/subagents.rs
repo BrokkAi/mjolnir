@@ -15,6 +15,7 @@ pub(super) const ORACLE_INSTRUCTIONS: &str = "You are the oracle: a read-only ad
 
 #[derive(Debug, Clone)]
 pub struct RegisterSubagentRequest {
+    pub no_github_credentials: bool,
     pub kind: mj_core::subagent::SubagentKind,
     pub reviewer_launch: Option<mj_core::worker_launch::ReviewerLaunchConfig>,
     pub parent_session_id: String,
@@ -490,6 +491,9 @@ impl Controller {
             // A child works in its parent's tree and gets what its parent got.
             no_project_memory: parent.no_project_memory,
             no_github_events: parent.no_github_events,
+            no_github_credentials: parent.no_github_credentials
+                || request.no_github_credentials
+                || !self.config.github.session_credentials,
             target_template_id: parent.target_template_id.clone(),
             resource_allocation: parent.resource_allocation.clone(),
             additional_mounts: parent.additional_mounts.clone(),

@@ -301,6 +301,7 @@ fn spawn_with() -> mj_core::subagent::SubagentToolRequest {
         request_id: "request-1".into(),
         created_at_ms: 0,
         action: mj_core::subagent::SubagentToolAction::Spawn {
+            no_github_credentials: false,
             task_type: mj_core::subagent::SubagentTaskType::Straightforward,
             task_name: "audit deps".into(),
             instructions: "check the lockfile".into(),
@@ -896,6 +897,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

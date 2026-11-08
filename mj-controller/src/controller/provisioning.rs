@@ -702,8 +702,10 @@ impl Controller {
                 Some(backend_session_bundle(&session, &self.config, executor)?)
             };
             let container_github_token =
-                github_token.filter(|_| configure_github_token_environment(&mut target));
-            if container_github_token.is_some()
+                github_token.filter(|_| {
+                    !session.no_github_credentials && configure_github_token_environment(&mut target)
+                });
+            if (container_github_token.is_some() || session.no_github_credentials)
                 && let Some(bundle) = bundle.as_mut()
             {
                 use_github_https_urls(bundle);

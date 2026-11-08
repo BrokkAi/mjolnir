@@ -558,6 +558,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "local".into(),
         resource_allocation: Some(SessionResourceAllocation::Container {
             cpus: 8,
@@ -7289,7 +7290,8 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
     }
     connection
         .execute_batch(
-            "DELETE FROM schema_migrations WHERE version >= 115;
+            "ALTER TABLE sessions DROP COLUMN no_github_credentials;
+             DELETE FROM schema_migrations WHERE version >= 115;
              UPDATE schema_compatibility SET minimum_compatible_version = 114;
              PRAGMA user_version = 114;",
         )

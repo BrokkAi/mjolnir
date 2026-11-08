@@ -260,6 +260,7 @@ impl RuntimeState {
             .context("reviewer launch configuration is missing")?
             .clone();
         self.start_subagent_session(crate::controller::RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: relation.kind,
             reviewer_launch: relation.reviewer_launch.clone(),
             parent_session_id: relation.parent_session_id.clone(),
@@ -513,6 +514,7 @@ impl RuntimeState {
                     review: request.review,
                     no_project_memory: request.no_project_memory,
                     no_github_events: request.no_github_events,
+                    no_github_credentials: request.no_github_credentials,
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,
                     additional_mounts: request.additional_mounts,
@@ -802,6 +804,7 @@ mod delegation_replay_tests {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 initial_prompt: None,
                 workspace_id: workspace.id.clone(),
                 profile_id: "codex".into(),
@@ -936,6 +939,7 @@ mod delegation_replay_tests {
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: false,
             initial_prompt: None,
             workspace_id: workspace.id,
             profile_id: "codex".into(),
@@ -1003,6 +1007,7 @@ mod delegation_replay_tests {
             let runtime = crate::daemon::tests::test_runtime_state();
             let replayed = runtime
                 .start_subagent_session(crate::controller::RegisterSubagentRequest {
+                    no_github_credentials: false,
                     kind: mj_core::subagent::SubagentKind::Worker,
                     reviewer_launch: None,
                     parent_session_id: "parent".into(),

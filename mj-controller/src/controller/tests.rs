@@ -706,6 +706,7 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         at: None,
         branch: None,
         base: None,
@@ -719,6 +720,85 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
         project_directory: None,
         session_title_override: None,
     }
+}
+
+#[test]
+fn github_credentials_creation_default_is_resolved_once_and_children_can_opt_out() {
+    const MARKER: &str = "MJ_TEST_GITHUB_CREDENTIALS_CHOICE";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "github_credentials_creation_default_is_resolved_once_and_children_can_opt_out",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut controller = Controller {
+        config: registration_config(),
+        state: State::default(),
+    };
+    let mut accepted = Vec::new();
+    for (global_default, explicit, expected) in [
+        (true, false, false),
+        (true, true, true),
+        (false, false, true),
+    ] {
+        controller.config.github.session_credentials = global_default;
+        let mut options = launch_options(Vec::new());
+        options.no_github_credentials = explicit;
+        let id = controller
+            .register_session_with_resources("codex", "project", "podman", "credentials", options)
+            .unwrap();
+        assert_eq!(
+            controller.state.sessions[&id].no_github_credentials,
+            expected
+        );
+        accepted.push((id, expected));
+    }
+    controller.config.github.session_credentials = true;
+    controller.state = crate::database::load_state().unwrap();
+    for (id, expected) in &accepted {
+        assert_eq!(
+            controller.state.sessions[id].no_github_credentials,
+            *expected
+        );
+    }
+    let parent_id = &accepted[0].0;
+    let parent = controller.state.sessions.get_mut(parent_id).unwrap();
+    parent.state = SessionState::Running;
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    parent.target = Some(TargetLocator::LocalPodman {
+        container_id: "credential-test-container".into(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    });
+    crate::database::save_session(parent).unwrap();
+    let child_id = controller
+        .register_subagent(super::subagents::RegisterSubagentRequest {
+            no_github_credentials: true,
+            kind: mj_core::subagent::SubagentKind::Worker,
+            reviewer_launch: None,
+            parent_session_id: parent_id.clone(),
+            task_name: "without credentials".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            fast_mode: false,
+            working_directory: PathBuf::new(),
+            initial_prompt: "Inspect the source".into(),
+            request_key: "credential-child".into(),
+            report_root: None,
+        })
+        .unwrap()
+        .child_session_id;
+    let restored = crate::database::load_state().unwrap();
+    assert!(restored.sessions[&child_id].no_github_credentials);
+    assert!(!restored.sessions[parent_id].no_github_credentials);
 }
 
 // Hard-won: f0f32ab19: an explicitly requested oracle was silently absent from the worker launch.
@@ -1912,6 +1992,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
 
     let child = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             parent_session_id: parent_id.to_owned(),
@@ -2047,6 +2128,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
         });
         session.no_project_memory = opted_out;
         session.no_github_events = opted_out;
+        session.no_github_credentials = opted_out;
         session
     };
     let opted_out_id = "0123456789abcdef0123456789abcdef";
@@ -2061,6 +2143,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
 
     let child_id = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             parent_session_id: opted_out_id.to_owned(),
@@ -2078,6 +2161,13 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
         .child_session_id;
     assert!(controller.state.sessions[&child_id].no_project_memory);
     assert!(controller.state.sessions[&child_id].no_github_events);
+    assert!(controller.state.sessions[&child_id].no_github_credentials);
+    assert!(
+        crate::database::read_durable_session_record(&child_id)
+            .unwrap()
+            .unwrap()
+            .no_github_credentials
+    );
 
     let launch = |controller: &Controller, id: &str| {
         controller
@@ -2097,6 +2187,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
         let launch = launch(&controller, id);
         assert!(launch.project_memory.is_none(), "{id}");
         assert!(launch.agent_mailboxes_enabled, "{id}");
+        assert!(launch.no_github_credentials, "{id}");
         assert_eq!(
             controller.project_memory_sync_target(id).unwrap(),
             None,
@@ -2105,6 +2196,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
     }
     let ordinary = launch(&controller, ordinary_id);
     assert!(ordinary.project_memory.is_some());
+    assert!(!ordinary.no_github_credentials);
     assert_eq!(ordinary.agent_mailboxes_enabled, mailboxes);
     assert!(
         controller
@@ -2315,6 +2407,7 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
     executor.execute(&command).unwrap();
     let child = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             parent_session_id: id.clone(),
@@ -2759,6 +2852,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         "/outside-the-child".into(),
     );
     let request = RegisterSubagentRequest {
+        no_github_credentials: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,
         reviewer_launch: Some(launch.clone()),
         parent_session_id: parent_id.into(),
@@ -2826,6 +2920,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     );
     let oracle = controller
         .register_subagent(RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Oracle,
             reviewer_launch: None,
             parent_session_id: parent_id.into(),
@@ -2895,6 +2990,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
         .insert("oracle-muse".into(), muse_profile);
     let muse_oracle = controller
         .register_subagent(RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Oracle,
             reviewer_launch: None,
             parent_session_id: muse_parent_id.into(),
@@ -2947,6 +3043,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     });
     let worker = controller
         .register_subagent(RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             parent_session_id: parent_id.into(),
@@ -2992,6 +3089,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     });
     crate::database::save_session(child_record).unwrap();
     let request = RegisterSubagentRequest {
+        no_github_credentials: false,
         kind: mj_core::subagent::SubagentKind::Reviewer,
         reviewer_launch: Some(launch),
         parent_session_id: worker.child_session_id.clone(),
@@ -3016,6 +3114,7 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     );
     let error = controller
         .register_subagent(RegisterSubagentRequest {
+            no_github_credentials: false,
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
             ..request
@@ -3091,6 +3190,7 @@ fn ordinary_children_inherit_the_parent_effective_review_setting() {
     let register_worker = |controller: &mut Controller, request_key: &str| {
         controller
             .register_subagent(RegisterSubagentRequest {
+                no_github_credentials: false,
                 kind: mj_core::subagent::SubagentKind::Worker,
                 reviewer_launch: None,
                 parent_session_id: parent_id.into(),

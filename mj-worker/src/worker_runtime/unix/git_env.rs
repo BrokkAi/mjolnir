@@ -48,6 +48,7 @@ pub const SESSION_SETUP_GUIDANCE: &str = "resume the session to restore its setu
 pub fn attach_session_git_environment(
     root: &std::path::Path,
     environment: &mut BTreeMap<String, String>,
+    no_github_credentials: bool,
 ) -> Result<()> {
     let root = std::path::absolute(root).context("resolve session worker root")?;
     let paths = GithubCliPaths::new(&root);
@@ -89,11 +90,15 @@ pub fn attach_session_git_environment(
             && name != "GH_TOKEN"
             && name != "GITHUB_TOKEN"
     });
+    if no_github_credentials {
+        credential_free_environment(&root, environment);
+    }
     Ok(())
 }
 
-/// The start of every wrapper in the session's `bin` directory: drop that
-/// directory from `PATH`, so the wrapper runs the target's own command.
+/// The start of every wrapper in the session's `bin` directory: drop session
+/// launcher directories so an inherited parent's wrapper cannot restore its
+/// authentication when this wrapper runs the target's own command.
 const WRAPPER_PREAMBLE: &str = r#"#!/bin/sh
 set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -101,7 +106,7 @@ clean_path=
 old_ifs=$IFS
 IFS=:
 for entry in $PATH; do
-    if [ "$entry" != "$script_dir" ]; then
+    if [ "$entry" != "$script_dir" ] && [ ! -f "$entry/../github-shell-env" ]; then
         if [ -z "$clean_path" ]; then clean_path=$entry; else clean_path=$clean_path:$entry; fi
     fi
 done
@@ -151,6 +156,7 @@ pub fn configure_github_cli(
     environment: &mut BTreeMap<String, String>,
     saved_home: Option<&std::path::Path>,
     extra_global_include: Option<&std::path::Path>,
+    no_github_credentials: bool,
 ) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -183,9 +189,29 @@ else
 fi
 exec gh "$@"
 "#;
+    let body = if no_github_credentials {
+        mj_core::credentials::remove_github_token(&root.join("github-token"))?;
+        mj_core::credentials::remove_github_authentication_environment(environment);
+        let config = root.join("gh-without-credentials");
+        mj_core::config::create_owner_only_directory(&config)?;
+        let hosts = config.join("hosts.yml");
+        match std::fs::remove_file(&hosts) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("remove session-owned GitHub login"),
+        }
+        r#"unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+GH_CONFIG_DIR=$script_dir/../gh-without-credentials
+GH_PROMPT_DISABLED=1
+export GH_CONFIG_DIR GH_PROMPT_DISABLED
+exec gh "$@"
+"#
+    } else {
+        WRAPPER
+    };
     crate::worker_runtime::shell_environment::write_executable(
         wrapper,
-        &format!("{WRAPPER_PREAMBLE}{WRAPPER}"),
+        &format!("{WRAPPER_PREAMBLE}{body}"),
     )?;
 
     prepend_github_cli_path(bin, environment)?;
@@ -197,8 +223,117 @@ exec gh "$@"
         &root.join("github-shell-env"),
         environment,
     )?;
-    configure_git_config_file(root, environment, &paths, saved_home, extra_global_include)?;
+    if no_github_credentials {
+        configure_git_without_credentials(
+            root,
+            environment,
+            &paths,
+            saved_home,
+            extra_global_include,
+        )?;
+    } else {
+        configure_git_config_file(root, environment, &paths, saved_home, extra_global_include)?;
+    }
     Ok(())
+}
+
+/// Retain identity without including any source authentication settings.
+fn git_author_identity(
+    root: &std::path::Path,
+    environment: &BTreeMap<String, String>,
+    saved_home: Option<&std::path::Path>,
+    extra_global_include: Option<&std::path::Path>,
+) -> Result<Vec<(String, String)>> {
+    let mut command = std::process::Command::new("git");
+    command.current_dir(root).envs(environment);
+    if let Some(home) = saved_home {
+        command.env("HOME", home);
+    }
+    if let Some(include) = extra_global_include {
+        command
+            .arg("-c")
+            .arg(format!("include.path={}", include.display()));
+    }
+    command.args(["config", "--null", "--get-regexp", r"^user\.(name|email)$"]);
+    let output = mj_core::subprocess::run_with_input(&mut command, &[])
+        .context("read Git author identity for a credential-free session")?;
+    if output.status.code() == Some(1) {
+        return Ok(Vec::new());
+    }
+    anyhow::ensure!(
+        output.status.success(),
+        "could not read Git author identity ({})",
+        output.status
+    );
+    let text = String::from_utf8(output.stdout).context("decode Git author identity")?;
+    Ok(text
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\n'))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect())
+}
+
+fn configure_git_without_credentials(
+    root: &std::path::Path,
+    environment: &mut BTreeMap<String, String>,
+    paths: &GithubCliPaths,
+    saved_home: Option<&std::path::Path>,
+    extra_global_include: Option<&std::path::Path>,
+) -> Result<()> {
+    let mut entries = git_author_identity(root, environment, saved_home, extra_global_include)?;
+    take_environment_git_config(environment);
+    environment.remove("MJ_ORIGINAL_GIT_CONFIG_GLOBAL");
+    let ssh_config = root.join("github-unauthenticated-ssh-config");
+    let mut ssh_text = String::from(
+        "Host github.com gist.github.com ssh.github.com\n    PubkeyAuthentication no\n    PasswordAuthentication no\n    KbdInteractiveAuthentication no\n    BatchMode yes\n",
+    );
+    if let Some(home) = saved_home {
+        ssh_text.push_str(&format!(
+            "Host !github.com !gist.github.com !ssh.github.com *\n    Include {}\n",
+            serde_json::to_string(&home.join(".ssh/config"))?
+        ));
+    }
+    mj_core::config::atomic_write_existing(&ssh_config, ssh_text.as_bytes())?;
+    let ssh_command = format!(
+        "ssh -F {}",
+        mj_core::targets::posix_quote(&ssh_config.to_string_lossy())
+    );
+    for host in ["github.com", "gist.github.com"] {
+        entries.push((format!("credential.https://{host}.helper"), String::new()));
+        entries.push((format!("http.https://{host}.extraheader"), String::new()));
+    }
+    entries.push(("core.sshCommand".into(), ssh_command.clone()));
+    mj_core::config::atomic_write_existing(
+        &paths.git_config,
+        render_git_config(&entries)?.as_bytes(),
+    )?;
+    credential_free_environment(root, environment);
+    let wrapper = format!(
+        "{WRAPPER_PREAMBLE}unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_SSH GIT_SSH_COMMAND\nGIT_CONFIG_GLOBAL=$script_dir/../gitconfig\nGIT_CONFIG_NOSYSTEM=1\nGIT_TERMINAL_PROMPT=0\nGIT_ASKPASS=/bin/false\nexport GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_TERMINAL_PROMPT GIT_ASKPASS\nexec git -c credential.https://github.com.helper= -c credential.https://gist.github.com.helper= -c http.https://github.com.extraheader= -c http.https://gist.github.com.extraheader= -c core.sshCommand={} \"$@\"\n",
+        mj_core::targets::posix_quote(&ssh_command)
+    );
+    crate::worker_runtime::shell_environment::write_executable(&paths.bin.join("git"), &wrapper)
+}
+
+fn credential_free_environment(root: &std::path::Path, environment: &mut BTreeMap<String, String>) {
+    mj_core::credentials::remove_github_authentication_environment(environment);
+    for name in ["GIT_CONFIG_PARAMETERS", "GIT_SSH", "GIT_SSH_COMMAND"] {
+        environment.remove(name);
+    }
+    for (name, value) in [
+        ("GH_CONFIG_DIR", root.join("gh-without-credentials")),
+        ("GIT_CONFIG_GLOBAL", root.join("gitconfig")),
+    ] {
+        environment.insert(name.into(), value.to_string_lossy().into_owned());
+    }
+    for (name, value) in [
+        ("MJ_GITHUB_CREDENTIALS", "disabled"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("GIT_ASKPASS", "/bin/false"),
+    ] {
+        environment.insert(name.into(), value.into());
+    }
 }
 
 /// Keep the GitHub token that the controller put in a container's

@@ -536,6 +536,9 @@ pub struct CreateSessionRequest {
     /// `mj_core::state::SessionRecord::no_github_events`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_github_events: bool,
+    /// Withhold GitHub credentials; inherited by children.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     #[serde(default)]
     pub initial_prompt: Option<String>,
     pub workspace_id: String,

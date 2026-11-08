@@ -260,6 +260,7 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
          DROP TRIGGER prompt_history_text_update;
          DROP TABLE prompt_history_text;
          DROP INDEX prompt_history_command;
+         ALTER TABLE sessions DROP COLUMN no_github_credentials;
          ALTER TABLE prompt_history DROP COLUMN command_id;
          ALTER TABLE turn_review_state DROP COLUMN active_group;
          ALTER TABLE turn_review_state DROP COLUMN push_findings;

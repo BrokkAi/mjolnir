@@ -240,6 +240,7 @@ impl Controller {
         let ownership_path = staging.path().join("ownership.json");
         WorkerOwnership {
             version: WorkerOwnership::VERSION,
+            no_github_credentials: session.no_github_credentials,
             workspace_id: session.workspace_id.clone(),
             session_id: session_id.to_string(),
             profile_id: session.last_profile.clone(),
@@ -1227,6 +1228,10 @@ pub(super) fn worker_launch_config_with_checkout(
     );
     let excluded_environment =
         exclude_harness_environment(&session.last_profile, profile, &mut environment);
+    if session.no_github_credentials {
+        mj_core::credentials::remove_github_authentication_environment(&mut environment);
+        mj_core::credentials::remove_github_authentication_environment(&mut target_environment);
+    }
     if podman_container && profile.kind == mj_core::config::HarnessKind::Claude {
         // Claude Code rejects bypassPermissions under uid 0 unless it is
         // told the process is already running in an isolated sandbox.
@@ -1236,6 +1241,7 @@ pub(super) fn worker_launch_config_with_checkout(
     }
     Ok((
         WorkerLaunchConfig {
+            no_github_credentials: session.no_github_credentials,
             oracle: false,
             initial_commands: Vec::new(),
             reviewer_launch: None,

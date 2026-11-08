@@ -361,6 +361,7 @@ pub fn lead_process_group() {}
 /// steer a read or write outside the session's harness home.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialEndpoint {
+    pub no_github_credentials: bool,
     pub harness: HarnessKind,
     /// The session's harness home; skills trees sync under it.
     pub home: PathBuf,
@@ -390,6 +391,7 @@ fn credential_endpoint(
         None => mj_core::config::harness_authentication_marker(config.harness, &home),
     };
     Ok(CredentialEndpoint {
+        no_github_credentials: config.no_github_credentials,
         harness: config.harness,
         home: home.clone(),
         marker,

@@ -992,6 +992,7 @@ impl ApiBackend {
                 anyhow::bail!("list_profiles is no longer available")
             }
             SubagentToolAction::Spawn {
+                no_github_credentials,
                 task_name,
                 instructions,
                 task_type,
@@ -1060,6 +1061,7 @@ impl ApiBackend {
                 };
                 let relation = self
                     .start_subagent(crate::controller::RegisterSubagentRequest {
+                        no_github_credentials: *no_github_credentials,
                         kind: mj_core::subagent::SubagentKind::Worker,
                         reviewer_launch: None,
                         parent_session_id: parent_session_id.to_owned(),

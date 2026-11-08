@@ -1512,6 +1512,7 @@ fn in_place_drain_waits_for_mutations_and_durable_effects_but_not_wait_or_list()
     };
     let mutating = [
         Action::Spawn {
+            no_github_credentials: false,
             task_name: "task".into(),
             instructions: "work".into(),
             task_type: mj_core::subagent::SubagentTaskType::Straightforward,

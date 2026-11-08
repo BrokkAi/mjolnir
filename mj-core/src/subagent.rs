@@ -459,6 +459,8 @@ pub enum SubagentToolAction {
         path: Option<String>,
     },
     Spawn {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_github_credentials: bool,
         task_name: String,
         instructions: String,
         #[serde(default)]
@@ -543,6 +545,8 @@ enum SubagentToolActionWire {
         path: Option<String>,
     },
     Spawn {
+        #[serde(default)]
+        no_github_credentials: bool,
         task_name: String,
         instructions: String,
         #[serde(default)]
@@ -668,6 +672,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 Self::SetReviewBaseline { commit, path }
             }
             SubagentToolActionWire::Spawn {
+                no_github_credentials,
                 task_name,
                 instructions,
                 task_type,
@@ -678,6 +683,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 context,
                 files,
             } => Self::Spawn {
+                no_github_credentials,
                 task_name,
                 instructions,
                 task_type,
@@ -1815,6 +1821,7 @@ mod tests {
     fn only_child_mutations_hold_an_in_place_move_drain() {
         let mutations = [
             SubagentToolAction::Spawn {
+                no_github_credentials: false,
                 task_type: SubagentTaskType::Straightforward,
                 task_name: "task".into(),
                 instructions: "work".into(),
