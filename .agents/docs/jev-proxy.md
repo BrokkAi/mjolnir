@@ -133,17 +133,19 @@ the same compaction filter and turn grouping, with every tool reduced to its
 name, status, and exit outcome. It never includes raw call inputs, results, or
 terminal output, including the newest eight calls that ordinary handoff
 compaction preserves. Conversation messages and plans remain available. The
-creation prompt interprets these summaries and requires successful creation;
-a failed or unfinished command does not establish ownership.
+creation prompt interprets these summaries and requires successful creation
+with identifying evidence; a failed or unfinished command, or a generic
+creation command without the created item's identity, does not establish ownership.
 
 `python3 scripts/jev-github-item-eval.py --run --output <file>` evaluates the
 synthetic summary-only controls in
 `services/jev-proxy/tests/fixtures/github-item-controls.json`. On 2026-11-08,
-the previous prompt passed 8/9 controls, incorrectly treating a failed creation
-as successful (created probability 0.51). The revised prompt passed 27/27
-classifications over three repeats, including shortened compaction command
-names; the failed creation scored 0.01 in every repeat. This is a small control
-set, not a production accuracy estimate. Local evidence is under
+the previous prompt incorrectly treated a failed creation as successful
+(created probability 0.51). Review also identified that a generic completed
+creation command cannot establish which item was opened. The final prompt
+passed 27/27 classifications over three repeats, scoring creation at 0.01 for
+both failures and commands without identity. This is a small control set, not
+a production accuracy estimate. Local evidence is under
 `/mnt/optane/jev-summary-20261108/`. Shipping smaller evidence requires the
 updated daemon; hosted prompt changes additionally require deploying the proxy.
 

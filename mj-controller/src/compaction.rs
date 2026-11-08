@@ -460,15 +460,6 @@ fn split_at_utf8_midpoint(text: &str) -> (&str, &str) {
     text.split_at(midpoint)
 }
 
-/// Fold the archived transcript into user turns with their agent, tool, and
-/// plan events. Thoughts and system notices carry no durable state, so they
-/// are dropped rather than summarized. Harness startup can also report tool
-/// failures before the first prompt; those are operational diagnostics rather
-/// than part of a user turn and are left out of the handoff.
-fn turns_from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Result<Vec<Turn>> {
-    turns_from_entries(TranscriptSummary::from_snapshot(snapshot).entries, false)
-}
-
 fn turns_from_entries(
     entries: impl IntoIterator<Item = mj_transcript::summary::SummaryEntry>,
     allow_leading_continuation: bool,

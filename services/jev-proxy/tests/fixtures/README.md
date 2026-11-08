@@ -3,7 +3,8 @@
 `github-item-controls.json` contains synthetic GitHub item matching controls with
 compaction tool summaries (names and outcomes, without raw calls or terminal
 output). It covers relevance, successful creation, reading an existing item,
-failed or planned creation, and a matching title with a different item number.
+failed or planned creation, creation without item identity, and a matching
+title with a different item number.
 Run `python3 scripts/jev-github-item-eval.py` to validate offline, or add
 `--run --output <artifact.json>` to evaluate the shared prompt against Jev. Each
 case runs three times by default; every relevance and creation decision must

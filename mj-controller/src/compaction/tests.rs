@@ -451,6 +451,10 @@ fn snapshot(bodies: Vec<CanonicalTranscriptBody>) -> CanonicalSessionSnapshot {
     }
 }
 
+fn turns_from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Result<Vec<Turn>> {
+    turns_from_entries(TranscriptSummary::from_snapshot(snapshot).entries, false)
+}
+
 fn exchanges(turns: &[(&str, &str)]) -> CanonicalSessionSnapshot {
     snapshot(
         turns

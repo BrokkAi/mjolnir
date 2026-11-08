@@ -168,7 +168,7 @@
     }
   },
   {
-    "id": "tool_only_creation",
+    "id": "creation_without_identity",
     "state": {
       "item": {
         "repo": "brokkai/mjolnir",
@@ -185,7 +185,7 @@
     },
     "expected": {
       "interested": true,
-      "created": true
+      "created": false
     }
   }
 ]
