@@ -436,8 +436,9 @@ fn a_daemon_reports_a_fresh_identity_for_each_start() {
 
 #[cfg(target_os = "linux")]
 // Hard-won: 92b39c9da: suspending the launcher's session deleted the daemon's working directory.
+// Hard-won: a97c0e7bc: node inherited a deleted checkout and every npm startup probe exited with status 7.
 #[test]
-fn daemon_working_directory_survives_removal_of_the_launching_checkout() {
+fn daemon_and_node_working_directories_survive_removal_of_the_launching_checkout() {
     let storage = upgrade_storage();
     let home = storage.path().join("home");
     let checkout = storage.path().join("checkout");
@@ -459,22 +460,57 @@ fn daemon_working_directory_survives_removal_of_the_launching_checkout() {
     let metadata: mj_client::daemon::DaemonMetadata =
         serde_json::from_slice(&fs::read(storage.path().join("data/daemon.json")).unwrap())
             .unwrap();
-    fs::remove_dir(&checkout).unwrap();
     let daemon_cwd = std::path::PathBuf::from(format!("/proc/{}/cwd", metadata.pid));
-    let output = mj_core::subprocess::run_with_input(
-        Command::new("git")
-            .args(["config", "--global", "--includes", "--null", "--list"])
-            .env("HOME", &home)
-            .current_dir(&daemon_cwd),
-        &[],
-    )
-    .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fs::read_link(daemon_cwd).unwrap(), home);
+    // The node is a detached sibling, so identify this fixture's node by its
+    // instance data directory rather than relying on process parentage.
+    let data_environment = format!("MJ_DATA_DIR={}", storage.path().join("data").display());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let node_cwd = loop {
+        let node = fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                let Ok(command) = fs::read(entry.path().join("cmdline")) else {
+                    return false;
+                };
+                command.split(|byte| *byte == 0).nth(1) == Some(b"node".as_slice())
+                    && fs::read(entry.path().join("environ")).is_ok_and(|environment| {
+                        environment
+                            .split(|byte| *byte == 0)
+                            .any(|entry| entry == data_environment.as_bytes())
+                    })
+            });
+        if let Some(node) = node {
+            let cwd = node.path().join("cwd");
+            // exec happens before main changes directory.
+            if fs::read_link(&cwd).unwrap() == home {
+                break cwd;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "node never entered the stable home directory"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    fs::remove_dir(&checkout).unwrap();
+    for cwd in [daemon_cwd, node_cwd] {
+        let output = mj_core::subprocess::run_with_input(
+            Command::new("git")
+                .args(["config", "--global", "--includes", "--null", "--list"])
+                .env("HOME", &home)
+                .current_dir(&cwd),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read_link(cwd).unwrap(), home);
+    }
 }
 
 #[test]
