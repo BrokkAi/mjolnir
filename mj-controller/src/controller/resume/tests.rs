@@ -1159,6 +1159,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "podman-old".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

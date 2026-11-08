@@ -45,6 +45,7 @@ fn session_record(id: &str) -> SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "target-1".into(),
         resource_allocation: None,
         container_cpus: None,

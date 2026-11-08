@@ -462,6 +462,7 @@ fn validate_action_against(
             review,
             no_project_memory: _,
             no_github_events: _,
+            no_github_credentials: _,
             oracle: _,
             oracle_choice: _,
         } => {

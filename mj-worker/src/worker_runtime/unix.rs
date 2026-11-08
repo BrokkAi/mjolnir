@@ -761,6 +761,12 @@ pub async fn run_daemon_owned(
     let startup_directory = std::env::current_dir()?;
     let root = super::resolve_relative_worker_root(root, &startup_directory);
     super::resolve_relative_harness_home(&mut config, &startup_directory);
+    if config.no_github_credentials {
+        mj_core::credentials::remove_github_authentication_environment(&mut config.environment);
+        mj_core::credentials::remove_github_authentication_environment(
+            &mut config.target_environment,
+        );
+    }
     let checkpoint_only = config.run_mode == mj_core::worker_launch::WorkerRunMode::CheckpointOnly;
     super::record_startup_step(&root, "policy");
     if !checkpoint_only {
@@ -1455,6 +1461,7 @@ async fn prepare_and_start_harness(
     session_environment.remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
     session_environment.remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
     let github_root = root.to_owned();
+    let no_github_credentials = config.no_github_credentials;
     let github_home = worker_home.clone();
     let git_config_include = session_git_config_include.clone();
     let mut explicit_environment = config.environment.clone();
@@ -1474,6 +1481,7 @@ async fn prepare_and_start_harness(
                 &mut session_environment,
                 github_home.as_deref(),
                 git_config_include.as_deref(),
+                no_github_credentials,
             )?;
             match &slopcop_login {
                 Ok(login) => configure_slopcop_cli(&github_root, login)?,

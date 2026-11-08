@@ -196,12 +196,18 @@ pub(in crate::controller) fn start_worker(
         targets::worker_root(locator, owner.session_id())? == worker_root,
         "worker owner does not cover the selected root"
     );
-    super::super::github_app::install_configured_session_github_token(
-        github,
-        executor,
-        locator,
-        worker_root,
-    )?;
+    if github.session_token_path.is_some() {
+        let session = crate::database::read_durable_session_record(owner.session_id())?
+            .context("session disappeared before installing its GitHub token")?;
+        if !session.no_github_credentials {
+            super::super::github_app::install_configured_session_github_token(
+                github,
+                executor,
+                locator,
+                worker_root,
+            )?;
+        }
+    }
     execute_checked(executor, start_worker_command(locator, worker_root))?;
     Ok(())
 }

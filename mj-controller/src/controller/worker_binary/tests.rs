@@ -1205,6 +1205,19 @@ fn a_probe_that_prints_something_else_is_an_error() {
 // Hard-won: a6ad3cc: concurrent checkpoint, upgrade, and recovery paths shared worker launch logs
 #[test]
 fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
+    const CHILD: &str = "MJ_TEST_PRIVATE_WORKER_LAUNCH_LOGS";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "starting_a_worker_uses_private_logs_without_touching_incumbent_files",
+        ))
+        .isolated_store(directory.path())
+        .env(CHILD, "1")
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
     let token_dir = tempfile::tempdir().unwrap();
     let token_path = token_dir.path().join("agent-pat");
     std::fs::write(&token_path, "github_pat_at_start").unwrap();
@@ -1237,6 +1250,10 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
             workspace_storage: Default::default(),
         },
     ] {
+        let session = crate::controller::test_support::checkpoint_test_session(
+            "13131313131313131313131313131313",
+        );
+        crate::database::save_session(&session).unwrap();
         let executor = RecordingExecutor {
             commands: RefCell::new(Vec::new()),
         };
@@ -1278,6 +1295,31 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
         assert!(!script.contains("worker-exit.json"));
         assert!(!script.contains("control.sock"));
         assert!(!script.contains("/worker.log"));
+        drop(commands);
+        let mut session = session;
+        session.no_github_credentials = true;
+        crate::database::save_session(&session).unwrap();
+        executor.commands.borrow_mut().clear();
+        start_worker(
+            &crate::worker_lifecycle::WorkerPermit::try_acquire(
+                &session.id,
+                "credential-free start",
+            )
+            .unwrap()
+            .unwrap(),
+            &executor,
+            &locator,
+            &targets::worker_root(&locator, &session.id).unwrap(),
+            &github,
+        )
+        .unwrap();
+        assert!(
+            executor
+                .commands
+                .borrow()
+                .iter()
+                .all(|command| command.purpose != "install configured session GitHub token")
+        );
     }
 }
 #[test]
@@ -4656,6 +4698,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
+        no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
@@ -4795,6 +4838,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         borrowed_from: None,
     };
     let launch = WorkerLaunchConfig {
+        no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
@@ -4903,6 +4947,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
+        no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,

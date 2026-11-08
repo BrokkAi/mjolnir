@@ -558,6 +558,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "local".into(),
         resource_allocation: Some(SessionResourceAllocation::Container {
             cpus: 8,
@@ -2534,6 +2535,79 @@ fn a_checkpoint_releases_the_tool_output_it_covers_and_keeps_the_diffstat() {
         compact_materialized_transcript_in(&database, "session-1", 15).unwrap(),
         TranscriptRetention::default()
     );
+}
+
+/// GitHub classification renders a session's last turns from a window that
+/// starts at a user message. A reply stored at that message's position but
+/// ordered before it belongs to the previous turn and must stay outside, or
+/// the window would open mid-turn and render differently from the history.
+#[test]
+fn recent_turns_render_from_their_window_as_from_the_whole_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    save_session_to(&database, &session("session-1", "project-1")).unwrap();
+    let item = |stable_id: String, position: u64, body: TranscriptBody| {
+        Arc::new(TranscriptItem {
+            latest_content_event_ordinal: matches!(body, TranscriptBody::Agent { .. })
+                .then_some(position),
+            stable_id,
+            position,
+            created_at_ms: 1_000,
+            last_changed_at_ms: 1_000,
+            body,
+        })
+    };
+    let mut materialized = materialized_session("session-1");
+    materialized.applied_event_ordinal = 100;
+    materialized.applied_event_digest = event_digest(100);
+    materialized.transcript = (1..=6)
+        .flat_map(|turn| {
+            [
+                item(
+                    format!("user:{turn}"),
+                    turn * 10,
+                    TranscriptBody::User {
+                        content: vec![
+                            serde_json::json!({"type": "text", "text": format!("ask {turn}")}),
+                        ],
+                    },
+                ),
+                item(
+                    // Same position as the next user message, sorted before it.
+                    format!("agent:{turn}"),
+                    (turn + 1) * 10,
+                    TranscriptBody::Agent {
+                        chunks: vec![serde_json::json!({
+                            "content": {"type": "text", "text": format!("answer {turn}")}
+                        })],
+                        streaming: false,
+                    },
+                ),
+            ]
+        })
+        .collect();
+    save_materialized_session_to(&database, &materialized).unwrap();
+    let render = |materialized: &MaterializedSession| {
+        let canonical =
+            mj_transcript::projection::canonical_session_from_materialized(materialized).unwrap();
+        crate::compaction::render_recent_turns(&canonical, 3)
+    };
+    let whole = load_materialized_session_from(&database, "session-1")
+        .unwrap()
+        .unwrap();
+
+    let recent = load_materialized_recent_turns_from(&database, "session-1", 3)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(recent.transcript.len(), 6, "three turns, not the history");
+    assert_eq!(recent.transcript[0].stable_id, "user:4");
+    assert!(render(&whole).contains("ask 4"));
+    assert_eq!(render(&recent), render(&whole));
+    let short = load_materialized_recent_turns_from(&database, "session-1", 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(short.transcript, whole.transcript, "fewer turns load whole");
 }
 
 /// The steady-state poll loads this on every change, so it must cost the
@@ -7289,7 +7363,8 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
     }
     connection
         .execute_batch(
-            "DELETE FROM schema_migrations WHERE version >= 115;
+            "ALTER TABLE sessions DROP COLUMN no_github_credentials;
+             DELETE FROM schema_migrations WHERE version >= 115;
              UPDATE schema_compatibility SET minimum_compatible_version = 114;
              PRAGMA user_version = 114;",
         )

@@ -1210,7 +1210,7 @@ mod tests {
                 push: self.host.path().to_path_buf(),
             };
             for command in
-                targets::clone_commands(&bundle, &self.workspace.to_string_lossy(), |args| {
+                targets::clone_commands(&bundle, &self.workspace.to_string_lossy(), None, |args| {
                     CommandSpec::new(args[0].clone(), args[1..].to_vec())
                 })
             {

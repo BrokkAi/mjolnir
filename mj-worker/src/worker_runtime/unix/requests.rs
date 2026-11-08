@@ -520,6 +520,10 @@ pub(crate) fn apply_credential_request_at(
             Ok(github_token_state_payload(&snapshot))
         }
         RelayRequest::InstallGithubToken { data } => {
+            anyhow::ensure!(
+                !endpoint.no_github_credentials,
+                "GitHub credentials are disabled for this session"
+            );
             if data.len() > MAX_GITHUB_TOKEN_BYTES * 2 {
                 bail!("GitHub token is above the {MAX_GITHUB_TOKEN_BYTES} byte limit");
             }

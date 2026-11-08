@@ -2455,6 +2455,7 @@ enabled = false
 
         let mutations = [
             SubagentToolAction::Spawn {
+                no_github_credentials: false,
                 task_type: mj_core::subagent::SubagentTaskType::Straightforward,
                 task_name: "task".into(),
                 instructions: "work".into(),

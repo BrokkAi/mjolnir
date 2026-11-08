@@ -1390,6 +1390,7 @@ fn github_app_configuration_is_optional_and_round_trips() {
         )])),
     });
     configured.github.session_token_path = Some(PathBuf::from("~/.secrets/gh_agents_pat"));
+    configured.github.session_credentials = false;
     configured.github.watch.interval_seconds = 30;
     configured.github.watch.api_base = "http://127.0.0.1:9411".into();
     configured.github.watch.enabled = false;
@@ -1397,6 +1398,7 @@ fn github_app_configuration_is_optional_and_round_trips() {
     configured.save_to(&path).unwrap();
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.contains("[github.app]"), "{body}");
+    assert!(body.contains("session_credentials = false"), "{body}");
     assert!(body.contains("[github.app.installations]"), "{body}");
     assert!(body.contains("[github.app.session_permissions]"), "{body}");
     assert!(body.contains("[github.app.token_permissions]"), "{body}");

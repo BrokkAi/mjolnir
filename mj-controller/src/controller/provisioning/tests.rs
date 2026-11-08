@@ -305,6 +305,48 @@ fn podman_session_runs_as_root_without_image_user_probing_or_keep_id() {
     );
 }
 
+#[test]
+fn credential_free_container_creation_omits_runtime_token_environment() {
+    let environment = BTreeMap::<String, String>::from([
+        ("GH_TOKEN".into(), "runtime-secret".into()),
+        ("GITHUB_TOKEN".into(), "runtime-secret".into()),
+        ("GH_ENTERPRISE_TOKEN".into(), "runtime-secret".into()),
+        ("NON_SECRET_SETTING".into(), "keep".into()),
+    ]);
+    let template: mj_core::config::TargetTemplate = serde_json::from_value(serde_json::json!({
+        "kind":"local-podman", "image":"test-image", "environment":environment,
+    }))
+    .unwrap();
+    let mut session = crate::controller::test_support::checkpoint_test_session(
+        "0123456789abcdef0123456789abcdef",
+    );
+    session.no_github_credentials = true;
+    let target =
+        backend_target(&template, None, ContainerOverrides::for_session(&session)).unwrap();
+    let plan = targets::provision_plan_named(
+        &target,
+        &session.id,
+        &probe_bundle(),
+        &[],
+        None,
+        &targets::resource_name(&session.id).unwrap(),
+        Some("checkout-secret"),
+    )
+    .unwrap();
+    let run_args = &plan.commands[0].args;
+    assert!(run_args.iter().all(|arg| !arg.contains("runtime-secret")));
+    assert!(run_args.iter().any(|arg| arg == "NON_SECRET_SETTING=keep"));
+    for command in &plan.commands {
+        let input = command.to_node_run(false).sensitive_stdin;
+        if command.purpose.starts_with("clone ") {
+            assert_eq!(input.as_deref(), Some(b"checkout-secret\n".as_slice()));
+        } else {
+            assert!(input.is_none());
+        }
+    }
+    assert!(!format!("{plan:?}").contains("checkout-secret"));
+}
+
 const SSH_DOCKER_FAILURE_CHILD: &str = "MJ_TEST_SSH_DOCKER_FAILURE_CHILD";
 
 #[test]
@@ -346,6 +388,7 @@ fn stale_worker_fails_before_any_container_is_created() {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 create_managed_worktree: None,
                 at: None,
@@ -417,6 +460,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -508,6 +552,7 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -811,6 +856,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -897,6 +943,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "remote".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -1027,6 +1074,7 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,

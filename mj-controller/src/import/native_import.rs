@@ -167,6 +167,7 @@ pub fn import_native_session(
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: !config.github.session_credentials,
             target_template_id: raw_project.map_or(target_id, |(_, raw_target_id)| raw_target_id),
             resource_allocation: None,
             additional_mounts: Vec::new(),

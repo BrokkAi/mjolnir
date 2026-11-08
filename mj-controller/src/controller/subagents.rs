@@ -15,6 +15,7 @@ pub(super) const ORACLE_INSTRUCTIONS: &str = "You are the oracle: a read-only ad
 
 #[derive(Debug, Clone)]
 pub struct RegisterSubagentRequest {
+    pub no_github_credentials: bool,
     pub kind: mj_core::subagent::SubagentKind,
     pub reviewer_launch: Option<mj_core::worker_launch::ReviewerLaunchConfig>,
     pub parent_session_id: String,
@@ -490,6 +491,9 @@ impl Controller {
             // A child works in its parent's tree and gets what its parent got.
             no_project_memory: parent.no_project_memory,
             no_github_events: parent.no_github_events,
+            no_github_credentials: parent.no_github_credentials
+                || request.no_github_credentials
+                || !self.config.github.session_credentials,
             target_template_id: parent.target_template_id.clone(),
             resource_allocation: parent.resource_allocation.clone(),
             additional_mounts: parent.additional_mounts.clone(),
@@ -515,7 +519,7 @@ impl Controller {
         let initial_prompt = match (handback_tool, &report_dir) {
             (true, Some(report_dir)) if reviewer => format!(
                 "You are a Mjolnir reviewer child. Your report directory is {report_dir}. Call handback with the complete rubric JSON (up to {} characters).\n\n{}",
-                mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS,
+                mj_core::subagent::SubagentKind::Reviewer.max_handback_chars(),
                 request.initial_prompt
             ),
             (_, report_dir) if oracle => {
@@ -532,7 +536,8 @@ impl Controller {
                     .map(|dir| format!("Your report directory is {dir}.\n\n"))
                     .unwrap_or_default();
                 format!(
-                    "{directory_note}{instructions}\n\n{}",
+                    "{directory_note}{instructions} Your answer may contain up to {} characters.\n\n{}",
+                    mj_core::subagent::SubagentKind::Oracle.max_handback_chars(),
                     request.initial_prompt
                 )
             }

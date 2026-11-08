@@ -223,6 +223,12 @@ impl Controller {
                     .and_then(|backend| {
                         adopted_container_workspace(&backend, session_id, executor)
                     });
+                let no_github_credentials = candidate
+                    .ownership
+                    .as_ref()
+                    .map_or(!self.config.github.session_credentials, |ownership| {
+                        ownership.no_github_credentials
+                    });
                 let mut record = adopted_session_record(
                     session_id,
                     target_id,
@@ -234,6 +240,7 @@ impl Controller {
                 );
                 record.target_runtime =
                     Some(record.target_runtime_settings(&self.config)?.into_owned());
+                record.no_github_credentials = no_github_credentials;
                 record.container_workspace = container_workspace;
                 record.project = Some(project);
                 (record, true)
@@ -590,6 +597,7 @@ fn adopted_session_record(
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: target_id.to_owned(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

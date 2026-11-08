@@ -1550,6 +1550,9 @@ pub struct SessionRecord {
     // Read legacy saved session JSON; creation requests have no old-name alias.
     #[serde(default, alias = "no_mailbox", skip_serializing_if = "is_false")]
     pub no_github_events: bool,
+    /// Withhold GitHub credentials; inherited by children.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     pub target_template_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_allocation: Option<SessionResourceAllocation>,

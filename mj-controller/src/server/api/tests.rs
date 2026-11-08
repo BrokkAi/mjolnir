@@ -2309,7 +2309,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert!(actions.try_recv().is_err());
 
     let response = tokio::spawn(app.oneshot(start_request(start_body(
-        r#","prompt":"add a README line","no_github_events":true,"remember_container_size":true"#,
+        r#","prompt":"add a README line","no_github_events":true,"no_github_credentials":true,"remember_container_size":true"#,
     ))));
     let request = actions.recv().await.unwrap();
     assert_eq!(
@@ -2322,6 +2322,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
             review: None,
             no_project_memory: false,
             no_github_events: true,
+            no_github_credentials: true,
             at: None,
             branch: None,
             base: None,

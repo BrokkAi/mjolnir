@@ -861,13 +861,14 @@ fn backend_bundle_with_sources(
     })
 }
 
-/// Per-session container size overrides. They win over both the target
+/// Per-session container overrides. They win over both the target
 /// template's values and any recorded resource allocation, and they are read
 /// only while a container is being created.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct ContainerOverrides<'a> {
     pub cpus: Option<&'a str>,
     pub memory: Option<&'a str>,
+    pub no_github_credentials: bool,
 }
 
 impl<'a> ContainerOverrides<'a> {
@@ -875,6 +876,7 @@ impl<'a> ContainerOverrides<'a> {
         Self {
             cpus: session.container_cpus.as_deref(),
             memory: session.container_memory.as_deref(),
+            no_github_credentials: session.no_github_credentials,
         }
     }
 }
@@ -1154,7 +1156,11 @@ fn backend_container(
     if let Some(memory) = memory {
         extra_run_args.push(format!("--memory={memory}"));
     }
-    for (key, value) in &container.environment {
+    let mut environment = container.environment.resolved().clone();
+    if overrides.no_github_credentials {
+        mj_core::credentials::remove_github_authentication_environment(&mut environment);
+    }
+    for (key, value) in &environment {
         extra_run_args.extend(["--env".to_string(), format!("{key}={value}")]);
     }
     ContainerTemplate {

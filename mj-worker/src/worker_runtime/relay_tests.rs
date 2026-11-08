@@ -213,6 +213,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
 
 fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
+        no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
@@ -360,7 +361,7 @@ fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
         "PATH".into(),
         format!("{}:/usr/bin:/bin", real_bin.display()),
     )]);
-    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
+    unix::configure_github_cli(worker.path(), &mut environment, None, None, false).unwrap();
     let token_path = worker.path().join("github-token");
     mj_core::credentials::remove_github_token(&token_path).unwrap();
 
@@ -391,6 +392,182 @@ fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
     assert_eq!(invoke(None), "unset|unset\n");
 }
 
+// Hard-won: a4c6fe269: URL-specific repository auth outranked a host-level reset.
+#[test]
+fn credential_free_git_and_gh_do_not_recover_host_or_refreshed_credentials() {
+    let directory = tempfile::tempdir().unwrap();
+    let worker = directory.path().join("worker");
+    let home = directory.path().join("home");
+    let project = directory.path().join("project");
+    for path in [&worker, &home, &project, &home.join(".config/gh")] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    git(&project, &["init", "-q"]);
+    let original_git = "[user]\nname = Isolated Author\nemail = author@example.invalid\n[credential \"https://github.com\"]\nhelper = \"!f() { echo username=host-user; echo password=host-secret; }; f\"\n[http \"https://github.com\"]\nextraheader = Authorization: host-secret\n[url \"git@github.com:\"]\ninsteadOf = https://github.com/\n";
+    std::fs::write(home.join(".gitconfig"), original_git).unwrap();
+    let original_gh =
+        "github.com:\n    oauth_token: host-secret\n    user: host-user\n    git_protocol: https\n";
+    std::fs::write(home.join(".config/gh/hosts.yml"), original_gh).unwrap();
+    git(
+        &project,
+        &[
+            "config",
+            "credential.https://github.com.helper",
+            "!f() { echo username=repo-user; echo password=repo-secret; }; f",
+        ],
+    );
+    git(
+        &project,
+        &[
+            "config",
+            "credential.https://github.com/org/repo.helper",
+            "!f() { echo username=repo-user; echo password=scoped-secret; }; f",
+        ],
+    );
+    git(
+        &project,
+        &[
+            "config",
+            "http.https://github.com/org/repo.extraheader",
+            "Authorization: scoped-secret",
+        ],
+    );
+    let login_hook = home.join("login-hook");
+    std::fs::write(
+        &login_hook,
+        "export GH_TOKEN=login-secret GITHUB_TOKEN=login-secret\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    let ssh_config = home.join(".ssh/config");
+    std::fs::write(&ssh_config, "Host github-work\n    HostName github.com\n    PubkeyAuthentication yes\n    ControlMaster auto\n    ControlPath /existing-authenticated-socket\nHost internal-work\n    HostName internal.example.invalid\n    PubkeyAuthentication yes\n").unwrap();
+    let parent = directory.path().join("parent-worker");
+    std::fs::create_dir_all(&parent).unwrap();
+    let mut parent_environment = BTreeMap::from([("PATH".into(), std::env::var("PATH").unwrap())]);
+    unix::configure_github_cli(&parent, &mut parent_environment, Some(&home), None, false).unwrap();
+    mj_core::credentials::write_github_token(&parent.join("github-token"), b"parent-secret")
+        .unwrap();
+    let mut environment = BTreeMap::from([
+        ("PATH".into(), parent_environment["PATH"].clone()),
+        ("HOME".into(), home.to_string_lossy().into_owned()),
+        (
+            "XDG_CONFIG_HOME".into(),
+            home.join(".config").to_string_lossy().into_owned(),
+        ),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            home.join(".gitconfig").to_string_lossy().into_owned(),
+        ),
+        ("BASH_ENV".into(), login_hook.to_string_lossy().into_owned()),
+        ("GH_TOKEN".into(), "stale-secret".into()),
+        ("GITHUB_TOKEN".into(), "stale-secret".into()),
+    ]);
+    mj_core::credentials::write_github_token(&worker.join("github-token"), b"stale-secret")
+        .unwrap();
+    for _ in 0..2 {
+        unix::configure_github_cli(&worker, &mut environment, Some(&home), None, true).unwrap();
+        assert!(!worker.join("github-token").exists());
+        assert!(!environment.contains_key("GH_TOKEN"));
+        assert!(!environment.contains_key("GITHUB_TOKEN"));
+        let invoke = |program: &str, args: &[&str], input: &[u8]| {
+            let mut command = std::process::Command::new(program);
+            command
+                .args(args)
+                .env_clear()
+                .envs(&environment)
+                .current_dir(directory.path());
+            mj_core::subprocess::run_with_input(&mut command, input).unwrap()
+        };
+        let git = invoke(
+            "git",
+            &["-C", project.to_str().unwrap(), "credential", "fill"],
+            b"protocol=https\nhost=github.com\npath=org/repo\n\n",
+        );
+        assert!(
+            !git.status.success(),
+            "Git must not recover a host or repository credential"
+        );
+        let gh = invoke("gh", &["auth", "token", "--hostname", "github.com"], &[]);
+        assert!(!gh.status.success(), "gh must not recover the host login");
+        let header = invoke(
+            "git",
+            &[
+                "-C",
+                project.to_str().unwrap(),
+                "config",
+                "--get-urlmatch",
+                "http.extraheader",
+                "https://github.com/org/repo",
+            ],
+            &[],
+        );
+        assert!(header.status.success());
+        assert!(header.stdout.iter().all(u8::is_ascii_whitespace));
+        let author = invoke("git", &["config", "user.name"], &[]);
+        assert_eq!(
+            String::from_utf8(author.stdout).unwrap().trim(),
+            "Isolated Author"
+        );
+        for (alias, pubkey) in [
+            ("github-work", ["no", "false"]),
+            ("internal-work", ["yes", "true"]),
+        ] {
+            let ssh = invoke(
+                worker.join("bin/git-ssh").to_str().unwrap(),
+                &["-G", "-F", ssh_config.to_str().unwrap(), alias],
+                &[],
+            );
+            assert!(ssh.status.success());
+            let settings = String::from_utf8(ssh.stdout).unwrap();
+            let setting = settings
+                .lines()
+                .find(|line| line.starts_with("pubkeyauthentication "))
+                .unwrap();
+            assert!(
+                pubkey.contains(&setting.split_whitespace().nth(1).unwrap()),
+                "{setting}"
+            );
+            if alias == "github-work" {
+                assert!(
+                    settings
+                        .lines()
+                        .all(|line| !line.contains("/existing-authenticated-socket"))
+                );
+            }
+        }
+        let shell = invoke(
+            "bash",
+            &[
+                "-c",
+                "printf '%s|%s' \"${GH_TOKEN-unset}\" \"${GITHUB_TOKEN-unset}\"",
+            ],
+            &[],
+        );
+        assert!(shell.status.success());
+        assert_eq!(shell.stdout, b"unset|unset");
+    }
+    let mut launch = launch_config(&worker.to_string_lossy());
+    launch.no_github_credentials = true;
+    let endpoint = credential_endpoint(&launch).unwrap();
+    let error = unix::apply_credential_request(
+        &endpoint,
+        &RelayRequest::InstallGithubToken {
+            data: "bmV3LXNlY3JldA==".into(),
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("disabled"));
+    assert!(!worker.join("github-token").exists());
+    assert_eq!(
+        std::fs::read_to_string(home.join(".gitconfig")).unwrap(),
+        original_git
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join(".config/gh/hosts.yml")).unwrap(),
+        original_gh
+    );
+}
+
 #[test]
 fn slopcop_wrapper_exports_each_live_login() {
     use mj_core::slopcop::SlopcopLogin;
@@ -409,7 +586,7 @@ fn slopcop_wrapper_exports_each_live_login() {
         "PATH".into(),
         format!("{}:/usr/bin:/bin", real_bin.display()),
     )]);
-    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
+    unix::configure_github_cli(worker.path(), &mut environment, None, None, false).unwrap();
     let login_path = home.path().join(mj_core::slopcop::LOGIN_FILE);
     unix::configure_slopcop_cli(worker.path(), &login_path).unwrap();
 
@@ -506,9 +683,9 @@ fi
         ("GIT_CONFIG_KEY_0".into(), "user.email".into()),
         ("GIT_CONFIG_VALUE_0".into(), "harness@example.test".into()),
     ]);
-    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
+    unix::configure_github_cli(worker.path(), &mut environment, None, None, false).unwrap();
     let configured_once = environment.clone();
-    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
+    unix::configure_github_cli(worker.path(), &mut environment, None, None, false).unwrap();
     assert_eq!(environment, configured_once);
 
     // Git settings reach the harness through one worker-owned file, not
@@ -5688,6 +5865,42 @@ async fn the_acp_bridge_never_sees_an_excluded_variable() {
     assert_eq!(
         std::fs::read_to_string(observed).unwrap(),
         "unset|unset|yes\n"
+    );
+}
+
+// Hard-won: a4c6fe269: login environment composition could restore GitHub Enterprise tokens.
+#[tokio::test]
+async fn credential_free_supervisor_excludes_all_github_tokens_after_environment_composition() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = temp.path().join("observed");
+    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+    config.no_github_credentials = true;
+    config.cwd = temp.path().to_owned();
+    config.bridge_command = "/bin/sh".into();
+    config.bridge_args = vec![
+        "-c".into(),
+        format!(
+            "printf '%s|%s|%s|%s' \"${{GH_TOKEN-unset}}\" \"${{GITHUB_TOKEN-unset}}\" \"${{GH_ENTERPRISE_TOKEN-unset}}\" \"${{GITHUB_ENTERPRISE_TOKEN-unset}}\" > {}",
+            mj_core::targets::posix_quote(&observed.to_string_lossy()),
+        ),
+    ];
+    let mut spec = AcpSupervisorSpec::from(&config);
+    let path = temp.path().join("supervisor.json");
+    spec.write_spec(&path).unwrap();
+    spec = AcpSupervisorSpec::read(&path).unwrap();
+    // The supervisor composes this with the login environment before applying
+    // its exclusions; tokens from either source must be absent from the child.
+    for name in mj_core::credentials::GITHUB_AUTHENTICATION_ENVIRONMENT {
+        spec.environment
+            .insert(name.into(), "reintroduced-secret".into());
+    }
+    let (supervisor_stdin, _held_stdin) = tokio::io::duplex(64);
+    unix::run_acp_supervisor_with_streams(spec, supervisor_stdin, tokio::io::sink())
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(observed).unwrap(),
+        "unset|unset|unset|unset"
     );
 }
 

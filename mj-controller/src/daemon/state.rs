@@ -353,6 +353,7 @@ impl RuntimeState {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 initial_prompt: None,
                 workspace_id: request.workspace_id,
                 profile_id: request.profile_id,
@@ -384,6 +385,13 @@ impl RuntimeState {
         )
         .await?;
         Ok(Some(registered))
+    }
+
+    /// Every session record, shared with the owner rather than copied.
+    pub(crate) fn session_records(
+        &self,
+    ) -> mj_core::snapshot_map::SnapshotMap<String, SessionRecord> {
+        self.owner().controller().state.sessions.clone()
     }
 
     pub(super) fn live_session_ids(&self) -> BTreeSet<String> {

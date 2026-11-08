@@ -50,6 +50,7 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

@@ -21,6 +21,7 @@ pub fn provision_plan(
         additional_mounts,
         container_workspace,
         &resource_name(session_id)?,
+        None,
     )
 }
 
@@ -31,6 +32,7 @@ pub fn provision_plan_named(
     additional_mounts: &[AdditionalMount],
     container_workspace: Option<&Path>,
     name: &str,
+    github_token: Option<&str>,
 ) -> Result<CommandPlan> {
     ensure!(
         resource_name_belongs_to(name, session_id)?,
@@ -62,6 +64,7 @@ pub fn provision_plan_named(
             additional_mounts,
             container_workspace,
             name,
+            github_token,
         )?;
         plan.commands = plan
             .commands
@@ -79,6 +82,7 @@ pub fn provision_plan_named(
             additional_mounts,
             container_workspace,
             name,
+            github_token,
         )?;
         plan.commands = plan
             .commands
@@ -109,7 +113,7 @@ pub fn provision_plan_named(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, &workspace, |args| {
+            commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
                 container_exec("podman", name, args)
             }));
         }
@@ -129,7 +133,7 @@ pub fn provision_plan_named(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, &workspace, |args| {
+            commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
                 container_exec("docker", name, args)
             }));
         }
@@ -156,7 +160,7 @@ pub fn provision_plan_named(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, &workspace, |args| {
+            commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
                 container_exec("container", name, args)
             }));
         }
@@ -176,7 +180,7 @@ pub fn provision_plan_named(
                     .creates_target(),
             );
             commands.extend(install_git_plan(ExecutionBoundary::Ssh(ssh)).commands);
-            commands.extend(clone_commands(bundle, &workspace, |args| {
+            commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
                 ssh_command_owned(ssh, args)
             }));
         }
@@ -202,10 +206,8 @@ pub fn provision_plan_named(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, &workspace, |args| {
-                let mut remote = vec!["podman".to_owned(), "exec".to_owned(), name.to_owned()];
-                remote.extend(args);
-                ssh_command_owned(ssh, remote)
+            commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
+                command_over_ssh(container_exec("podman", name, args), ssh)
             }));
         }
     }

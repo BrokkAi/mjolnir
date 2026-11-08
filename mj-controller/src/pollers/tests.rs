@@ -126,6 +126,7 @@ fn podman_controller(state: SessionState) -> Controller {
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: false,
             target_template_id: "podman".into(),
             resource_allocation: None,
             additional_mounts: Vec::new(),

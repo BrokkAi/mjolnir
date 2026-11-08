@@ -71,6 +71,9 @@ pub enum ControllerAction {
         /// Exclude this session from GitHub watcher delivery targets.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_github_events: bool,
+        /// Withhold GitHub credentials; inherited by children.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_github_credentials: bool,
         /// Which workspace the session belongs to. Optional on the wire so a
         /// viewer cached from before workspaces reached the phone still parses,
         /// but a controller holding more than one workspace refuses an empty

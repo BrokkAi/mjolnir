@@ -39,7 +39,7 @@ static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
 static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
         "You are a Mjolnir sub-agent. Call handback once as your last action; your parent reads that report. If you committed changes and have mj-review tools, get them reviewed before handing back. If a parent decision blocks progress, hand back your question and stop; its answer arrives as your next prompt. Your first prompt names your report directory. {}",
-        mj_core::subagent::HANDBACK_REPORT_RULES
+        mj_core::subagent::HANDBACK_REPORT_RULES.as_str()
     )
 });
 
@@ -423,7 +423,7 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
     static REVIEWER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
         format!(
             "You are a Mjolnir reviewer child. Call handback once as your last action with your plain-text findings, or exactly `No findings.` if there are none. Your report may contain up to {} characters.",
-            mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS
+            mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
         )
     });
     let reviewer_instructions = REVIEWER_INSTRUCTIONS.as_str();
@@ -454,8 +454,10 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
             }
             if reviewer {
                 tools[0]["description"] = json!(&reviewer_instructions);
-                tools[0]["inputSchema"]["properties"]["message"]["description"] =
-                    json!("Complete reviewer rubric JSON");
+                tools[0]["inputSchema"]["properties"]["message"]["description"] = json!(format!(
+                    "Complete reviewer rubric JSON, at most {} characters",
+                    mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
+                ));
             }
             (
                 if reviewer {
@@ -493,6 +495,8 @@ struct CallParams {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnArgs {
+    #[serde(default)]
+    no_github_credentials: bool,
     task_name: String,
     instructions: String,
     /// Required when the subtle type is offered. Without it, the spawn tool
@@ -663,6 +667,7 @@ fn call_with_budget_and_options(
                 None => bail!("missing field `task_type`"),
             };
             SubagentToolAction::Spawn {
+                no_github_credentials: args.no_github_credentials,
                 task_name: args.task_name,
                 instructions: instructions.to_owned(),
                 task_type,
@@ -851,6 +856,7 @@ fn spawn_tool(subtle_subagents: bool) -> Value {
         (SPAWN_ONE_TASK_TYPE, "the configured model and effort")
     };
     let mut properties = json!({
+        "no_github_credentials":{"type":"boolean","description":"Withhold GitHub credentials from this child and its descendants. A parent's credential opt-out is always inherited."},
         "task_name":{"type":"string"},
         "instructions":{"type":"string","description":"The assignment, context, constraints and required evidence. Point to relevant files, symbols, line ranges and earlier reports; the child reads them in the shared filesystem."},
         "task_type":{"type":"string","enum":["straightforward","subtle"],"description":"`subtle` gets a smarter, more expensive agent than `straightforward`; choose it for work that needs judgment or risks subtle bugs."},
@@ -1160,9 +1166,9 @@ fn child_tool_definitions() -> Vec<Value> {
             "handback",
             &format!(
                 "Hand back once, as your last action. Repeats in one turn are refused. {}",
-                mj_core::subagent::HANDBACK_REPORT_RULES
+                mj_core::subagent::HANDBACK_REPORT_RULES.as_str()
             ),
-            json!({"type":"object","properties":{"message":{"type":"string","description":"Your report, at most 4,000 characters; details go in files in your report directory."}},"required":["message"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"message":{"type":"string","description":format!("Your report, at most {} characters for workers or {} for oracles and reviewers; details go in files in your report directory.", mj_core::subagent::SubagentKind::Worker.max_handback_chars(), mj_core::subagent::SubagentKind::Oracle.max_handback_chars())}},"required":["message"],"additionalProperties":false}),
         )),
         fetch_tool(),
         send_message_tool(),
@@ -1296,6 +1302,7 @@ mod tests {
                 request.action,
                 SubagentToolAction::Spawn {
                     task_type: mj_core::subagent::SubagentTaskType::Straightforward,
+                    no_github_credentials: true,
                     ..
                 }
             ));
@@ -1308,7 +1315,7 @@ mod tests {
             &socket,
             None,
             SubagentMcpRole::Parent,
-            Some(&json!({"name":"spawn", "arguments":{"task_name":"t", "instructions":"i"}})),
+            Some(&json!({"name":"spawn", "arguments":{"task_name":"t", "instructions":"i", "no_github_credentials":true}})),
             &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
             |_| Duration::from_secs(5),
             STRAIGHTFORWARD_ONLY,
@@ -1688,7 +1695,13 @@ mod tests {
         )
         .unwrap();
         let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-        assert!(output.contains(&mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS.to_string()));
+        assert!(
+            output.contains(
+                &mj_core::subagent::SubagentKind::Reviewer
+                    .max_handback_chars()
+                    .to_string()
+            )
+        );
         assert!(!output.contains("4,000"));
         assert!(output.contains("plain-text findings"));
     }
@@ -1779,7 +1792,10 @@ mod tests {
                     }
                     SubagentMcpRole::Child => {
                         assert!(!instructions.contains(DELEGATION_ROUTING));
-                        assert!(instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES));
+                        assert!(
+                            instructions
+                                .contains(mj_core::subagent::HANDBACK_REPORT_RULES.as_str())
+                        );
                         assert_eq!(
                             tools
                                 .iter()
@@ -1838,6 +1854,7 @@ mod tests {
                             keys,
                             [
                                 "instructions",
+                                "no_github_credentials",
                                 "task_name",
                                 "task_type",
                                 "working_directory"
@@ -2107,7 +2124,7 @@ mod tests {
             handback["description"].as_str().unwrap(),
         ] {
             assert!(
-                instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES),
+                instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES.as_str()),
                 "{instructions}"
             );
         }

@@ -1362,6 +1362,7 @@ pub(crate) fn spawn_dashboard_create_session(
                         review,
                         no_project_memory: false,
                         no_github_events: false,
+                        no_github_credentials: false,
                         at: None,
                         branch: None,
                         base: None,

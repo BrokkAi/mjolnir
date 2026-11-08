@@ -992,6 +992,7 @@ impl ApiBackend {
                 anyhow::bail!("list_profiles is no longer available")
             }
             SubagentToolAction::Spawn {
+                no_github_credentials,
                 task_name,
                 instructions,
                 task_type,
@@ -1060,6 +1061,7 @@ impl ApiBackend {
                 };
                 let relation = self
                     .start_subagent(crate::controller::RegisterSubagentRequest {
+                        no_github_credentials: *no_github_credentials,
                         kind: mj_core::subagent::SubagentKind::Worker,
                         reviewer_launch: None,
                         parent_session_id: parent_session_id.to_owned(),
@@ -1290,15 +1292,7 @@ impl ApiBackend {
                         || !self.exports.child_awaits_review(child_id.clone()).await,
                     "your review has no verdict yet; wait for it, address it, then hand back"
                 );
-                let maximum = match record.kind {
-                    mj_core::subagent::SubagentKind::Worker
-                    | mj_core::subagent::SubagentKind::Oracle => {
-                        mj_core::subagent::MAX_HANDBACK_CHARS
-                    }
-                    mj_core::subagent::SubagentKind::Reviewer => {
-                        mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS
-                    }
-                };
+                let maximum = record.kind.max_handback_chars();
                 let characters = message.chars().count();
                 ensure!(
                     characters <= maximum,

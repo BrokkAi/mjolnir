@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 118;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 119;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2236,6 +2236,20 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older daemons cannot honor the accepted credential prohibition
+    // and could restore GitHub authentication when resuming or syncing a session.
+    if version < 119 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE sessions ADD COLUMN no_github_credentials INTEGER NOT NULL DEFAULT 0;
+             UPDATE schema_compatibility SET minimum_compatible_version = 119 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (119, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 119;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2710,6 +2724,13 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
 /// Historical fixtures must remove review columns introduced afterward.
 #[cfg(test)]
 pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
+    if version < 119
+        && legacy_schema::table_has_column(connection, "sessions", "no_github_credentials").unwrap()
+    {
+        connection
+            .execute_batch("ALTER TABLE sessions DROP COLUMN no_github_credentials;")
+            .unwrap();
+    }
     restore_pre116_prompt_history(connection, version);
     if version < 114
         && legacy_schema::table_has_column(connection, "turn_review_state", "declined_findings")
@@ -3827,7 +3848,8 @@ mod reader_tests {
         let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
-                "ALTER TABLE sessions DROP COLUMN oracle_choice;
+                "ALTER TABLE sessions DROP COLUMN no_github_credentials;
+             ALTER TABLE sessions DROP COLUMN oracle_choice;
              ALTER TABLE sessions DROP COLUMN oracle;
              DROP TABLE oracle_preference;
              ALTER TABLE turn_review_state DROP COLUMN declined_findings;
@@ -4248,12 +4270,29 @@ mod reader_tests {
         let connection = open_writer(&path).unwrap();
         let state = read_schema_state(&connection).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(118));
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         // A revision-117 build is refused: its decoder of a stored outcome
         // rejects the field a sub-agent's worker adds.
-        let refused = state.ensure_supported_by(117).unwrap_err();
-        assert!(format!("{refused:#}").contains("118"), "{refused:#}");
-        state.ensure_supported_by(118).unwrap();
+        state.ensure_supported_by(117).unwrap_err();
+        assert!(state.ensure_supported_by(118).is_err());
+        state.ensure_supported_by(SCHEMA_VERSION).unwrap();
+    }
+
+    #[test]
+    fn github_credential_policy_survives_migration_and_refuses_older_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let mut record = super::super::tests::session("credential-upgrade", "project");
+        save_session_to(&path, &record).unwrap();
+        stamp_schema_version(&path, 118);
+        let connection = open_writer(&path).unwrap();
+        let schema = read_schema_state(&connection).unwrap();
+        assert!(schema.ensure_supported_by(118).is_err());
+        drop(connection);
+        assert!(!load_state_from(&path).unwrap().sessions[&record.id].no_github_credentials);
+        record.no_github_credentials = true;
+        save_session_to(&path, &record).unwrap();
+        assert!(load_state_from(&path).unwrap().sessions[&record.id].no_github_credentials);
     }
 
     #[test]
@@ -4318,7 +4357,8 @@ mod reader_tests {
         restore_pre116_prompt_history(&connection, 115);
         connection
             .execute_batch(
-                "DELETE FROM schema_migrations WHERE version >= 116;
+                "ALTER TABLE sessions DROP COLUMN no_github_credentials;
+                 DELETE FROM schema_migrations WHERE version >= 116;
                  UPDATE schema_compatibility SET minimum_compatible_version = 114;
                  PRAGMA user_version = 115;",
             )
@@ -4453,7 +4493,8 @@ mod reader_tests {
         // container, of a failed child and of a live session.
         connection
             .execute_batch(
-                "DELETE FROM schema_migrations WHERE version >= 117;
+                "ALTER TABLE sessions DROP COLUMN no_github_credentials;
+                 DELETE FROM schema_migrations WHERE version >= 117;
                  UPDATE schema_compatibility SET minimum_compatible_version = 114;
                  PRAGMA user_version = 116;",
             )

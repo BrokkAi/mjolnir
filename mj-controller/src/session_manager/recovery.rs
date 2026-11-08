@@ -317,15 +317,17 @@ fn restart_owned_worker(
         if config.github.session_token_path.is_some() {
             let session = crate::database::read_durable_session_record(id)?
                 .context("session disappeared before installing its GitHub token")?;
-            let backend =
-                crate::controller::backend_locator(&plan.source_target, &session, &config)?;
-            let root = crate::targets::worker_root(&backend, id)?;
-            crate::controller::install_configured_session_github_token(
-                &config.github,
-                executor,
-                &backend,
-                &root,
-            )?;
+            if !session.no_github_credentials {
+                let backend =
+                    crate::controller::backend_locator(&plan.source_target, &session, &config)?;
+                let root = crate::targets::worker_root(&backend, id)?;
+                crate::controller::install_configured_session_github_token(
+                    &config.github,
+                    executor,
+                    &backend,
+                    &root,
+                )?;
+            }
         }
     }
     plan.restart.execute(executor)?;
