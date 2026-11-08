@@ -28,3 +28,4 @@ mod checkpoint_tests;
 mod test_support;
 
 pub mod cpu_usage;
+pub mod work_facts;

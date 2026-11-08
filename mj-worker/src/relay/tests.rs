@@ -286,6 +286,7 @@ fn classifier_input_handoff_preserves_running_children_and_stop_controls() {
         .record_command_completed(
             "approval",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: mj_core::acp::AWAITING_INPUT_STOP_REASON.into(),
                 usage: None,
                 diagnostic: None,
@@ -333,6 +334,7 @@ fn inferred_finished_handoff_marks_the_tracked_turn_idle() {
         .record_command_completed(
             "finished-prompt",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: mj_core::acp::INFERRED_FINISHED_STOP_REASON.into(),
                 usage: None,
                 diagnostic: None,
@@ -624,6 +626,7 @@ fn automatic_steering_stops_for_a_turn_that_returned_a_steer() {
         .record_command_completed(
             "prompt-first",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "EndTurn".into(),
                 usage: None,
                 diagnostic: None,
@@ -762,6 +765,7 @@ fn admitted_claude_steer_returns_if_its_boundary_hook_becomes_unavailable() {
         .record_command_completed(
             "prompt-first",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "EndTurn".into(),
                 usage: None,
                 diagnostic: None,
@@ -810,6 +814,7 @@ fn interrupting_a_pending_claude_steer_runs_its_prompt_next() {
         .record_command_completed(
             "prompt-first",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "Cancelled".into(),
                 usage: None,
                 diagnostic: None,
@@ -875,6 +880,7 @@ fn claude_attachment_steer_is_left_for_the_next_normal_prompt() {
         .record_command_completed(
             "prompt-first",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "EndTurn".into(),
                 usage: None,
                 diagnostic: None,
@@ -1077,6 +1083,7 @@ fn a_returned_steer_keeps_the_prompt_queued_for_the_next_turn() {
         .record_command_completed(
             "prompt-first",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "EndTurn".into(),
                 usage: None,
                 diagnostic: None,
@@ -1509,6 +1516,7 @@ fn a_stopped_sub_agents_note_reaches_only_the_first_prompt_after_a_resume() {
         .record_command_completed(
             "first-prompt",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -1923,6 +1931,7 @@ fn hidden_context_waits_for_a_prompt_and_survives_an_interruption() {
         .record_command_completed(
             "second-prompt",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -2193,6 +2202,7 @@ fn relay_runs_queued_prompts_in_order_without_a_controller() {
         .record_command_completed(
             "command-one",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -2291,6 +2301,7 @@ fn shell_runs_during_an_active_turn_and_barriers_the_later_prompt() {
         .record_command_completed(
             "prompt-command-1",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -2338,6 +2349,7 @@ fn a_prompt_accepted_before_a_shell_keeps_priority_and_does_not_consume_it() {
         .record_command_completed(
             "prompt-command-1",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -2873,6 +2885,7 @@ fn codex_replies_preserve_the_user_turn_and_only_autonomous_work_adds_a_notice()
             .record_command_completed(
                 command_id,
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
@@ -2939,6 +2952,7 @@ fn codex_goal_turns_block_replacement_after_the_prompt_finishes() {
         .record_command_completed(
             "00000000000000000000000000000001",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -3281,7 +3295,7 @@ fn a_lagging_idle_task_end_cannot_settle_the_next_turn_after_output() {
 fn replayed_autonomous_spawn_and_untyped_end_leave_no_imminent_turn() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
-    relay.acp_ready = true;
+    relay.set_acp_ready(true);
     relay
         .apply_claude_task_fixture("replayed".into(), true, true, false, true)
         .unwrap();
@@ -3962,6 +3976,7 @@ fn a_prompt_result_settles_a_lingering_harness_turn() {
         .record_command_completed(
             "next-prompt",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -4325,6 +4340,7 @@ fn kimi_background_agent_survives_its_parent_prompt_until_native_termination() {
         .record_command_completed(
             "parent-command",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -4470,6 +4486,7 @@ fn air_tasks_survive_prompt_boundaries_until_the_terminal_updates() {
             "completed" => relay.record_command_completed(
                 "review-prompt",
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
@@ -4949,6 +4966,7 @@ fn completed_codex_mcp_execute_calls_do_not_leave_background_work() {
             .record_command_completed(
                 "memory-prompt",
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
@@ -4982,6 +5000,7 @@ fn prompt_boundaries_clear_stale_tools_but_preserve_detached_commands() {
             "completed" => relay.record_command_completed(
                 "boundary-prompt",
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
@@ -5084,6 +5103,7 @@ fn completed_subagent_tool_update_keeps_a_parent_prompt_busy() {
         .record_command_completed(
             "parent-prompt",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -5343,6 +5363,7 @@ fn config_accepted_during_a_prompt_waits_while_cancel_bypasses_it() {
         .record_command_completed(
             "active-prompt",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "cancelled".into(),
                 usage: None,
@@ -5755,6 +5776,7 @@ fn new_prompt_invalidates_a_completed_turn_verdict_and_resets_its_evidence() {
         .record_command_completed(
             "prior-prompt",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "EndTurn".into(),
                 usage: None,
                 diagnostic: None,
@@ -5785,6 +5807,7 @@ fn new_prompt_invalidates_a_completed_turn_verdict_and_resets_its_evidence() {
         .record_command_completed(
             "new-prompt",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "EndTurn".into(),
                 usage: None,
                 diagnostic: None,
@@ -5845,6 +5868,7 @@ fn finished_turn_queues_only_one_replied_classification() {
         .record_command_completed(
             "prompt-1",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "EndTurn".into(),
                 usage: None,
                 diagnostic: None,
@@ -5913,6 +5937,7 @@ fn compact_preserves_large_pending_context_for_the_next_prompt() {
         .record_command_completed(
             "compact-command",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "EndTurn".into(),
                 usage: None,
                 diagnostic: None,
@@ -6291,6 +6316,7 @@ fn clear_is_accepted_after_a_finished_turn_whose_events_are_unacknowledged() {
         .record_command_completed(
             "finished-turn",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -6751,6 +6777,7 @@ fn a_jev_verdict_keeps_the_completion_identity_a_handback_reminder_names() {
             .record_command_completed(
                 "first-command",
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
                     diagnostic: None,
@@ -6820,6 +6847,7 @@ fn durable_archive_context_retry_after_consumption_does_not_reinstall_it() {
         .record_command_completed(
             "first-prompt",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -7081,6 +7109,7 @@ fn mailbox_delivery_claims_are_at_most_once_across_hook_prompt_and_wake() {
                 .record_command_completed(
                     "waiting-parent",
                     RelayCommandOutcome::Prompt {
+                        work_facts: None,
                         stop_reason: "end_turn".into(),
                         usage: None,
                         diagnostic: None,
@@ -7478,6 +7507,7 @@ fn mailbox_context_stays_pending_across_compaction_and_slash_prompts() {
             .record_command_completed(
                 "context-command",
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
@@ -7787,6 +7817,7 @@ fn hookless_mid_turn_mailbox_event_starts_a_wake_turn_after_completion() {
         .record_command_completed(
             "parent-working",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
                 diagnostic: None,
@@ -7804,6 +7835,7 @@ fn hookless_mid_turn_mailbox_event_starts_a_wake_turn_after_completion() {
         .record_command_completed(
             &wake_id,
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
                 diagnostic: None,
@@ -7937,4 +7969,23 @@ fn settled_harness_turn_admits_only_its_current_reminder() {
             completed_ordinal: completion.completed_ordinal,
         },
     );
+}
+
+#[test]
+fn readiness_and_the_instant_the_scan_reads_cannot_disagree() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    let clock = relay.harness_ready_clock();
+    assert!(!relay.is_acp_ready());
+    assert_eq!(clock.load(std::sync::atomic::Ordering::Acquire), 0);
+    relay.set_acp_ready(true);
+    let first = clock.load(std::sync::atomic::Ordering::Acquire);
+    assert!(relay.is_acp_ready() && first != 0);
+    assert_eq!(relay.operational_state().acp_ready, Some(true));
+    // A second configuration of an open session keeps the first instant.
+    relay.set_acp_ready(true);
+    assert_eq!(clock.load(std::sync::atomic::Ordering::Acquire), first);
+    relay.clear_acp_readiness();
+    assert!(!relay.is_acp_ready());
+    assert_eq!(clock.load(std::sync::atomic::Ordering::Acquire), 0);
 }

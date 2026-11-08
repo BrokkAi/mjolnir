@@ -46,6 +46,8 @@ use std::fs;
 use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate};
 use anyhow::{Context, Result, anyhow, bail};
@@ -116,8 +118,13 @@ pub struct DurableRelay {
     /// apart, and a controller has to know whether the worker it is talking to
     /// is the binary it would install today.
     worker_build: Option<String>,
-    /// Current ACP process readiness; never recovered from the journal.
-    acp_ready: bool,
+    /// Epoch milliseconds at which the harness session was last configured, or
+    /// 0 while it is not: the one owner of ACP process readiness, which is
+    /// never recovered from the journal. [`Self::is_acp_ready`] derives the
+    /// readiness flag from it, and the work-facts scan reads the instant to
+    /// tell the harness's own processes, which exist by then, from work the
+    /// agent started, so the two cannot disagree.
+    harness_ready_ms: Arc<AtomicI64>,
     /// A bridge has connected and its session is not open yet: the load or
     /// new-session request and the model and mode applied after it. Output
     /// in this window answers no prompt (R8-4). Never recovered from the
@@ -478,7 +485,7 @@ impl DurableRelay {
             root,
             relay_version: relay_version.into(),
             worker_build: Some(mj_core::worker_build::WORKER_BUILD_ID.to_owned()),
-            acp_ready: false,
+            harness_ready_ms: Arc::new(AtomicI64::new(0)),
             session_setup: false,
             checkpoint_only,
             reviewer_admissions: BTreeMap::new(),
@@ -754,7 +761,7 @@ impl DurableRelay {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         let mut state = self.snapshot.operational_state();
-        state.acp_ready = Some(self.acp_ready);
+        state.acp_ready = Some(self.is_acp_ready());
         state.checkpoint_only = self.checkpoint_only;
         state.steering_supported = self.steering_supported;
         // Harness-initiated turns have no owned prompt ID. Keep their existing
@@ -785,9 +792,33 @@ impl DurableRelay {
         state
     }
 
+    /// Whether the ACP process is configured: derived from the readiness
+    /// instant, never stored beside it.
+    pub(crate) fn is_acp_ready(&self) -> bool {
+        self.harness_ready_ms.load(Ordering::Acquire) != 0
+    }
+
+    pub(crate) fn set_acp_ready(&mut self, ready: bool) {
+        // A second configuration of an open session is not a new harness: the
+        // instant stays that of the first, or work started in between would
+        // read as part of the harness.
+        if ready && !self.is_acp_ready() {
+            self.harness_ready_ms
+                .store(epoch_millis().max(1), Ordering::Release);
+        } else if !ready {
+            self.harness_ready_ms.store(0, Ordering::Release);
+        }
+    }
+
+    /// The instant the harness session was last configured, shared with
+    /// connections that observe work.
+    pub fn harness_ready_clock(&self) -> Arc<AtomicI64> {
+        self.harness_ready_ms.clone()
+    }
+
     /// A stopped bridge cannot become ready again until its replacement configures.
     pub fn clear_acp_readiness(&mut self) {
-        self.acp_ready = false;
+        self.set_acp_ready(false);
         self.steering_supported = None;
         self.automatic_steering = false;
     }
@@ -884,7 +915,7 @@ impl DurableRelay {
             goal_decision: self.snapshot.goal.decision.is_some(),
             goal_synchronized: self.snapshot.goal.synchronized(),
             background_work_known: self.background_work_known,
-            acp_ready: Some(self.acp_ready),
+            acp_ready: Some(self.is_acp_ready()),
             checkpoint_only: self.checkpoint_only,
             checkpoint_barrier: self.snapshot.checkpoint_barrier.is_some(),
             capacity_retry_armed: self
@@ -1002,6 +1033,18 @@ impl DurableRelay {
     /// The directory holding this relay's durable state.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The journal ordinal of the newest work this worker accepted: a prompt, or
+    /// a turn the harness started on its own. Zero before any. The worker's own
+    /// answer to whether work arrived after a finish.
+    pub fn newest_accepted_work_ordinal(&self) -> u64 {
+        self.snapshot
+            .latest_prompt_accepted_ordinal
+            .into_iter()
+            .chain(self.snapshot.last_harness_turn_started_ordinal)
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn latest_ordinal(&self) -> u64 {
@@ -1136,7 +1179,7 @@ impl DurableRelay {
         }
         let ordinal = self.append_relay_event(None, observation)?;
         if let Some(ready) = acp_ready {
-            self.acp_ready = ready;
+            self.set_acp_ready(ready);
         }
         if let Some(setup) = session_setup {
             self.session_setup = setup;
@@ -1528,6 +1571,7 @@ pub(crate) mod test_support {
             .record_command_completed(
                 command_id,
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,

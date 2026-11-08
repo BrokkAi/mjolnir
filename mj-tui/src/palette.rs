@@ -1688,6 +1688,7 @@ mod tests {
         materialized.applied_event_ordinal = 4;
         materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
         materialized.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+            work_facts: None,
             answered_through: None,
             command_id: "prompt-1".into(),
             accepted_ordinal: Some(1),

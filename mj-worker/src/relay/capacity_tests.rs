@@ -32,6 +32,7 @@ fn finish(relay: &mut DurableRelay, id: &str, text: &str, stop: &str) {
         .record_command_completed(
             id,
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: stop.into(),
                 usage: None,
@@ -193,6 +194,7 @@ fn text_only_capacity_message_and_structured_errors_wait_for_jev() {
         .record_command_completed(
             "structured-prompt",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "error".into(),
                 diagnostic: Some(mj_core::diagnostic::TurnDiagnostic::from_acp(
                     &agent_client_protocol::Error::new(-32603, "failed")

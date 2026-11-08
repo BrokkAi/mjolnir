@@ -1268,6 +1268,12 @@ pub enum RelayCommandOutcome {
 
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<crate::usage::TokenUsage>,
+        /// What the worker observed of a sub-agent's processes and working tree
+        /// when the turn ended, captured before this outcome is published, so
+        /// the facts and the outcome are one record and replay carries them.
+        /// Absent for a session that is not a sub-agent and from older workers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        work_facts: Option<Box<crate::work_facts::WorkFacts>>,
     },
     UserShell {
         result: UserShellResult,

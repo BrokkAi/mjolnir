@@ -344,6 +344,32 @@ pub enum SubagentFinishIdentity {
     },
 }
 
+impl SubagentFinishIdentity {
+    /// Whether a report with this identity was made after the turn that
+    /// completed at `ordinal`, or for a later one: the parent has been told of
+    /// that turn's ending.
+    pub fn covers(&self, ordinal: u64) -> bool {
+        self.completed_ordinal()
+            .is_some_and(|completed| completed >= ordinal)
+    }
+
+    /// The ordinal of the turn this finish completed, whatever the kind of
+    /// identity: a terminal one carries the last completed turn, and has none
+    /// for a child that never completed a turn. The one place that says which
+    /// turn a finish's recorded facts belong to.
+    pub fn completed_ordinal(&self) -> Option<u64> {
+        match self {
+            Self::Turn {
+                completed_ordinal, ..
+            } => Some(*completed_ordinal),
+            Self::Terminal {
+                last_completed_ordinal,
+                ..
+            } => *last_completed_ordinal,
+        }
+    }
+}
+
 fn deserialize_terminal_last_completed_ordinal<'de, D>(
     deserializer: D,
 ) -> Result<Option<u64>, D::Error>
@@ -1978,6 +2004,7 @@ mod tests {
 
     fn finished(command_id: &str, stop_reason: &str) -> crate::state::MaterializedTurnOutcome {
         crate::state::MaterializedTurnOutcome {
+            work_facts: None,
             answered_through: None,
             diagnostic: None,
             usage: None,

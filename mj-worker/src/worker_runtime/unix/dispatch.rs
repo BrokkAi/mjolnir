@@ -8,6 +8,7 @@ pub(crate) async fn run_relay_coordinator_with_shells(
     commands: mpsc::Sender<CommandRequest>,
     user_shells: crate::user_shell::UserShellRegistry,
     kimi_tasks: Option<KimiTaskMonitor>,
+    capture: Option<crate::work_facts::WorkObserver>,
 ) -> Result<()> {
     let verdict = crate::acp::verdict_client::VerdictClient::resolve(None).await;
     run_relay_coordinator_with_verdict(
@@ -18,10 +19,14 @@ pub(crate) async fn run_relay_coordinator_with_shells(
         user_shells,
         kimi_tasks,
         verdict,
+        capture,
     )
     .await
 }
 
+// The coordinator owns one handle to each thing it serves; a struct of them
+// would only rename the arguments.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_relay_coordinator_with_verdict(
     relay: Arc<Mutex<DurableRelay>>,
     mut events: mpsc::Receiver<RuntimeEvent>,
@@ -30,6 +35,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
     mut user_shells: crate::user_shell::UserShellRegistry,
     mut kimi_tasks: Option<KimiTaskMonitor>,
     verdict: Option<crate::acp::verdict_client::VerdictClient>,
+    capture: Option<crate::work_facts::WorkObserver>,
 ) -> Result<()> {
     let verdict = verdict.map(|client| {
         client.with_log(
@@ -184,6 +190,10 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     // Runtime events already in the channel always belong
                     // before any newly admitted checkpoint cut.
                     let queued = events.len();
+                    let mut capturing = capture.as_ref().map(|observer| Capture {
+                        observer,
+                        wakes: &mut dispatch_wakes,
+                    });
                     if record_queued_runtime_events(
                         &relay,
                         &mut in_flight,
@@ -192,6 +202,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                         &mut user_shells,
                         &mut kimi_tasks,
                         queued,
+                        capturing.as_mut(),
                     ).await? {
                         verdict_tasks.shutdown().await;
                         return Ok(());
@@ -215,6 +226,10 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     verdict_tasks.shutdown().await;
                     return Ok(());
                 };
+                let mut capturing = capture.as_ref().map(|observer| Capture {
+                    observer,
+                    wakes: &mut dispatch_wakes,
+                });
                 if record_runtime_event_batch(
                     &relay,
                     &mut in_flight,
@@ -223,6 +238,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     &mut session_configured,
                     &mut user_shells,
                     &mut kimi_tasks,
+                    capturing.as_mut(),
                 ).await? {
                     verdict_tasks.shutdown().await;
                     return Ok(());
@@ -353,22 +369,172 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
     }
 }
 
-/// Record the complete batch already emitted by the ACP runtime before
-/// admitting a checkpoint barrier. A command event may itself materialize
-/// several durable observations, and queued notification events belong to
-/// the cut ahead of any waiting barrier.
-pub(crate) async fn record_runtime_event_batch(
+/// What observing a sub-agent's finishing prompt needs from its coordinator:
+/// the observer, and the channel that says a command has been accepted.
+pub(crate) struct Capture<'a> {
+    pub(crate) observer: &'a crate::work_facts::WorkObserver,
+    pub(crate) wakes: &'a mut mpsc::Receiver<()>,
+}
+
+/// Observe a sub-agent's work for the prompt that is finishing, together with
+/// whatever else must happen before its outcome is published (`prepare`, which
+/// for Kimi waits for the turn's native records to settle): the time added is
+/// the slowest of them, not their sum. The next turn cannot start meanwhile: the
+/// next prompt is dispatched by this task after the outcome is recorded.
+///
+/// There is no timeout of ours. The observation ends by itself, or is cancelled
+/// by what really ends a turn early: the harness stopping or restarting, its
+/// event channel closing, or the relay holding a cancellation or a Close it
+/// has not yet delivered (this task is what dispatches those, so they would otherwise wait behind a
+/// Git read that does not return; dropping the observation kills its Git
+/// children). A park waits for the report, which waits for the outcome. The
+/// outcome is then published with the facts unavailable and the reason. Events
+/// that arrive while it runs belong after the outcome, and are kept, in order,
+/// in `deferred`. Wakes consumed here need no replay: the caller dispatches
+/// pending commands once the outcome is recorded.
+async fn capture_while_open(
+    capture: &mut Capture<'_>,
+    relay: &Arc<Mutex<DurableRelay>>,
+    events: &mut mpsc::Receiver<RuntimeEvent>,
+    deferred: &mut std::collections::VecDeque<RuntimeEvent>,
+) -> mj_core::work_facts::WorkFacts {
+    // The relay is asked on entry and on every wake, never only on a wake: the
+    // wake of a command accepted just before this prompt's event was drained is
+    // already consumed, and the command is still waiting for this task.
+    let ends_for_command = || {
+        relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .undelivered_cancellation_or_close_pending()
+    };
+    const COMMAND_ACCEPTED: &str =
+        "a cancellation or close was accepted while the turn's observation was being taken";
+    if ends_for_command() {
+        return mj_core::work_facts::WorkFacts::unavailable(COMMAND_ACCEPTED);
+    }
+    let observation = crate::work_facts::capture(capture.observer);
+    tokio::pin!(observation);
+    let mut wakes_open = true;
+    loop {
+        tokio::select! {
+            biased;
+            facts = &mut observation => return facts,
+            wake = capture.wakes.recv(), if wakes_open => match wake {
+                // The coordinator finds the closed channel itself afterwards.
+                None => wakes_open = false,
+                Some(()) => {
+                    if ends_for_command() {
+                        return mj_core::work_facts::WorkFacts::unavailable(COMMAND_ACCEPTED);
+                    }
+                }
+            },
+            event = events.recv() => match event {
+                None => {
+                    return mj_core::work_facts::WorkFacts::unavailable(
+                        "the harness exited while the turn's observation was being taken",
+                    );
+                }
+                Some(event) => {
+                    let ends = matches!(
+                        event,
+                        RuntimeEvent::Stopped | RuntimeEvent::HarnessRestarting { .. }
+                    );
+                    deferred.push_back(event);
+                    if ends {
+                        return mj_core::work_facts::WorkFacts::unavailable(
+                            "the harness stopped while the turn's observation was being taken",
+                        );
+                    }
+                }
+            },
+        }
+    }
+}
+
+/// Prepare, observe (for a sub-agent's finishing prompt) and record one runtime
+/// event, then the events that arrived while it was observed.
+#[allow(clippy::too_many_arguments)]
+async fn record_one_runtime_event(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
-    mut first: RuntimeEvent,
+    mut event: RuntimeEvent,
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configured: &mut bool,
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
+    capture: Option<&mut Capture<'_>>,
 ) -> Result<bool> {
-    prepare_kimi_runtime_event(kimi_tasks, relay, &mut first).await?;
-    track_user_shell_completion(user_shells, &first);
-    if record_runtime_event_and_track_configuration(relay, in_flight, first, session_configured)? {
+    let mut deferred = std::collections::VecDeque::new();
+    let finishing_prompt = matches!(event, RuntimeEvent::PromptFinished { .. });
+    let work_facts = match capture.filter(|_| finishing_prompt) {
+        Some(capture) => {
+            let (prepared, facts) = tokio::join!(
+                prepare_kimi_runtime_event(kimi_tasks, relay, &mut event),
+                capture_while_open(capture, relay, events, &mut deferred),
+            );
+            prepared?;
+            Some(facts)
+        }
+        None => {
+            prepare_kimi_runtime_event(kimi_tasks, relay, &mut event).await?;
+            None
+        }
+    };
+    track_user_shell_completion(user_shells, &event);
+    if record_runtime_event_and_track_configuration(
+        relay,
+        in_flight,
+        event,
+        session_configured,
+        work_facts,
+    )? {
+        return Ok(true);
+    }
+    // What arrived during the observation, in the order it arrived, now that the
+    // outcome it followed is recorded.
+    while let Some(mut event) = deferred.pop_front() {
+        prepare_kimi_runtime_event(kimi_tasks, relay, &mut event).await?;
+        track_user_shell_completion(user_shells, &event);
+        if record_runtime_event_and_track_configuration(
+            relay,
+            in_flight,
+            event,
+            session_configured,
+            None,
+        )? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Record the complete batch already emitted by the ACP runtime before
+/// admitting a checkpoint barrier. A command event may itself materialize
+/// several durable observations, and queued notification events belong to
+/// the cut ahead of any waiting barrier.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn record_runtime_event_batch(
+    relay: &Arc<Mutex<DurableRelay>>,
+    in_flight: &mut BTreeMap<String, RelayCommand>,
+    first: RuntimeEvent,
+    events: &mut mpsc::Receiver<RuntimeEvent>,
+    session_configured: &mut bool,
+    user_shells: &mut crate::user_shell::UserShellRegistry,
+    kimi_tasks: &mut Option<KimiTaskMonitor>,
+    mut capture: Option<&mut Capture<'_>>,
+) -> Result<bool> {
+    if record_one_runtime_event(
+        relay,
+        in_flight,
+        first,
+        events,
+        session_configured,
+        user_shells,
+        kimi_tasks,
+        capture.as_deref_mut(),
+    )
+    .await?
+    {
         return Ok(true);
     }
     let queued = events.len();
@@ -380,10 +546,12 @@ pub(crate) async fn record_runtime_event_batch(
         user_shells,
         kimi_tasks,
         queued,
+        capture,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_queued_runtime_events(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
@@ -392,18 +560,23 @@ pub(crate) async fn record_queued_runtime_events(
     user_shells: &mut crate::user_shell::UserShellRegistry,
     kimi_tasks: &mut Option<KimiTaskMonitor>,
     maximum: usize,
+    mut capture: Option<&mut Capture<'_>>,
 ) -> Result<bool> {
     for recorded in 0..maximum {
         match events.try_recv() {
-            Ok(mut event) => {
-                prepare_kimi_runtime_event(kimi_tasks, relay, &mut event).await?;
-                track_user_shell_completion(user_shells, &event);
-                if record_runtime_event_and_track_configuration(
+            Ok(event) => {
+                if record_one_runtime_event(
                     relay,
                     in_flight,
                     event,
+                    events,
                     session_configured,
-                )? {
+                    user_shells,
+                    kimi_tasks,
+                    capture.as_deref_mut(),
+                )
+                .await?
+                {
                     return Ok(true);
                 }
                 if (recorded + 1) % 256 == 0 {
@@ -438,6 +611,7 @@ pub(crate) fn record_runtime_event_and_track_configuration(
     in_flight: &mut BTreeMap<String, RelayCommand>,
     event: RuntimeEvent,
     session_configured: &mut bool,
+    work_facts: Option<mj_core::work_facts::WorkFacts>,
 ) -> Result<bool> {
     // A fresh bridge must configure its session again before any command is
     // dispatched to it. That gap is what lets the bridge drop the requests the
@@ -449,13 +623,25 @@ pub(crate) fn record_runtime_event_and_track_configuration(
         *session_configured = false;
     }
     *session_configured |= matches!(event, RuntimeEvent::SessionConfigured { .. });
-    record_runtime_event(relay, in_flight, event)
+    record_runtime_event_with_facts(relay, in_flight, event, work_facts)
 }
 
+#[cfg(test)]
 pub(crate) fn record_runtime_event(
     relay: &Arc<Mutex<DurableRelay>>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
     event: RuntimeEvent,
+) -> Result<bool> {
+    record_runtime_event_with_facts(relay, in_flight, event, None)
+}
+
+/// Record one runtime event. `work_facts` is what the worker observed of its
+/// agent's work for a finishing prompt, published with that prompt's outcome.
+pub(crate) fn record_runtime_event_with_facts(
+    relay: &Arc<Mutex<DurableRelay>>,
+    in_flight: &mut BTreeMap<String, RelayCommand>,
+    event: RuntimeEvent,
+    work_facts: Option<mj_core::work_facts::WorkFacts>,
 ) -> Result<bool> {
     let stopped = matches!(event, RuntimeEvent::Stopped);
     let mut relay = relay.lock().expect("relay state lock poisoned");
@@ -594,6 +780,7 @@ pub(crate) fn record_runtime_event(
                     stop_reason,
                     usage,
                     diagnostic,
+                    work_facts: work_facts.map(Box::new),
                 },
             )?;
         }

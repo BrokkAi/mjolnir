@@ -523,13 +523,13 @@ fn main() -> Result<()> {
     // child inherits it. This also covers `daemon-run`, which is this same
     // binary, so a per-instance daemon validates its own environment on boot.
     mj_core::config::apply_instance_flag(cli.instance.as_deref())?;
-    if matches!(cli.command, Some(Command::DaemonRun)) {
+    if matches!(cli.command, Some(Command::DaemonRun | Command::Node)) {
         // Set this before starting threads: the launcher's session checkout
-        // can be removed while the daemon is still running.
-        let home =
-            mj_core::path_input::user_home().context("locate the daemon's home directory")?;
+        // can be removed while the daemon or its sibling node is still running.
+        let home = mj_core::path_input::user_home()
+            .context("locate the background process's home directory")?;
         std::env::set_current_dir(&home)
-            .with_context(|| format!("set daemon working directory to {}", home.display()))?;
+            .with_context(|| format!("set background working directory to {}", home.display()))?;
     }
     let log = Some(logging::ControllerLog::start(
         command_name(cli.command.as_ref()),
