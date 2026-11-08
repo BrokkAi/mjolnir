@@ -6,6 +6,16 @@ use mj_core::state::{
     TranscriptBody, TranscriptItem,
 };
 use serde_json::json;
+
+fn live_sessions(ids: &[&str]) -> LiveSessions {
+    ids.iter()
+        .map(|id| {
+            let record =
+                super::super::tests::runtime_test_session(id, "workspace", SessionState::Running);
+            ((*id).to_owned(), record)
+        })
+        .collect()
+}
 use tokio::sync::{mpsc, oneshot};
 
 fn view(id: &str, completed: bool) -> ManagedSessionView {
@@ -122,7 +132,7 @@ async fn continuation_checks_run_concurrently_and_defer_review_until_each_settle
             let enabled = enabled.clone();
             Arc::new(move |_| enabled.load(Ordering::SeqCst))
         },
-        live: Arc::new(|| ["one".into(), "two".into()].into()),
+        live: Arc::new(|| live_sessions(&["one", "two"])),
         review: {
             let reviews = reviews.clone();
             Arc::new(move |id, view| {
@@ -246,7 +256,7 @@ async fn continuation_does_not_revive_old_idle_sessions_and_new_input_cancels_a_
         control: remote.control,
         allowed: Arc::new(|_| true),
         claim: Arc::new(|_| Claim::Allowed),
-        live: Arc::new(|| ["one".into()].into()),
+        live: Arc::new(|| live_sessions(&["one"])),
         review: Arc::new(|_, _| {}),
     };
     let cancellation = CancellationToken::new();
@@ -327,7 +337,7 @@ async fn continuation_submits_a_guarded_prompt_and_reviews_only_after_the_chain(
             control: remote.control,
             allowed: Arc::new(|_| true),
             claim: Arc::new(|_| Claim::Allowed),
-            live: Arc::new(|| ["one".into()].into()),
+            live: Arc::new(|| live_sessions(&["one"])),
             review: {
                 let reviews = reviews.clone();
                 Arc::new(move |_, v| {
@@ -515,7 +525,7 @@ async fn quota_classification_survives_exhausted_allowance_and_unusable_authoriz
         control: remote.control,
         allowed: Arc::new(|_| true),
         claim: Arc::new(|_| Claim::Allowed),
-        live: Arc::new(|| ["one".into()].into()),
+        live: Arc::new(|| live_sessions(&["one"])),
         review: Arc::new(|_, _| {}),
         profile: Arc::new(|_| Some("test".into())),
         quota: Arc::new(|_, view| {
@@ -651,7 +661,7 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
                     Claim::Blocked
                 }
             }),
-            live: Arc::new(|| ["one".into()].into()),
+            live: Arc::new(|| live_sessions(&["one"])),
             review: Arc::new(|_, _| panic!("quota-blocked turn must not be reviewed")),
             profile: Arc::new(move |_| {
                 Some(
@@ -758,7 +768,7 @@ async fn a_due_recovery_that_cannot_be_submitted_says_which_fact_refused_it() {
         control: remote.control,
         allowed: Arc::new(|_| true),
         claim: Arc::new(|_| Claim::Allowed),
-        live: Arc::new(|| ["one".into()].into()),
+        live: Arc::new(|| live_sessions(&["one"])),
         review: Arc::new(|_, _| panic!("quota-blocked turn must not be reviewed")),
         profile: Arc::new(|_| Some("test".into())),
         quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
@@ -876,7 +886,7 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
             control: remote.control,
             allowed: Arc::new(|_| true),
             claim: Arc::new(|_| Claim::Allowed),
-            live: Arc::new(|| ["one".into()].into()),
+            live: Arc::new(|| live_sessions(&["one"])),
             review: Arc::new(|_, _| {}),
             profile: Arc::new(|_| Some("test".into())),
             quota: Arc::new(|_, view| {
@@ -1034,7 +1044,7 @@ async fn background_work_defers_continuation_and_its_end_brings_a_fresh_check() 
         control: remote.control,
         allowed: Arc::new(|_| true),
         claim: Arc::new(|_| Claim::Allowed),
-        live: Arc::new(|| ["one".into()].into()),
+        live: Arc::new(|| live_sessions(&["one"])),
         review: Arc::new(|_, _| {}),
         profile: Arc::new(|_| Some("test".into())),
         quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
@@ -1161,7 +1171,7 @@ async fn a_due_recovery_resumes_a_usage_limited_goal_and_leaves_a_spent_budget_a
             control: remote.control,
             allowed: Arc::new(|_| true),
             claim: Arc::new(|_| Claim::Allowed),
-            live: Arc::new(|| ["one".into()].into()),
+            live: Arc::new(|| live_sessions(&["one"])),
             review: Arc::new(|_, _| {}),
             profile: Arc::new(|_| Some("test".into())),
             quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
@@ -1273,7 +1283,7 @@ async fn handoff_defers_a_completion_without_consuming_its_trigger() {
         control: remote.control,
         allowed: Arc::new(|_| true),
         claim: Arc::new(|_| Claim::Allowed),
-        live: Arc::new(|| ["one".into()].into()),
+        live: Arc::new(|| live_sessions(&["one"])),
         review: Arc::new(|_, _| {}),
     };
     let (calls, mut requests) = mpsc::unbounded_channel();
@@ -1338,7 +1348,7 @@ fn idle_feed(
         control,
         allowed: Arc::new(|_| false),
         claim: Arc::new(|_| Claim::Blocked),
-        live: Arc::new(BTreeSet::new),
+        live: Arc::new(LiveSessions::new),
         review: Arc::new(|_, _| {}),
         quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
         profile: Arc::new(|_| None),
@@ -1577,7 +1587,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             control: remote.control,
             allowed: Arc::new(|_| true),
             claim: Arc::new(|_| Claim::Allowed),
-            live: Arc::new(|| ["one".into()].into()),
+            live: Arc::new(|| live_sessions(&["one"])),
             review: Arc::new(|_, _| {}),
             profile: Arc::new(|_| Some("test".into())),
             quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),

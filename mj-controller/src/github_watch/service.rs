@@ -647,12 +647,15 @@ fn spaced_words(text: &str) -> String {
 
 async fn recent_turns(session_id: String) -> Result<String> {
     tokio::task::spawn_blocking(move || {
-        let Some(materialized) = crate::database::load_materialized_session(&session_id)? else {
+        const TURNS: usize = 3;
+        let Some(materialized) =
+            crate::database::load_materialized_recent_turns(&session_id, TURNS)?
+        else {
             return Ok(String::new());
         };
         let canonical =
             mj_transcript::projection::canonical_session_from_materialized(&materialized)?;
-        Ok(crate::compaction::render_recent_turns(&canonical, 3))
+        Ok(crate::compaction::render_recent_turns(&canonical, TURNS))
     })
     .await
     .context("load session turns for GitHub classification")?
