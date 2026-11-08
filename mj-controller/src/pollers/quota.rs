@@ -576,9 +576,7 @@ pub(crate) fn refresh_host_image(
         );
         ImageRefreshOutcome::Unchanged
     };
-    if let Some(prune) = &refresh.prune {
-        run_refresh_command(prune, executor)?;
-    }
+    run_refresh_command(&refresh.prune, executor)?;
     Ok(outcome)
 }
 

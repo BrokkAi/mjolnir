@@ -1688,10 +1688,12 @@ impl RefreshReports {
 }
 
 // Hard-won: #1358: the image refresher restarted an Apple container service the user had stopped
+// Hard-won: #1476: Apple image refreshes omitted cleanup and accumulated 128 GB of old data.
 #[test]
 fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_it() {
     struct AppleExecutor {
         service_running: bool,
+        failed_command: Option<&'static str>,
         commands: std::sync::Mutex<Vec<String>>,
     }
 
@@ -1699,11 +1701,16 @@ fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let line = format!("{} {}", command.program, command.args.join(" "));
             let stopped = line == "container system status" && !self.service_running;
+            let failed = self.failed_command == Some(line.as_str());
             self.commands.lock().unwrap().push(line);
             Ok(CommandOutput {
-                status: i32::from(stopped),
+                status: i32::from(stopped || failed),
                 stdout: b"sha256:1111\n".to_vec(),
-                stderr: Vec::new(),
+                stderr: if failed {
+                    b"image store unavailable".to_vec()
+                } else {
+                    Vec::new()
+                },
             })
         }
     }
@@ -1721,6 +1728,7 @@ fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_
 
     let stopped = AppleExecutor {
         service_running: false,
+        failed_command: None,
         commands: std::sync::Mutex::new(Vec::new()),
     };
     assert_eq!(
@@ -1736,6 +1744,7 @@ fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_
 
     let running = AppleExecutor {
         service_running: true,
+        failed_command: None,
         commands: std::sync::Mutex::new(Vec::new()),
     };
     assert_eq!(
@@ -1747,16 +1756,38 @@ fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_
         ))
     );
     let commands = running.commands.lock().unwrap();
-    assert!(
-        commands
-            .iter()
-            .any(|line| line.starts_with("container image pull")),
-        "{commands:?}"
+    assert_eq!(
+        *commands,
+        [
+            "container system status",
+            "container image inspect ghcr.io/example/dev:latest",
+            "container image pull ghcr.io/example/dev:latest",
+            "container image inspect ghcr.io/example/dev:latest",
+            "container image prune",
+        ],
+        "a successful pull must reclaim orphaned data without deleting tagged preloads"
     );
-    assert!(
-        !commands.iter().any(|line| line.contains("system start")),
-        "{commands:?}"
-    );
+    drop(commands);
+
+    for failed_command in [
+        "container image pull ghcr.io/example/dev:latest",
+        "container image prune",
+    ] {
+        let failing = AppleExecutor {
+            service_running: true,
+            failed_command: Some(failed_command),
+            commands: std::sync::Mutex::new(Vec::new()),
+        };
+        let (_, _, error) = refresh_one_host(refresh(), &failing, &reports.record())
+            .expect("the failure is returned for the daemon to report");
+        assert!(error.unwrap().contains("image store unavailable"));
+        let commands = failing.commands.lock().unwrap();
+        assert_eq!(
+            commands.last().map(String::as_str),
+            Some(failed_command),
+            "a failed download must not proceed to cleanup"
+        );
+    }
 }
 
 /// A background refresh is a chore, not a launch. One host that cannot
