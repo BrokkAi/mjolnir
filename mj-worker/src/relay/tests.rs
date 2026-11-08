@@ -7060,6 +7060,7 @@ fn request_mailbox_drain_for_test(
                 lease_id,
                 text,
                 count,
+                ..
             },
     } = response.body
     else {
@@ -7074,6 +7075,7 @@ fn drain_post_tool_batch(relay: &mut DurableRelay) -> (Option<String>, usize, Op
             lease_id,
             text,
             count,
+            ..
         } => (text, count, lease_id),
         other => panic!("unexpected PostToolBatch response: {other:?}"),
     }

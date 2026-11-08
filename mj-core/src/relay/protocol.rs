@@ -634,6 +634,10 @@ pub enum RelayResponsePayload {
         text: Option<String>,
         /// Number of context items leased to the hook.
         count: usize,
+        /// Per-event identities and rendering for durable harness inboxes.
+        /// Additive response data; older hook clients still use `text`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        contexts: Vec<MailboxHookContext>,
     },
     MailboxAcknowledged {
         acknowledged: bool,
@@ -732,6 +736,12 @@ pub enum RelayResponsePayload {
         #[serde(default = "review_base_changed_default")]
         changed: bool,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailboxHookContext {
+    pub key: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

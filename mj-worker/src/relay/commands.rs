@@ -2136,6 +2136,7 @@ impl DurableRelay {
                 lease_id: None,
                 text: None,
                 count: 0,
+                contexts: Vec::new(),
             });
         }
         let events = self.snapshot.pending_mailbox_events.clone();
@@ -2145,6 +2146,7 @@ impl DurableRelay {
                 lease_id: None,
                 text: None,
                 count: 0,
+                contexts: Vec::new(),
             });
         }
         let mut random = [0u8; 16];
@@ -2179,6 +2181,13 @@ impl DurableRelay {
             lease_id: Some(lease.lease_id),
             text: Some(text),
             count,
+            contexts: events
+                .iter()
+                .map(|event| mj_core::relay::MailboxHookContext {
+                    key: event.key.clone(),
+                    text: mj_core::mailbox::render_mailbox_events(std::slice::from_ref(event)),
+                })
+                .collect(),
         })
     }
 

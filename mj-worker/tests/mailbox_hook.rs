@@ -382,6 +382,7 @@ fn a_lost_drain_response_keeps_mailbox_events_for_a_restarted_worker() {
                 lease_id: None,
                 text: None,
                 count: 0,
+                ..
             }
         }
     ));

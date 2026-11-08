@@ -111,7 +111,7 @@ class Relay:
 
 def run(args, harness):
     root = args.root.resolve() / harness
-    root.mkdir(parents=True, exist_ok=False)
+    root.mkdir(mode=0o700, parents=True, exist_ok=False)
     worker_root = root / "worker"
     project = root / "project"
     home = root / "home"
@@ -120,9 +120,8 @@ def run(args, harness):
     for directory in (worker_root, project, home, config, data):
         directory.mkdir()
     subprocess.run(["git", "init", "-q", str(project)], check=True)
-    env = {key: value for key, value in os.environ.items()
-           if not key.startswith(("MJ_", "MJOLNIR_", "CODEX_", "CLAUDE_", "ANTHROPIC_",
-                                  "OPENAI_", "OPENCODE_", "DSH_", "DEEPSEEK_"))}
+    env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "SHELL", "USER", "LOGNAME")
+           if key in os.environ}
     env.update(HOME=str(home), XDG_CONFIG_HOME=str(config), XDG_DATA_HOME=str(data),
                XDG_STATE_HOME=str(root / "state"), XDG_CACHE_HOME=str(args.cache.resolve()),
                MJ_INSTANCE=args.instance, MJ_CONFIG_DIR=str(root / "mj-config"),

@@ -7,6 +7,21 @@ use serde_json::json;
 use std::io::Write;
 use std::path::Path;
 
+/// Let a harness retain leased input before acknowledging it. Reuse the same
+/// framed IPC, request deadline, and long Unix socket path handling as hooks.
+pub fn request(socket: &Path) -> Result<()> {
+    let request: mj_core::relay::RelayRequest = serde_json::from_reader(std::io::stdin().lock())?;
+    anyhow::ensure!(
+        matches!(
+            request,
+            mj_core::relay::RelayRequest::DrainMailbox { .. }
+                | mj_core::relay::RelayRequest::AckMailbox { .. }
+        ),
+        "expected a mailbox drain or acknowledgement"
+    );
+    write_stdout(&serde_json::to_value(send_request(socket, request)?)?)
+}
+
 /// Consume one harness hook request, write its response, then acknowledge the
 /// relay lease. Relay unavailability is deliberately fail-open: an unacked
 /// lease returns to the mailbox after its timeout or a worker restart.
@@ -74,6 +89,7 @@ fn drain(socket: &Path, hook_event: &str) -> Result<(Option<String>, usize, Opti
             lease_id,
             text,
             count,
+            ..
         } => Ok((text, count, lease_id)),
         other => bail!("worker refused mailbox hook request: {other:?}"),
     }
