@@ -95,10 +95,6 @@ pub(crate) fn record_github_classification_failure(
 ) -> Result<()> {
     submit_database_write("record_github_classification_failure", move |connection| {
         let tx = connection.transaction()?;
-        if !session_holds_github_rows(&tx, &session_id)? {
-            tx.commit()?;
-            return Ok(());
-        }
         if tx.query_row("SELECT EXISTS(SELECT 1 FROM github_watch_classifications WHERE owner=?1 AND repo=?2 AND number=?3 AND session_id=?4)",
             params![owner,repo,number,session_id], |row| row.get::<_,bool>(0))? {
             tx.commit()?; return Ok(());
@@ -231,20 +227,6 @@ pub(crate) fn load_github_item_classified_sessions(
         .collect()
 }
 
-/// A classification can finish after its session was destroyed. Writes run
-/// one at a time on the writer thread, so checking here orders each write
-/// against the removal: a write after it stores nothing, and a removal after
-/// a write is a change the mailbox sweep cleans up after. The test matches
-/// the one that cleanup uses.
-fn session_holds_github_rows(tx: &rusqlite::Transaction<'_>, session_id: &str) -> Result<bool> {
-    Ok(tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sessions
-                       WHERE session_id = ?1 AND state <> 'destroyed-with-data-loss')",
-        [session_id],
-        |row| row.get(0),
-    )?)
-}
-
 /// Classification, creator watch, and resulting interest event share one
 /// transaction. A process restart cannot leave one without the others.
 pub(crate) fn commit_github_item_classification(
@@ -254,10 +236,6 @@ pub(crate) fn commit_github_item_classification(
     let has_event = event.is_some();
     let inserted = submit_database_write("commit_github_item_classification", move |connection| {
         let tx = connection.transaction()?;
-        if !session_holds_github_rows(&tx, &classification.session_id)? {
-            tx.commit()?;
-            return Ok(false);
-        }
         let inserted = tx.execute(
             "INSERT INTO github_watch_classifications(owner, repo, number, session_id,
                     kind, title, url, created_at, interested, created)

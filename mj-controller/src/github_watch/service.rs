@@ -1963,57 +1963,6 @@ mod tests {
         Json(comments).into_response()
     }
 
-    /// A classification can finish after its session was destroyed. It must
-    /// store nothing: no classification, failure, or creator watch that would
-    /// keep polling GitHub, and no event for the mailbox to deliver.
-    #[test]
-    fn a_classification_that_outlives_its_session_stores_nothing() {
-        if !run_isolated_child("a_classification_that_outlives_its_session_stores_nothing") {
-            return;
-        }
-        let _writer = crate::database::install_isolated_test_writer();
-        let classification = watch_classification(7, "2026-01-01T00:00:00Z");
-        let event = Some(("github-7".to_owned(), "{}".to_owned(), true));
-
-        assert!(
-            !crate::database::commit_github_item_classification(classification, event).unwrap()
-        );
-        crate::database::record_github_classification_failure(
-            "acme".into(),
-            "repo".into(),
-            7,
-            "creator".into(),
-        )
-        .unwrap();
-
-        assert!(
-            crate::database::load_github_watches("acme", "repo")
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            crate::database::load_github_item_classified_sessions("acme", "repo", 7)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            crate::database::load_github_classification_failures("acme", "repo")
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            crate::database::pending_mailbox_events(16)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    /// Classifications are stored only for a session the store holds.
-    fn save_creator_session() {
-        crate::database::save_session(&crate::database::test_session("creator", "project"))
-            .unwrap();
-    }
-
     fn watch_classification(
         number: i64,
         created_at: &str,
@@ -2041,7 +1990,6 @@ mod tests {
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
-        save_creator_session();
         let initial = crate::database::github_repo_cursor("acme", "repo").unwrap();
         let parsed = DateTime::parse_from_rfc3339(&initial.watch_started_at).unwrap();
         let start = DateTime::from_timestamp(parsed.timestamp() + 1, 0).unwrap();
@@ -2442,7 +2390,6 @@ mod tests {
 
     async fn check_reconciliation_checkpoint_recovery(scenario: ReconciliationRecovery) {
         let _writer = crate::database::install_isolated_test_writer();
-        save_creator_session();
         let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
         let origin = now - chrono::Duration::hours(4);
         let at = |seconds| {
@@ -2641,7 +2588,6 @@ mod tests {
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
-        save_creator_session();
         let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
@@ -2818,7 +2764,6 @@ mod tests {
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
-        save_creator_session();
         let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
@@ -2939,7 +2884,6 @@ mod tests {
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
-        save_creator_session();
         let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
@@ -3026,7 +2970,6 @@ mod tests {
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
-        save_creator_session();
         let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
