@@ -1,6 +1,5 @@
 //! Actionable host and configuration prerequisite checks.
 
-#[cfg(unix)]
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};

@@ -91,6 +91,7 @@ pub(crate) struct ProcRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Marker {
     Present,
+    #[cfg(any(unix, test))]
     Absent,
     /// The environment could not be read although the process is the same
     /// user's (a process that forbids it, such as one that is not dumpable), so
@@ -303,6 +304,7 @@ pub(crate) struct ProcessReader {
 }
 
 impl ProcessReader {
+    #[cfg(any(unix, test))]
     pub(crate) fn new(describe: impl Fn(&ProcRow) -> Described + Send + 'static) -> Self {
         Self {
             describe: Box::new(describe),

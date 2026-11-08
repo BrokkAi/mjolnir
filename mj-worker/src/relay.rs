@@ -1003,6 +1003,7 @@ impl DurableRelay {
         self.harness_turns = policy;
     }
 
+    #[cfg(unix)]
     pub(crate) fn uses_claude_harness_turns(&self) -> bool {
         self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
     }

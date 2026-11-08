@@ -1466,7 +1466,7 @@ pub(super) struct RenewalTasks(BTreeMap<String, RenewalTask>);
 impl RenewalTasks {
     /// A task standing in for the session's renewal, as one that had been
     /// started for `target`.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn with_task(
         target: &CredentialSyncTarget,
         handle: tokio::task::JoinHandle<()>,
@@ -1483,7 +1483,7 @@ impl RenewalTasks {
     }
 
     /// Whether the session has a renewal task that has not ended.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn is_running(&self, session_id: &str) -> bool {
         self.0
             .get(session_id)

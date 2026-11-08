@@ -2120,7 +2120,6 @@ fn refusing_aws_cli(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// The role the AWS sync tests configure.
-#[cfg(unix)]
 fn role_config() -> mj_core::config::AwsRoleConfig {
     mj_core::config::AwsRoleConfig {
         role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),

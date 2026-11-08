@@ -128,6 +128,44 @@ Deployed on 2026-10-09 as version `8bdbc740-9b8a-402d-a37e-2d059a639263` from `d
 
 `POST /v1/github-item-verdict` accepts `{item: {repo, kind, number, title, body, author, url}, session: {recent_turns}}`, with the item first so the provider prompt prefix is shared by every session classified for one item. `kind` is `issue` or `pull_request`; `recent_turns` is the compaction rendering of the session's last three user turns. The proxy supplies `mj-core/src/github_item/questions.json` and returns Noul `interested` and `created` answers. The daemon's GitHub watcher calls it once per new item per live primary session (`mj-controller/src/github_item_verdict.rs`); see `.agents/plans/session-mailbox-and-github-watch.md`. Item text is untrusted evidence. The route has its own `GITHUB_ITEM_RATE_LIMITER` (120 per 60 s per IP), so a burst of new items cannot use up the continuation budget.
 
+GitHub classification uses `TranscriptSummary::from_snapshot_keeping(snapshot, 0)`:
+the same compaction filter and turn grouping, with every tool reduced to its
+name, status, and exit outcome. It never includes raw call inputs, results, or
+terminal output, including the newest eight calls that ordinary handoff
+compaction preserves. Conversation messages and plans remain available. The
+creation prompt interprets these summaries and requires successful creation
+with identifying evidence; a failed or unfinished command, or a generic
+creation command without the created item's identity, does not establish ownership.
+If an identity appeared only in discarded tool output, such as the URL from
+`gh pr create --fill`, the session can receive its own item notification before
+the assistant reports it. This is the accepted summary-only evidence tradeoff:
+abstain from ownership instead of suppressing another session's relevant item.
+
+`python3 scripts/jev-github-item-eval.py --run --output <file>` evaluates the
+synthetic summary-only controls in
+`services/jev-proxy/tests/fixtures/github-item-controls.json`. On 2026-11-08,
+the previous prompt incorrectly treated a failed creation as successful
+(created probability 0.51). Review also identified that a generic completed
+creation command cannot establish which item was opened. The final prompt
+passed 27/27 classifications over three repeats, scoring creation at 0.01 for
+both failures and commands without identity. This is a small control set, not
+a production accuracy estimate. Local evidence is under
+`/mnt/optane/jev-summary-20261108/`. Shipping smaller evidence requires the
+updated daemon; hosted prompt changes additionally require deploying the proxy.
+
+Deployed the summary-aware GitHub ownership questions on 2026-11-08 as version
+`ed0d18cc-6aba-43e1-98e8-8fe50c73f651` from `aed371dfe`, following explicit user
+authorization. It replaces `49d6f62b-4489-454c-b132-614f58384a5a`. Before
+publication, all 34 proxy tests, TypeScript checking, the deployment dry run,
+and 27 live synthetic model controls passed. Hosted smoke checks returned 200
+for all four requests: identified PR creation scored created 0.96; failed
+creation and creation without item identity each scored 0.01; v7 turn verdict
+retained its five answers and classified the synthetic completed reply as
+finished/closing. Smoke requests used no User-Agent as documented above; the
+default Python User-Agent received 403 at the edge. No private conversation
+content was sent. Results are in
+`/mnt/optane/jev-summary-20261108/deployment-smoke.json`.
+
 Deployed on 2026-10-07 as version `684c5a50-d4ba-4392-822e-09152a1cb57b`, replacing `14ca6393-f397-40c7-a1c2-615c9bb32b6e`, following explicit user authorization. TypeScript check, 28 proxy tests and the dry run passed first. Synthetic smoke checks without a User-Agent: a pull request the session's turns show it opening scored interested 0.96 and created 0.97; an unrelated README typo issue scored 0.03 and 0.02; a malformed item returned 400; v6 (running turn), v1 turn-verdict and v1 continuation returned 200. A v6 request with `phase: replied` and no `completion` correctly returns 400. No private conversation was sent.
 
 ## Question locator

@@ -5,7 +5,9 @@
 use anyhow::{Context, Result, bail};
 use std::process::Command;
 
-use super::{Described, Marker, ProcRow, ProcessReader, ProcessTable};
+use super::Marker;
+#[cfg(target_os = "macos")]
+use super::{Described, ProcRow, ProcessReader, ProcessTable};
 
 /// `[[dd-]hh:]mm:ss` as `ps -o etime` prints it.
 pub(super) fn parse_elapsed_secs(text: &str) -> Option<i64> {
@@ -67,6 +69,7 @@ pub(super) fn classify_marker(
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn read_table(session_id: &str) -> Result<ProcessTable> {
     let wanted = format!("MJ_SESSION_ID={session_id}");
     let environment_lines: std::collections::BTreeMap<u32, String> =
