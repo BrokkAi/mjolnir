@@ -2,8 +2,10 @@ use super::*;
 
 #[cfg(unix)]
 use std::fs;
+use std::sync::Mutex;
+#[cfg(unix)]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// The connectivity probe `mj doctor` runs against an SSH target.
@@ -2612,6 +2614,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Records the commands it is handed and reports an empty success.
