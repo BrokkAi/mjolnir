@@ -2370,9 +2370,9 @@ pub struct ImageRefresh {
     /// Run before and after the pull.
     pub image_id: CommandSpec,
     pub pull: CommandSpec,
-    /// Dangling images only. Both engines keep an image a container still uses.
-    /// `None` for Apple's `container` engine, which has no verified prune form.
-    pub prune: Option<CommandSpec>,
+    /// Dangling images and orphaned content only. Keep tagged images ready
+    /// for future sessions; `--all` would delete those preloaded images.
+    pub prune: CommandSpec,
 }
 
 /// The background refresh for one configured container target, or `None` when
@@ -2422,17 +2422,12 @@ pub fn image_refresh(
     }
     pull_args.push(image.to_owned());
     let pull = host.command(pull_args, format!("refresh container image {image}"));
-    let prune = (!apple).then(|| {
-        host.command(
-            vec![
-                engine.to_owned(),
-                "image".to_owned(),
-                "prune".to_owned(),
-                "-f".to_owned(),
-            ],
-            "remove dangling container images".to_owned(),
-        )
-    });
+    let mut prune_args = vec![engine.to_owned(), "image".to_owned(), "prune".to_owned()];
+    // Apple prunes without prompting and does not accept Docker/Podman's -f.
+    if !apple {
+        prune_args.push("-f".to_owned());
+    }
+    let prune = host.command(prune_args, "remove dangling container images".to_owned());
     Some(ImageRefresh {
         host,
         image: image.to_owned(),
