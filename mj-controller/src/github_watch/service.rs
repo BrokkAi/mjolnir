@@ -505,14 +505,31 @@ async fn classify_recorded_items(
     if pending.is_empty() {
         return Ok(());
     }
+    pending.truncate(MAX_CLASSIFICATIONS_PER_POLL);
+    let mut digests = std::collections::HashMap::new();
+    for (_, session, _, _) in &pending {
+        if !digests.contains_key(&session.id) {
+            // Retain failures per pair, just like classifier failures, without reloading.
+            digests.insert(
+                session.id.clone(),
+                session_digest(session.id.clone())
+                    .await
+                    .map_err(|e| format!("{e:#}")),
+            );
+        }
+    }
     let login = api.credential_login().await?;
     let login = login.as_deref();
-    let results = stream::iter(pending.into_iter().take(MAX_CLASSIFICATIONS_PER_POLL)).map(|(item, session, _, attempts)| {
+    let results = stream::iter(pending).map(|(item, session, _, attempts)| {
         let classifier = classifier.clone(); let control = api.control.clone();
+        let digest = digests[&session.id].clone();
         async move {
             if stop.is_cancelled() { return Ok(()); }
             let number = item.number; let session_id = session.id.clone();
-            match classify_for_session(owner, repo, item, session, login, classifier, control).await {
+            match async {
+                let digest = digest.map_err(|e| anyhow::anyhow!(e))?;
+                classify_for_session(owner, repo, item, (session, digest), login, classifier, control).await
+            }.await {
                 Ok(()) => Ok(()),
                 Err(error) if is_github_events_disabled(&error) => Err(error),
                 Err(error) => {
@@ -533,17 +550,19 @@ async fn classify_for_session(
     owner: &str,
     repo: &str,
     item: crate::database::GithubSeenItem,
-    session: SessionRecord,
+    session: (SessionRecord, SessionContext),
     credential_login: Option<&str>,
     classifier: Arc<dyn GithubClassifier>,
     control: PollControl,
 ) -> Result<()> {
+    let (session, digest) = session;
     let repo_label = format!("{owner}/{repo}");
     let kind = item_kind_from_watch(&item.kind);
     // Sessions share one GitHub account, so the author cannot name a session,
     // but this session did not open an item another account authored.
     let own_account = credential_login.is_none_or(|login| login.eq_ignore_ascii_case(&item.author));
-    let recent_turns = recent_turns(session.id.clone()).await?;
+    let created = own_account
+        && opened_by_session(&session.id, &item.created_at, item.number as u64, &item.url).await?;
     let evidence = GithubItemEvidence {
         item: GithubItem {
             repo: repo_label.clone(),
@@ -554,15 +573,19 @@ async fn classify_for_session(
             author: item.author,
             url: item.url.clone(),
         },
-        session: SessionContext { recent_turns },
+        session: digest,
     };
-    control.check_enabled()?;
-    let verdict = classifier.classify(&evidence).await?;
-    control.check_enabled()?;
-    let created = own_account
-        && (verdict.created
-            || opened_by_session_tool_call(&session.id, &item.created_at, &item.title).await?);
-    let event = if verdict.interested && !created {
+    // The creator already knows its item, so it is never told about it and
+    // Jev is not asked; its stored interest is false.
+    let interested = if created {
+        false
+    } else {
+        control.check_enabled()?;
+        let verdict = classifier.classify(&evidence).await?;
+        control.check_enabled()?;
+        verdict.interested
+    };
+    let event = if interested {
         let key = format!(
             "github:{repo_label}#{}:interest:{}",
             item.number, session.id
@@ -592,7 +615,7 @@ async fn classify_for_session(
         title: item.title,
         url: item.url,
         created_at: item.created_at,
-        interested: verdict.interested,
+        interested,
         created,
     };
     blocking_db(move || {
@@ -601,61 +624,57 @@ async fn classify_for_session(
     .await
 }
 
-/// Jev misses items whose opening command has left its evidence or never
-/// showed the title. A `gh pr create` or `gh issue create` call that was
-/// running when the item appeared and names its title also counts. Requiring
-/// the title stops a long command from claiming another session's item.
-async fn opened_by_session_tool_call(
+async fn opened_by_session(
     session_id: &str,
     created_at: &str,
-    title: &str,
+    number: u64,
+    url: &str,
 ) -> Result<bool> {
-    let Some(created_at_ms) = timestamp_millis(created_at) else {
+    let Some(at_ms) = timestamp_millis(created_at) else {
+        return Ok(false);
+    };
+    let Some(item) = mj_core::github_reference::github_references(url)
+        .into_iter()
+        .next()
+    else {
         return Ok(false);
     };
     let session_id = session_id.to_owned();
-    let commands = blocking_db(move || {
-        crate::database::load_github_session_tool_commands_at(&session_id, created_at_ms)
+    let output = blocking_db(move || {
+        crate::database::load_github_session_creation_output(&session_id, at_ms)
     })
     .await?;
-    Ok(commands
-        .iter()
-        .any(|command| command_opens_titled_item(command, title)))
+    Ok(output.iter().any(|text| {
+        mj_core::github_reference::github_references(text)
+            .iter()
+            .any(|reference| {
+                // A bare `#N` cannot name the repository, and sessions work
+                // in several; creation output (gh, the API, MCP tools)
+                // carries the full URL.
+                reference.number == number
+                    && reference
+                        .owner
+                        .as_ref()
+                        .zip(item.owner.as_ref())
+                        .is_some_and(|(owner, expected)| owner.eq_ignore_ascii_case(expected))
+                    && reference
+                        .repo
+                        .as_ref()
+                        .zip(item.repo.as_ref())
+                        .is_some_and(|(repo, expected)| repo.eq_ignore_ascii_case(expected))
+            })
+    }))
 }
 
-fn command_opens_titled_item(command: &str, title: &str) -> bool {
-    let command = spaced_words(command);
-    let title = spaced_words(title);
-    !title.trim().is_empty()
-        && (command.contains(" gh pr create ") || command.contains(" gh issue create "))
-        && command.contains(&title)
-}
-
-/// Lowercase words with a space before and after each, so shell quoting and
-/// escaping cannot hide a title and a match always covers whole words.
-fn spaced_words(text: &str) -> String {
-    let mut spaced = String::from(" ");
-    for word in text
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-    {
-        spaced.push_str(&word.to_lowercase());
-        spaced.push(' ');
-    }
-    spaced
-}
-
-async fn recent_turns(session_id: String) -> Result<String> {
+async fn session_digest(session_id: String) -> Result<SessionContext> {
     tokio::task::spawn_blocking(move || {
-        const TURNS: usize = 3;
+        const TURNS: usize = mj_core::github_item::SESSION_TURNS;
         let Some(materialized) =
             crate::database::load_materialized_recent_turns(&session_id, TURNS)?
         else {
-            return Ok(String::new());
+            return Ok(SessionContext::default());
         };
-        let canonical =
-            mj_transcript::projection::canonical_session_from_materialized(&materialized)?;
-        Ok(crate::compaction::render_recent_turns(&canonical, TURNS))
+        Ok(mj_transcript::github_item::session_digest(&materialized))
     })
     .await
     .context("load session turns for GitHub classification")?
@@ -1793,7 +1812,6 @@ mod tests {
                 let title = evidence.item.title.to_ascii_lowercase();
                 Ok(GithubItemVerdict {
                     interested: title.contains("interesting"),
-                    created: title.contains("created"),
                 })
             })
         }
@@ -3052,15 +3070,12 @@ mod tests {
     impl GithubClassifier for FailingSessionClassifier {
         fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
             Box::pin(async move {
-                if evidence.session.recent_turns.contains("FAIL_PAIR")
+                if evidence.session.conversation.contains("FAIL_PAIR")
                     && self.0.load(Ordering::SeqCst)
                 {
                     bail!("permanent session classifier failure");
                 }
-                Ok(GithubItemVerdict {
-                    interested: false,
-                    created: false,
-                })
+                Ok(GithubItemVerdict { interested: false })
             })
         }
     }
@@ -3123,9 +3138,10 @@ mod tests {
         };
         crate::database::save_materialized_session(&materialized).unwrap();
         assert!(
-            recent_turns("bad".into())
+            session_digest("bad".into())
                 .await
                 .unwrap()
+                .conversation
                 .contains("FAIL_PAIR")
         );
         let failing = Arc::new(AtomicBool::new(true));
@@ -3261,9 +3277,15 @@ mod tests {
                         "title": "Open the pull request",
                         "kind": "execute",
                         "status": "completed",
-                        "rawInput": {"command": "gh pr create --title 'Interesting synthetic change' --body-file pr.md"}
+                        "rawInput": {"command": "python open_item.py"}
                     }),
-                    terminal_outputs: vec![],
+                    terminal_outputs: vec![mj_core::transcript::TerminalOutputRecord {
+                        terminal_id: "call-1".into(),
+                        output: "https://github.com/acme/repo/pull/1\n".into(),
+                        truncated: false,
+                        exit_code: Some(0),
+                        signal: None,
+                    }],
                     terminal_refs: vec![],
                     presentation: None,
                 },

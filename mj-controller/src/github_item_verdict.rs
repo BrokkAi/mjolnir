@@ -6,7 +6,7 @@ use serde_json::json;
 
 const DIRECT_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const HOSTED_ENDPOINT: &str =
-    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/github-item-verdict";
+    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v2/github-item-verdict";
 
 pub async fn classify(evidence: &GithubItemEvidence) -> Result<GithubItemVerdict> {
     let evidence = evidence.bounded_for_request()?;
@@ -29,9 +29,9 @@ pub async fn classify(evidence: &GithubItemEvidence) -> Result<GithubItemVerdict
         Ok(log) => Some(log.start(
             &format!("github:{}#{}", evidence.item.repo, evidence.item.number),
             "github-item-verdict",
-            "Is this GitHub item relevant to this session, and did this agent create it?",
+            "Is this GitHub item relevant to this session, based on its compact digest?",
             &format!(
-                "{} #{}; recent session turns",
+                "{} #{}; compact session digest",
                 evidence.item.repo, evidence.item.number
             ),
         )),
@@ -47,7 +47,7 @@ pub async fn classify(evidence: &GithubItemEvidence) -> Result<GithubItemVerdict
             json!({
                 "request": request,
                 "source": source,
-                "contract": "github-item-verdict-v1",
+                "contract": "github-item-verdict-v2",
                 "questions": mj_core::github_item::questions(),
                 "model": "jev-latest"
             }),
@@ -66,10 +66,7 @@ pub async fn classify(evidence: &GithubItemEvidence) -> Result<GithubItemVerdict
     if let Some(attempt) = attempt {
         match &result {
             Ok(verdict) => {
-                let answer = format!(
-                    "Interested: {}; created: {}.",
-                    verdict.interested, verdict.created
-                );
+                let answer = format!("Interested: {}.", verdict.interested);
                 attempt.update(Some(&answer), json!({"answer": answer}));
                 attempt.finish(
                     "classified",

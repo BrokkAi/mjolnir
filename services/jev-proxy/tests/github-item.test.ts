@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import proxy from "../src/index.ts";
 import { githubItemQuestions } from "../src/github-item.ts";
+import { githubItemQuestionsV2 } from "../src/github-item.ts";
 
 const evidence = {
   item: {
@@ -82,4 +83,37 @@ test("GitHub item verdict enforces the complete upstream request cap", async t =
   const response = await proxy.fetch(request(oversizedUpstream), env());
   assert.equal(response.status, 413);
   assert.equal(fetch.mock.callCount(), 0);
+});
+
+test("GitHub item v2 accepts compact evidence and an interested-only answer", async t => {
+  const v2 = { item: evidence.item, session: { conversation: "User: Implement mailbox support\nAgent: Mailbox support is ready.\n", files: ["src/mailbox.rs"], references: ["#42"] } };
+  t.mock.method(globalThis, "fetch", async (_url: unknown, options: RequestInit) => {
+    assert.deepEqual(JSON.parse(options.body as string), { model: "jev-latest", state: v2, questions: githubItemQuestionsV2 });
+    return Response.json({ answers: { interested: { type: "noul", noul: 0.9 } } });
+  });
+  const response = await proxy.fetch(new Request("https://proxy.example/v2/github-item-verdict", { method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(v2) }), env());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { answers: { interested: { type: "noul", noul: 0.9 } } });
+  v2.session.conversation = "é".repeat(4096);
+  const boundary = await proxy.fetch(new Request("https://proxy.example/v2/github-item-verdict", { method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(v2) }), env());
+  assert.equal(boundary.status, 200);
+});
+
+test("GitHub item v2 rejects over-limit and unknown fields", async () => {
+  const valid = { item: evidence.item, session: { conversation: "", files: [], references: [] } };
+  const call = (body: unknown) => proxy.fetch(new Request("https://proxy.example/v2/github-item-verdict", { method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(body) }), env());
+  for (const value of [
+    { ...valid, extra: true },
+    { ...valid, item: { ...valid.item, extra: true } },
+    { ...valid, item: { ...valid.item, body: "x".repeat(4225) } },
+    { ...valid, session: { ...valid.session, conversation: "é".repeat(4097) } },
+    { ...valid, session: { ...valid.session, requests: [] } },
+    { ...valid, session: { ...valid.session, files: [""] } },
+    { ...valid, session: { ...valid.session, references: ["x".repeat(129)] } },
+  ]) assert.equal((await call(value)).status, 400);
+});
+
+test("GitHub item v1 remains accepted with its frozen answer shape", async t => {
+  t.mock.method(globalThis, "fetch", async () => Response.json({ answers }));
+  assert.equal((await proxy.fetch(request(), env())).status, 200);
 });

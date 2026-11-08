@@ -8,3 +8,5 @@ pub mod summary;
 pub mod turn_context;
 
 pub mod authorization;
+
+pub mod github_item;

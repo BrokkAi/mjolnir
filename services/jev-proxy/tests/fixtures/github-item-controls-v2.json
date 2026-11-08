@@ -1,0 +1,280 @@
+[
+  {
+    "id": "related",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "User: Implement mailbox delivery through tool hooks.\nAgent: I am implementing mailbox support.\n",
+        "files": [],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "unrelated",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "User: Fix AWS capacity reporting.\nAgent: Corrected memory accounting in the EC2 picker.\n",
+        "files": [],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": false
+    }
+  },
+  {
+    "id": "created_pr",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "User: Implement mailbox delivery and open a PR.\nAgent: Opened https://github.com/brokkai/mjolnir/pull/42: Add mailbox support.\n",
+        "files": [],
+        "references": [
+          "https://github.com/brokkai/mjolnir/pull/42"
+        ]
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "read_existing",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "User: Review mailbox changes.\nAgent: I read the existing PR #42; another agent opened it.\n",
+        "files": [],
+        "references": [
+          "#42"
+        ]
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "failed_create",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "User: Implement mailbox support.\nAgent: Opening the PR failed with authentication denied.\n",
+        "files": [],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "future_create",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "User: Implement mailbox support.\nAgent: I will open a PR after validation.\n",
+        "files": [],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "other_number",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "User: Implement mailbox support.\nAgent: Opened https://github.com/brokkai/mjolnir/pull/43: Add mailbox support.\n",
+        "files": [],
+        "references": [
+          "https://github.com/brokkai/mjolnir/pull/43"
+        ]
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "same_broad_topic",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "User: Fix terminal keyboard event delivery.\nAgent: Working on escape key parsing in the terminal input loop.\n",
+        "files": [],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": false
+    }
+  },
+  {
+    "id": "creation_without_identity",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "User: Implement mailbox support and open the PR.\n",
+        "files": [],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "files_related",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "User: Continue with the plan.\n",
+        "files": [
+          "mj-controller/src/mailbox/hooks.rs",
+          "mj-controller/src/mailbox/delivery.rs"
+        ],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "files_unrelated",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "User: Continue with the plan.\n",
+        "files": [
+          "mj-tui/src/input/keys.rs",
+          "mj-tui/src/render/status.rs"
+        ],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": false
+    }
+  },
+  {
+    "id": "earlier_request",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "User: Implement mailbox delivery through tool hooks.\nUser: Also fix the typo in the README.\nUser: Run the tests again.\nAgent: All tests pass.\n",
+        "files": [
+          "mj-controller/src/mailbox/hooks.rs"
+        ],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  }
+]
