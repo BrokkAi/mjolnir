@@ -3568,6 +3568,7 @@ async fn obsolete_credentials_are_withdrawn_before_a_stuck_mint_and_the_step_say
 // cache is keyed by), the AWS CLI it started is terminated, so the cache
 // entry's lock is released and the replacement is not left waiting on a helper
 // nobody wants.
+// Hard-won: 42c9f2103: the renewal teardown test assumed /proc on macOS.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_superseded_renewals_stuck_helper_is_terminated_and_the_replacement_mints() {
@@ -3619,7 +3620,8 @@ async fn a_superseded_renewals_stuck_helper_is_terminated_and_the_replacement_mi
     };
     wait_for("the first helper", &|| helper_pids().len() == 1).await;
     let stuck = helper_pids()[0];
-    assert!(std::path::Path::new(&format!("/proc/{stuck}")).exists());
+    let birth = mj_core::subprocess::process_birth_identity(stuck)
+        .expect("the first helper is still running");
 
     // The target changes without changing what the cache is keyed by: the
     // task is replaced, and its helper is terminated with it.
@@ -3628,7 +3630,7 @@ async fn a_superseded_renewals_stuck_helper_is_terminated_and_the_replacement_mi
     handle.set_targets(vec![changed]);
     wait_for("the replacement's helper", &|| helper_pids().len() == 2).await;
     wait_for("the superseded helper to end", &|| {
-        !std::path::Path::new(&format!("/proc/{stuck}")).exists()
+        !mj_core::subprocess::process_birth_identity(stuck).is_ok_and(|current| current == birth)
     })
     .await;
     assert!(!root.join("aws").exists());
