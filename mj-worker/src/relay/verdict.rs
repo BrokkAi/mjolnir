@@ -160,16 +160,10 @@ impl DurableRelay {
             .background_commands()
             .into_iter()
             .take(mj_core::activity::verdict::IN_FLIGHT_TOOLS)
-            .map(|command| {
-                let mut text = command.command;
-                text.truncate(
-                    text.floor_char_boundary(mj_core::activity::verdict::TOOL_TITLE_BYTES),
-                );
-                mj_core::activity::verdict::BackgroundEvidence {
-                    id: command.id,
-                    command: text,
-                    started_s_ago: now.saturating_sub(command.started_at_ms).max(0) as u64 / 1000,
-                }
+            .map(|command| mj_core::activity::verdict::BackgroundEvidence {
+                command: mj_core::activity::verdict::tool_title(&command.command),
+                id: command.id,
+                started_s_ago: now.saturating_sub(command.started_at_ms).max(0) as u64 / 1000,
             })
             .collect();
         crate::acp::verdict_client::bound_authorization(
