@@ -2250,6 +2250,23 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Compatible: adds an index only. Reading a parent's child messages joined
+    // the outbox to each child by `target_session_id` with no index, scanning
+    // every outbox row per child (27 s for a parent with 2,209 children).
+    // Older builds read and write the same rows and SQLite maintains the index
+    // for them, so the compatibility floor stays where it is.
+    if version < 120 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE INDEX IF NOT EXISTS mailbox_outbox_target
+                 ON mailbox_outbox(target_session_id);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (120, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 120;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

@@ -423,6 +423,18 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
             container: container_target("ghcr.io/example/dev:1.2.3", ImagePullPolicy::Auto),
         },
     );
+    config.targets.insert(
+        "ssh-apple".into(),
+        TargetTemplate::SshAppleContainer {
+            ssh: SshConnection {
+                host: "mac.example.test".into(),
+                user: Some("dev".into()),
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            container: container_target("ghcr.io/example/dev:latest", ImagePullPolicy::Auto),
+        },
+    );
     // An explicit `never` is the one way to keep an image out of the plan.
     config.targets.insert(
         "never".into(),
@@ -448,7 +460,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
     let plan = image_refresh_plan(&config);
     assert_eq!(
         plan.len(),
-        6,
+        7,
         "expected one refresh per host, image and platform: {plan:?}"
     );
 
@@ -462,10 +474,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
     assert_eq!(local.when, RefreshWhen::Always);
     assert_eq!(local.pull.program, "podman");
     assert_eq!(local.pull.args, ["pull", "ghcr.io/example/dev:latest"]);
-    assert_eq!(
-        local.prune.as_ref().expect("podman prunes").args,
-        ["image", "prune", "-f"]
-    );
+    assert_eq!(local.prune.args, ["image", "prune", "-f"]);
     assert_eq!(
         local.image_id.args,
         [
@@ -481,10 +490,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
     assert_eq!(docker.when, RefreshWhen::Always);
     assert_eq!(docker.pull.program, "docker");
     assert_eq!(docker.pull.args, ["pull", "ghcr.io/example/dev:1.2.3"]);
-    assert_eq!(
-        docker.prune.as_ref().expect("docker prunes").args,
-        ["image", "prune", "-f"]
-    );
+    assert_eq!(docker.prune.args, ["image", "prune", "-f"]);
 
     // A versioned tag and a digest pin only need the host to have a copy.
     let apple = entry(&ImageHost::AppleContainer, "ghcr.io/example/dev:1.2.3");
@@ -493,6 +499,27 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
     assert_eq!(
         apple.pull.args,
         ["image", "pull", "ghcr.io/example/dev:1.2.3"]
+    );
+    assert_eq!(apple.prune.program, "container");
+    assert_eq!(apple.prune.args, ["image", "prune"]);
+    let remote_apple = plan
+        .iter()
+        .find(|refresh| matches!(refresh.host, ImageHost::SshAppleContainer(_)))
+        .expect("the remote Apple host is refreshed over SSH");
+    assert_eq!(remote_apple.prune.program, "ssh");
+    assert!(
+        remote_apple
+            .prune
+            .args
+            .contains(&"dev@mac.example.test".to_owned())
+    );
+    assert_eq!(
+        remote_apple
+            .prune
+            .args
+            .last()
+            .map(|arg| unwrapped_remote_line(arg)),
+        Some("'container' 'image' 'prune'")
     );
     let pinned = plan
         .iter()
@@ -531,12 +558,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
         Some("'podman' 'pull' '--platform=linux/amd64' 'ghcr.io/example/dev:latest'")
     );
     assert_eq!(
-        ssh.prune
-            .as_ref()
-            .expect("podman prunes")
-            .args
-            .last()
-            .map(|arg| unwrapped_remote_line(arg)),
+        ssh.prune.args.last().map(|arg| unwrapped_remote_line(arg)),
         Some("'podman' 'image' 'prune' '-f'")
     );
 }
@@ -589,8 +611,6 @@ fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
     assert_eq!(
         refresh
             .prune
-            .as_ref()
-            .expect("docker prunes")
             .args
             .last()
             .map(|arg| unwrapped_remote_line(arg)),
