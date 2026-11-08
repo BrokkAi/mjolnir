@@ -43,7 +43,7 @@ mj-client = { path = "mj-client", package = "brokk-mj-client", version = "2.69.0
 mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.69.0" }
 mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.69.0" }
 mj-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.69.0" }
-sessionwiki = "0.34.5"
+sessionwiki = { package = "brokk-sessionwiki", version = "0.34.22" }
 
 # Every external dependency that two or more crates share is declared once
 # here, so a version can only be raised in one place. Each entry carries the
@@ -83,7 +83,7 @@ rayon = "1"
 # through `mj_controller::server::install_rustls_crypto_provider`.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 ring = "0.17"
-rusqlite = { version = "0.40", features = ["backup", "bundled", "fallible_uint", "functions"] }
+rusqlite = { version = "0.41", features = ["backup", "bundled", "fallible_uint", "functions"] }
 ruzstd = "0.9"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1", features = ["derive"] }
