@@ -164,7 +164,7 @@ impl ScopedAwsCredentials {
     }
 
     /// Whether the cache holds credentials for the session.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn holds(&self, session_id: &str) -> bool {
         self.entries
             .lock()
