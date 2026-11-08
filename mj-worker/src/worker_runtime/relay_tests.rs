@@ -392,6 +392,7 @@ fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
     assert_eq!(invoke(None), "unset|unset\n");
 }
 
+// Hard-won: a4c6fe269: URL-specific repository auth outranked a host-level reset.
 #[test]
 fn credential_free_git_and_gh_do_not_recover_host_or_refreshed_credentials() {
     let directory = tempfile::tempdir().unwrap();
@@ -413,6 +414,22 @@ fn credential_free_git_and_gh_do_not_recover_host_or_refreshed_credentials() {
             "config",
             "credential.https://github.com.helper",
             "!f() { echo username=repo-user; echo password=repo-secret; }; f",
+        ],
+    );
+    git(
+        &project,
+        &[
+            "config",
+            "credential.https://github.com/org/repo.helper",
+            "!f() { echo username=repo-user; echo password=scoped-secret; }; f",
+        ],
+    );
+    git(
+        &project,
+        &[
+            "config",
+            "http.https://github.com/org/repo.extraheader",
+            "Authorization: scoped-secret",
         ],
     );
     let login_hook = home.join("login-hook");
@@ -455,13 +472,13 @@ fn credential_free_git_and_gh_do_not_recover_host_or_refreshed_credentials() {
                 .args(args)
                 .env_clear()
                 .envs(&environment)
-                .current_dir(&project);
+                .current_dir(directory.path());
             mj_core::subprocess::run_with_input(&mut command, input).unwrap()
         };
         let git = invoke(
             "git",
-            &["credential", "fill"],
-            b"protocol=https\nhost=github.com\n\n",
+            &["-C", project.to_str().unwrap(), "credential", "fill"],
+            b"protocol=https\nhost=github.com\npath=org/repo\n\n",
         );
         assert!(
             !git.status.success(),
@@ -469,6 +486,20 @@ fn credential_free_git_and_gh_do_not_recover_host_or_refreshed_credentials() {
         );
         let gh = invoke("gh", &["auth", "token", "--hostname", "github.com"], &[]);
         assert!(!gh.status.success(), "gh must not recover the host login");
+        let header = invoke(
+            "git",
+            &[
+                "-C",
+                project.to_str().unwrap(),
+                "config",
+                "--get-urlmatch",
+                "http.extraheader",
+                "https://github.com/org/repo",
+            ],
+            &[],
+        );
+        assert!(header.status.success());
+        assert!(header.stdout.iter().all(u8::is_ascii_whitespace));
         let author = invoke("git", &["config", "user.name"], &[]);
         assert_eq!(
             String::from_utf8(author.stdout).unwrap().trim(),
@@ -5804,6 +5835,42 @@ async fn the_acp_bridge_never_sees_an_excluded_variable() {
     assert_eq!(
         std::fs::read_to_string(observed).unwrap(),
         "unset|unset|yes\n"
+    );
+}
+
+// Hard-won: a4c6fe269: login environment composition could restore GitHub Enterprise tokens.
+#[tokio::test]
+async fn credential_free_supervisor_excludes_all_github_tokens_after_environment_composition() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = temp.path().join("observed");
+    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+    config.no_github_credentials = true;
+    config.cwd = temp.path().to_owned();
+    config.bridge_command = "/bin/sh".into();
+    config.bridge_args = vec![
+        "-c".into(),
+        format!(
+            "printf '%s|%s|%s|%s' \"${{GH_TOKEN-unset}}\" \"${{GITHUB_TOKEN-unset}}\" \"${{GH_ENTERPRISE_TOKEN-unset}}\" \"${{GITHUB_ENTERPRISE_TOKEN-unset}}\" > {}",
+            mj_core::targets::posix_quote(&observed.to_string_lossy()),
+        ),
+    ];
+    let mut spec = AcpSupervisorSpec::from(&config);
+    let path = temp.path().join("supervisor.json");
+    spec.write_spec(&path).unwrap();
+    spec = AcpSupervisorSpec::read(&path).unwrap();
+    // The supervisor composes this with the login environment before applying
+    // its exclusions; tokens from either source must be absent from the child.
+    for name in mj_core::credentials::GITHUB_AUTHENTICATION_ENVIRONMENT {
+        spec.environment
+            .insert(name.into(), "reintroduced-secret".into());
+    }
+    let (supervisor_stdin, _held_stdin) = tokio::io::duplex(64);
+    unix::run_acp_supervisor_with_streams(spec, supervisor_stdin, tokio::io::sink())
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(observed).unwrap(),
+        "unset|unset|unset|unset"
     );
 }
 

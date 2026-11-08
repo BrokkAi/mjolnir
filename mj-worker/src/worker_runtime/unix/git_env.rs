@@ -308,8 +308,50 @@ fn configure_git_without_credentials(
         render_git_config(&entries)?.as_bytes(),
     )?;
     credential_free_environment(root, environment);
+    // Match every URL scope in the selected repository. Git's URL matcher can
+    // prefer a path-specific local setting over a host-wide command override.
+    const GIT_WRAPPER: &str = r#"unset GIT_CONFIG_COUNT GIT_SSH GIT_SSH_COMMAND
+GIT_CONFIG_GLOBAL=$script_dir/../gitconfig
+GIT_CONFIG_NOSYSTEM=1
+GIT_TERMINAL_PROMPT=0
+GIT_ASKPASS=/bin/false
+export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_TERMINAL_PROMPT GIT_ASKPASS
+real_git=$(command -v git)
+repository_authentication_keys() (
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -C) [ "$#" -ge 2 ] || break; if [ -n "$2" ]; then cd -- "$2" || exit; fi; shift 2 ;;
+            --git-dir|--work-tree) [ "$#" -ge 2 ] || break
+                if [ "$1" = --git-dir ]; then GIT_DIR=$2; export GIT_DIR; else GIT_WORK_TREE=$2; export GIT_WORK_TREE; fi
+                shift 2 ;;
+            --git-dir=*) GIT_DIR=${1#*=}; export GIT_DIR; shift ;;
+            --work-tree=*) GIT_WORK_TREE=${1#*=}; export GIT_WORK_TREE; shift ;;
+            --bare) GIT_DIR=.; export GIT_DIR; shift ;;
+            -c|--config-env|--namespace|--super-prefix) [ "$#" -ge 2 ] || break; shift 2 ;;
+            -*) shift ;;
+            *) break ;;
+        esac
+    done
+    "$real_git" config --name-only --get-regexp '^(http|credential)\..*\.(extraheader|helper)$'
+)
+if keys=$(repository_authentication_keys "$@"); then :; else
+    status=$?
+    [ "$status" -eq 1 ] || exit "$status"
+fi
+while IFS= read -r key; do
+    url=${key#*.}; url=${url%.*}
+    host=${url#*://}; host=${host%%/*}; host=${host##*@}; host=${host%%:*}
+    host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+    case "$host" in github.com|gist.github.com) set -- -c "$key=" "$@" ;; esac
+done <<EOF
+$keys
+EOF
+# Hooks and aliases must route their own Git calls through this policy too.
+PATH=$script_dir:$PATH
+export PATH
+"#;
     let wrapper = format!(
-        "{WRAPPER_PREAMBLE}unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_SSH GIT_SSH_COMMAND\nGIT_CONFIG_GLOBAL=$script_dir/../gitconfig\nGIT_CONFIG_NOSYSTEM=1\nGIT_TERMINAL_PROMPT=0\nGIT_ASKPASS=/bin/false\nexport GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_TERMINAL_PROMPT GIT_ASKPASS\nexec git -c credential.https://github.com.helper= -c credential.https://gist.github.com.helper= -c http.https://github.com.extraheader= -c http.https://gist.github.com.extraheader= -c core.sshCommand={} \"$@\"\n",
+        "{WRAPPER_PREAMBLE}{GIT_WRAPPER}exec \"$real_git\" -c credential.https://github.com.helper= -c credential.https://gist.github.com.helper= -c http.https://github.com.extraheader= -c http.https://gist.github.com.extraheader= -c core.sshCommand={} \"$@\"\n",
         mj_core::targets::posix_quote(&ssh_command)
     );
     crate::worker_runtime::shell_environment::write_executable(&paths.bin.join("git"), &wrapper)

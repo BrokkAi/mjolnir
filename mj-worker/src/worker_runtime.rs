@@ -144,11 +144,19 @@ pub struct AcpSupervisorSpec {
 
 impl From<&WorkerLaunchConfig> for AcpSupervisorSpec {
     fn from(config: &WorkerLaunchConfig) -> Self {
+        let mut excluded_environment = config.excluded_environment.clone();
+        if config.no_github_credentials {
+            for name in mj_core::credentials::GITHUB_AUTHENTICATION_ENVIRONMENT {
+                if !excluded_environment.iter().any(|excluded| excluded == name) {
+                    excluded_environment.push(name.into());
+                }
+            }
+        }
         Self {
             command: config.bridge_command.clone(),
             args: config.bridge_args.clone(),
             environment: config.environment.clone(),
-            excluded_environment: config.excluded_environment.clone(),
+            excluded_environment,
             cwd: config.cwd.clone(),
             harness_lease: None,
             node_lease: None,
