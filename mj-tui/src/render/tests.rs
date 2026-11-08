@@ -3780,8 +3780,14 @@ fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
     assert_eq!(capacity_table_lines(&dashboard), 1);
 }
 
+// Hard-won: b54b2449a8: AFK omitted classifier intervention after failed turns.
 #[test]
 fn golden_operator_away_dialog() {
+    use crate::ingest::PreparedMaterializedSessionDetail;
+    use mj_core::activity::verdict::CompletionEvidence;
+    use mj_core::assessment::{Action, Status, TurnAssessment};
+    use mj_core::state::{MaterializedSession, MaterializedTurnOutcome, TurnOutcomeKind};
+
     let mut output = String::new();
     for (symbols, label, width, height) in [
         (mj_core::config::SymbolSet::Unicode, "AFK", 100, 32),
@@ -3798,19 +3804,80 @@ fn golden_operator_away_dialog() {
         let mut config = config();
         config.advanced.symbols = Some(symbols);
         let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-        for index in 0..4 {
+        let mut classified = Vec::new();
+        for (index, title) in [
+            "Explicit question",
+            "Classifier question",
+            "Classifier failure",
+            "Ordinary idle",
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut session = running_session();
             session.id = format!("waiting-{index}");
-            session.title = format!("Waiting session {index}");
+            session.title = title.into();
             session.acp_session_title = None;
-            dashboard.session_details.insert(
-                session.id.clone(),
-                SessionDetail {
-                    pending_elicitations: vec![question(&session.id)],
-                    ..Default::default()
+            session.viewed_through_event_ordinal = 3;
+            if index == 1 {
+                session.workspace_id = "other".into();
+            }
+            let mut materialized = MaterializedSession::empty(&session.id);
+            materialized.applied_event_ordinal = 4;
+            materialized.transcript = vec![agent_message(2, "I need your decision.")];
+            materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
+                command_id: format!("prompt-{index}"),
+                accepted_ordinal: Some(1),
+                turn_start_position: Some(2),
+                completed_ordinal: 3,
+                completed_at_ms: 1_000,
+                outcome: match index {
+                    2 => TurnOutcomeKind::Completed {
+                        stop_reason: "provider_error".into(),
+                    },
+                    _ => TurnOutcomeKind::Completed {
+                        stop_reason: "EndTurn".into(),
+                    },
                 },
-            );
+                work_facts: None,
+                answered_through: None,
+                diagnostic: None,
+                usage: None,
+            });
+            let assessment = if index == 0 {
+                materialized.pending_elicitations = vec![question(&session.id)];
+                None
+            } else if index == 3 {
+                None
+            } else {
+                let mut assessment = TurnAssessment::pending(
+                    format!("prompt-{index}"),
+                    3,
+                    1_000,
+                    CompletionEvidence {
+                        stop_reason: if index == 2 {
+                            "provider_error"
+                        } else {
+                            "EndTurn"
+                        }
+                        .into(),
+                        diagnostic: None,
+                    },
+                );
+                assessment.status = Status::Assessed;
+                assessment.action = Some(Action::AwaitInput);
+                Some(assessment)
+            };
             dashboard.state.sessions.insert(session.id.clone(), session);
+            dashboard.apply_prepared_materialized_session(
+                PreparedMaterializedSessionDetail::from_assessed_materialized(
+                    materialized.clone(),
+                    assessment.as_ref(),
+                    3,
+                    Default::default(),
+                ),
+            );
+            classified.push((materialized, assessment));
         }
         dashboard.set_operator_presence(mj_core::state::OperatorPresence {
             away: true,
@@ -3818,7 +3885,36 @@ fn golden_operator_away_dialog() {
         });
         append_dashboard_golden(&mut output, label, width, height, &mut dashboard);
         if label == "AFK" {
-            dashboard.session_details.clear();
+            dashboard
+                .session_details
+                .get_mut("waiting-0")
+                .unwrap()
+                .pending_elicitations
+                .clear();
+            append_dashboard_golden(
+                &mut output,
+                "AFK classifier intervention only",
+                width,
+                height,
+                &mut dashboard,
+            );
+            for (mut materialized, assessment) in classified {
+                materialized.applied_event_ordinal += 1;
+                materialized.pending_elicitations.clear();
+                let assessment = assessment.map(|mut assessment| {
+                    assessment.status = Status::Superseded;
+                    assessment.reason = "question_dismissed".into();
+                    assessment
+                });
+                dashboard.apply_prepared_materialized_session(
+                    PreparedMaterializedSessionDetail::from_assessed_materialized(
+                        materialized,
+                        assessment.as_ref(),
+                        3,
+                        Default::default(),
+                    ),
+                );
+            }
             append_dashboard_golden(
                 &mut output,
                 "AFK waiting requests cleared",
