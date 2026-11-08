@@ -404,15 +404,6 @@ pub(super) fn load_github_session_turn_windows_from(
 ) -> Result<Vec<GithubSessionTurnWindow>> {
     let mut connection = open_reader(path)?;
     let tx = connection.transaction()?;
-    let windows = github_session_turn_windows_in(&tx, session_id)?;
-    tx.commit()?;
-    Ok(windows)
-}
-
-fn github_session_turn_windows_in(
-    tx: &rusqlite::Transaction<'_>,
-    session_id: &str,
-) -> Result<Vec<GithubSessionTurnWindow>> {
     let bodies = {
         let mut statement = tx.prepare(
             "SELECT body FROM api_events
@@ -469,11 +460,12 @@ fn github_session_turn_windows_in(
         });
     }
     windows.extend(harness_turn_windows(
-        tx,
+        &tx,
         session_id,
         &prompt_turn_starts,
         harness_turn_running,
     )?);
+    tx.commit()?;
     Ok(windows)
 }
 
@@ -545,8 +537,11 @@ fn harness_turn_windows(
     Ok(windows)
 }
 
-/// Output from calls overlapping creation, plus output and assistant text from
-/// creation onward in the turn containing it. Command inputs are never evidence.
+/// Output of this session's tool calls that were running within a second of
+/// `at_ms`; GitHub timestamps have one-second precision. Nothing can print a
+/// new item's URL before it exists, so this ignores how the command was
+/// composed. Later turn text is not evidence: a session that merely mentions
+/// another session's new item afterwards would otherwise claim it.
 pub(crate) fn load_github_session_creation_output(
     session_id: &str,
     at_ms: i64,
@@ -559,69 +554,37 @@ fn load_github_session_creation_output_from(
     session_id: &str,
     at_ms: i64,
 ) -> Result<Vec<String>> {
-    let mut connection = open_reader(path)?;
-    // One snapshot keeps an active turn from spanning items in a later turn.
-    let tx = connection.transaction()?;
-    let windows = github_session_turn_windows_in(&tx, session_id)?;
-    let mut statement = tx.prepare(
-        "SELECT body_json, created_at_ms, last_changed_at_ms
-         FROM materialized_transcript_items
-         WHERE session_id=?1 AND json_extract(body_json, '$.kind') IN ('tool', 'agent')
+    let connection = open_reader(path)?;
+    let mut statement = connection.prepare(
+        "SELECT body_json FROM materialized_transcript_items
+         WHERE session_id=?1 AND created_at_ms <= ?2 + 1000
            AND (last_changed_at_ms >= ?2 - 1000
-                OR json_extract(body_json, '$.call.status') IN ('pending', 'in_progress'))",
+                OR json_extract(body_json, '$.call.status') IN ('pending', 'in_progress'))
+           AND json_extract(body_json, '$.kind') = 'tool'",
     )?;
+    let bodies = statement
+        .query_map(params![session_id, at_ms], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut output = Vec::new();
-    let rows = statement.query_map(params![session_id, at_ms], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (body, started, changed) = row?;
-        let body: mj_core::transcript::TranscriptBody = serde_json::from_str(&body)?;
-        let in_turn = started >= at_ms
-            && windows.iter().any(|window| {
-                at_ms.div_euclid(1000) >= window.started_at_ms.div_euclid(1000)
-                    && window
-                        .completed_at_ms
-                        .is_none_or(|end| at_ms < ((end + 999) / 1000) * 1000)
-                    && started >= window.started_at_ms
-                    && window.completed_at_ms.is_none_or(|end| started <= end)
-            });
-        match body {
-            mj_core::transcript::TranscriptBody::Tool {
-                call,
-                terminal_outputs,
-                ..
-            } => {
-                let call: agent_client_protocol::v1::schema::ToolCall =
-                    serde_json::from_value(call)?;
-                let overlapping = started <= at_ms + 1000
-                    && (changed >= at_ms - 1000
-                        || matches!(
-                            call.status,
-                            agent_client_protocol::v1::schema::ToolCallStatus::Pending
-                                | agent_client_protocol::v1::schema::ToolCallStatus::InProgress
-                        ));
-                if overlapping || in_turn {
-                    output.extend(mj_transcript::transcript::tool_content_details(
-                        &call.content,
-                        &terminal_outputs,
-                        call.raw_output.as_ref(),
-                        mj_transcript::transcript::tool_status(&call.status),
-                    ));
-                    // MCP tools can supply structured output without a text block.
-                    if let Some(raw) = call.raw_output {
-                        output.push(raw.to_string());
-                    }
-                }
-            }
-            mj_core::transcript::TranscriptBody::Agent { chunks, .. } if in_turn => {
-                output.push(mj_transcript::transcript::materialized_chunks_text(&chunks));
-            }
-            _ => {}
+    for body in bodies {
+        let mj_core::transcript::TranscriptBody::Tool {
+            call,
+            terminal_outputs,
+            ..
+        } = serde_json::from_str(&body)?
+        else {
+            continue;
+        };
+        let call: agent_client_protocol::v1::schema::ToolCall = serde_json::from_value(call)?;
+        output.extend(mj_transcript::transcript::tool_content_details(
+            &call.content,
+            &terminal_outputs,
+            call.raw_output.as_ref(),
+            mj_transcript::transcript::tool_status(&call.status),
+        ));
+        // MCP tools can supply structured output without a text block.
+        if let Some(raw) = call.raw_output {
+            output.push(raw.to_string());
         }
     }
     Ok(output)
@@ -753,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn creation_output_excludes_early_mentions_but_keeps_overlapping_calls() {
+    fn creation_output_comes_only_from_calls_running_at_creation() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creation.sqlite");
         save_session_to(
@@ -762,26 +725,24 @@ mod tests {
         )
         .unwrap();
         let connection = open_reader(&path).unwrap();
+        let tool = |id: &str, output: &str| serde_json::json!({"kind":"tool", "call":{"toolCallId":id, "title":"script", "status":"completed", "content":[]}, "terminal_outputs":[{"terminal_id":id, "output":output, "exit_code":0}]});
         // This fixture uses SQL to exercise the persisted transcript format.
-        connection.execute("INSERT INTO materialized_sessions(session_id, execution_state, running_started_at_ms, active_turn_json) VALUES ('session-1', 'running', 1000, ?1) ON CONFLICT(session_id) DO UPDATE SET execution_state='running', running_started_at_ms=1000, active_turn_json=excluded.active_turn_json", params![serde_json::json!({"command_id":"turn", "turn_start_position":1, "started_at_ms":1000}).to_string()]).unwrap();
         for (position, started, changed, body) in [
-            (
-                1,
-                2000,
-                2000,
-                serde_json::json!({"kind":"agent", "chunks":[{"content":{"type":"text", "text":"#12 early"}}], "streaming":false}),
-            ),
+            (1, 1000, 2000, tool("before", "early")),
             (
                 2,
                 3000,
                 6000,
-                serde_json::json!({"kind":"tool", "call":{"toolCallId":"create", "title":"script", "status":"completed", "content":[]}, "terminal_outputs":[{"terminal_id":"create", "output":"https://github.com/owner/repo/issues/12", "exit_code":0}]}),
+                tool("create", "https://github.com/owner/repo/issues/12"),
             ),
+            // A later view or mention of the new item in the same turn would
+            // let a session that never opened it claim it.
+            (3, 7000, 7000, tool("view", "viewed later")),
             (
-                3,
+                4,
                 7000,
                 7000,
-                serde_json::json!({"kind":"agent", "chunks":[{"content":{"type":"text", "text":"#123 later"}}], "streaming":false}),
+                serde_json::json!({"kind":"agent", "chunks":[{"content":{"type":"text", "text":"mentioned later"}}], "streaming":false}),
             ),
         ] {
             connection.execute("INSERT INTO materialized_transcript_items(session_id, stable_id, position, created_at_ms, last_changed_at_ms, body_json) VALUES ('session-1', ?1, ?2, ?3, ?4, ?5)", params![position.to_string(), position, started, changed, body.to_string()]).unwrap();
@@ -789,9 +750,9 @@ mod tests {
         let output = load_github_session_creation_output_from(&path, "session-1", 5000)
             .unwrap()
             .join("\n");
-        assert!(!output.contains("early"));
         assert!(output.contains("https://github.com/owner/repo/issues/12"));
-        assert!(output.contains("#123 later"));
+        assert!(!output.contains("early"));
+        assert!(!output.contains("later"));
     }
 
     // Hard-won: b4476dc76: comments a session posted in turns the harness started on its own still came back to it.

@@ -648,17 +648,20 @@ async fn opened_by_session(
         mj_core::github_reference::github_references(text)
             .iter()
             .any(|reference| {
+                // A bare `#N` cannot name the repository, and sessions work
+                // in several; creation output (gh, the API, MCP tools)
+                // carries the full URL.
                 reference.number == number
-                    && reference.owner.as_ref().is_none_or(|owner| {
-                        item.owner
-                            .as_ref()
-                            .is_some_and(|expected| owner.eq_ignore_ascii_case(expected))
-                            && reference
-                                .repo
-                                .as_ref()
-                                .zip(item.repo.as_ref())
-                                .is_some_and(|(repo, expected)| repo.eq_ignore_ascii_case(expected))
-                    })
+                    && reference
+                        .owner
+                        .as_ref()
+                        .zip(item.owner.as_ref())
+                        .is_some_and(|(owner, expected)| owner.eq_ignore_ascii_case(expected))
+                    && reference
+                        .repo
+                        .as_ref()
+                        .zip(item.repo.as_ref())
+                        .is_some_and(|(repo, expected)| repo.eq_ignore_ascii_case(expected))
             })
     }))
 }
