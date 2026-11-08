@@ -6,12 +6,12 @@ use serde_json::Value;
 
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 pub const QUESTIONS: &str = include_str!("github_item/questions_v2.json");
-// Token-cost design budgets: relevance needs the opening, not the full body.
+// Relevance evidence budgets; conversation limits are selected by replay.
 // Mirrored by the v2 proxy validator.
 pub const ITEM_BODY_BYTES: usize = 4096;
 pub const SESSION_TURNS: usize = 3;
-pub const REQUEST_BYTES: usize = 512;
-pub const REPLY_BYTES: usize = 512;
+pub const CONVERSATION_BYTES: usize = 8 * 1024;
+pub const MESSAGE_BYTES: usize = 2 * 1024;
 pub const MAX_FILES: usize = 32;
 pub const FILE_BYTES: usize = 256;
 pub const MAX_REFERENCES: usize = 32;
@@ -40,8 +40,7 @@ pub struct GithubItem {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionContext {
-    pub requests: Vec<String>,
-    pub latest_reply: String,
+    pub conversation: String,
     pub files: Vec<String>,
     pub references: Vec<String>,
 }
@@ -91,17 +90,8 @@ impl GithubItemEvidence {
     pub fn validate(&self) -> Result<()> {
         self.validate_fixed_fields()?;
         ensure!(
-            self.session.requests.len() <= SESSION_TURNS
-                && self
-                    .session
-                    .requests
-                    .iter()
-                    .all(|s| s.len() <= REQUEST_BYTES),
-            "invalid GitHub session requests"
-        );
-        ensure!(
-            self.session.latest_reply.len() <= REPLY_BYTES,
-            "GitHub session reply is too long"
+            self.session.conversation.len() <= CONVERSATION_BYTES,
+            "GitHub session conversation is too long"
         );
         ensure!(
             self.session.files.len() <= MAX_FILES
@@ -224,8 +214,8 @@ mod tests {
                 url: "https://github.com/brokkai/mjolnir/pull/42".into(),
             },
             session: SessionContext {
-                requests: vec!["Implement mailbox support".into()],
-                latest_reply: "Checking the worker".into(),
+                conversation: "User: Implement mailbox support\nAgent: Checking the worker\n"
+                    .into(),
                 files: vec!["mj-worker/src/lib.rs".into()],
                 references: vec!["#42".into()],
             },
@@ -247,15 +237,10 @@ mod tests {
         maximal.item.number = 9_007_199_254_740_991;
         maximal.item.body = "x".repeat(ITEM_BODY_BYTES - 1) + "🦀";
         maximal.session = SessionContext {
-            requests: vec!["x".repeat(REQUEST_BYTES - 1) + "é"; SESSION_TURNS],
-            latest_reply: "x".repeat(REPLY_BYTES),
+            conversation: "x".repeat(CONVERSATION_BYTES),
             files: vec!["x".repeat(FILE_BYTES); MAX_FILES],
             references: vec!["x".repeat(REFERENCE_BYTES); MAX_REFERENCES],
         };
-        // Digest cut points, including multibyte text straddling the byte boundary.
-        for request in &mut maximal.session.requests {
-            *request = utf8_prefix(request, REQUEST_BYTES).into();
-        }
         let bounded = maximal.bounded_for_request().unwrap();
         assert_eq!(
             bounded.item.body,
@@ -267,9 +252,12 @@ mod tests {
         );
         assert!(upstream_len(&bounded).unwrap() <= MAX_BODY_BYTES);
         let mut escaped = bounded.clone();
-        escaped.item.body = "\"".repeat(ITEM_BODY_BYTES);
-        escaped.session.requests = vec!["\"".repeat(REQUEST_BYTES); SESSION_TURNS];
-        escaped.session.latest_reply = "\"".repeat(REPLY_BYTES);
+        escaped.item.repo = "\"".repeat(256);
+        escaped.item.title = "\"".repeat(1024);
+        escaped.item.author = "\"".repeat(256);
+        escaped.item.url = "\"".repeat(2048);
+        escaped.item.body = format!("{}{}", "\"".repeat(ITEM_BODY_BYTES), BODY_TRUNCATION_MARKER);
+        escaped.session.conversation = "\"".repeat(CONVERSATION_BYTES);
         escaped.session.files = vec!["\"".repeat(FILE_BYTES); MAX_FILES];
         escaped.session.references = vec!["\"".repeat(REFERENCE_BYTES); MAX_REFERENCES];
         escaped.validate().unwrap();
@@ -277,6 +265,11 @@ mod tests {
             "maximal escaped v2 request: {} bytes",
             upstream_len(&escaped).unwrap()
         );
+        // Individual UTF-8 budgets do not bound JSON's six-byte control escapes.
+        // The complete envelope must still reject oversized combinations.
+        escaped.item.body = "\0".repeat(ITEM_BODY_BYTES);
+        assert!(upstream_len(&escaped).unwrap() > MAX_BODY_BYTES);
+        assert!(escaped.validate().is_err());
         let serialized = serde_json::to_string(&bounded.upstream_body()).unwrap();
         assert!(serialized.find("\"item\"").unwrap() < serialized.find("\"session\"").unwrap());
     }

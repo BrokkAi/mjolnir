@@ -12,10 +12,7 @@
         "url": "https://github.com/brokkai/mjolnir/pull/42"
       },
       "session": {
-        "requests": [
-          "Implement mailbox delivery through tool hooks."
-        ],
-        "latest_reply": "I am implementing mailbox support.",
+        "conversation": "User: Implement mailbox delivery through tool hooks.\nAgent: I am implementing mailbox support.\n",
         "files": [],
         "references": []
       }
@@ -37,10 +34,7 @@
         "url": "https://github.com/brokkai/mjolnir/pull/42"
       },
       "session": {
-        "requests": [
-          "Fix AWS capacity reporting."
-        ],
-        "latest_reply": "Corrected memory accounting in the EC2 picker.",
+        "conversation": "User: Fix AWS capacity reporting.\nAgent: Corrected memory accounting in the EC2 picker.\n",
         "files": [],
         "references": []
       }
@@ -62,10 +56,7 @@
         "url": "https://github.com/brokkai/mjolnir/pull/42"
       },
       "session": {
-        "requests": [
-          "Implement mailbox delivery and open a PR."
-        ],
-        "latest_reply": "Opened https://github.com/brokkai/mjolnir/pull/42: Add mailbox support.",
+        "conversation": "User: Implement mailbox delivery and open a PR.\nAgent: Opened https://github.com/brokkai/mjolnir/pull/42: Add mailbox support.\n",
         "files": [],
         "references": [
           "https://github.com/brokkai/mjolnir/pull/42"
@@ -89,10 +80,7 @@
         "url": "https://github.com/brokkai/mjolnir/pull/42"
       },
       "session": {
-        "requests": [
-          "Review mailbox changes."
-        ],
-        "latest_reply": "I read the existing PR #42; another agent opened it.",
+        "conversation": "User: Review mailbox changes.\nAgent: I read the existing PR #42; another agent opened it.\n",
         "files": [],
         "references": [
           "#42"
@@ -116,10 +104,7 @@
         "url": "https://github.com/brokkai/mjolnir/pull/42"
       },
       "session": {
-        "requests": [
-          "Implement mailbox support."
-        ],
-        "latest_reply": "Opening the PR failed with authentication denied.",
+        "conversation": "User: Implement mailbox support.\nAgent: Opening the PR failed with authentication denied.\n",
         "files": [],
         "references": []
       }
@@ -141,10 +126,7 @@
         "url": "https://github.com/brokkai/mjolnir/pull/42"
       },
       "session": {
-        "requests": [
-          "Implement mailbox support."
-        ],
-        "latest_reply": "I will open a PR after validation.",
+        "conversation": "User: Implement mailbox support.\nAgent: I will open a PR after validation.\n",
         "files": [],
         "references": []
       }
@@ -166,10 +148,7 @@
         "url": "https://github.com/brokkai/mjolnir/pull/42"
       },
       "session": {
-        "requests": [
-          "Implement mailbox support."
-        ],
-        "latest_reply": "Opened https://github.com/brokkai/mjolnir/pull/43: Add mailbox support.",
+        "conversation": "User: Implement mailbox support.\nAgent: Opened https://github.com/brokkai/mjolnir/pull/43: Add mailbox support.\n",
         "files": [],
         "references": [
           "https://github.com/brokkai/mjolnir/pull/43"
@@ -193,10 +172,7 @@
         "url": "https://github.com/brokkai/mjolnir/pull/42"
       },
       "session": {
-        "requests": [
-          "Fix terminal keyboard event delivery."
-        ],
-        "latest_reply": "Working on escape key parsing in the terminal input loop.",
+        "conversation": "User: Fix terminal keyboard event delivery.\nAgent: Working on escape key parsing in the terminal input loop.\n",
         "files": [],
         "references": []
       }
@@ -218,10 +194,7 @@
         "url": "https://github.com/brokkai/mjolnir/pull/42"
       },
       "session": {
-        "requests": [
-          "Implement mailbox support and open the PR."
-        ],
-        "latest_reply": "",
+        "conversation": "User: Implement mailbox support and open the PR.\n",
         "files": [],
         "references": []
       }
@@ -243,10 +216,7 @@
         "url": "https://github.com/brokkai/mjolnir/pull/42"
       },
       "session": {
-        "requests": [
-          "Continue with the plan."
-        ],
-        "latest_reply": "",
+        "conversation": "User: Continue with the plan.\n",
         "files": [
           "mj-controller/src/mailbox/hooks.rs",
           "mj-controller/src/mailbox/delivery.rs"
@@ -271,10 +241,7 @@
         "url": "https://github.com/brokkai/mjolnir/pull/42"
       },
       "session": {
-        "requests": [
-          "Continue with the plan."
-        ],
-        "latest_reply": "",
+        "conversation": "User: Continue with the plan.\n",
         "files": [
           "mj-tui/src/input/keys.rs",
           "mj-tui/src/render/status.rs"
@@ -299,12 +266,7 @@
         "url": "https://github.com/brokkai/mjolnir/pull/42"
       },
       "session": {
-        "requests": [
-          "Implement mailbox delivery through tool hooks.",
-          "Also fix the typo in the README.",
-          "Run the tests again."
-        ],
-        "latest_reply": "All tests pass.",
+        "conversation": "User: Implement mailbox delivery through tool hooks.\nUser: Also fix the typo in the README.\nUser: Run the tests again.\nAgent: All tests pass.\n",
         "files": [
           "mj-controller/src/mailbox/hooks.rs"
         ],

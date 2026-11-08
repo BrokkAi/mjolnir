@@ -3070,11 +3070,7 @@ mod tests {
     impl GithubClassifier for FailingSessionClassifier {
         fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
             Box::pin(async move {
-                if evidence
-                    .session
-                    .requests
-                    .iter()
-                    .any(|s| s.contains("FAIL_PAIR"))
+                if evidence.session.conversation.contains("FAIL_PAIR")
                     && self.0.load(Ordering::SeqCst)
                 {
                     bail!("permanent session classifier failure");
@@ -3145,9 +3141,8 @@ mod tests {
             session_digest("bad".into())
                 .await
                 .unwrap()
-                .requests
-                .iter()
-                .any(|s| s.contains("FAIL_PAIR"))
+                .conversation
+                .contains("FAIL_PAIR")
         );
         let failing = Arc::new(AtomicBool::new(true));
         let classifier: Arc<dyn GithubClassifier> =
