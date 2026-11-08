@@ -2602,6 +2602,7 @@ mod tests {
         );
     }
 
+    // Hard-won: d9efe7006: Windows timestamp fixtures need writable handles.
     #[test]
     fn home_watch_rehash_catches_a_same_size_rewrite_with_an_unchanged_stat() {
         let directory = tempfile::tempdir().unwrap();
@@ -2614,7 +2615,9 @@ mod tests {
         // invisible to the stat; only the recency re-hash catches it, the
         // way a same-second edit lands on a one-second-granularity filesystem.
         std::fs::write(home.join("config.toml"), "model = \"two\"\n").unwrap();
-        std::fs::File::open(home.join("config.toml"))
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(home.join("config.toml"))
             .unwrap()
             .set_modified(stored_mtime)
             .unwrap();
@@ -2629,13 +2632,16 @@ mod tests {
     // Hard-won: #1337 review: a timestamp-preserving rewrite hid from the
     // poll while a probe recorded the fresh digest, so the identity looked
     // stale every pass and re-probed forever.
+    // Hard-won: d9efe7006: Windows timestamp fixtures need writable handles.
     #[tokio::test]
     async fn a_stat_hidden_rewrite_converges_once_a_probe_reads_it() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let old = SystemTime::now() - Duration::from_secs(120);
         write_home_model(root, "solo", "aaa");
-        std::fs::File::open(root.join("solo").join("config.toml"))
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("solo").join("config.toml"))
             .unwrap()
             .set_modified(old)
             .unwrap();
@@ -2649,7 +2655,9 @@ mod tests {
         // A timestamp-preserving rewrite of the same length is invisible to
         // the stat poll and stays undetected while no probe reads the home.
         write_home_model(root, "solo", "bbb");
-        std::fs::File::open(root.join("solo").join("config.toml"))
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("solo").join("config.toml"))
             .unwrap()
             .set_modified(old)
             .unwrap();
