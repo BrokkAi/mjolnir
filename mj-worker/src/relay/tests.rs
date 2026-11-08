@@ -638,6 +638,120 @@ fn automatic_steering_stops_for_a_turn_that_returned_a_steer() {
     assert_eq!(claimed[0].command_id, "prompt-second");
 }
 
+// Hard-won: #1473: DSH held ready oracle answers until the lead's hours-long turn ended.
+#[test]
+fn dsh_mailbox_uses_durable_steering_and_keeps_returned_input_queued() {
+    for returned in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay =
+            DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Dsh, &[])
+                .unwrap();
+        relay.set_steering_supported(Some(true));
+        relay.set_automatic_steering(true);
+        queue_prompt(&mut relay, "prompt-first", "work continues");
+        assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+        let first = mailbox_fixture_event("oracle-answer", true);
+        submit_relay(
+            &mut relay,
+            "mailbox-first",
+            RelayCommand::DeliverMailboxEvent {
+                event: first.clone(),
+            },
+        );
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        let wake = claimed[0]
+            .steering_prompt
+            .as_ref()
+            .unwrap()
+            .queued_command_id
+            .clone();
+        let steer = claimed_steer_of(&claimed, &wake);
+        assert_eq!(
+            claimed[0].steering_prompt.as_ref().unwrap().prompt,
+            RelayCommand::MailboxWake {
+                events: vec![first.clone()]
+            }
+            .prompt_blocks()
+            .unwrap()
+            .as_ref()
+        );
+        assert_eq!(
+            relay.snapshot.active_prompt.as_ref().unwrap().command_id,
+            "prompt-first"
+        );
+        assert_eq!(drain_mailbox_for_test(&mut relay, "competing-hook").1, 0);
+
+        submit_relay(
+            &mut relay,
+            "mailbox-first-retry",
+            RelayCommand::DeliverMailboxEvent { event: first },
+        );
+        let second = mailbox_fixture_event("child-handback", true);
+        submit_relay(
+            &mut relay,
+            "mailbox-second",
+            RelayCommand::DeliverMailboxEvent {
+                event: second.clone(),
+            },
+        );
+        assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+        relay
+            .record_command_completed(
+                &steer,
+                if returned {
+                    RelayCommandOutcome::SteeringReturned {
+                        queued_command_id: wake.clone(),
+                    }
+                } else {
+                    RelayCommandOutcome::Steered {
+                        queued_command_id: wake.clone(),
+                    }
+                },
+            )
+            .unwrap();
+        if returned {
+            assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+            relay
+                .record_command_completed(
+                    "prompt-first",
+                    RelayCommandOutcome::Prompt {
+                        work_facts: None,
+                        stop_reason: "EndTurn".into(),
+                        usage: None,
+                        diagnostic: None,
+                    },
+                )
+                .unwrap();
+            let claimed = relay.claim_pending_commands(true).unwrap();
+            assert_eq!(claimed.len(), 1);
+            assert_eq!(claimed[0].command_id, wake);
+            assert_eq!(
+                claimed[0].hidden_prompt_context.as_deref(),
+                Some(mj_core::mailbox::render_mailbox_events(&[second]).as_str())
+            );
+        } else {
+            let claimed = relay.claim_pending_commands(true).unwrap();
+            assert_eq!(claimed.len(), 1);
+            let prompt = claimed[0].steering_prompt.as_ref().unwrap();
+            assert_eq!(
+                prompt.prompt,
+                RelayCommand::MailboxWake {
+                    events: vec![second]
+                }
+                .prompt_blocks()
+                .unwrap()
+                .as_ref()
+            );
+            assert_ne!(prompt.queued_command_id, wake);
+            assert_eq!(
+                relay.snapshot.active_prompt.as_ref().unwrap().command_id,
+                "prompt-first"
+            );
+        }
+        assert!(relay.snapshot.pending_mailbox_events.is_empty());
+    }
+}
+
 #[test]
 fn claude_automatic_steer_is_delivered_and_completed_by_post_tool_batch() {
     let temp = tempfile::tempdir().unwrap();

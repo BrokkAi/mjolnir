@@ -1662,6 +1662,30 @@ async fn prepare_and_start_harness(
             claude_mailbox_hook_available = mailbox_hook_available;
             registered
         }
+        HarnessKind::OpenCode => {
+            let budget = preparation_step(
+                root,
+                status,
+                "mailbox-plugin",
+                LOCAL_PREPARATION_STEP_TIMEOUT,
+                cancel,
+            )
+            .await?;
+            let root = root.to_owned();
+            let mut environment = config.environment.clone();
+            config.environment =
+                bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+                    if step_cancel.is_cancelled() {
+                        bail!(
+                            "preparation cancelled before configuring the OpenCode mailbox plugin"
+                        );
+                    }
+                    super::subagents::configure_opencode_mailbox_hook(&root, &mut environment)?;
+                    Ok(environment)
+                })
+                .await?;
+            false // OpenCode receives its MCP servers through ACP.
+        }
         HarnessKind::Kimi if subagent_role.is_some() => {
             let budget = preparation_step(
                 root,

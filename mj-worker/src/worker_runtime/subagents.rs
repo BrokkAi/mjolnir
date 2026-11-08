@@ -26,6 +26,32 @@ use crate::subagent_mcp::DaemonContact;
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
 
+/// Register a worker-owned OpenCode 2 plugin without editing the user's home.
+pub(super) fn configure_opencode_mailbox_hook(
+    root: &Path,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let directory = root.join("opencode-mailbox");
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("create OpenCode plugin directory {}", directory.display()))?;
+    let worker = std::env::current_exe().context("locate worker for OpenCode mailbox hook")?;
+    let script = include_str!("../../assets/opencode-mailbox.js")
+        .replace("__MJ_WORKER__", &serde_json::to_string(&worker)?)
+        .replace(
+            "__MJ_SOCKET__",
+            &serde_json::to_string(&root.join("control.sock"))?,
+        );
+    let path = directory.join("index.js");
+    std::fs::write(&path, script)
+        .with_context(|| format!("write OpenCode mailbox hook {}", path.display()))?;
+    std::fs::write(
+        directory.join("package.json"),
+        r#"{"name":"mjolnir-mailbox","type":"module","main":"index.js"}"#,
+    )
+    .context("write OpenCode mailbox plugin manifest")?;
+    super::json_gh_rules::configure_opencode_plugin(&directory, environment)
+}
+
 const CODEX_CONFIG_ENV: &str = "CODEX_CONFIG";
 const CODEX_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
 const CLAUDE_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
@@ -1137,6 +1163,100 @@ impl Drop for LiveWaiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: #1473: OpenCode never drained the lead mailbox between tool calls.
+    #[test]
+    fn opencode_mailbox_plugin_preserves_tool_results_and_excludes_native_children() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let mut environment = BTreeMap::from([(
+            "OPENCODE_CONFIG_CONTENT".into(),
+            "{ // keep user plugins\n\"plugins\": [\"user-plugin\"], \"permissions\": [] }".into(),
+        )]);
+        configure_opencode_mailbox_hook(root.path(), &mut environment).unwrap();
+        let once = environment.clone();
+        configure_opencode_mailbox_hook(root.path(), &mut environment).unwrap();
+        assert_eq!(environment, once);
+        assert!(environment["OPENCODE_CONFIG_CONTENT"].contains("user-plugin"));
+
+        let worker = root.path().join("worker.mjs");
+        std::fs::write(
+            &worker,
+            r##"#!/usr/bin/env node
+import fs from "node:fs";
+const text = "mailbox:" + "x".repeat(128 * 1024);
+// Both output pipes exceed the OS pipe buffer before stdin is consumed.
+process.stdout.write(JSON.stringify({hookSpecificOutput: {additionalContext: text}}));
+process.stderr.write("diagnostic:" + "y".repeat(128 * 1024));
+process.stdin.resume();
+process.stdin.on("end", () => fs.appendFileSync(process.env.MJ_HOOK_CALLS, "called\n"));
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = root.path().join("plugin.mjs");
+        std::fs::write(
+            &script,
+            include_str!("../../assets/opencode-mailbox.js")
+                .replace("__MJ_WORKER__", &serde_json::to_string(&worker).unwrap())
+                .replace("__MJ_SOCKET__", "\"unused\""),
+        )
+        .unwrap();
+        let calls = root.path().join("calls");
+        let mut command = std::process::Command::new("node");
+        command
+            .args(["--input-type=module", "-"])
+            .env("MJ_HOOK_PLUGIN", script)
+            .env("MJ_HOOK_CALLS", calls);
+        let output = mj_core::subprocess::run_with_input(
+            &mut command,
+            br#"
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import { pathToFileURL } from "node:url";
+const plugin = (await import(pathToFileURL(process.env.MJ_HOOK_PLUGIN))).default;
+let hook;
+let disposed = false;
+const cleanup = await plugin.setup({
+  session: {get: async ({sessionID}) => ({parentID: sessionID === "native-child" ? "lead" : undefined})},
+  tool: {hook: async (name, callback) => {
+    assert.equal(name, "execute.after");
+    hook = callback;
+    return {dispose: () => {disposed = true}};
+  }},
+});
+const text = "mailbox:" + "x".repeat(128 * 1024);
+const first = {sessionID: "lead", status: "completed", result: {content: "tool output", output: {ok: true}, metadata: {title: "kept"}}};
+await hook(first);
+assert.deepEqual(first.result, {content: [{type: "text", text: "tool output"}, {type: "text", text}], output: {ok: true}, metadata: {title: "kept"}});
+const file = {type: "file", uri: "file:///image.png", mime: "image/png"};
+const second = {sessionID: "lead", status: "completed", result: {content: [file]}};
+await hook(second);
+assert.deepEqual(second.result.content, [file, {type: "text", text}]);
+const failure = {sessionID: "lead", status: "error", error: new Error("tool failed")};
+await hook(failure);
+assert.equal(failure.error.message, "tool failed\n\n" + text);
+const child = {sessionID: "native-child", status: "completed", result: {content: "child output"}};
+await hook(child);
+assert.deepEqual(child.result, {content: "child output"});
+assert.equal(fs.readFileSync(process.env.MJ_HOOK_CALLS, "utf8"), "called\ncalled\ncalled\n");
+await cleanup();
+assert.ok(disposed);
+console.log("OpenCode mailbox plugin contract passed");
+"#,
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "OpenCode mailbox plugin contract passed"
+        );
+    }
 
     #[test]
     fn a_kimi_reviewer_registers_handback_in_its_private_runtime_profile() {
