@@ -460,9 +460,10 @@ fn exchanges(turns: &[(&str, &str)]) -> CanonicalSessionSnapshot {
     )
 }
 
+// Hard-won: Jev billing investigation: recent turns retained full tool payloads.
 #[test]
 fn recent_turns_use_compaction_grouping_and_markup_before_selecting_the_tail() {
-    let snapshot = exchanges(&[
+    let mut snapshot = exchanges(&[
         ("older user request", "older assistant reply"),
         ("recent request one", "recent reply one"),
         ("recent request two", "recent reply two"),
@@ -476,6 +477,41 @@ fn recent_turns_use_compaction_grouping_and_markup_before_selecting_the_tail() {
     assert!(!rendered.contains("older user request"));
     assert!(rendered.contains("recent request one"));
     assert!(rendered.contains("recent request three"));
+
+    // A single command can fill the wire budget and evict the conversation
+    // that establishes relevance. Both ACP payloads and detached terminal
+    // output must go through compaction's outcome-only tool representation.
+    let mut call = tool_call("failed", &"raw tool output 🧭\n".repeat(8 * 1024));
+    call["rawInput"] = serde_json::json!({"command": "cat huge-file"});
+    call["rawOutput"] = serde_json::json!({"exit_code": 7});
+    snapshot.transcript.push(CanonicalTranscriptItem {
+        stable_id: "large-tool".into(),
+        position: 9,
+        latest_content_event_ordinal: None,
+        created_at_ms: 0,
+        last_changed_at_ms: 0,
+        body: CanonicalTranscriptBody::Tool {
+            call,
+            terminal_outputs: vec![mj_checkpoint::archive::CanonicalTerminalOutput {
+                terminal_id: "term-1".into(),
+                output: "raw terminal output\n".repeat(8 * 1024),
+                truncated: false,
+                exit_code: Some(7),
+                signal: None,
+            }],
+            terminal_refs: Vec::new(),
+            presentation: None,
+        },
+    });
+    let compact = render_recent_turns(&snapshot, 3);
+    assert_eq!(
+        compact,
+        rendered.trim_end_matches("</turn>\n\n").to_owned()
+            + "<tool_event>\n"
+            + r#"{"toolCallId":"call-1","name":"read","kind":"other","status":"failed","exit_code":7}"#
+            + "\n</tool_event>\n</turn>\n\n"
+    );
+    assert!(render_turns(&turns_from_snapshot(&snapshot).unwrap(), 0).contains("raw tool output"));
 }
 
 #[test]

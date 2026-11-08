@@ -532,13 +532,17 @@ fn turns_from_entries(
     Ok(turns)
 }
 
-/// Render the most recent user turns with the exact turn grouping and markup
-/// used by compaction. Selection happens after transcript events are grouped.
+/// Render the most recent user turns for classification, using compaction's
+/// grouping and tool summaries. Raw tool calls and terminal output are omitted
+/// even for the newest tools; compaction itself retains those for handoff.
 pub fn render_recent_turns(snapshot: &CanonicalSessionSnapshot, count: usize) -> String {
     if count == 0 {
         return String::new();
     }
-    match turns_from_snapshot(snapshot) {
+    match turns_from_entries(
+        TranscriptSummary::from_snapshot_keeping(snapshot, 0).entries,
+        false,
+    ) {
         Ok(turns) => {
             let start = turns.len().saturating_sub(count);
             render_turns(&turns[start..], 0)
