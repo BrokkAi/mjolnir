@@ -133,19 +133,14 @@ pub(crate) async fn run(
 ) -> Result<()> {
     let mut sweep = tokio::time::interval(WORKER_SWEEP);
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut orphans = OrphanCleanup::default();
     while let Some(maintenance) = next_wake(outbox_notify(), &mut sweep, &stop).await {
         if stop.is_cancelled() {
             return Ok(());
         }
-        if maintenance
-            && let Err(error) = reconcile_durable_state(&state, &stop, &mut orphans).await
-        {
+        if maintenance && let Err(error) = reconcile_durable_state(&state, &stop).await {
             tracing::warn!(error = %format!("{error:#}"), "mailbox reconciliation failed; the next sweep will retry");
         }
-        if let Err(error) =
-            process_pending(state.clone(), sessions.clone(), stop.clone(), &mut orphans).await
-        {
+        if let Err(error) = process_pending(state.clone(), sessions.clone(), stop.clone()).await {
             tracing::warn!(error = %format!("{error:#}"), "mailbox outbox sweep failed; pending rows remain durable");
         }
     }
@@ -166,41 +161,7 @@ async fn next_wake(
     }
 }
 
-type SessionRecords = mj_core::snapshot_map::SnapshotMap<String, mj_core::state::SessionRecord>;
-
-/// Rows become orphans only when their session leaves the daemon, so the
-/// cleanup scans its tables after that rather than on every sweep. Each scan
-/// reads every outbox and GitHub classification row on the writer thread.
-#[derive(Default)]
-struct OrphanCleanup {
-    /// The session records the last successful cleanup started from; none
-    /// before the first, which also clears what earlier daemons left.
-    pruned_from: Option<SessionRecords>,
-    /// A pending event targets a session the daemon no longer holds, such as
-    /// one enqueued just after its session was destroyed.
-    stray_target: bool,
-}
-
-fn session_gone(record: Option<&mj_core::state::SessionRecord>) -> bool {
-    record.is_none_or(|record| record.state == mj_core::state::SessionState::DestroyedWithDataLoss)
-}
-
-impl OrphanCleanup {
-    fn due(&self, current: &SessionRecords) -> bool {
-        self.stray_target
-            || self.pruned_from.as_ref().is_none_or(|before| {
-                before
-                    .changes(current)
-                    .any(|(_, record)| session_gone(record))
-            })
-    }
-}
-
-async fn reconcile_durable_state(
-    state: &RuntimeState,
-    stop: &CancellationToken,
-    orphans: &mut OrphanCleanup,
-) -> Result<()> {
+async fn reconcile_durable_state(state: &RuntimeState, stop: &CancellationToken) -> Result<()> {
     tokio::task::spawn_blocking(crate::database::reconcile_pending_subagent_questions)
         .await
         .context("child question reconciliation task failed")??;
@@ -214,22 +175,15 @@ async fn reconcile_durable_state(
             "removed pending mailbox messages for stopped children"
         );
     }
-    // Read before the cleanup: a session that leaves while it runs is a
-    // change from these records, so the next sweep cleans up after it.
-    let records = state.session_records();
-    if orphans.due(&records) {
-        let pruned =
-            tokio::task::spawn_blocking(crate::database::prune_mailbox_events_for_missing_sessions)
-                .await
-                .context("mailbox orphan cleanup task failed")??;
-        orphans.pruned_from = Some(records);
-        orphans.stray_target = false;
-        if pruned > 0 {
-            tracing::info!(
-                count = pruned,
-                "removed mailbox events for destroyed sessions"
-            );
-        }
+    let pruned =
+        tokio::task::spawn_blocking(crate::database::prune_mailbox_events_for_missing_sessions)
+            .await
+            .context("mailbox orphan cleanup task failed")??;
+    if pruned > 0 {
+        tracing::info!(
+            count = pruned,
+            "removed mailbox events for destroyed sessions"
+        );
     }
     // Lifecycle recovery can settle a finish after startup reconciliation.
     // Rebuild missing events from durable state on the same bounded sweep
@@ -251,7 +205,6 @@ async fn process_pending(
     state: std::sync::Arc<RuntimeState>,
     sessions: SessionManagerControl,
     stop: CancellationToken,
-    orphans: &mut OrphanCleanup,
 ) -> Result<()> {
     let entries = tokio::task::spawn_blocking(|| {
         crate::database::pending_mailbox_events(PENDING_BATCH_PER_SESSION)
@@ -266,13 +219,6 @@ async fn process_pending(
             .push(entry);
     }
     retain_waiting_notices(by_session.keys());
-    let records = state.session_records();
-    if by_session
-        .keys()
-        .any(|session_id| session_gone(records.get(session_id)))
-    {
-        orphans.stray_target = true;
-    }
 
     let mut work = by_session.into_iter();
     let mut active = JoinSet::new();
