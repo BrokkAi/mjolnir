@@ -391,6 +391,7 @@ fn probe_profile(kind: HarnessKind, home: &Path, codex_profile: Option<String>) 
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        aws: None,
         codex_profile,
     };
     profile.inherit_provider_key();

@@ -2853,17 +2853,14 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
         | TargetLocator::SshAppleContainer {
             ssh, container_id, ..
         } => {
-            let mut remote = vec![
-                locator
-                    .container_engine()
-                    .expect("remote container")
-                    .to_owned(),
-                "exec".to_owned(),
-                "-i".to_owned(),
-                container_id.to_owned(),
-            ];
-            remote.extend(args);
-            ssh_command_owned(ssh, remote)
+            let remote = drained_container_exec(
+                locator.container_engine().expect("remote container"),
+                container_id,
+                args,
+            );
+            let mut argv = vec![remote.program];
+            argv.extend(remote.args);
+            ssh_command_owned(ssh, argv)
         }
     }
 }
@@ -2905,11 +2902,132 @@ pub fn container_exec(
     CommandSpec::new(engine, command_args)
 }
 
+/// A container exec run on a remote host over SSH, through the output drain
+/// below. Only SSH targets need it: there the drain runs on the remote host
+/// and outlives a cancelled local ssh, whereas a local target's cancellation
+/// kills the whole process group, drain included, and a local controller
+/// (Windows) may have no POSIX shell to run it.
+pub fn drained_container_exec(
+    engine: &str,
+    container_id: &str,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> CommandSpec {
+    let exec = container_exec(engine, container_id, args);
+    let mut wrapped = vec![
+        "-c".to_owned(),
+        CONTAINER_EXEC_DRAIN.to_owned(),
+        "exec-drain".to_owned(),
+        exec.program,
+    ];
+    wrapped.extend(exec.args);
+    CommandSpec::new("sh", wrapped)
+}
+
+// Podman's attached client removes its exec record only on normal exit. A broken
+// SSH output pipe kills it with SIGPIPE and leaks that record. The host-side
+// POSIX drain preserved both streams and status and prevented leaks in all 40
+// cancellation trials on morannon (2026-11-07). Keep draining after EPIPE.
+// An infinite command retains its temporary status directory until it ends.
+const CONTAINER_EXEC_DRAIN: &str = r#"status_dir=$(mktemp -d) || exit 125
+trap 'rm -rf "$status_dir"' 0
+drain() {
+    trap '' PIPE
+    cat
+    cat >/dev/null
+}
+{
+    {
+        "$@"
+        printf '%s\n' "$?" >"$status_dir/status"
+    } 2>&1 1>&3 | drain >&2
+} 3>&1 | drain
+if [ -r "$status_dir/status" ]; then
+    read -r status <"$status_dir/status"
+    exit "$status"
+fi
+exit 125
+"#;
+
 #[cfg(all(test, unix))]
 mod executor_tests {
     use std::fs;
 
     use super::*;
+
+    // Hard-won: leaked exec records: a broken SSH pipe killed the attached client.
+    #[test]
+    fn container_exec_drain_preserves_streams_stdin_and_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake = temp.path().join("podman");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nshift 3\ncat\nprintf 'stderr bytes\\n' >&2\nexit \"$1\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        for status in [0, 37, 23, 255] {
+            let plain = CommandSpec::new(
+                fake.to_str().unwrap(),
+                ["exec", "-i", "ctr", &status.to_string()],
+            );
+            let wrapped =
+                drained_container_exec(fake.to_str().unwrap(), "ctr", [status.to_string()]);
+            let input = vec![b'x'; 204800];
+            let expected = ProcessExecutor
+                .execute_with_stdin(&plain, &mut std::io::Cursor::new(&input))
+                .unwrap();
+            let actual = ProcessExecutor
+                .execute_with_stdin(&wrapped, &mut std::io::Cursor::new(&input))
+                .unwrap();
+            assert_eq!(actual.stdout, expected.stdout);
+            assert_eq!(actual.stderr, expected.stderr);
+            assert_eq!(actual.status, expected.status);
+            assert_eq!(actual.stdout.len(), input.len());
+            let mut argv = vec![wrapped.program.clone()];
+            argv.extend(wrapped.args.clone());
+            let marked = CommandSpec::new(
+                "sh",
+                [
+                    "-c".to_owned(),
+                    with_start_marker(&remote_command_line(&argv)),
+                ],
+            );
+            let marked = ProcessExecutor
+                .execute_with_stdin(&marked, &mut std::io::Cursor::new(&input))
+                .unwrap();
+            assert_eq!(
+                marked.stdout,
+                [SSH_START_MARKER.as_bytes(), actual.stdout.as_slice()].concat()
+            );
+            assert_eq!(marked.stderr, actual.stderr);
+            assert_eq!(marked.status, actual.status);
+        }
+    }
+
+    // Hard-won: leaked exec records: output cancellation must let the client exit normally.
+    #[test]
+    fn container_exec_drain_survives_closed_downstream_pipes() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake = temp.path().join("podman");
+        fs::write(&fake, "#!/bin/sh\nset -e\nshift 3\nhead -c 204800 /dev/zero\nhead -c 204800 /dev/zero >&2\nprintf done > \"$1\"\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        let marker = temp.path().join("normal-exit");
+        let wrapped =
+            drained_container_exec(fake.to_str().unwrap(), "ctr", [marker.to_str().unwrap()]);
+        let mut argv = vec![wrapped.program];
+        argv.extend(wrapped.args);
+        let line = format!(
+            "{{ {} 2>&1 1>&3 | head -c 0; }} 3>&1 | head -c 0",
+            remote_command_line(&argv)
+        );
+        let result = ProcessExecutor
+            .execute(&CommandSpec::new("sh", ["-c", &line]))
+            .unwrap();
+        assert_eq!(result.status, 0);
+        assert_eq!(fs::read_to_string(marker).unwrap(), "done");
+    }
 
     /// The retry backoff override is process-wide, so tests that shorten it
     /// take turns: one test restoring the real delay mid-run would stretch

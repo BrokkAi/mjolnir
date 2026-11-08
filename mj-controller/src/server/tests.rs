@@ -4163,6 +4163,34 @@ fn persisted_cookie_key_survives_a_restart_and_stays_owner_only() {
     assert!(!session_cookie_valid(&rotated, &cookie, 100));
 }
 
+// Two callers that find no key must not each create one: the phone server
+// starting while sessions launch and renew would otherwise end with different
+// keys, and records signed with the loser's stop verifying.
+#[test]
+fn concurrent_first_uses_of_the_cookie_key_end_with_one_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("nested").join("phone-cookie-key");
+    let start = std::sync::Arc::new(std::sync::Barrier::new(16));
+    let keys = (0..16)
+        .map(|_| {
+            let (path, start) = (path.clone(), start.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                load_or_create_cookie_key(&path).unwrap()
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+
+    let stored = std::fs::read(&path).unwrap();
+    assert!(
+        keys.iter().all(|key| *key == stored),
+        "callers ended with different keys"
+    );
+}
+
 #[test]
 fn corrupt_cookie_key_is_regenerated_instead_of_blocking_startup() {
     let directory = tempfile::tempdir().unwrap();
@@ -5305,8 +5333,8 @@ impl api::SubagentBackend for SettingsReviewBackend {
             Ok(mj_core::worker_launch::ProfileConfig {
                 model: model.clone(),
                 models: vec![mj_core::acp::SessionConfigChoice {
-                    value: model.unwrap_or_else(|| "claude-haiku-4.5".into()),
-                    name: "Terra".into(),
+                    value: model.unwrap_or_else(|| "claude-sonnet-4.5".into()),
+                    name: "Sonnet 4.5".into(),
                     description: None,
                 }],
                 efforts: vec![mj_core::acp::SessionConfigChoice {
@@ -5338,9 +5366,9 @@ async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
     let stored = std::fs::read(&path).unwrap();
     let identity = Config::load_from(&path).unwrap().profiles["claude"].capabilities_key("claude");
     let capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot = serde_json::from_value(serde_json::json!({"profiles": {identity: {
-        "choices": {"status": "ready", "value": {"model": "claude-haiku-4.5", "observed_at": 0, "efforts": [{"value": "high", "name": "High", "description": null}],
-            "models": [{"value": "claude-haiku-4.5", "name": "Terra", "description": null}]}},
-        "efforts": {"claude-haiku-4.5": {"status": "ready", "value": [{"value": "high", "name": "High", "description": null}]}}
+        "choices": {"status": "ready", "value": {"model": "claude-sonnet-4.5", "observed_at": 0, "efforts": [{"value": "high", "name": "High", "description": null}],
+            "models": [{"value": "claude-sonnet-4.5", "name": "Sonnet 4.5", "description": null}]}},
+        "efforts": {"claude-sonnet-4.5": {"status": "ready", "value": [{"value": "high", "name": "High", "description": null}]}}
     }}})).unwrap();
     let (app, ..) = app_with_backend(
         BTreeMap::new(),
@@ -5357,8 +5385,11 @@ async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
-        reply["draft"]["review"]["reviewers"][0]["model"],
-        "claude-haiku-4.5"
+        reply["draft"]["review"]["reviewers"],
+        serde_json::json!([
+            {"model": "claude-sonnet-4.5", "effort": "high"},
+            {"model": "claude-sonnet-4.5", "effort": "high"}
+        ])
     );
     assert!(reply["draft"]["review"].get("profile").is_none());
     assert_eq!(std::fs::read(&path).unwrap(), stored);

@@ -57,6 +57,45 @@ impl Controller {
         &self,
         session_id: &str,
     ) -> Result<Option<mj_core::aws_credentials::AwsCredentialSource>> {
+        let (profile, backend, environment) = self.aws_session_inputs(session_id)?;
+        crate::aws_credentials::source(profile, &backend, &environment)
+    }
+
+    /// [`Self::aws_credential_source`] for the credential sync: the same for a
+    /// profile without a role, and for one with a role every session that may
+    /// hold Mjolnir's credentials stays managed (see
+    /// [`crate::aws_credentials::sync_source`]).
+    pub(crate) fn aws_credential_sync_source(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<mj_core::aws_credentials::AwsCredentialSource>> {
+        let (profile, backend, environment) = self.aws_session_inputs(session_id)?;
+        crate::aws_credentials::sync_source(profile, &backend, &environment)
+    }
+
+    /// A notice for the person when the profile's `[profiles.<id>.aws]` role
+    /// cannot apply to this session, and why: its target is raw local or EC2,
+    /// or sets its own AWS credentials, or the profile is not a Bedrock one.
+    pub(crate) fn aws_role_notice(&self, session_id: &str) -> Result<Option<String>> {
+        let (profile, backend, environment) = self.aws_session_inputs(session_id)?;
+        let profile_id = &self.state.sessions[session_id].last_profile;
+        Ok(crate::aws_credentials::unused_role_notice(
+            profile_id,
+            profile,
+            crate::aws_credentials::SessionHost::from(&backend),
+            &environment,
+        ))
+    }
+
+    /// What decides whether this session receives synced AWS credentials.
+    fn aws_session_inputs(
+        &self,
+        session_id: &str,
+    ) -> Result<(
+        &mj_core::config::HarnessProfile,
+        targets::TargetLocator,
+        std::collections::BTreeMap<String, String>,
+    )> {
         let session = self
             .state
             .sessions
@@ -73,7 +112,7 @@ impl Controller {
             .context("session target is missing")?;
         let backend = backend_locator(locator, session, &self.config)?;
         let runtime = session.target_runtime_settings(&self.config)?;
-        crate::aws_credentials::source(profile, &backend, &runtime.environment)
+        Ok((profile, backend, runtime.environment.clone()))
     }
 
     /// Where this session's worker lives. This is decided from the session
@@ -224,8 +263,11 @@ impl Controller {
         );
         drop(staging_timing);
         result?;
+        if let Some(notice) = self.aws_role_notice(session_id)? {
+            executor.notify_notice(&notice);
+        }
         if let Some(source) = self.aws_credential_source(session_id)? {
-            let credentials = crate::aws_credentials::export(&source, executor)?;
+            let credentials = crate::aws_assume_role::obtain(session_id, &source, executor)?;
             credentials.install(&profile_stage, Path::new(&target_profile_home))?;
         }
         stage_claude_keychain_login(
@@ -700,10 +742,21 @@ impl Controller {
             })
             .collect::<Result<Vec<_>>>()?;
         }
-        launch.review_trigger = if subagent.is_none() {
+        // Top-level sessions and ordinary sub-agents may request review. A
+        // reviewer or the oracle never does. The worker derives the review
+        // tools and the push gate from this one value. An ordinary sub-agent
+        // takes its parent's effective review choice.
+        launch.review_trigger = if subagent
+            .as_ref()
+            .is_none_or(|child| child.kind == mj_core::subagent::SubagentKind::Worker)
+        {
+            if let Err(missing) = self.state.effective_review(session_id) {
+                tracing::warn!(session_id, missing = %missing,
+                    "review choice cannot be resolved through the parent chain; launching without review tools");
+            }
             self.config
                 .review
-                .for_session(session.review.as_ref())
+                .for_session(self.state.effective_review_or_off(session_id))
                 .trigger()
         } else {
             Default::default()

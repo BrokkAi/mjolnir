@@ -255,6 +255,7 @@ mod tests {
                     .record_command_completed(
                         "sent-work",
                         RelayCommandOutcome::Prompt {
+                            work_facts: None,
                             stop_reason: "end_turn".into(),
                             diagnostic: None,
                             usage: None,

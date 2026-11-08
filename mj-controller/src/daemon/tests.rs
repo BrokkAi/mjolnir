@@ -1036,6 +1036,13 @@ fn zombie_only_daemon_group_counts_as_gone() {
 }
 
 pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
+    test_runtime_state_with(Controller {
+        config: Config::default(),
+        state: mj_core::state::State::default(),
+    })
+}
+
+pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
@@ -1044,10 +1051,7 @@ pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
     );
     Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
-        Controller {
-            config: Config::default(),
-            state: mj_core::state::State::default(),
-        },
+        controller,
         recovery.observer(),
         upgrades.observer(),
         Vec::new(),
@@ -1280,19 +1284,23 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
     assert!(crate::upgrade::activity("late operation").is_err());
 }
 
-struct TestRemoteManager {
+pub(super) struct TestRemoteManager {
     control: SessionManagerControl,
     requests: RemoteSessionRequests,
-    publisher: RemoteSessionPublisher,
+    pub(super) publisher: RemoteSessionPublisher,
     _shutdown: SessionManagerShutdown,
     _targets: tokio::sync::watch::Sender<Vec<RelaySessionTarget>>,
 }
 
 impl TestRemoteManager {
     async fn new() -> Self {
+        Self::for_session("session-1").await
+    }
+
+    /// A manager whose one session is `session_id`.
+    pub(super) async fn for_session(session_id: &str) -> Self {
         let channels =
             crate::session_manager::spawn_remote_session_manager().expect("remote manager");
-        let session_id = "session-1";
         channels.targets.send_replace(vec![RelaySessionTarget {
             session_id: session_id.to_owned(),
             spec: CommandSpec::new("true", Vec::<String>::new()),
@@ -1320,7 +1328,7 @@ impl TestRemoteManager {
     }
 }
 
-fn test_runtime_state_with_manager(manager: &TestRemoteManager) -> Arc<RuntimeState> {
+pub(super) fn test_runtime_state_with_manager(manager: &TestRemoteManager) -> Arc<RuntimeState> {
     let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
         manager.control.clone(),
@@ -1535,7 +1543,7 @@ fn active_child_session_ids_skips_children_that_already_stopped() {
     .map(|subagent| (subagent.child_session_id.clone(), subagent.into()))
     .collect();
 
-    let children = active_child_session_ids(&state, &parent.id);
+    let children = state.active_child_session_ids(&parent.id);
 
     assert_eq!(children, vec!["running-child".to_owned()]);
 }
@@ -3625,7 +3633,7 @@ async fn a_create_stalled_in_one_stage_fails_its_start_and_names_the_stage() {
 /// A background image download belongs to the daemon, not to a session, so
 /// whichever workspace the person is looking at shows it.
 /// A view of `session-1` whose harness is ready for its first prompt.
-fn ready_startup_view() -> ManagedSessionView {
+pub(super) fn ready_startup_view() -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let operational = mj_core::relay::RelayOperationalState {
         assessment: None,
@@ -5992,6 +6000,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             models: Default::default(),
             legacy_subagents: None,
             ..mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, home)
@@ -7106,6 +7115,7 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
             }));
     }
     conversation.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        work_facts: None,
         answered_through: None,
         diagnostic: None,
         usage: None,
@@ -9575,6 +9585,7 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
         .record_command_completed(
             &prompt_id,
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
                 diagnostic: None,
@@ -10017,7 +10028,7 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
     ));
 }
 
-fn test_runtime_state_holding(state: mj_core::state::State) -> Arc<RuntimeState> {
+pub(super) fn test_runtime_state_holding(state: mj_core::state::State) -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(

@@ -972,10 +972,11 @@ impl HarnessKind {
         )
     }
 
-    /// Whether a primary session on this harness can be held to push review:
-    /// the `--review-gate` flag on its `mj-agents` server, the push hook and
-    /// `MJ_REVIEW_GATE`. Separate from `supports_delegation_tools`, which
-    /// OpenCode satisfies without having the gate.
+    /// Whether a session on this harness is offered the review tools, and a
+    /// primary one can be held to push review: the `mj-review` server, the
+    /// push hook and `MJ_REVIEW_GATE`. Separate from
+    /// `supports_delegation_tools`, which OpenCode satisfies without having
+    /// the gate.
     pub const fn supports_review_gate(self) -> bool {
         matches!(self, Self::Claude | Self::Codex | Self::Dsh)
     }
@@ -1082,6 +1083,12 @@ pub struct HarnessProfile {
     /// changes nothing there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muse_auto_review: Option<bool>,
+    /// The IAM role Mjolnir assumes for each session of a profile that
+    /// authenticates with the AWS credential chain (Bedrock), so the session
+    /// gets short-lived credentials limited to that role instead of a copy
+    /// of the controller host's credentials. See [`AwsRoleConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws: Option<super::AwsRoleConfig>,
     /// The models Mjolnir offers from this profile, as exact values from the
     /// profile's advertised catalogue (`openrouter/deepseek/deepseek-v4.1-flash-1017`).
     /// Empty offers everything the harness advertises. Some harnesses, such as
@@ -1178,6 +1185,7 @@ impl HarnessProfile {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             models: Default::default(),
             legacy_subagents: None,
         }
@@ -1515,6 +1523,9 @@ impl HarnessProfile {
         }
         if self.muse_auto_review.is_some() && self.kind != HarnessKind::Muse {
             bail!("profile {id:?}: `muse_auto_review` applies only to a Muse profile");
+        }
+        if let Some(aws) = &self.aws {
+            aws.validate(id)?;
         }
         Ok(())
     }

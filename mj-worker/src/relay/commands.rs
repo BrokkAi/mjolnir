@@ -1904,6 +1904,27 @@ impl DurableRelay {
         self.close_requested()
     }
 
+    /// Whether a cancellation is accepted but not yet delivered to the harness,
+    /// or a Close is accepted and not finished. Work the worker does for its own
+    /// purposes, such as observing a finished turn, ends when this is true, so
+    /// that the command is not held behind it. A cancellation already delivered
+    /// is not held by anything, and is how a cancelled turn ends.
+    pub fn undelivered_cancellation_or_close_pending(&self) -> bool {
+        self.close_requested()
+            || self.snapshot.dispatches.values().any(|dispatch| {
+                matches!(
+                    dispatch.command,
+                    RelayCommand::Cancel
+                        | RelayCommand::CancelTurn
+                        | RelayCommand::CancelTurnFor { .. }
+                        | RelayCommand::ApplyQueuedFor { .. }
+                ) && matches!(
+                    dispatch.state,
+                    RelayDispatchState::Queued | RelayDispatchState::Pending
+                )
+            })
+    }
+
     fn pending_close_barrier_id(&self) -> Option<&str> {
         self.snapshot.dispatches.values().find_map(|dispatch| {
             if matches!(

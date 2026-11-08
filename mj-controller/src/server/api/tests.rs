@@ -3221,6 +3221,7 @@ async fn wait_for_an_earlier_turn_names_the_later_turn_it_answers_about() {
             execution: MaterializedExecutionState::Idle,
             active_turn: None,
             last_turn_outcome: Some(MaterializedTurnOutcome {
+                work_facts: None,
                 answered_through: None,
                 diagnostic: None,
                 usage: None,
@@ -3569,6 +3570,7 @@ fn an_unanswered_turn_reaches_wait_as_a_named_error() {
 
 fn completed(accepted_ordinal: u64, stop_reason: &str) -> MaterializedTurnOutcome {
     MaterializedTurnOutcome {
+        work_facts: None,
         answered_through: None,
         diagnostic: None,
         usage: None,
@@ -3907,6 +3909,7 @@ fn a_stored_expect_continuation_verdict_holds_no_wait_on_an_idle_session() {
     use mj_core::activity::{ActivityState, verdict};
     use mj_core::assessment::{Action, Status};
     let turn = MaterializedTurnOutcome {
+        work_facts: None,
         answered_through: None,
         diagnostic: None,
         usage: None,
@@ -4215,6 +4218,7 @@ fn rejections_stopped_sessions_and_an_empty_session_each_end_the_wait() {
 
     let mut rejected = idle(None);
     rejected.last_turn_outcome = Some(MaterializedTurnOutcome {
+        work_facts: None,
         answered_through: None,
         diagnostic: None,
         usage: None,
@@ -4965,6 +4969,7 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     let mut session = snapshot.sessions[0].clone();
     session.lifecycle = ViewerLifecycleCategory::Failed;
     session.move_recovery = Some(crate::server::ViewerMoveRecovery {
+        failure_notice: None,
         oracle: None,
         oracle_choice: None,
         operation_id: "move-a".into(),
@@ -5899,6 +5904,7 @@ async fn missing_target_access_returns_actionable_conflict_for_branch_and_bundle
 
 fn finished_child_turn(command_id: &str) -> MaterializedTurnOutcome {
     MaterializedTurnOutcome {
+        work_facts: None,
         answered_through: None,
         diagnostic: None,
         usage: None,

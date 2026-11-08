@@ -201,8 +201,10 @@ async fn run_relay_coordinator(
         BTreeMap::new(),
         shell_events,
     );
-    unix::run_relay_coordinator_with_verdict(relay, events, wakes, commands, shells, None, None)
-        .await
+    unix::run_relay_coordinator_with_verdict(
+        relay, events, wakes, commands, shells, None, None, None,
+    )
+    .await
 }
 
 fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error>) {
@@ -774,6 +776,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         for request in [
             RelayRequest::InstallAwsCredentials {
                 data: base64::engine::general_purpose::STANDARD.encode(&aws_bytes),
+                scope: None,
             },
             RelayRequest::AwsCredentialsState,
         ] {
@@ -841,6 +844,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
                 &mut writer,
                 RelayRequest::InstallAwsCredentials {
                     data: base64::engine::general_purpose::STANDARD.encode(&aws_bytes),
+                    scope: None,
                 },
             )
             .await;
@@ -873,6 +877,110 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
             );
         }
     }
+
+    // Credentials Mjolnir issued carry a scope the worker keeps beside the
+    // secret and reports; it describes only the secret it was written with.
+    let scope = mj_core::aws_credentials::AwsCredentialScope {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        role_session_name: "mj-0123456789abcdef0123456789abcdef".into(),
+        session_policy_fingerprint: "policy".into(),
+        source_identity: None,
+        expires_at_epoch_millis: 4_070_908_800_000,
+        tag: "tag".into(),
+    };
+    let scoped_credentials =
+        |key: &str, scope: Option<&mj_core::aws_credentials::AwsCredentialScope>| {
+            let credentials = mj_core::aws_credentials::AwsCredentials::from_export(
+                "bedrock",
+                &serde_json::to_vec(&serde_json::json!({
+                    "Version": 1, "AccessKeyId": key, "SecretAccessKey": "secret",
+                    "SessionToken": "token", "Expiration": "2099-01-01T00:00:00Z",
+                }))
+                .unwrap(),
+            )
+            .unwrap()
+            .with_scope(scope.cloned());
+            base64::engine::general_purpose::STANDARD.encode(credentials.encode().unwrap())
+        };
+    for (key, recorded, expected) in [
+        ("issued", Some(&scope), Some(scope.clone())),
+        ("host-own", None, None),
+    ] {
+        delegation_exchange(
+            &mut lines,
+            &mut writer,
+            RelayRequest::InstallAwsCredentials {
+                data: scoped_credentials(key, recorded),
+                scope: recorded.cloned(),
+            },
+        )
+        .await;
+        let reported =
+            delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsScope).await;
+        assert!(
+            matches!(&reported, RelayResponsePayload::AwsCredentialsScope { scope, .. } if *scope == expected),
+            "{key}: {reported:?}"
+        );
+    }
+    // A record never vouches for a different secret.
+    delegation_exchange(
+        &mut lines,
+        &mut writer,
+        RelayRequest::InstallAwsCredentials {
+            data: scoped_credentials("issued", Some(&scope)),
+            scope: Some(scope.clone()),
+        },
+    )
+    .await;
+    let secret = temp
+        .path()
+        .join(mj_core::aws_credentials::SHARED_CREDENTIALS_FILE);
+    std::fs::write(
+        &secret,
+        String::from_utf8(std::fs::read(&secret).unwrap())
+            .unwrap()
+            .replace("issued", "swapped"),
+    )
+    .unwrap();
+    let reported =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsScope).await;
+    assert!(matches!(
+        reported,
+        RelayResponsePayload::AwsCredentialsScope { scope: None, .. }
+    ));
+
+    // Withdrawing the credentials deletes the secret file, reports them absent
+    // and leaves the way open to install again.
+    let removed =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::RemoveAwsCredentials).await;
+    assert!(matches!(
+        removed,
+        RelayResponsePayload::CredentialState { present: false, .. }
+    ));
+    assert!(
+        !temp
+            .path()
+            .join(mj_core::aws_credentials::SHARED_CREDENTIALS_FILE)
+            .exists()
+    );
+    let again =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::RemoveAwsCredentials).await;
+    assert!(matches!(
+        again,
+        RelayResponsePayload::CredentialState { present: false, .. }
+    ));
+    // The profile the session was staged with outlives the credentials: the
+    // controller asks the worker for it, and the worker still knows.
+    let staged =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsScope).await;
+    assert!(
+        matches!(
+            &staged,
+            RelayResponsePayload::AwsCredentialsScope { scope: None, profile: Some(profile) }
+                if profile == "bedrock"
+        ),
+        "{staged:?}"
+    );
 
     // The host's slopcop login takes the same connection-only route.
     let login =
@@ -6779,6 +6887,7 @@ async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
         .record_command_completed(
             "capacity-original",
             crate::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "error".into(),
                 usage: None,
@@ -7875,6 +7984,388 @@ async fn cpu_usage_answers_from_the_sampler_without_journaling() {
     task.await.unwrap().unwrap();
 }
 
+/// A sub-agent's coordinator: it observes its agent's work when a prompt ends.
+async fn run_capturing_coordinator(
+    relay: Arc<Mutex<DurableRelay>>,
+    events: mpsc::Receiver<RuntimeEvent>,
+    wakes: mpsc::Receiver<()>,
+    commands: mpsc::Sender<CommandRequest>,
+    observer: crate::work_facts::WorkObserver,
+) -> anyhow::Result<()> {
+    let (shell_events, _shell_events_rx) = mpsc::channel(1);
+    let shells = crate::user_shell::UserShellRegistry::new(
+        std::env::current_dir()?,
+        BTreeMap::new(),
+        shell_events,
+    );
+    unix::run_relay_coordinator_with_verdict(
+        relay,
+        events,
+        wakes,
+        commands,
+        shells,
+        None,
+        None,
+        Some(observer),
+    )
+    .await
+}
+
+/// The facts a prompt's published outcome carries, once it is published:
+/// `Some(None)` is an outcome without any.
+fn prompt_outcome_facts(
+    relay: &Arc<Mutex<DurableRelay>>,
+) -> Option<Option<mj_core::work_facts::WorkFacts>> {
+    relay
+        .lock()
+        .unwrap()
+        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap()
+        .into_iter()
+        .find_map(|event| match event.observation {
+            RelayObservation::CommandCompleted {
+                outcome: mj_core::relay::RelayCommandOutcome::Prompt { work_facts, .. },
+                ..
+            } => Some(work_facts.map(|facts| *facts)),
+            _ => None,
+        })
+}
+
+/// A fake `git` whose `status` announces itself and then waits for a release
+/// file, so a test can hold the capture open.
+#[cfg(unix)]
+fn gated_git(directory: &Path, release: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let git = directory.join("gated-git");
+    let wait = if release {
+        r#"while [ ! -f "$dir/release" ]; do sleep 0.01; done"#
+    } else {
+        r#"while true; do sleep 0.05; done"#
+    };
+    std::fs::write(
+        &git,
+        format!(
+            r#"#!/bin/sh
+dir="$2"; command="$3"
+sha=1111111111111111111111111111111111111111
+case "$command" in
+  status) touch "$dir/status.started"; {wait}
+          printf '# branch.oid %s\000# branch.head main\000? notes.txt\000' "$sha" ;;
+  log) printf '%s\000The subject\n' "$sha" ;;
+  *) exit 2 ;;
+esac
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git
+}
+
+#[cfg(unix)]
+fn capture_observer(
+    relay: &Arc<Mutex<DurableRelay>>,
+    directory: &Path,
+    git: PathBuf,
+) -> crate::work_facts::WorkObserver {
+    crate::work_facts::WorkObserver {
+        session_id: SESSION_ID.into(),
+        worker_pid: std::process::id(),
+        directory: directory.to_path_buf(),
+        git: git.into(),
+        harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
+        children: Default::default(),
+    }
+}
+
+/// A sub-agent's prompt outcome is published with the facts its worker observed,
+/// and the next prompt, which this task dispatches only after the outcome is
+/// recorded, waits for the observation.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sub_agents_prompt_outcome_carries_its_facts_and_the_next_prompt_waits_for_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-first", prompt("first"));
+    submit(&mut durable, "prompt-second", prompt("second"));
+    let relay = Arc::new(Mutex::new(durable));
+    let git = gated_git(work.path(), true);
+    let observer = capture_observer(&relay, work.path(), git);
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (_wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_capturing_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+        observer,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-first", "first");
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-first".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    // The capture is running (its Git read has started and is held): nothing is
+    // published and the second prompt has not been dispatched.
+    wait_for("the capture to start", async {
+        while !work.path().join("status.started").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(command_rx.try_recv().is_err(), "the next turn started");
+    assert_eq!(prompt_outcome_facts(&relay), None, "published early");
+
+    std::fs::write(work.path().join("release"), "").unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-second", "second");
+    let facts = prompt_outcome_facts(&relay)
+        .expect("the outcome is published")
+        .expect("with the facts");
+    let tree = facts.worktree.known().expect("the working tree was read");
+    assert!(tree.shown.iter().any(|path| path.path == "notes.txt"));
+    assert!(facts.processes.known().is_some(), "{:?}", facts.processes);
+    drop(event_tx);
+    drop(_wake_tx);
+    let _ = coordinator.await;
+}
+
+/// The harness stopping while the observation runs ends it: the outcome is
+/// published with the facts unavailable and the reason, and the event that
+/// stopped it is recorded after the outcome.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_capture_cancelled_by_the_harness_stopping_publishes_unavailable_facts() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-only", prompt("only"));
+    let relay = Arc::new(Mutex::new(durable));
+    // A Git read that never ends: only the stop can end the capture.
+    let git = gated_git(work.path(), false);
+    let observer = capture_observer(&relay, work.path(), git);
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (_wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_capturing_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+        observer,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-only", "only");
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-only".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    wait_for("the capture to start", async {
+        while !work.path().join("status.started").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    coordinator.await.unwrap().unwrap();
+    let facts = prompt_outcome_facts(&relay)
+        .expect("the outcome is published")
+        .expect("with facts that say they are unavailable");
+    assert!(
+        matches!(
+            &facts.worktree,
+            mj_core::work_facts::Observed::Unavailable { reason }
+                if reason.contains("harness stopped")
+        ),
+        "{facts:?}"
+    );
+    assert!(facts.processes.known().is_none());
+}
+
+/// A Git read that never returns must not hold the turn's outcome, or the
+/// commands behind it: a cancellation accepted during the observation ends it,
+/// the outcome is published with the facts unavailable, and the Git read is
+/// killed with the dropped observation.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancellation_accepted_during_a_capture_ends_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-only", prompt("only"));
+    let relay = Arc::new(Mutex::new(durable));
+    let git = gated_git(work.path(), false);
+    let observer = capture_observer(&relay, work.path(), git);
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_capturing_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+        observer,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-only", "only");
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-only".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    wait_for("the capture to start", async {
+        while !work.path().join("status.started").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(prompt_outcome_facts(&relay), None, "published early");
+
+    submit(&mut relay.lock().unwrap(), "cancel-1", RelayCommand::Cancel);
+    wake_tx.send(()).await.unwrap();
+    wait_for("the outcome to be published", async {
+        while prompt_outcome_facts(&relay).is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let facts = prompt_outcome_facts(&relay).unwrap().expect("with facts");
+    assert!(
+        matches!(
+            &facts.worktree,
+            mj_core::work_facts::Observed::Unavailable { reason }
+                if reason.contains("cancellation or close")
+        ),
+        "{facts:?}"
+    );
+    drop(event_tx);
+    drop(wake_tx);
+    let _ = coordinator.await;
+}
+
+/// A cancellation accepted before the finishing event is drained is waiting for
+/// the same task that would observe the turn, and its wake may already be spent:
+/// the capture must see it on entry, not only when another wake comes.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancellation_accepted_before_a_capture_starts_ends_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-only", prompt("only"));
+    let relay = Arc::new(Mutex::new(durable));
+    let git = gated_git(work.path(), false);
+    let observer = capture_observer(&relay, work.path(), git);
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_capturing_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+        observer,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-only", "only");
+    // Accepted with no wake sent, then the turn finishes: the cancellation is
+    // still undelivered when the capture starts.
+    submit(&mut relay.lock().unwrap(), "cancel-1", RelayCommand::Cancel);
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-only".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    wait_for("the outcome to be published", async {
+        while prompt_outcome_facts(&relay).is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let facts = prompt_outcome_facts(&relay).unwrap().expect("with facts");
+    assert!(
+        matches!(
+            &facts.worktree,
+            mj_core::work_facts::Observed::Unavailable { reason }
+                if reason.contains("cancellation or close")
+        ),
+        "{facts:?}"
+    );
+    drop(event_tx);
+    drop(wake_tx);
+    let _ = coordinator.await;
+}
+
+/// A session that is not a sub-agent has no observer, and its outcome says
+/// nothing of facts.
+#[tokio::test]
+async fn an_ordinary_sessions_prompt_outcome_carries_no_facts() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-only", prompt("only"));
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (_wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-only", "only");
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-only".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    wait_for_relay_state(&relay, |state| state.active_prompt.is_none()).await;
+    assert_eq!(prompt_outcome_facts(&relay), Some(None));
+    drop(event_tx);
+    drop(_wake_tx);
+    let _ = coordinator.await;
+}
+
 #[test]
 fn push_gate_startup_and_environment_follow_harness_and_primary_ownership() {
     for harness in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Muse] {
@@ -7936,6 +8427,55 @@ fn push_gate_startup_and_environment_follow_harness_and_primary_ownership() {
                 .contains_key("MJ_REVIEW_GATE")
         );
     }
+}
+
+// A child offered the review tools records where its work starts at launch,
+// without the push gate. Otherwise a repository with no default-branch merge
+// base would record the already-committed HEAD at its first request and refuse.
+#[test]
+fn a_review_enabled_child_is_pinned_at_launch_without_the_push_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = git_repository(&temp);
+    let mut launch = launch_config("/test/profile");
+    launch.cwd = repository.clone();
+    launch.session_id = "review-child".into();
+    launch.harness = HarnessKind::Codex;
+    launch.review_trigger = mj_core::config::ReviewTrigger::Push;
+    launch.environment.insert(
+        mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV.into(),
+        "1".into(),
+    );
+    let start = git(&repository, &["rev-parse", "HEAD"]);
+    assert!(launch.prepares_review() && !launch.review_gate());
+    let notices = super::harness_launch::prepare_review_gate(&launch).unwrap();
+    assert!(notices.is_empty());
+    assert!(!repository.join(".git/hooks/pre-push").exists());
+    assert!(
+        !super::harness_launch::primary_supervisor_spec(&launch)
+            .environment
+            .contains_key("MJ_REVIEW_GATE")
+    );
+    std::fs::write(repository.join("tracked.rs"), "fn main() { work(); }\n").unwrap();
+    git(&repository, &["commit", "-qam", "child work"]);
+    assert_eq!(
+        crate::review::capture::review_start_head(
+            &mj_checkpoint::archive::SystemGit,
+            &repository,
+            "review-child"
+        )
+        .unwrap(),
+        Some(start),
+        "the first review covers the commits made after the child started"
+    );
+    // A harness that cannot offer the tools records nothing and says nothing.
+    launch.session_id = "muse-child".into();
+    launch.harness = HarnessKind::Muse;
+    assert!(!launch.prepares_review());
+    assert!(
+        super::harness_launch::prepare_review_gate(&launch)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

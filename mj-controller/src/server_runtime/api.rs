@@ -77,6 +77,12 @@ pub trait ExportRuntime: Send + Sync {
         Default::default()
     }
 
+    /// Whether a child that can request review is still waiting for its
+    /// verdict. A child's handback or ended turn is not final until it is not.
+    fn child_awaits_review(&self, _child_session_id: String) -> BoxFuture<'_, bool> {
+        Box::pin(async { false })
+    }
+
     fn queue_startup(
         self: Arc<Self>,
         _session_id: String,
@@ -278,6 +284,10 @@ impl ExportRuntime for RuntimeState {
 
     fn subagent_config(&self) -> mj_core::config::SubagentConfig {
         self.with_config(|config| config.subagents.clone())
+    }
+
+    fn child_awaits_review(&self, child_session_id: String) -> BoxFuture<'_, bool> {
+        Box::pin(async move { RuntimeState::child_awaits_review(self, &child_session_id).await })
     }
 
     fn queue_startup(
@@ -1103,6 +1113,7 @@ impl ApiBackend {
                     .into_iter()
                     .map(|(id, summary, progress)| (id, (summary, progress)))
                     .collect::<BTreeMap<_, _>>();
+                let now_ms = u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0);
                 let agents = relations
                     .into_iter()
                     .map(|relation| {
@@ -1149,6 +1160,13 @@ impl ApiBackend {
                         inputs.annotate(&relation.child_session_id, &mut entry);
                         mark_parked(&mut entry, record.as_ref());
                         mark_promptable(&mut entry, &state, progress, record.as_ref());
+                        if let Some(facts) = progress
+                            .answer
+                            .as_ref()
+                            .and_then(|turn| turn.work_facts.as_ref())
+                        {
+                            entry["facts"] = work_facts_entry(facts, now_ms);
+                        }
                         entry
                     })
                     .collect::<Vec<_>>();
@@ -1265,6 +1283,13 @@ impl ApiBackend {
                 .await?
                 .filter(|record| record.handback_tool)
                 .context("handback is only for a Mjolnir sub-agent that was given the tool")?;
+                // Refusing here means no report exists to release before the
+                // child has read and addressed its verdict.
+                ensure!(
+                    record.kind != mj_core::subagent::SubagentKind::Worker
+                        || !self.exports.child_awaits_review(child_id.clone()).await,
+                    "your review has no verdict yet; wait for it, address it, then hand back"
+                );
                 let maximum = match record.kind {
                     mj_core::subagent::SubagentKind::Worker
                     | mj_core::subagent::SubagentKind::Oracle => {
@@ -1661,25 +1686,85 @@ impl ApiBackend {
 
     /// Commit each new finish and its durable mailbox event together.
     pub(crate) async fn reconcile_parent_reports(&self, parent_id: &str) -> Result<()> {
+        self.reconcile_children(parent_id).await.map(|_| ())
+    }
+
+    /// Reconcile the parent's reports and say, for one child's finish at
+    /// `ordinal`, whether the parent has been told. The report and the
+    /// `reported_finish` marker it moves are written in one transaction, so that
+    /// marker is the fact: it is read from the store after the reconcile, not
+    /// from the committed snapshot, which refreshes after the write returns.
+    pub(crate) async fn reconcile_child_report(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+        ordinal: u64,
+    ) -> Result<ChildReport> {
+        let reconciled = self.reconcile_children(parent_id).await?;
+        if reconciled.parent_closing {
+            return Ok(ChildReport::NotNews("the parent is closing"));
+        }
+        match reconciled.children.get(child_id) {
+            None => Ok(ChildReport::NotNews(
+                "the child is not a worker of this parent",
+            )),
+            Some(ChildDisposition::NotNews(why)) => Ok(ChildReport::NotNews(why)),
+            Some(ChildDisposition::NotFinished) => Ok(ChildReport::NotFinished),
+            Some(ChildDisposition::Reported) => {
+                let child = child_id.to_owned();
+                let marker = blocking("read the child's reported finish", move || {
+                    crate::database::load_subagent(&child)
+                })
+                .await?
+                .and_then(|relation| relation.reported_finish);
+                Ok(if marker.is_some_and(|marker| marker.covers(ordinal)) {
+                    ChildReport::Told
+                } else {
+                    ChildReport::Awaiting
+                })
+            }
+        }
+    }
+
+    async fn reconcile_children(&self, parent_id: &str) -> Result<Reconciled> {
+        let mut reconciled = Reconciled::default();
         if self.exports.close_is_requested(parent_id) {
-            return Ok(());
+            reconciled.parent_closing = true;
+            return Ok(reconciled);
         }
         let (inputs, children) = self.notification_children(parent_id).await?;
-        let ready = children
-            .into_iter()
-            .filter(|child| {
-                child.relation.kind != mj_core::subagent::SubagentKind::Reviewer
-                    && !self
-                        .exports
-                        .close_is_requested(&child.relation.child_session_id)
-                    && !matches!(child.state.as_str(), "stopping" | "stopped")
-                    && child.identity.as_ref().is_some_and(|identity| {
-                        child.relation.reported_finish.as_ref() != Some(identity)
-                    })
-            })
-            .collect::<Vec<_>>();
+        // Each child has one of a few ends here: not news (and why), not seen as
+        // finished, held for its facts, or its finish is reported (by an earlier
+        // reconcile or by this one).
+        let mut ready = Vec::new();
+        for child in children {
+            let id = child.relation.child_session_id.clone();
+            let disposition = if child.relation.kind == mj_core::subagent::SubagentKind::Reviewer {
+                ChildDisposition::NotNews("a reviewer is reported by its review")
+            } else if self.exports.close_is_requested(&id) {
+                ChildDisposition::NotNews("a close of the child was requested")
+            } else if matches!(child.state.as_str(), "stopping" | "stopped") {
+                ChildDisposition::NotNews("the child is stopping or stopped")
+            } else if self.exports.child_awaits_review(id.clone()).await {
+                // A child whose review is open is still pending: it may end
+                // turns while it waits, and handback refuses until the verdict.
+                ChildDisposition::NotNews("the child awaits its review's verdict")
+            } else {
+                match &child.identity {
+                    None => ChildDisposition::NotFinished,
+                    Some(identity) if child.relation.reported_finish.as_ref() == Some(identity) => {
+                        ChildDisposition::Reported
+                    }
+                    Some(_) => {
+                        ready.push(child);
+                        continue;
+                    }
+                }
+            };
+            reconciled.children.insert(id, disposition);
+        }
         if ready.is_empty() {
-            return Ok(());
+            return Ok(reconciled);
         }
         let spans = ready
             .iter()
@@ -1695,8 +1780,10 @@ impl ApiBackend {
         })
         .await?;
         let mut notifications = Vec::with_capacity(ready.len());
+        let mut enqueued = Vec::with_capacity(ready.len());
         for child in ready {
             let id = &child.relation.child_session_id;
+            enqueued.push(id.clone());
             let output = if child.state == "completed" {
                 match &child.progress.report {
                     ReportState::Delivered(message) => Some(message.clone()),
@@ -1725,7 +1812,15 @@ impl ApiBackend {
                 &child.progress,
                 child.record.as_ref(),
             );
-            let report = serde_json::from_value::<mj_core::mailbox::SubagentFinishedReport>(entry)?;
+            let report_has_facts = child.finished && !oracle;
+            let mut report =
+                serde_json::from_value::<mj_core::mailbox::SubagentFinishedReport>(entry)?;
+            // What the child's worker observed when the turn ended is part of the
+            // outcome that ended it, so the report reads it from the same snapshot
+            // as the finish, and nothing waits on it.
+            if report_has_facts {
+                report.facts = Some(finish_facts(&child.progress));
+            }
             notifications.push((
                 child.identity.expect("ready report has a finish identity"),
                 report,
@@ -1736,7 +1831,10 @@ impl ApiBackend {
             crate::database::enqueue_subagent_reports(parent, notifications)
         })
         .await?;
-        Ok(())
+        for id in enqueued {
+            reconciled.children.insert(id, ChildDisposition::Reported);
+        }
+        Ok(reconciled)
     }
 
     async fn require_owned_child(&self, parent_id: &str, child_id: &str) -> Result<()> {
@@ -2114,6 +2212,51 @@ fn subagent_status(
     }
 }
 
+/// A child's turns as the readers see them (the committed snapshot, or the
+/// store in a process without the writer): the completion ordinal of its last
+/// finished turn, and whether a turn is running now.
+pub(crate) fn load_child_turns(child_id: &str) -> Result<(Option<u64>, bool)> {
+    let state = match crate::database::committed_state()? {
+        Some(committed) => committed.turns.get(child_id).map(|turn| turn.state.clone()),
+        None => crate::database::load_materialized_turn_outcome(child_id)?,
+    };
+    Ok(state.map_or((None, false), |(_, active, last)| {
+        (last.map(|turn| turn.completed_ordinal), active.is_some())
+    }))
+}
+
+/// What a reconcile found for each of a parent's children.
+#[derive(Default)]
+struct Reconciled {
+    parent_closing: bool,
+    children: BTreeMap<String, ChildDisposition>,
+}
+
+enum ChildDisposition {
+    /// The child's finish is reported, now or earlier.
+    Reported,
+    /// There is no report to make, and why.
+    NotNews(&'static str),
+    /// The reconcile's view of the child is that it has not finished. That is not
+    /// "not news": it can be a child that did finish seen through a view that is
+    /// behind, or one that went on to a newer turn; the caller, which holds the
+    /// ending it asks about, tells which.
+    NotFinished,
+}
+
+/// Whether the parent has been told of one child's finish.
+pub(crate) enum ChildReport {
+    /// The report is enqueued and the child's marker covers the finish.
+    Told,
+    /// There is nothing to tell, for the reason given: the finish is not news.
+    NotNews(&'static str),
+    /// The reconcile does not see the child as finished.
+    NotFinished,
+    /// News, but not reported yet: the readers' snapshot has not caught up with
+    /// the finish, or the enqueue skipped it. Ask again.
+    Awaiting,
+}
+
 /// What the store says about a child's answer to its parent's newest prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChildProgress {
@@ -2330,6 +2473,38 @@ fn wait_agent_entry(
         agent["failure"] = serde_json::json!({"kind": "provider_failure", "summary": summary});
     }
     agent
+}
+
+/// The `facts` object of a `list_agents` entry: the lines of what the child's
+/// worker observed when its last turn ended, rendered by the same code as the
+/// mailbox report.
+fn work_facts_entry(facts: &mj_core::work_facts::WorkFacts, now_ms: u64) -> serde_json::Value {
+    serde_json::json!({
+        "finish": {
+            "observed_secs_ago": now_ms.saturating_sub(facts.observed_at_ms) / 1000,
+            "lines": facts.render_lines(),
+        }
+    })
+}
+
+/// The facts a finished child's report carries: what its worker recorded in the
+/// outcome that ended its last turn, or why there are none. A prompt outcome
+/// without them is from a worker that predates the capture; an ending that was
+/// not a completed prompt took no observation.
+fn finish_facts(progress: &ChildProgress) -> mj_core::work_facts::WorkFacts {
+    let Some(turn) = &progress.answer else {
+        return mj_core::work_facts::WorkFacts::unavailable(
+            "the child ended without a completed turn, so its worker did not observe it",
+        );
+    };
+    turn.work_facts.clone().unwrap_or_else(|| {
+        mj_core::work_facts::WorkFacts::unavailable(match turn.outcome {
+            mj_core::state::TurnOutcomeKind::Completed { .. } => {
+                "the child's worker predates this version"
+            }
+            _ => "the turn ended without completing, so its worker took no observation",
+        })
+    })
 }
 
 /// What the session list calls a child now, bounded to one line, or the task

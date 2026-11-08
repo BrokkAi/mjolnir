@@ -37,6 +37,7 @@ fn view(id: &str, completed: bool) -> ManagedSessionView {
     ];
     if completed {
         materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
+            work_facts: None,
             answered_through: None,
             diagnostic: None,
             usage: None,
@@ -1433,6 +1434,7 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, PathBuf::default())
             },
         );
@@ -1527,9 +1529,41 @@ fn quota_move_request() -> mj_core::state::MoveSessionRequest {
     .unwrap()
 }
 
+fn private_quota_move_error() -> anyhow::Error {
+    let error = toml::from_str::<toml::Value>(
+        r#"experimental_bearer_token = "quota-secret-canary" unexpected"#,
+    )
+    .unwrap_err();
+    let error =
+        anyhow::Error::new(error).context("read /private/profile/config.toml on secret-ssh-host");
+    assert!(
+        format!("{error:#}").contains("quota-secret-canary"),
+        "the real TOML diagnostic carries the credential"
+    );
+    error
+}
+
+// Hard-won: #1470: raw preparation diagnostics leaked credentials through the quota recovery command.
 #[tokio::test]
 async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadline_on_refusal() {
-    for case in ["weekly", "goal", "refused", "five-hour"] {
+    for case in [
+        "weekly",
+        "goal",
+        "refused",
+        "refused-private",
+        "five-hour",
+        "preparation-private",
+        "preparation-marked-private",
+        "preparation-safe",
+        "late-refused",
+        "late-private",
+        "late-outcome",
+    ] {
+        let moves = !matches!(
+            case,
+            "five-hour" | "preparation-private" | "preparation-marked-private" | "preparation-safe"
+        );
+        let rejected = matches!(case, "refused" | "refused-private");
         let mut remote = spawn_remote_session_manager().unwrap();
         remote.targets.send_replace(vec![RelaySessionTarget {
             session_id: "one".into(),
@@ -1566,13 +1600,19 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                     calls.fetch_add(1, Ordering::SeqCst);
                     Box::pin(async move {
                         if case == "refused" {
-                            anyhow::bail!("lifecycle busy")
+                            return Err(private_quota_move_error().context(
+                                mj_core::refusal::Refusal::precondition("lifecycle busy"),
+                            ));
+                        }
+                        if case == "refused-private" {
+                            return Err(private_quota_move_error());
                         }
                         Ok(())
                     })
                 })
             },
         };
+        let failure_control = environment.control.clone();
         let mut blocked = view("one", true);
         if case == "goal" {
             let snapshot = blocked.snapshot.as_mut().unwrap();
@@ -1589,8 +1629,32 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             .publish("one".into(), blocked.clone())
             .await
             .unwrap();
-        let fallback = recovery_for(&blocked, Some(mj_core::clock::epoch_millis() + 18_060_000));
-        let plan = if case == "five-hour" {
+        let mut fallback =
+            recovery_for(&blocked, Some(mj_core::clock::epoch_millis() + 18_060_000));
+        if matches!(
+            case,
+            "preparation-private" | "preparation-marked-private" | "preparation-safe"
+        ) {
+            let error = if case == "preparation-safe" {
+                private_quota_move_error().context(mj_core::refusal::Refusal::precondition(
+                    "Cannot switch profiles automatically: existing sub-agents would be stopped",
+                ).with_code(crate::controller::move_session::QUOTA_MOVE_SAFETY_REFUSAL))
+            } else if case == "preparation-marked-private" {
+                let error = private_quota_move_error();
+                let message = format!("{error:#}");
+                error.context(mj_core::refusal::Refusal::precondition(message))
+            } else {
+                private_quota_move_error()
+            };
+            quota::preparation_refused(
+                &mut fallback.notice,
+                "one",
+                "destination",
+                &error,
+                "quota-move-prepare-one-3",
+            );
+        }
+        let plan = if !moves {
             quota::Plan::Wait(fallback.clone())
         } else {
             let mut abstention = fallback.clone();
@@ -1607,7 +1671,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
         let task = tokio::spawn(async move {
             quota::schedule(&environment, "one", blocked.clone(), plan).await
         });
-        for step in 0..if case == "refused" { 2 } else { 1 } {
+        for step in 0..if rejected { 2 } else { 1 } {
             let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
                 .await
                 .unwrap()
@@ -1615,6 +1679,13 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             let RemoteSessionRequest::Submit { command, reply, .. } = request else {
                 panic!("expected recovery")
             };
+            let wire = serde_json::to_string(&command).unwrap();
+            for private in ["quota-secret-canary", "/private/profile", "secret-ssh-host"] {
+                assert!(
+                    !wire.contains(private),
+                    "{case} leaked {private} to the worker journal command"
+                );
+            }
             let RelayCommand::SetQuotaRecovery {
                 recovery: Some(recovery),
                 ..
@@ -1622,7 +1693,7 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             else {
                 panic!("expected recovery record")
             };
-            if step == 0 && case != "five-hour" {
+            if step == 0 && moves {
                 // The record written before the Move carries the retry, so a
                 // Move that fails leaves it in place.
                 assert_eq!(recovery.retry_at_ms, fallback.retry_at_ms);
@@ -1644,8 +1715,16 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
             } else {
                 assert_eq!(recovery.retry_at_ms, fallback.retry_at_ms);
-                if case == "refused" {
-                    assert!(recovery.notice.contains("lifecycle busy"));
+                if matches!(case, "refused" | "refused-private") {
+                    assert!(recovery.notice.contains("quota-move-start-one-"));
+                } else if matches!(case, "preparation-private" | "preparation-marked-private") {
+                    assert!(recovery.notice.contains("quota-move-prepare-one-3"));
+                } else if case == "preparation-safe" {
+                    assert!(
+                        recovery
+                            .notice
+                            .contains("existing sub-agents would be stopped")
+                    );
                 }
             }
             blocked = view("one", true);
@@ -1672,10 +1751,79 @@ async fn quota_schedule_writes_timed_record_before_one_move_and_restores_deadlin
             reply.send(Ok(())).unwrap();
         }
         task.await.unwrap().unwrap();
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            usize::from(case != "five-hour")
-        );
+        if matches!(case, "late-refused" | "late-private" | "late-outcome") {
+            // No Move record exists for preflight errors. The worker must
+            // receive the failure after its earlier "Switching" notice.
+            let outcome: Result<mj_core::state::MoveOutcome> = if case == "late-refused" {
+                Err(private_quota_move_error().context(
+                    mj_core::refusal::Refusal::precondition(
+                        "sub-agents appeared after preparation; prepare and confirm Move again",
+                    )
+                    .with_code(crate::controller::move_session::QUOTA_MOVE_SAFETY_REFUSAL),
+                ))
+            } else if case == "late-outcome" {
+                Ok(mj_core::state::MoveOutcome {
+                    operation_id: "quota-move-test".into(),
+                    session_id: "one".into(),
+                    profile_id: "destination".into(),
+                    target_template_id: "local".into(),
+                    outcome: "failed".into(),
+                    error: Some(format!("{:#}", private_quota_move_error())),
+                    recovery: Some(
+                        "Source retained and still running. Retry Move when ready.".into(),
+                    ),
+                })
+            } else {
+                Err(private_quota_move_error())
+            };
+            let text = crate::daemon::session_move::quota_move_failure_notice(
+                &outcome,
+                "one",
+                "quota-move-test",
+                "destination",
+            )
+            .expect("a failed Move reports a conversation notice");
+            let recording = tokio::spawn(async move {
+                crate::daemon::session_move::record_quota_move_failure(
+                    &failure_control,
+                    "one",
+                    "quota-move-test",
+                    text,
+                )
+                .await
+            });
+            let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let RemoteSessionRequest::Submit { command, reply, .. } = request else {
+                panic!("expected durable failure notice")
+            };
+            let wire = serde_json::to_string(&command).unwrap();
+            for private in ["quota-secret-canary", "/private/profile", "secret-ssh-host"] {
+                assert!(
+                    !wire.contains(private),
+                    "{case} leaked {private} in its asynchronous failure notice"
+                );
+            }
+            let RelayCommand::RecordNotice { text } = command else {
+                panic!("a failed switch must be recorded in the conversation")
+            };
+            assert!(
+                text.contains("automatic switch to profile destination") && text.contains("failed")
+            );
+            if case == "late-refused" {
+                assert!(text.contains("sub-agents appeared after preparation"));
+            } else {
+                assert!(text.contains("quota-move-test"));
+            }
+            if case == "late-outcome" {
+                assert!(text.contains("Source retained and still running"));
+            }
+            reply.send(Ok(8)).unwrap();
+            recording.await.unwrap().unwrap();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), usize::from(moves));
         assert!(!matches!(
             tokio::time::timeout(Duration::from_millis(150), remote.requests.recv()).await,
             Ok(Some(_))

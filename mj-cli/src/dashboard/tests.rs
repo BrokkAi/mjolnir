@@ -84,6 +84,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
+                aws: None,
                 codex_profile: None,
                 environment: Default::default(),
                 ..mj_core::config::HarnessProfile::new(
@@ -1070,6 +1071,7 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
     let mut materialized = MaterializedSession::empty("session-1");
     materialized.applied_event_ordinal = 4;
     materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
+        work_facts: None,
         answered_through: None,
         command_id: "prompt-1".into(),
         accepted_ordinal: Some(1),

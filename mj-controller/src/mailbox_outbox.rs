@@ -546,7 +546,7 @@ mod tests {
             if protocol < 43 {
                 assert_eq!(
                     wire["body"]["text"],
-                    "Review clean for commits aaaaaaa..bbbbbbb in /repo. Tree ccccccc is recorded as reviewed; you may push."
+                    "Review clean for commits aaaaaaa..bbbbbbb in /repo. Tree ccccccc is recorded as reviewed."
                 );
             }
             assert_eq!(
@@ -591,6 +591,70 @@ mod tests {
                 let text = wire["body"]["text"].as_str().unwrap();
                 assert!(text.contains("was not delivered"), "{text}");
                 assert!(!text.contains("finished"), "{text}");
+            } else {
+                assert_eq!(delivered, event);
+            }
+        }
+    }
+
+    #[test]
+    fn a_report_with_observed_facts_reaches_older_workers_as_text_with_the_same_facts() {
+        let mut report: mj_core::mailbox::SubagentFinishedReport =
+            serde_json::from_value(serde_json::json!({
+                "child_session_id": "child-1",
+                "task_name": "Run suites",
+                "state": "completed",
+                "finished": true,
+                "output": "Done.",
+                "report_dir": null
+            }))
+            .unwrap();
+        report.facts = Some(mj_core::work_facts::WorkFacts {
+            observed_at_ms: 1,
+            processes: mj_core::work_facts::Observed::Known(mj_core::work_facts::ProcessFacts {
+                unattributed: 0,
+                running: 1,
+                shown: vec![mj_core::work_facts::RunningProcess {
+                    pid: 41301,
+                    elapsed_secs: 250,
+                    command: "sleep 600".into(),
+                    detached: true,
+                }],
+                omitted: 0,
+                identities: vec![mj_core::work_facts::ProcessIdentity {
+                    pid: 41301,
+                    start: "boot:1".into(),
+                }],
+            }),
+            worktree: mj_core::work_facts::Observed::unavailable("not a Git repository"),
+        });
+        let event = mj_core::mailbox::MailboxEvent {
+            key: "report-1".into(),
+            source: "mjolnir".into(),
+            wake: true,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
+                report: Box::new(report),
+            },
+        };
+        let current = mj_core::relay::RELAY_FINISH_FACTS_PROTOCOL;
+        for protocol in [current - 1, current] {
+            let mut delivered = event.clone();
+            super::downgrade_review_or_report(&mut delivered, protocol);
+            let wire = serde_json::to_value(&delivered).unwrap();
+            if protocol < current {
+                // An older worker cannot read `facts`, so it receives what the
+                // daemon rendered, observed lines included.
+                assert_eq!(wire["body"]["type"], "plain_text");
+                let text = wire["body"]["text"].as_str().unwrap();
+                assert!(
+                    text.contains("pid 41301, up 4m10s, detached from the harness: sleep 600"),
+                    "{text}"
+                );
+                assert!(
+                    text.contains("Working tree: unavailable (not a Git repository)"),
+                    "{text}"
+                );
             } else {
                 assert_eq!(delivered, event);
             }

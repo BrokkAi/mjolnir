@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 114;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 118;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2219,6 +2219,23 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: no table changes, but a sub-agent's prompt outcome now carries
+    // what its worker observed (`work_facts`), stored in the materialized
+    // session's `last_turn_outcome_json`, which a revision-117 daemon decodes
+    // with `deny_unknown_fields` and would refuse; and a finished child's report
+    // carries the facts in `mailbox_outbox.event_json`. A revision-117 daemon must
+    // not write or read this store once either exists.
+    if version < 118 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 118 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (118, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 118;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -4222,6 +4239,24 @@ mod reader_tests {
     }
 
     #[test]
+    fn outcome_facts_migration_raises_the_floor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let record = super::super::tests::session("facts-upgrade", "project");
+        save_session_to(&path, &record).unwrap();
+        stamp_schema_version(&path, 117);
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(118));
+        // A revision-117 build is refused: its decoder of a stored outcome
+        // rejects the field a sub-agent's worker adds.
+        let refused = state.ensure_supported_by(117).unwrap_err();
+        assert!(format!("{refused:#}").contains("118"), "{refused:#}");
+        state.ensure_supported_by(118).unwrap();
+    }
+
+    #[test]
     fn mailbox_reset_migration_seeds_existing_frontiers_and_preserves_compatibility() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
@@ -4284,6 +4319,7 @@ mod reader_tests {
         connection
             .execute_batch(
                 "DELETE FROM schema_migrations WHERE version >= 116;
+                 UPDATE schema_compatibility SET minimum_compatible_version = 114;
                  PRAGMA user_version = 115;",
             )
             .unwrap();
@@ -4327,7 +4363,7 @@ mod reader_tests {
         assert_eq!(state.revision, SCHEMA_VERSION);
         state
             .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
-            .expect("a revision-115 build still reads and writes the store");
+            .expect("the store is readable at the compatibility floor");
         let matching = |query: &str| -> Vec<String> {
             connection
                 .prepare(
@@ -4418,6 +4454,7 @@ mod reader_tests {
         connection
             .execute_batch(
                 "DELETE FROM schema_migrations WHERE version >= 117;
+                 UPDATE schema_compatibility SET minimum_compatible_version = 114;
                  PRAGMA user_version = 116;",
             )
             .unwrap();

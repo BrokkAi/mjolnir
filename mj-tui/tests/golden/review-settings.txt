@@ -2,12 +2,12 @@
 
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
+  │Reviewer 1  gpt-6-terra ▾                                        high ▾               Remove  │
+  │                                                                                              │
+  │Reviewer 2  gpt-6-sol ▾                                          medium ▾             Remove  │
+  │                                                                                              │
   │  Add reviewer     Autoconfigure                                                              │
   │Review runs before push when reviewers are set.                                               │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -33,6 +33,14 @@
 
 
   ╭ × Settings › Code Review ────────────────────────────╮
+  │Reviewer 1 model    gpt-6-terra ▾                     │
+  │Reviewer 1 effort   high ▾                            │
+  │  Remove reviewer 1                                   │
+  │                                                      │
+  │Reviewer 2 model    gpt-6-sol ▾                       │
+  │Reviewer 2 effort   medium ▾                          │
+  │  Remove reviewer 2                                   │
+  │                                                      │
   │  Add reviewer     Autoconfigure                      │
   │Review runs before push when reviewers are set.       │
   │                                                      │
@@ -48,13 +56,67 @@
   │                                                      │
   │                                                      │
   │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
   │  Cancel     Back     Save Settings                   │
   ╰──────────────────────────────────────────────────────╯
+
+
+=== Anthropic (100x30) ===
+
+
+  ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
+  │Reviewer 1  claude-sonnet-5-5 ▾                                  high ▾               Remove  │
+  │                                                                                              │
+  │Reviewer 2  claude-sonnet-5-5 ▾                                  high ▾               Remove  │
+  │                                                                                              │
+  │  Add reviewer     Autoconfigure                                                              │
+  │Review runs before push when reviewers are set.                                               │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │  Cancel     Back     Save Settings                                                           │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+=== Other provider (100x30) ===
+
+
+  ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
+  │Reviewer 1  google/gemini-3-pro ▾                                high ▾               Remove  │
+  │                                                                                              │
+  │Reviewer 2  google/gemini-3-pro ▾                                high ▾               Remove  │
+  │                                                                                              │
+  │  Add reviewer     Autoconfigure                                                              │
+  │Review runs before push when reviewers are set.                                               │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │                                                                                              │
+  │  Cancel     Back     Save Settings                                                           │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯

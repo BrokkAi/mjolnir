@@ -38,13 +38,17 @@ static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
 /// A child's server instructions: its report reaches the parent through `handback`.
 static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "You are a Mjolnir sub-agent. Call handback once as your last action; your parent reads that report. If a parent decision blocks progress, hand back your question and stop; its answer arrives as your next prompt. Your first prompt names your report directory. {}",
+        "You are a Mjolnir sub-agent. Call handback once as your last action; your parent reads that report. If you committed changes and have mj-review tools, get them reviewed before handing back. If a parent decision blocks progress, hand back your question and stop; its answer arrives as your next prompt. Your first prompt names your report directory. {}",
         mj_core::subagent::HANDBACK_REPORT_RULES
     )
 });
 
+/// Policy for the separate `mj-review` server of a managed child, delivered
+/// through initialization. A child does not push; it reviews before it reports.
+const CHILD_REVIEW_SERVER_INSTRUCTIONS: &str = "If you committed changes, call `request_review` before you hand back your report. A task that committed nothing (an investigation, a test run, a question) hands back without a review. It replies immediately; the verdict arrives later as a Mjolnir message. After calling it, end your turn: the verdict starts your next turn, and handback is refused until it arrives. Pass `path` for a worktree other than your working directory. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Hand back once the review is clean or you have overridden its findings. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
+
 /// Policy for the separate `mj-review` server, delivered through initialization.
-const REVIEW_SERVER_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or `gh pr create`. It replies immediately; the verdict arrives later as a Mjolnir message. Pass `path` when pushing from another worktree. A push is allowed after every reviewer is clean, or after `override_review` on the reviewed commits. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
+const REVIEW_SERVER_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or `gh pr create`. It replies immediately; the verdict arrives later as a Mjolnir message. Pass `path` when pushing from another worktree; reviewing a worktree at HEAD lets you keep working meanwhile. A push is allowed after every reviewer is clean, or after `override_review` on the reviewed commits. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
 
 /// A child's advice when Mjolnir has not confirmed its report. Calling again
 /// is safe: a report that did arrive is refused as already delivered.
@@ -892,13 +896,13 @@ fn tool_definitions_with_options(
         spawn_tool(options.subtle_subagents),
         read_only(tool(
             "list_agents",
-            "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A failed delivery does not change the child's state. A child whose last turn failed and whose entry has promptable true can be resumed with send_message. A finished child has parked true when its processes were released. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
+            "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A failed delivery does not change the child's state. A child whose last turn failed and whose entry has promptable true can be resumed with send_message. A finished child has parked true when its worker was stopped; parking stops the harness and the processes under it, and a detached process may keep running. An entry has facts when Mjolnir recorded what the child's worker observed: facts.finish lists the processes the child's agent had left running and its working tree when its turn ended. The facts are Mjolnir's observation, not the child's claim; read them against its report. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
             json!({"type":"object","additionalProperties":false}),
         )),
         send_message_tool(),
         tool(
             "close",
-            "Stop one child session identified by its full ID or a unique hexadecimal prefix of at least 8 characters, and retain its conversation. Closing a child keeps its report directory; only destroying the child or its parent removes it. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished and contains the resolved full child session ID; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
+            "Stop one child session identified by its full ID or a unique hexadecimal prefix of at least 8 characters, and retain its conversation. Closing a child keeps its report directory; only destroying the child or its parent removes it. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no worker left and only its record is settled. An answer of closed true means that finished and contains the resolved full child session ID; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
             child,
         ),
         fetch_tool(),
@@ -1079,9 +1083,21 @@ fn call_review(
 
 /// Serve the before-push review tools over MCP stdio as `mj-review`. The tools
 /// reach the controller through the same worker queue as `mj-agents`.
-pub fn run_review_mcp_stdio(socket: &Path, harness: Option<HarnessKind>) -> Result<()> {
+pub fn run_review_mcp_stdio(
+    socket: &Path,
+    harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
+) -> Result<()> {
     let stdin = std::io::stdin();
-    run_review(stdin.lock(), std::io::stdout(), socket, harness)
+    run_review(stdin.lock(), std::io::stdout(), socket, harness, role)
+}
+
+/// A managed child reviews before it reports; a top-level session, before it pushes.
+fn review_instructions(role: SubagentMcpRole) -> &'static str {
+    match role {
+        SubagentMcpRole::Child | SubagentMcpRole::FetchOnly => CHILD_REVIEW_SERVER_INSTRUCTIONS,
+        SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly => REVIEW_SERVER_INSTRUCTIONS,
+    }
 }
 
 fn run_review<R: BufRead, W: Write + Send + Sync + 'static>(
@@ -1089,6 +1105,7 @@ fn run_review<R: BufRead, W: Write + Send + Sync + 'static>(
     writer: W,
     socket: &Path,
     harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
     crate::mcp_stdio::serve(
@@ -1096,7 +1113,7 @@ fn run_review<R: BufRead, W: Write + Send + Sync + 'static>(
         writer,
         crate::mcp_stdio::McpServer {
             name: mj_core::subagent::REVIEW_MCP_SERVER,
-            instructions: REVIEW_SERVER_INSTRUCTIONS,
+            instructions: review_instructions(role),
             tools: review_tool_definitions(),
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
@@ -1482,6 +1499,7 @@ mod tests {
                 writer,
                 Path::new("unused.sock"),
                 Some(HarnessKind::Claude),
+                SubagentMcpRole::Parent,
             )
         });
         assert_eq!(initialize["serverInfo"]["name"], "mj-review");
@@ -1494,6 +1512,21 @@ mod tests {
         assert_eq!(instructions, REVIEW_SERVER_INSTRUCTIONS);
         // Claude cuts server instructions at 2048 characters.
         assert!(instructions.chars().count() <= 2048);
+        for role in [SubagentMcpRole::Child, SubagentMcpRole::FetchOnly] {
+            let (initialize, _) = mcp_exchange(|input, writer| {
+                run_review(
+                    input,
+                    writer,
+                    Path::new("unused.sock"),
+                    Some(HarnessKind::Claude),
+                    role,
+                )
+            });
+            let instructions = initialize["instructions"].as_str().unwrap();
+            assert_eq!(instructions, CHILD_REVIEW_SERVER_INSTRUCTIONS);
+            assert!(instructions.chars().count() <= 2048);
+            assert!(instructions.contains("handback is refused until it arrives"));
+        }
 
         let by_name = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
         let override_review = by_name("override_review");

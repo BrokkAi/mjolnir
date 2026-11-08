@@ -1,6 +1,6 @@
 //! Durable contracts for Mjolnir-managed child-agent sessions.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::continuation::GeneratedPrompt;
 use serde::{Deserialize, Serialize};
@@ -342,6 +342,32 @@ pub enum SubagentFinishIdentity {
         )]
         last_completed_ordinal: Option<u64>,
     },
+}
+
+impl SubagentFinishIdentity {
+    /// Whether a report with this identity was made after the turn that
+    /// completed at `ordinal`, or for a later one: the parent has been told of
+    /// that turn's ending.
+    pub fn covers(&self, ordinal: u64) -> bool {
+        self.completed_ordinal()
+            .is_some_and(|completed| completed >= ordinal)
+    }
+
+    /// The ordinal of the turn this finish completed, whatever the kind of
+    /// identity: a terminal one carries the last completed turn, and has none
+    /// for a child that never completed a turn. The one place that says which
+    /// turn a finish's recorded facts belong to.
+    pub fn completed_ordinal(&self) -> Option<u64> {
+        match self {
+            Self::Turn {
+                completed_ordinal, ..
+            } => Some(*completed_ordinal),
+            Self::Terminal {
+                last_completed_ordinal,
+                ..
+            } => *last_completed_ordinal,
+        }
+    }
 }
 
 fn deserialize_terminal_last_completed_ordinal<'de, D>(
@@ -973,17 +999,26 @@ pub enum SubagentMcpRole {
 }
 
 impl SubagentMcpRole {
-    /// Only top-level sessions enforce the automatic push-review gate.
+    /// The arguments that start the `mj-review` server. Only a managed child
+    /// names its role, which selects its instructions; a top-level session's
+    /// arguments stay as earlier builds wrote them.
     #[must_use]
-    pub fn supports_push_gate(self) -> bool {
-        matches!(self, Self::Parent | Self::MessageOnly)
-    }
-
-    /// Whether a session in this role is offered the `mj-review` server: the
-    /// role enforces the push gate and the launch turned the gate on.
-    #[must_use]
-    pub fn offers_review_server(self, review_gate: bool) -> bool {
-        review_gate && self.supports_push_gate()
+    pub fn review_server_args(self, socket: &Path, harness: &str) -> Vec<String> {
+        let mut args: Vec<String> = [
+            "worker",
+            "subagent-mcp",
+            "--socket",
+            &socket.to_string_lossy(),
+            "--harness",
+            harness,
+            "--review-server",
+        ]
+        .map(str::to_owned)
+        .into();
+        if matches!(self, Self::Child | Self::FetchOnly) {
+            args.extend(["--role".to_owned(), self.id().to_owned()]);
+        }
+        args
     }
 
     #[must_use]
@@ -1969,6 +2004,7 @@ mod tests {
 
     fn finished(command_id: &str, stop_reason: &str) -> crate::state::MaterializedTurnOutcome {
         crate::state::MaterializedTurnOutcome {
+            work_facts: None,
             answered_through: None,
             diagnostic: None,
             usage: None,
@@ -2280,7 +2316,7 @@ mod tests {
     }
 
     #[test]
-    fn review_tools_belong_to_the_review_server_for_gated_top_level_roles() {
+    fn review_tools_belong_to_the_review_server_and_no_mj_agents_role() {
         assert_eq!(REVIEW_MCP_SERVER, "mj-review");
         assert_eq!(
             REVIEW_MCP_TOOLS,
@@ -2295,11 +2331,6 @@ mod tests {
             for tool in REVIEW_MCP_TOOLS {
                 assert!(!role.tool_names().contains(tool), "{role} lists {tool}");
             }
-            assert!(!role.offers_review_server(false));
-            assert_eq!(
-                role.offers_review_server(true),
-                matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly)
-            );
         }
     }
 

@@ -915,7 +915,7 @@ mod settled_task_tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
-        relay.acp_ready = true;
+        relay.set_acp_ready(true);
         relay
             .record_observation(RelayObservation::SessionConfigured {
                 config_options: vec![],
@@ -970,7 +970,7 @@ mod settled_task_tests {
         drop(relay);
         std::fs::remove_file(dir.path().join(RELAY_STATE_FILE)).unwrap();
         let mut relay = claude_relay(dir.path());
-        relay.acp_ready = true;
+        relay.set_acp_ready(true);
         assert!(
             relay
                 .snapshot
@@ -1101,7 +1101,7 @@ mod settled_task_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
         relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
-        relay.acp_ready = true;
+        relay.set_acp_ready(true);
         relay.snapshot.native_session_id = Some("root".into());
 
         // claude-agent-acp 0.97.0's autonomousTurnStarted payload canStop=true although
@@ -1136,7 +1136,7 @@ mod settled_task_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
         // A configured harness session; otherwise nothing is ever quiet.
-        relay.acp_ready = true;
+        relay.set_acp_ready(true);
         relay.set_air_tasks(vec![task("srv")]).unwrap();
         relay
             .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
@@ -1249,12 +1249,12 @@ mod settled_task_tests {
             relay
                 .record_observation(RelayObservation::SessionRestarted)
                 .unwrap();
-            relay.acp_ready = true;
+            relay.set_acp_ready(true);
             relay
         };
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
-        relay.acp_ready = true;
+        relay.set_acp_ready(true);
         relay.set_air_tasks(vec![task("srv")]).unwrap();
         relay
             .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
@@ -1360,7 +1360,7 @@ mod settled_task_tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
-        relay.acp_ready = true;
+        relay.set_acp_ready(true);
         relay
             .record_observation(RelayObservation::SessionConfigured {
                 config_options: vec![],
@@ -1374,6 +1374,7 @@ mod settled_task_tests {
             .record_command_completed(
                 "api-turn-20",
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
@@ -1476,6 +1477,7 @@ mod settled_task_tests {
             .record_command_completed(
                 "original-prompt",
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "EndTurn".into(),
                     usage: None,

@@ -408,6 +408,7 @@ pub(super) fn project_observation(
                     stop_reason,
                     usage,
                     diagnostic,
+                    work_facts,
                 } => {
                     let native_running =
                         current.configuration.goal.as_deref().is_some_and(mj_core::goal::GoalState::running);
@@ -446,6 +447,7 @@ pub(super) fn project_observation(
                         outcome: TurnOutcomeKind::Completed {
                             stop_reason: stop_reason.clone(),
                         },
+                        work_facts: work_facts.as_deref().cloned(),
                     });
                     mutation.active_turn = Some(None);
                 }
@@ -551,6 +553,7 @@ pub(super) fn project_observation(
                     .filter(|turn| turn.belongs_to(command_id));
                 let outcome_text = message.clone();
                 mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                    work_facts: None,
                     answered_through: None,
                     diagnostic: None,
                     usage: None,
@@ -863,6 +866,7 @@ pub(super) fn project_observation(
                         .is_some_and(|turn| turn.command_id == command_id)
                     {
                         mutation.last_turn_outcome = Some(MaterializedTurnOutcome {
+                            work_facts: None,
                             answered_through: None,
                             command_id,
                             accepted_ordinal: None,

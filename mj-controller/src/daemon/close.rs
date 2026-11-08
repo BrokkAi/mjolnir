@@ -165,7 +165,9 @@ impl RuntimeState {
             let parent_session_id = parent_session_id.to_owned();
             move || {
                 let controller = Controller::load()?;
-                let stopped = active_child_session_ids(&controller.state, &parent_session_id)
+                let stopped = controller
+                    .state
+                    .active_child_session_ids(&parent_session_id)
                     .iter()
                     .map(|child_id| {
                         crate::controller::stopped_subagent(&controller.state, child_id)

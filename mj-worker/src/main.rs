@@ -563,7 +563,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             review_server,
         } => {
             if review_server {
-                mj_worker::subagent_mcp::run_review_mcp_stdio(&socket, harness)
+                mj_worker::subagent_mcp::run_review_mcp_stdio(&socket, harness, role)
             } else {
                 mj_worker::subagent_mcp::run_mcp_stdio(
                     &socket,

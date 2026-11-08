@@ -5,9 +5,12 @@ impl HostState {
     /// stop.
     pub(super) async fn handle(&mut self, event: HostEvent) -> bool {
         if let Some(reason) = &self.startup_failure {
+            // A group restored before recovery failed still runs: its events,
+            // and questions about whether it is open, are answered as usual.
             let active_owner = match &event {
                 HostEvent::ReviewerFinished { session_id, .. }
-                | HostEvent::Resolve { session_id, .. } => Some(session_id),
+                | HostEvent::Resolve { session_id, .. }
+                | HostEvent::HasOpenReview { session_id, .. } => Some(session_id),
                 _ => None,
             };
             if active_owner.is_some_and(|session_id| self.reviews.contains_key(session_id)) {
@@ -26,6 +29,15 @@ impl HostState {
                 }
                 HostEvent::QuestionTarget { reply, .. } => {
                     let _ = reply.send(None);
+                    return false;
+                }
+                // A session recovery did not restore is missing from the maps,
+                // so "no review" cannot be answered truthfully. (Restored ones
+                // were answered above as active owners.)
+                HostEvent::HasOpenReview { reply, .. } => {
+                    let _ = reply.send(Err(super::OpenReviewUnknown::RecoveryFailed(
+                        reason.clone(),
+                    )));
                     return false;
                 }
                 event => return Box::pin(self.handle_without_startup_failure(event)).await,
@@ -175,6 +187,19 @@ impl HostState {
                         .map(|_| (child_session_id, question_id));
                 let _ = reply.send(target);
             }
+            // Never deferred: callers hold admissions or deliver other
+            // events while they ask, so before the startup sweep finishes a
+            // session it has not restored yet answers "not ready".
+            HostEvent::HasOpenReview { session_id, reply } => {
+                let open = self.reviews.contains_key(&session_id)
+                    || self.preparing.contains_key(&session_id)
+                    || self.pending_open.contains_key(&session_id);
+                let _ = reply.send(if open || self.startup_ready {
+                    Ok(open)
+                } else {
+                    Err(super::OpenReviewUnknown::NotReady)
+                });
+            }
             HostEvent::CloseChild { child_session_id } => self.close_child(child_session_id),
             HostEvent::ChildEnded {
                 child_session_id,
@@ -266,6 +291,16 @@ impl HostState {
                         HostEvent::Resolve { reply, .. } => {
                             let _ =
                                 reply.send(Err(format!("review startup recovery failed: {error}")));
+                        }
+                        // A group restored before the failure still runs.
+                        HostEvent::HasOpenReview { session_id, reply } => {
+                            let _ = reply.send(if self.reviews.contains_key(&session_id) {
+                                Ok(true)
+                            } else {
+                                Err(super::OpenReviewUnknown::RecoveryFailed(format!(
+                                    "review startup recovery failed: {error}"
+                                )))
+                            });
                         }
                         HostEvent::QuestionTarget { reply, .. } => {
                             let _ = reply.send(None);

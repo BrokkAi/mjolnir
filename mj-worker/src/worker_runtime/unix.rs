@@ -100,6 +100,8 @@ struct HarnessPreparationSetup {
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
     resume_session: Option<String>,
     native_session_may_have_history: bool,
+    /// What a sub-agent's worker observes at the end of each turn.
+    capture: Option<crate::work_facts::WorkObserver>,
 }
 
 #[derive(Clone)]
@@ -249,7 +251,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     };
     let supervisor_path = root.join("acp-supervisor.json");
     supervisor_spec.write_spec(&supervisor_path)?;
-    let review_gate = config.review_gate();
+    let review_tools = config.review_tools();
     let worker_executable = std::env::current_exe().context("locate Hel worker executable")?;
     let reviewer = Arc::new(ReviewCapture {
         session_id: config.session_id.clone(),
@@ -355,7 +357,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             role,
             agent_mailboxes_enabled: config.agent_mailboxes_enabled,
             subtle_subagents: config.subtle_subagents,
-            review_gate,
+            review_tools,
             profile_registration,
         }),
         project_memory: config.project_memory,
@@ -394,6 +396,7 @@ fn start_bridge(
     relay: Arc<Mutex<DurableRelay>>,
     dispatch_wakes: mpsc::Receiver<()>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
+    capture: Option<crate::work_facts::WorkObserver>,
     runtime: tokio::runtime::Handle,
     cancel: CancellationToken,
 ) -> Result<StartedBridgeTasks> {
@@ -440,6 +443,7 @@ fn start_bridge(
         commands_tx,
         user_shells,
         kimi_task_home.map(KimiTaskMonitor::new),
+        capture,
     )));
     if cancel.is_cancelled() {
         bail!("preparation cancelled while starting the relay coordinator");
@@ -847,6 +851,20 @@ pub async fn run_daemon_owned(
         durable_relay.record_observation(RelayObservation::SessionRestarted)?;
     }
 
+    // Only a managed sub-agent that is not a reviewer observes its agent's work
+    // when a turn ends (`SESSION_MANAGED_SUBAGENT_ENV`, set by the controller for
+    // every sub-agent, and no `reviewer_launch`): an ordinary session has no
+    // parent to report to, and a reviewer's verdict names no working tree.
+    let capture = (config.is_managed_subagent() && config.reviewer_launch.is_none()).then(|| {
+        crate::work_facts::WorkObserver {
+            session_id: config.session_id.clone(),
+            worker_pid: std::process::id(),
+            directory: config.cwd.clone(),
+            git: "git".into(),
+            harness_ready_ms: durable_relay.harness_ready_clock(),
+            children: Default::default(),
+        }
+    });
     let relay = Arc::new(Mutex::new(durable_relay));
     // Client tasks are detached, so a durable failure they cannot recover
     // from has to travel back here to stop the daemon.
@@ -957,6 +975,7 @@ pub async fn run_daemon_owned(
         kimi_task_home,
         resume_session,
         native_session_may_have_history,
+        capture,
     };
     let prep_status = preparation_tx.clone();
     let prep_cancel = preparation_cancel.clone();
@@ -1403,12 +1422,10 @@ async fn prepare_and_start_harness(
         kimi_task_home,
         resume_session,
         native_session_may_have_history,
+        capture,
     } = setup;
     let managed_subagent = config.is_managed_subagent();
-    if managed_subagent {
-        config.review_trigger = Default::default();
-    }
-    let review_gate = config.review_gate();
+    let review_tools = config.review_tools();
     let subagent_role = config.subagent_mcp_role();
     let root = root_path.as_path();
     let login_budget = preparation_step(
@@ -1583,7 +1600,7 @@ async fn prepare_and_start_harness(
                             agent_mailboxes_enabled: mailboxes_enabled,
                             subtle_subagents,
                         },
-                        review_gate,
+                        review_tools,
                     )?;
                     Ok((registered, environment))
                 })
@@ -1629,7 +1646,7 @@ async fn prepare_and_start_harness(
                         role,
                         mailboxes_enabled,
                         subtle_subagents,
-                        review_gate,
+                        review_tools,
                     )?;
                     let mailbox_hook_available =
                         super::subagents::configure_claude_mailbox_hook(&root, &session_id, &home)?;
@@ -1720,11 +1737,7 @@ async fn prepare_and_start_harness(
         .await?;
     }
 
-    if config.review_trigger == mj_core::config::ReviewTrigger::Push
-        && !config.is_managed_subagent()
-        && !config.handback_tool
-        && config.reviewer_launch.is_none()
-    {
+    if config.prepares_review() {
         let budget = preparation_step(
             root,
             status,
@@ -1830,6 +1843,7 @@ async fn prepare_and_start_harness(
             relay,
             dispatch_wakes,
             kimi_task_home,
+            capture,
             bridge_runtime,
             bridge_cancel,
         )
@@ -2151,6 +2165,8 @@ pub(super) async fn serve_client_with_memory(
                 RelayRequest::CredentialState
                     | RelayRequest::AwsCredentialsState
                     | RelayRequest::InstallAwsCredentials { .. }
+                    | RelayRequest::RemoveAwsCredentials
+                    | RelayRequest::AwsCredentialsScope
                     | RelayRequest::SlopcopLoginState
                     | RelayRequest::InstallSlopcopLogin { .. }
                     | RelayRequest::RemoveSlopcopLogin
@@ -2691,6 +2707,7 @@ mod preparation_tests {
             dispatch_wakes,
             commands,
             shells,
+            None,
             None,
             None,
         ));
