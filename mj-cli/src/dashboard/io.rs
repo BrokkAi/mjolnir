@@ -2385,6 +2385,7 @@ mod tests {
     }
 
     // Hard-won: 0bd61a289: summary hydration exhausted the blocking pool while awaiting nested metadata reads.
+    // Hard-won: 99572842f: an unowned daemon fixture took the slow Windows stale-record path.
     #[test]
     fn stored_summary_bursts_leave_the_blocking_pool_available() {
         const CHILD: &str = "MJ_TEST_SUMMARY_BLOCKING_POOL";
@@ -2393,6 +2394,9 @@ mod tests {
         if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
             return;
         }
+        // A running daemon owns its store. Without that ownership, startup
+        // probes this record's process and endpoint before refusing it.
+        let _store_guard = mj_controller::controller::ControllerStoreGuard::acquire().unwrap();
         // Refuse before startup can launch anything. Even this refusal needs
         // connection metadata, just as successful summary reads do.
         let metadata = daemon::DaemonMetadata {
@@ -2435,7 +2439,13 @@ mod tests {
                     else {
                         panic!("expected a summary result")
                     };
-                    assert!(result.is_err(), "the newer daemon must be refused");
+                    assert!(
+                        result
+                            .err()
+                            .expect("the newer daemon must be refused")
+                            .contains("the daemon uses a newer protocol"),
+                        "the refusal must come from the recorded daemon's protocol"
+                    );
                 }
                 // Attachment renewal and chat preparation need this pool too.
                 tokio::task::spawn_blocking(|| ()).await.unwrap();
