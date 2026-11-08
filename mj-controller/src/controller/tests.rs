@@ -2938,9 +2938,10 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     assert_eq!(
         oracle.initial_prompt,
         format!(
-            "Your report directory is /reports/{}.\n\n{}\n\nQuestion:\nWhich option?",
+            "Your report directory is /reports/{}.\n\n{} Your answer may contain up to {} characters.\n\nQuestion:\nWhich option?",
             oracle.child_session_id,
-            super::subagents::ORACLE_INSTRUCTIONS
+            super::subagents::ORACLE_INSTRUCTIONS,
+            mj_core::subagent::SubagentKind::Oracle.max_handback_chars()
         )
     );
     assert_eq!(oracle.model.as_deref(), Some("oracle-model"));

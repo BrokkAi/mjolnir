@@ -519,7 +519,7 @@ impl Controller {
         let initial_prompt = match (handback_tool, &report_dir) {
             (true, Some(report_dir)) if reviewer => format!(
                 "You are a Mjolnir reviewer child. Your report directory is {report_dir}. Call handback with the complete rubric JSON (up to {} characters).\n\n{}",
-                mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS,
+                mj_core::subagent::SubagentKind::Reviewer.max_handback_chars(),
                 request.initial_prompt
             ),
             (_, report_dir) if oracle => {
@@ -536,7 +536,8 @@ impl Controller {
                     .map(|dir| format!("Your report directory is {dir}.\n\n"))
                     .unwrap_or_default();
                 format!(
-                    "{directory_note}{instructions}\n\n{}",
+                    "{directory_note}{instructions} Your answer may contain up to {} characters.\n\n{}",
+                    mj_core::subagent::SubagentKind::Oracle.max_handback_chars(),
                     request.initial_prompt
                 )
             }

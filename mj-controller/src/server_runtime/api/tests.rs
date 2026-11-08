@@ -1788,7 +1788,8 @@ async fn a_child_hands_back_one_report_per_turn() {
         }
     };
 
-    let first = hand_back("child-1", "the full report").await;
+    let worker_report = "é".repeat(mj_core::subagent::MAX_HANDBACK_CHARS);
+    let first = hand_back("child-1", &worker_report).await;
     assert!(!first.is_error, "{}", first.message);
     assert!(
         first.message.contains("\"delivered\": true"),
@@ -1800,7 +1801,7 @@ async fn a_child_hands_back_one_report_per_turn() {
         recorded
             .handback
             .map(|handback| (handback.command_id, handback.message)),
-        Some(("task".to_owned(), "the full report".to_owned()))
+        Some(("task".to_owned(), worker_report))
     );
 
     let second = hand_back("child-1", "a second report").await;
@@ -1820,7 +1821,11 @@ async fn a_child_hands_back_one_report_per_turn() {
 
     // A report past the cap is refused, and the refusal says where the
     // details go, so the child can retry with a short report.
-    let long = hand_back("child-1", &"x".repeat(20_000)).await;
+    let long = hand_back(
+        "child-1",
+        &"é".repeat(mj_core::subagent::MAX_HANDBACK_CHARS + 1),
+    )
+    .await;
     assert!(long.is_error, "{}", long.message);
     assert!(
         long.message.contains("report directory") && long.message.contains("4000"),
@@ -1836,49 +1841,64 @@ async fn a_child_hands_back_one_report_per_turn() {
         stranger.message
     );
 
-    let mut reviewer = parent_record("reviewer-1", "helper");
-    reviewer.title = "review".into();
-    let mut relation = crate::database::load_subagent("child-1").unwrap().unwrap();
-    relation.kind = mj_core::subagent::SubagentKind::Reviewer;
-    relation.child_session_id = reviewer.id.clone();
-    relation.request_key = "reviewer-request".into();
-    crate::database::save_subagent_session(&reviewer, &relation).unwrap();
-    let backend = Arc::new(ApiBackend::new(
-        SessionControl::new(FakeControl(FakeSession {
-            session_id: reviewer.id.clone(),
-            accepted_ordinal: 1,
-            submitted: mpsc::unbounded_channel().0,
-            view: Some(view),
-        })),
-        running_states(),
-        Arc::new(NoExports),
-    ));
-    let title = "- [P1] Preserve the complete finding — src/lib.rs:1\n";
-    let message = format!("{title}{}", "é".repeat(20_000 - title.chars().count()));
-    assert_eq!(message.chars().count(), 20_000);
-    let accepted = backend
-        .execute_subagent_tool(
-            reviewer.id.clone(),
-            mj_core::subagent::SubagentToolRequest {
-                originating_command_id: None,
-                request_id: "reviewer-report".into(),
-                created_at_ms: 0,
-                action: mj_core::subagent::SubagentToolAction::Handback {
-                    message: message.clone(),
+    for (id, kind) in [
+        ("reviewer-1", mj_core::subagent::SubagentKind::Reviewer),
+        ("oracle-1", mj_core::subagent::SubagentKind::Oracle),
+    ] {
+        let advisor = parent_record(id, "helper");
+        let mut relation = crate::database::load_subagent("child-1").unwrap().unwrap();
+        relation.kind = kind;
+        relation.child_session_id = advisor.id.clone();
+        relation.request_key = format!("{id}-request");
+        crate::database::save_subagent_session(&advisor, &relation).unwrap();
+        let backend = Arc::new(ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: advisor.id.clone(),
+                accepted_ordinal: 1,
+                submitted: mpsc::unbounded_channel().0,
+                view: Some(view.clone()),
+            })),
+            running_states(),
+            Arc::new(NoExports),
+        ));
+        let hand_back = |message: String| {
+            backend.execute_subagent_tool(
+                advisor.id.clone(),
+                mj_core::subagent::SubagentToolRequest {
+                    originating_command_id: None,
+                    request_id: format!("{id}-report"),
+                    created_at_ms: 0,
+                    action: mj_core::subagent::SubagentToolAction::Handback { message },
                 },
-            },
-        )
-        .await;
-    assert!(!accepted.is_error, "{}", accepted.message);
-    let report = crate::database::load_subagent_report(&reviewer.id)
-        .unwrap()
-        .handback
-        .unwrap();
-    assert_eq!(report.message, message);
-    assert!(matches!(
-        mj_review::verdict::review_output_verdict(&report.message),
-        mj_core::review::verdict::ReviewVerdict::Findings { .. }
-    ));
+            )
+        };
+        // Refusal must not consume this turn's handback; the boundary-sized
+        // Unicode report must then reach the durable record without truncation.
+        let too_long = hand_back("é".repeat(65_537)).await;
+        assert!(too_long.is_error, "{kind:?}: {}", too_long.message);
+        assert!(too_long.message.contains("65536"), "{}", too_long.message);
+        assert!(
+            crate::database::load_subagent_report(id)
+                .unwrap()
+                .handback
+                .is_none()
+        );
+        let title = "- [P1] Preserve the complete finding — src/lib.rs:1\n";
+        let message = format!("{title}{}", "é".repeat(65_536 - title.chars().count()));
+        let accepted = hand_back(message.clone()).await;
+        assert!(!accepted.is_error, "{kind:?}: {}", accepted.message);
+        let report = crate::database::load_subagent_report(id)
+            .unwrap()
+            .handback
+            .unwrap();
+        assert_eq!(report.message, message);
+        if kind == mj_core::subagent::SubagentKind::Reviewer {
+            assert!(matches!(
+                mj_review::verdict::review_output_verdict(&report.message),
+                mj_core::review::verdict::ReviewVerdict::Findings { .. }
+            ));
+        }
+    }
 }
 
 /// Found in a live run: a parent waited right after spawning, the store had
@@ -6404,13 +6424,24 @@ async fn the_oracle_is_hidden_from_the_primarys_ordinary_child_tools() {
 #[test]
 fn an_oracle_report_names_ask_oracle_for_the_rest_and_never_send_message() {
     let progress = ChildProgress::settled(ReportState::Delivered("answer".into()));
-    let long = "x".repeat(mj_core::subagent::MAX_HANDBACK_CHARS + 10);
+    let long = "x".repeat(mj_core::subagent::MAX_ADVISOR_HANDBACK_CHARS + 10);
     let truncated = super::wait_agent_entry("c1", "completed", Some(long), true, &progress, true);
     assert_eq!(truncated["oracle"], true);
     assert_eq!(truncated["truncated"], true);
     let output = truncated["output"].as_str().unwrap();
     assert!(output.contains("10 more characters") && output.contains("ask_oracle"));
     assert!(!output.contains("send_message"), "{output}");
+    let complete = "é".repeat(65_536);
+    let delivered = super::wait_agent_entry(
+        "c1",
+        "completed",
+        Some(complete.clone()),
+        true,
+        &progress,
+        true,
+    );
+    assert_eq!(delivered["output"], complete);
+    assert!(delivered.get("truncated").is_none(), "{delivered}");
     let mut answered = super::wait_agent_entry(
         "c1",
         "completed",

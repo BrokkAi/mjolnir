@@ -39,7 +39,7 @@ static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
 static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
         "You are a Mjolnir sub-agent. Call handback once as your last action; your parent reads that report. If you committed changes and have mj-review tools, get them reviewed before handing back. If a parent decision blocks progress, hand back your question and stop; its answer arrives as your next prompt. Your first prompt names your report directory. {}",
-        mj_core::subagent::HANDBACK_REPORT_RULES
+        mj_core::subagent::HANDBACK_REPORT_RULES.as_str()
     )
 });
 
@@ -423,7 +423,7 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
     static REVIEWER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
         format!(
             "You are a Mjolnir reviewer child. Call handback once as your last action with your plain-text findings, or exactly `No findings.` if there are none. Your report may contain up to {} characters.",
-            mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS
+            mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
         )
     });
     let reviewer_instructions = REVIEWER_INSTRUCTIONS.as_str();
@@ -454,8 +454,10 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
             }
             if reviewer {
                 tools[0]["description"] = json!(&reviewer_instructions);
-                tools[0]["inputSchema"]["properties"]["message"]["description"] =
-                    json!("Complete reviewer rubric JSON");
+                tools[0]["inputSchema"]["properties"]["message"]["description"] = json!(format!(
+                    "Complete reviewer rubric JSON, at most {} characters",
+                    mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
+                ));
             }
             (
                 if reviewer {
@@ -1164,9 +1166,9 @@ fn child_tool_definitions() -> Vec<Value> {
             "handback",
             &format!(
                 "Hand back once, as your last action. Repeats in one turn are refused. {}",
-                mj_core::subagent::HANDBACK_REPORT_RULES
+                mj_core::subagent::HANDBACK_REPORT_RULES.as_str()
             ),
-            json!({"type":"object","properties":{"message":{"type":"string","description":"Your report, at most 4,000 characters; details go in files in your report directory."}},"required":["message"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"message":{"type":"string","description":format!("Your report, at most {} characters for workers or {} for oracles and reviewers; details go in files in your report directory.", mj_core::subagent::SubagentKind::Worker.max_handback_chars(), mj_core::subagent::SubagentKind::Oracle.max_handback_chars())}},"required":["message"],"additionalProperties":false}),
         )),
         fetch_tool(),
         send_message_tool(),
@@ -1693,7 +1695,13 @@ mod tests {
         )
         .unwrap();
         let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-        assert!(output.contains(&mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS.to_string()));
+        assert!(
+            output.contains(
+                &mj_core::subagent::SubagentKind::Reviewer
+                    .max_handback_chars()
+                    .to_string()
+            )
+        );
         assert!(!output.contains("4,000"));
         assert!(output.contains("plain-text findings"));
     }
@@ -1784,7 +1792,10 @@ mod tests {
                     }
                     SubagentMcpRole::Child => {
                         assert!(!instructions.contains(DELEGATION_ROUTING));
-                        assert!(instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES));
+                        assert!(
+                            instructions
+                                .contains(mj_core::subagent::HANDBACK_REPORT_RULES.as_str())
+                        );
                         assert_eq!(
                             tools
                                 .iter()
@@ -2113,7 +2124,7 @@ mod tests {
             handback["description"].as_str().unwrap(),
         ] {
             assert!(
-                instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES),
+                instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES.as_str()),
                 "{instructions}"
             );
         }
