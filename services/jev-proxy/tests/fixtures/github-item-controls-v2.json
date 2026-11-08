@@ -1,0 +1,318 @@
+[
+  {
+    "id": "related",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "requests": [
+          "Implement mailbox delivery through tool hooks."
+        ],
+        "latest_reply": "I am implementing mailbox support.",
+        "files": [],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "unrelated",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "requests": [
+          "Fix AWS capacity reporting."
+        ],
+        "latest_reply": "Corrected memory accounting in the EC2 picker.",
+        "files": [],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": false
+    }
+  },
+  {
+    "id": "created_pr",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "requests": [
+          "Implement mailbox delivery and open a PR."
+        ],
+        "latest_reply": "Opened https://github.com/brokkai/mjolnir/pull/42: Add mailbox support.",
+        "files": [],
+        "references": [
+          "https://github.com/brokkai/mjolnir/pull/42"
+        ]
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "read_existing",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "requests": [
+          "Review mailbox changes."
+        ],
+        "latest_reply": "I read the existing PR #42; another agent opened it.",
+        "files": [],
+        "references": [
+          "#42"
+        ]
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "failed_create",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "requests": [
+          "Implement mailbox support."
+        ],
+        "latest_reply": "Opening the PR failed with authentication denied.",
+        "files": [],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "future_create",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "requests": [
+          "Implement mailbox support."
+        ],
+        "latest_reply": "I will open a PR after validation.",
+        "files": [],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "other_number",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "requests": [
+          "Implement mailbox support."
+        ],
+        "latest_reply": "Opened https://github.com/brokkai/mjolnir/pull/43: Add mailbox support.",
+        "files": [],
+        "references": [
+          "https://github.com/brokkai/mjolnir/pull/43"
+        ]
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "same_broad_topic",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "requests": [
+          "Fix terminal keyboard event delivery."
+        ],
+        "latest_reply": "Working on escape key parsing in the terminal input loop.",
+        "files": [],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": false
+    }
+  },
+  {
+    "id": "creation_without_identity",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "requests": [
+          "Implement mailbox support and open the PR."
+        ],
+        "latest_reply": "",
+        "files": [],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "files_related",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "requests": [
+          "Continue with the plan."
+        ],
+        "latest_reply": "",
+        "files": [
+          "mj-controller/src/mailbox/hooks.rs",
+          "mj-controller/src/mailbox/delivery.rs"
+        ],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "files_unrelated",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "requests": [
+          "Continue with the plan."
+        ],
+        "latest_reply": "",
+        "files": [
+          "mj-tui/src/input/keys.rs",
+          "mj-tui/src/render/status.rs"
+        ],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": false
+    }
+  },
+  {
+    "id": "earlier_request",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Add mailbox support",
+        "body": "Adds delivery through tool hooks.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "requests": [
+          "Implement mailbox delivery through tool hooks.",
+          "Also fix the typo in the README.",
+          "Run the tests again."
+        ],
+        "latest_reply": "All tests pass.",
+        "files": [
+          "mj-controller/src/mailbox/hooks.rs"
+        ],
+        "references": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  }
+]
