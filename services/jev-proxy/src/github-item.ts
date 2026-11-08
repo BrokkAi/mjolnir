@@ -1,6 +1,8 @@
 import questions from "../../../mj-core/src/github_item/questions.json" with { type: "json" };
+import questionsV2 from "../../../mj-core/src/github_item/questions_v2.json" with { type: "json" };
 
 export { questions as githubItemQuestions };
+export { questionsV2 as githubItemQuestionsV2 };
 
 export interface GithubItemEvidence {
   item: {
@@ -13,6 +15,11 @@ export interface GithubItemEvidence {
     url: string;
   };
   session: { recent_turns: string };
+}
+
+export interface GithubItemEvidenceV2 {
+  item: GithubItemEvidence["item"];
+  session: { requests: string[]; latest_reply: string; files: string[]; references: string[] };
 }
 
 const encoder = new TextEncoder();
@@ -49,4 +56,28 @@ export function githubItemAnswers(value: unknown): Record<string, unknown> | und
     result[key] = { type: "noul", noul: answer.noul };
   }
   return result;
+}
+
+export function githubItemRequestV2(value: unknown): value is GithubItemEvidenceV2 {
+  if (!object(value) || !fields(value, ["item", "session"])
+    || !object(value.item) || !fields(value.item, ["repo", "kind", "number", "title", "body", "author", "url"])
+    || !object(value.session) || !fields(value.session, ["requests", "latest_reply", "files", "references"])) return false;
+  const item = value.item;
+  const session = value.session;
+  const strings = (values: unknown, count: number, limit: number, nonempty = true) => Array.isArray(values)
+    && values.length <= count && values.every(value => text(value, limit, nonempty));
+  return text(item.repo, 256) && (item.kind === "issue" || item.kind === "pull_request")
+    && typeof item.number === "number" && Number.isSafeInteger(item.number) && item.number > 0
+    && text(item.title, 1024) && text(item.body, 4096 + 128, false)
+    && text(item.author, 256, false) && text(item.url, 2048)
+    && strings(session.requests, 3, 512, false) && text(session.latest_reply, 512, false)
+    && strings(session.files, 32, 256) && strings(session.references, 32, 128);
+}
+
+export function githubItemAnswersV2(value: unknown): Record<string, unknown> | undefined {
+  if (!object(value) || !object(value.answers) || !fields(value.answers, ["interested"])) return;
+  const answer = value.answers.interested;
+  if (!object(answer) || answer.type !== "noul" || typeof answer.noul !== "number"
+    || !Number.isFinite(answer.noul) || answer.noul < 0 || answer.noul > 1) return;
+  return { interested: { type: "noul", noul: answer.noul } };
 }
