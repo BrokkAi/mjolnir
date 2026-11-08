@@ -438,6 +438,9 @@ fn credential_free_git_and_gh_do_not_recover_host_or_refreshed_credentials() {
         "export GH_TOKEN=login-secret GITHUB_TOKEN=login-secret\n",
     )
     .unwrap();
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    let ssh_config = home.join(".ssh/config");
+    std::fs::write(&ssh_config, "Host github-work\n    HostName github.com\n    PubkeyAuthentication yes\n    ControlMaster auto\n    ControlPath /existing-authenticated-socket\nHost internal-work\n    HostName internal.example.invalid\n    PubkeyAuthentication yes\n").unwrap();
     let parent = directory.path().join("parent-worker");
     std::fs::create_dir_all(&parent).unwrap();
     let mut parent_environment = BTreeMap::from([("PATH".into(), std::env::var("PATH").unwrap())]);
@@ -505,6 +508,33 @@ fn credential_free_git_and_gh_do_not_recover_host_or_refreshed_credentials() {
             String::from_utf8(author.stdout).unwrap().trim(),
             "Isolated Author"
         );
+        for (alias, pubkey) in [
+            ("github-work", ["no", "false"]),
+            ("internal-work", ["yes", "true"]),
+        ] {
+            let ssh = invoke(
+                worker.join("bin/git-ssh").to_str().unwrap(),
+                &["-G", "-F", ssh_config.to_str().unwrap(), alias],
+                &[],
+            );
+            assert!(ssh.status.success());
+            let settings = String::from_utf8(ssh.stdout).unwrap();
+            let setting = settings
+                .lines()
+                .find(|line| line.starts_with("pubkeyauthentication "))
+                .unwrap();
+            assert!(
+                pubkey.contains(&setting.split_whitespace().nth(1).unwrap()),
+                "{setting}"
+            );
+            if alias == "github-work" {
+                assert!(
+                    settings
+                        .lines()
+                        .all(|line| !line.contains("/existing-authenticated-socket"))
+                );
+            }
+        }
         let shell = invoke(
             "bash",
             &[

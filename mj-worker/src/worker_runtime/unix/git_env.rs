@@ -283,21 +283,23 @@ fn configure_git_without_credentials(
     let mut entries = git_author_identity(root, environment, saved_home, extra_global_include)?;
     take_environment_git_config(environment);
     environment.remove("MJ_ORIGINAL_GIT_CONFIG_GLOBAL");
-    let ssh_config = root.join("github-unauthenticated-ssh-config");
-    let mut ssh_text = String::from(
-        "Host github.com gist.github.com ssh.github.com\n    PubkeyAuthentication no\n    PasswordAuthentication no\n    KbdInteractiveAuthentication no\n    BatchMode yes\n",
-    );
-    if let Some(home) = saved_home {
-        ssh_text.push_str(&format!(
-            "Host !github.com !gist.github.com !ssh.github.com *\n    Include {}\n",
-            serde_json::to_string(&home.join(".ssh/config"))?
-        ));
-    }
-    mj_core::config::atomic_write_existing(&ssh_config, ssh_text.as_bytes())?;
-    let ssh_command = format!(
-        "ssh -F {}",
-        mj_core::targets::posix_quote(&ssh_config.to_string_lossy())
-    );
+    let ssh_wrapper = paths.bin.join("git-ssh");
+    // OpenSSH owns alias and Include interpretation. Ask it for the effective
+    // destination before applying the policy, including for a reused socket.
+    const SSH_WRAPPER: &str = r#"configuration=$(ssh -G "$@")
+hostname=$(printf '%s\n' "$configuration" | awk '$1 == "hostname" { print $2; exit }' | tr '[:upper:]' '[:lower:]')
+hostname=${hostname%.}
+case "$hostname" in
+    github.com|gist.github.com|ssh.github.com)
+        exec ssh -o PubkeyAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o ControlMaster=no -o ControlPath=none -o IdentityAgent=none "$@" ;;
+    *) exec ssh "$@" ;;
+esac
+"#;
+    crate::worker_runtime::shell_environment::write_executable(
+        &ssh_wrapper,
+        &format!("{WRAPPER_PREAMBLE}{SSH_WRAPPER}"),
+    )?;
+    let ssh_command = mj_core::targets::posix_quote(&ssh_wrapper.to_string_lossy());
     for host in ["github.com", "gist.github.com"] {
         entries.push((format!("credential.https://{host}.helper"), String::new()));
         entries.push((format!("http.https://{host}.extraheader"), String::new()));
