@@ -4220,7 +4220,6 @@ fn retired_cpu_producers_cannot_erase_or_overwrite_their_replacement() {
     assert!(updates.cpu.borrow().is_empty());
 }
 
-#[cfg(unix)]
 fn policy_test_options() -> Vec<agent_client_protocol::v1::schema::SessionConfigOption> {
     use agent_client_protocol::v1::schema::*;
     vec![
