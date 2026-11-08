@@ -14,7 +14,9 @@ Oracle answers and child handbacks must reach a working lead before its current 
 - [x] Commit initial implementation as c3c23d510 and merge current 2.69.0 master as f8b7d6a0d.
 - [x] Correct the review finding about OpenCode acknowledgement ownership: retain stable per-event synthetic messages in OpenCode before acknowledging a relay lease.
 - [x] Final dev-profile `cargo test -p brokk-mj-core -p brokk-mj-worker`, workspace Clippy with warnings denied, formatting and Python syntax checks pass. Both real pinned harnesses pass again with a clean environment at `/tmp/mjmb1473i/`.
-- [ ] Complete final review of the durable OpenCode bridge, push origin/master, install locally, confirm daemon handoff, and report findings to session 1ea309c3a68c04ca5e3e64aeda6ee07a.
+- [x] Final review completed: fix P1 retention ownership; decline the P2 cross-store exactly-once expansion because existing unacknowledged crash recovery deliberately permits redelivery.
+- [x] Push source through c64aa79a1, install locally, and confirm daemon handoff. Daemon PID 1397027 reports build c64aa79a1 and API readiness at 2026-11-08 05:11:37Z. Native and portable workers both report 2.69.0+9c5b4ffe75e530698765692c1f19e3301e900a60.
+- [x] Send confirmed findings, source links, validation and limits to session 1ea309c3a68c04ca5e3e64aeda6ee07a (message request dd0eccb5eca4a20a33f1d298528757e0). Dispatch macOS/Windows validation on master as run 42449504674.
 
 ## Surprises & Discoveries
 
@@ -28,9 +30,11 @@ Push review found that acknowledging the hook subprocess's pipe write preceded a
 
 Use existing durable wake prompts and steering for DSH, and the existing mailbox-hook lease protocol plus OpenCode's durable native inbox for OpenCode. This avoids a second Mjolnir delivery queue and new journal or database formats. Use `resume: false` so the current ACP-owned turn consumes steered input without starting an unowned native turn. Keep Claude and Codex delivery behavior intact. User explicitly requested direct implementation, then push and local installation before the final report; do not delegate implementation.
 
+Retain the established at-least-once crash contract. If native retention succeeds but a crash prevents the relay from applying an acknowledgement, a later ordinary idle wake may repeat the message. Per-event IDs deduplicate plugin retries, while eliminating ambiguity across every normal prompt would require a broader persisted delivery protocol. The P1 permanent-loss window is fixed; the P2 exactly-once expansion was explicitly declined and reported to the requester.
+
 ## Outcomes & Retrospective
 
-Both delivery paths are implemented and verified against the actual pinned harnesses. DSH needs no upstream change or release. The OpenCode plugin leaves tool results intact, skips native children using the real `parentID` API field, and uses the shared worker IPC transport so long Unix socket paths work. The contract regression covers failed retention, lost acknowledgements, batch changes on retry, and Unicode payloads larger than a pipe buffer. Final review, push and installation remain.
+Both delivery paths are implemented, pushed and installed, and verified against the actual pinned harnesses. DSH needs no upstream change or release. The OpenCode plugin leaves tool results intact, skips native children using the real `parentID` API field, and uses the shared worker IPC transport so long Unix socket paths work. The contract regression covers failed retention, lost acknowledgements, batch changes on retry, and Unicode payloads larger than a pipe buffer. Both real harnesses receive a 96 KiB message in request 2 of the original turn. Existing busy workers adopt the fixed worker when idle; their active turns are preserved. The requester has the source-backed findings and the remaining at-least-once crash limitation.
 
 ## Context and Orientation
 
@@ -73,3 +77,5 @@ Revision note (2026-11-07): initial plan records confirmed harness APIs and Jona
 Revision note (2026-11-08): record the implemented worker-owned plugin registration, the dispatch-order correction, and completed real-harness and Rust validation.
 
 Revision note (2026-11-08): replace pipe-write acknowledgement with durable native retention and per-event retry IDs after the P1 review finding. Final touched-crate tests and Clippy pass. Both real pinned harnesses pass with the final bridge and clean test environment at `/tmp/mjmb1473i/{open-code,dsh}/result.json`.
+
+Revision note (2026-11-08): record completed publication, local installation and daemon readiness, the review decision about existing crash semantics, and delivery of the final findings. Install evidence is `/tmp/mj1473-install.log`; platform CI is https://github.com/BrokkAi/mjolnir/actions/runs/42449504674.
