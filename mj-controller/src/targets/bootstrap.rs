@@ -105,6 +105,7 @@ pub(super) const BUNDLE_REPOSITORIES_PARALLEL_GROUP: u32 = 1;
 pub(crate) fn clone_commands(
     bundle: &ProjectBundleSpec,
     workspace: &str,
+    github_token: Option<&str>,
     wrap: impl Fn(Vec<String>) -> CommandSpec,
 ) -> Vec<CommandSpec> {
     let mut commands = vec![
@@ -122,12 +123,25 @@ pub(crate) fn clone_commands(
             .url
             .as_ref()
             .expect("validated network repository");
+        let wrap_fetch = |args: Vec<String>| {
+            if let Some(token) = github_token
+                && mj_core::remote_git::is_github_https_url(url)
+                && fetches_repository(&args)
+            {
+                let (args, input) = clone_with_github_token(args, token);
+                wrap(args).with_sensitive_stdin(input)
+            } else {
+                wrap(args)
+            }
+        };
         if let Some(cutoff) = &repository.history_cutoff {
             commands.extend(
                 cutoff_checkout_commands(&destination, url, repository, cutoff)
                     .into_iter()
                     .map(|(args, purpose)| {
-                        wrap(args).purpose(purpose).stage(ProvisionStage::Cloning)
+                        wrap_fetch(args)
+                            .purpose(purpose)
+                            .stage(ProvisionStage::Cloning)
                     }),
             );
             continue;
@@ -146,7 +160,7 @@ pub(crate) fn clone_commands(
         args.push(url.clone());
         args.push(destination);
         commands.push(
-            wrap(args)
+            wrap_fetch(args)
                 .purpose(format!("clone {}", repository.destination))
                 .stage(ProvisionStage::Cloning)
                 .parallel_group(BUNDLE_REPOSITORIES_PARALLEL_GROUP),
@@ -231,9 +245,8 @@ pub(super) fn fetches_repository(args: &[String]) -> bool {
     }
 }
 
-/// Run one `git clone` from [`clone_commands`] with a GitHub token that only
-/// that process sees. Bare hosts have no GitHub CLI login before the worker's
-/// credential sync, so a private HTTPS clone would otherwise prompt and fail.
+/// Run one checkout fetch with a GitHub token that only that process sees.
+/// This also provisions private repositories for workers without credentials.
 /// The token arrives on stdin, so it stays out of argv and Git configuration.
 pub(super) fn clone_with_github_token(args: Vec<String>, token: &str) -> (Vec<String>, Vec<u8>) {
     let mut wrapped = vec![
@@ -243,11 +256,13 @@ pub(super) fn clone_with_github_token(args: Vec<String>, token: &str) -> (Vec<St
             .to_owned(),
         "mj-github-token".to_owned(),
         "git".to_owned(),
-        "-c".to_owned(),
-        "credential.helper=".to_owned(),
-        "-c".to_owned(),
-        "credential.helper=!f() { if [ \"$1\" = get ]; then printf '%s\\n' username=x-access-token \"password=$GH_TOKEN\"; fi; }; f".to_owned(),
     ];
+    for host in ["github.com", "gist.github.com"] {
+        wrapped.extend([
+            "-c".into(), format!("credential.https://{host}.helper="),
+            "-c".into(), format!("credential.https://{host}.helper=!f() {{ if [ \"$1\" = get ]; then printf '%s\\n' username=x-access-token \"password=$GH_TOKEN\"; fi; }}; f"),
+        ]);
+    }
     debug_assert_eq!(args.first().map(String::as_str), Some("git"));
     wrapped.extend(args.into_iter().skip(1));
     let mut input = token.as_bytes().to_vec();

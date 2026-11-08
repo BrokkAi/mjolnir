@@ -2694,7 +2694,9 @@ fn aws_clone_receives_github_token_on_stdin_only() {
         workspace: format!(".local/share/hel/workspaces/{SESSION}"),
     };
     let token = "ghs_secret-token";
-    let plan = provision_on_locator_plan(&locator, SESSION, &bundle(), Some(token)).unwrap();
+    let mut repositories = bundle();
+    repositories.repositories[0].url = Some("https://github.com/example/app.git".into());
+    let plan = provision_on_locator_plan(&locator, SESSION, &repositories, Some(token)).unwrap();
     let clones = plan
         .commands
         .iter()
@@ -2704,7 +2706,7 @@ fn aws_clone_receives_github_token_on_stdin_only() {
     for command in clones {
         let remote = command.args.last().unwrap();
         assert!(unwrapped_remote_line(remote).starts_with("'sh' '-c' 'IFS= read -r GH_TOKEN"));
-        assert!(remote.contains("'credential.helper=' '-c' 'credential.helper=!f()"));
+        assert!(remote.contains("'credential.https://github.com.helper=' '-c' 'credential.https://github.com.helper=!f()"));
         assert!(remote.contains("'git' '-c'") && remote.contains("'clone'"));
         assert!(!format!("{command:?}").contains(token));
     }
@@ -2720,6 +2722,67 @@ fn aws_clone_receives_github_token_on_stdin_only() {
     );
 }
 
+// Hard-won: 6dbb3ac44: withholding worker credentials also removed private-checkout authentication.
+#[test]
+fn checkout_authentication_uses_real_git_without_persisting_the_token() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().to_string_lossy().into_owned();
+    let config = directory.path().join(".gitconfig");
+    let original = "[credential \"https://github.com\"]\nhelper = \"!f() { echo username=old; echo password=old; }; f\"\n";
+    std::fs::write(&config, original).unwrap();
+    let token = "checkout-only-secret";
+    let (args, mut input) = clone_with_github_token(
+        vec!["git".into(), "credential".into(), "fill".into()],
+        token,
+    );
+    input.extend_from_slice(b"protocol=https\nhost=github.com\n\n");
+    let mut command = CommandSpec::new(&args[0], args[1..].to_vec()).with_sensitive_stdin(input);
+    command.clear_env = true;
+    command.env.extend([
+        ("PATH".into(), std::env::var("PATH").unwrap()),
+        ("HOME".into(), home),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            config.to_string_lossy().into_owned(),
+        ),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+    ]);
+    let output = ProcessExecutor.execute(&command).unwrap();
+    assert_eq!(
+        output.status,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains(&format!("password={token}"))
+    );
+    assert_eq!(std::fs::read_to_string(config).unwrap(), original);
+    assert!(!format!("{command:?}").contains(token));
+
+    let mut bundle = bundle();
+    bundle.repositories[0].url = Some("https://github.com/example/app.git".into());
+    bundle.repositories[1].url = Some("https://example.invalid/non-github.git".into());
+    let commands = clone_commands(&bundle, "/workspace", Some(token), |args| {
+        CommandSpec::new(&args[0], args[1..].to_vec())
+    });
+    let clone = |purpose: &str| {
+        commands
+            .iter()
+            .find(|command| command.purpose == purpose)
+            .unwrap()
+            .to_node_run(false)
+    };
+    assert_eq!(
+        clone("clone app").sensitive_stdin.as_deref(),
+        Some(b"checkout-only-secret\n".as_slice())
+    );
+    assert!(clone("clone libs/lib").sensitive_stdin.is_none());
+}
+
 fn cutoff_bundle(reference: Option<&str>) -> ProjectBundleSpec {
     let mut bundle = bundle();
     bundle.repositories.truncate(1);
@@ -2733,7 +2796,7 @@ fn cutoff_bundle(reference: Option<&str>) -> ProjectBundleSpec {
 
 #[test]
 fn a_history_cutoff_initializes_and_fetches_by_object_id_instead_of_cloning() {
-    let commands = clone_commands(&cutoff_bundle(None), "/workspace", |args| {
+    let commands = clone_commands(&cutoff_bundle(None), "/workspace", None, |args| {
         CommandSpec::new(args[0].clone(), args[1..].to_vec())
     });
     let argv = commands
@@ -2775,6 +2838,7 @@ fn a_history_cutoff_initializes_and_fetches_by_object_id_instead_of_cloning() {
     let commands = clone_commands(
         &cutoff_bundle(Some("/run/hel/git-cache/key.bundle")),
         "/workspace",
+        None,
         |args| CommandSpec::new(args[0].clone(), args[1..].to_vec()),
     );
     assert!(commands.iter().all(|command| {
@@ -2804,8 +2868,9 @@ fn aws_cutoff_fetch_receives_github_token_on_stdin_only() {
         workspace: format!(".local/share/hel/workspaces/{SESSION}"),
     };
     let token = "ghs_secret-token";
-    let plan =
-        provision_on_locator_plan(&locator, SESSION, &cutoff_bundle(None), Some(token)).unwrap();
+    let mut repositories = cutoff_bundle(None);
+    repositories.repositories[0].url = Some("https://github.com/example/app.git".into());
+    let plan = provision_on_locator_plan(&locator, SESSION, &repositories, Some(token)).unwrap();
     let with_token = plan
         .commands
         .iter()
@@ -5221,6 +5286,7 @@ fn move_destination_generations_have_independent_container_and_volume_ownership(
         &[],
         None,
         &destination_name,
+        None,
     )
     .unwrap();
     assert!(plan.commands[0].args.contains(&destination_name));

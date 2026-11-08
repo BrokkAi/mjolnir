@@ -2188,6 +2188,7 @@ fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
         &[],
         Some(&container_workspace),
         &resource,
+        None,
     )
     .unwrap();
     let cloned = plan

@@ -745,7 +745,7 @@ impl Controller {
                         session_id,
                         bundle,
                         &mut runtime_mounts,
-                        container_github_token,
+                        github_token,
                         executor,
                     )
                 });
@@ -775,6 +775,7 @@ impl Controller {
                             &runtime_mounts,
                             session.container_workspace.as_deref(),
                             &resource_name,
+                            session.no_github_credentials.then_some(github_token).flatten(),
                         )
                     })
             };

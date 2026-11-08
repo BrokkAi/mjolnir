@@ -323,10 +323,28 @@ fn credential_free_container_creation_omits_runtime_token_environment() {
     session.no_github_credentials = true;
     let target =
         backend_target(&template, None, ContainerOverrides::for_session(&session)).unwrap();
-    let plan = targets::provision_plan(&target, &session.id, &probe_bundle(), &[], None).unwrap();
+    let plan = targets::provision_plan_named(
+        &target,
+        &session.id,
+        &probe_bundle(),
+        &[],
+        None,
+        &targets::resource_name(&session.id).unwrap(),
+        Some("checkout-secret"),
+    )
+    .unwrap();
     let run_args = &plan.commands[0].args;
     assert!(run_args.iter().all(|arg| !arg.contains("runtime-secret")));
     assert!(run_args.iter().any(|arg| arg == "NON_SECRET_SETTING=keep"));
+    for command in &plan.commands {
+        let input = command.to_node_run(false).sensitive_stdin;
+        if command.purpose.starts_with("clone ") {
+            assert_eq!(input.as_deref(), Some(b"checkout-secret\n".as_slice()));
+        } else {
+            assert!(input.is_none());
+        }
+    }
+    assert!(!format!("{plan:?}").contains("checkout-secret"));
 }
 
 const SSH_DOCKER_FAILURE_CHILD: &str = "MJ_TEST_SSH_DOCKER_FAILURE_CHILD";
