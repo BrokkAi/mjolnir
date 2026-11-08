@@ -3006,6 +3006,7 @@ mod executor_tests {
     }
 
     // Hard-won: leaked exec records: output cancellation must let the client exit normally.
+    // Hard-won: 1e324ede0: BSD head rejects zero-byte readers in this fixture.
     #[test]
     fn container_exec_drain_survives_closed_downstream_pipes() {
         let temp = tempfile::tempdir().unwrap();
@@ -3019,7 +3020,7 @@ mod executor_tests {
         let mut argv = vec![wrapped.program];
         argv.extend(wrapped.args);
         let line = format!(
-            "{{ {} 2>&1 1>&3 | head -c 0; }} 3>&1 | head -c 0",
+            "{{ {} 2>&1 1>&3 | true; }} 3>&1 | true",
             remote_command_line(&argv)
         );
         let result = ProcessExecutor
