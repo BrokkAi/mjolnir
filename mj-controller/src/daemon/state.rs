@@ -387,6 +387,13 @@ impl RuntimeState {
         Ok(Some(registered))
     }
 
+    /// Every session record, shared with the owner rather than copied.
+    pub(crate) fn session_records(
+        &self,
+    ) -> mj_core::snapshot_map::SnapshotMap<String, SessionRecord> {
+        self.owner().controller().state.sessions.clone()
+    }
+
     pub(super) fn live_session_ids(&self) -> BTreeSet<String> {
         self.owner()
             .controller()
