@@ -115,6 +115,11 @@ enum WorkerCommand {
         #[arg(long, value_parser = ["PostToolUse", "PostToolBatch"])]
         event: String,
     },
+    /// Exchange one mailbox lease request for a durable harness inbox.
+    MailboxRequest {
+        #[arg(long)]
+        socket: PathBuf,
+    },
     /// Serve Mjolnir-owned delegation tools over MCP stdio.
     SubagentMcp {
         #[arg(long)]
@@ -552,6 +557,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         WorkerCommand::MailboxHook { socket, event } => {
             mj_worker::mailbox_hook::run(&socket, &event)
         }
+        WorkerCommand::MailboxRequest { socket } => mj_worker::mailbox_hook::request(&socket),
 
         WorkerCommand::SubagentMcp {
             socket,

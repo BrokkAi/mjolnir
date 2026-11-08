@@ -26,6 +26,32 @@ use crate::subagent_mcp::DaemonContact;
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
 
+/// Register a worker-owned OpenCode 2 plugin without editing the user's home.
+pub(super) fn configure_opencode_mailbox_hook(
+    root: &Path,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let directory = root.join("opencode-mailbox");
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("create OpenCode plugin directory {}", directory.display()))?;
+    let worker = std::env::current_exe().context("locate worker for OpenCode mailbox transport")?;
+    let script = include_str!("../../assets/opencode-mailbox.js")
+        .replace("__MJ_WORKER__", &serde_json::to_string(&worker)?)
+        .replace(
+            "__MJ_SOCKET__",
+            &serde_json::to_string(&root.join("control.sock"))?,
+        );
+    let path = directory.join("index.js");
+    std::fs::write(&path, script)
+        .with_context(|| format!("write OpenCode mailbox hook {}", path.display()))?;
+    std::fs::write(
+        directory.join("package.json"),
+        r#"{"name":"mjolnir-mailbox","type":"module","main":"index.js"}"#,
+    )
+    .context("write OpenCode mailbox plugin manifest")?;
+    super::json_gh_rules::configure_opencode_plugin(&directory, environment)
+}
+
 const CODEX_CONFIG_ENV: &str = "CODEX_CONFIG";
 const CODEX_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
 const CLAUDE_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
@@ -1137,6 +1163,157 @@ impl Drop for LiveWaiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: #1473: OpenCode must retain each message before acknowledging the relay lease.
+    #[test]
+    fn opencode_mailbox_plugin_retains_before_ack_and_deduplicates_retries() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let mut environment = BTreeMap::from([(
+            "OPENCODE_CONFIG_CONTENT".into(),
+            "{ // keep user plugins\n\"plugins\": [\"user-plugin\"], \"permissions\": [] }".into(),
+        )]);
+        configure_opencode_mailbox_hook(root.path(), &mut environment).unwrap();
+        let once = environment.clone();
+        configure_opencode_mailbox_hook(root.path(), &mut environment).unwrap();
+        assert_eq!(environment, once);
+        assert!(environment["OPENCODE_CONFIG_CONTENT"].contains("user-plugin"));
+        let transport = root.path().join("transport.mjs");
+        std::fs::write(
+            &transport,
+            r##"#!/usr/bin/env node
+import { createConnection } from "node:net";
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => input += chunk);
+process.stdin.on("end", () => {
+  const connection = createConnection(process.argv.at(-1));
+  let reply = "";
+  connection.setEncoding("utf8");
+  connection.on("connect", () => connection.write(JSON.stringify({
+    request_id: "test", protocol_version: 1, request: JSON.parse(input),
+  }) + "\n"));
+  connection.on("data", chunk => reply += chunk);
+  connection.on("end", () => {
+    if (reply) process.stdout.write(JSON.stringify(JSON.parse(reply).payload));
+    else process.exitCode = 1;
+  });
+});
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&transport, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let plugin_path = root.path().join("opencode-mailbox/index.js");
+        let script = std::fs::read_to_string(&plugin_path).unwrap().replace(
+            &serde_json::to_string(&std::env::current_exe().unwrap()).unwrap(),
+            &serde_json::to_string(&transport).unwrap(),
+        );
+        std::fs::write(&plugin_path, script).unwrap();
+        let mut command = std::process::Command::new("node");
+        command
+            .args(["--input-type=module", "-"])
+            .env("MJ_HOOK_PLUGIN", plugin_path)
+            .env("MJ_HOOK_SOCKET", root.path().join("control.sock"));
+        let output = mj_core::subprocess::run_with_input(
+            &mut command,
+            br#"
+import assert from "node:assert/strict";
+import { createServer } from "node:net";
+import { pathToFileURL } from "node:url";
+const plugin = (await import(pathToFileURL(process.env.MJ_HOOK_PLUGIN))).default;
+const retained = new Map();
+const first = {key: "oracle", text: "mailbox:" + "\u754c\u{1f680}".repeat(20 * 1024)};
+const second = {key: "child", text: "second message"};
+let contexts = [first];
+let drains = 0;
+let acknowledgements = 0;
+let rejectRetention = true;
+let loseAcknowledgement = true;
+const server = createServer(connection => {
+  let input = "";
+  connection.setEncoding("utf8");
+  connection.on("data", chunk => {
+    input += chunk;
+    if (!input.includes("\n")) return;
+    const request = JSON.parse(input.slice(0, input.indexOf("\n")));
+    let payload;
+    if (request.request.method === "drain_mailbox") {
+      drains++;
+      payload = {type: "mailbox_drained", data: {lease_id: "lease-" + drains, contexts}};
+    } else {
+      assert.equal(request.request.method, "ack_mailbox");
+      assert.ok(contexts.every(context => [...retained.values()].includes(context.text)),
+        "every message must already be retained when the relay is acknowledged");
+      acknowledgements++;
+      if (loseAcknowledgement) {
+        loseAcknowledgement = false;
+        connection.end();
+        return;
+      }
+      payload = {type: "mailbox_acknowledged", data: {acknowledged: true}};
+    }
+    connection.end(JSON.stringify({request_id: request.request_id,
+      protocol_version: request.protocol_version, result: "ok", payload}) + "\n");
+  });
+});
+await new Promise(resolve => server.listen(process.env.MJ_HOOK_SOCKET, resolve));
+let hook;
+let disposed = false;
+try {
+  const cleanup = await plugin.setup({
+    session: {
+      get: async ({sessionID}) => ({parentID: sessionID === "native-child" ? "lead" : undefined}),
+      synthetic: async ({id, text, delivery, resume}) => {
+        assert.equal(delivery, "steer");
+        assert.equal(resume, false);
+        if (rejectRetention) {
+          rejectRetention = false;
+          throw new Error("retention failed");
+        }
+        if (retained.has(id)) assert.equal(retained.get(id), text);
+        retained.set(id, text);
+      },
+    },
+    tool: {hook: async (name, callback) => {
+      assert.equal(name, "execute.after");
+      hook = callback;
+      return {dispose: () => {disposed = true}};
+    }},
+  });
+  const event = {sessionID: "lead", status: "completed", result: {content: "tool output", output: {ok: true}}};
+  await assert.rejects(hook(event), /retention failed/);
+  assert.equal(acknowledgements, 0);
+  await assert.rejects(hook(event), /mailbox request exited/);
+  assert.equal(retained.size, 1);
+  // An expired unacknowledged lease can include newer events on retry.
+  contexts = [first, second];
+  await hook(event);
+  assert.equal(retained.size, 2);
+  assert.deepEqual(event.result, {content: "tool output", output: {ok: true}});
+  const child = {sessionID: "native-child", status: "completed", result: {content: "child output"}};
+  await hook(child);
+  assert.equal(drains, 3);
+  assert.equal(acknowledgements, 2);
+  await cleanup();
+  assert.ok(disposed);
+} finally {
+  await new Promise(resolve => server.close(resolve));
+}
+console.log("OpenCode durable mailbox bridge passed");
+"#,
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "OpenCode durable mailbox bridge passed"
+        );
+    }
 
     #[test]
     fn a_kimi_reviewer_registers_handback_in_its_private_runtime_profile() {

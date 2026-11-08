@@ -78,6 +78,32 @@ fn string_value(node: Option<CstNode>) -> Option<String> {
     node?.as_string_lit()?.decoded_value().ok()
 }
 
+pub(super) fn configure_opencode_plugin(
+    directory: &std::path::Path,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let original = environment
+        .get(OPENCODE_CONTENT)
+        .map(String::as_str)
+        .unwrap_or("{}");
+    let (document, object) = document(original).context(OPENCODE_CONTENT)?;
+    let plugins = object
+        .array_value_or_create("plugins")
+        .context("OPENCODE_CONFIG_CONTENT plugins must be an array")?;
+    let directory = directory
+        .to_str()
+        .context("OpenCode plugin path is not UTF-8")?;
+    if !plugins
+        .elements()
+        .iter()
+        .any(|node| string_value(Some(node.clone())).as_deref() == Some(directory))
+    {
+        plugins.append(directory.into());
+    }
+    environment.insert(OPENCODE_CONTENT.into(), document.to_string());
+    Ok(())
+}
+
 /// One native permission rule, as OpenCode 2.2.6 lists them in `permissions`.
 type Rule = (&'static str, &'static str, &'static str);
 

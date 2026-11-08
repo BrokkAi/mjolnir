@@ -76,8 +76,26 @@ pub enum HarnessTurnPolicy {
 enum SteeringDeliveryMode {
     #[default]
     Acp,
+    /// The harness has no mailbox hook; carry waking events through its
+    /// ordinary durable prompt queue and safe-boundary steering instead.
+    AcpWithMailbox,
     ClaudePostToolBatch,
     ClaudeTurnEnd,
+}
+
+impl SteeringDeliveryMode {
+    fn for_harness(harness: mj_core::config::HarnessKind, claude_hook: bool) -> Self {
+        match (harness, claude_hook) {
+            (mj_core::config::HarnessKind::Dsh, _) => Self::AcpWithMailbox,
+            (mj_core::config::HarnessKind::Claude, true) => Self::ClaudePostToolBatch,
+            (mj_core::config::HarnessKind::Claude, false) => Self::ClaudeTurnEnd,
+            _ => Self::Acp,
+        }
+    }
+
+    fn uses_acp(self) -> bool {
+        matches!(self, Self::Acp | Self::AcpWithMailbox)
+    }
 }
 
 /// How long a stop sent during a turn Claude Code started on its own waits
@@ -493,10 +511,9 @@ impl DurableRelay {
             steering_supported: None,
             initial_commands: initial_commands.to_vec(),
             automatic_steering: false,
-            steering_delivery_mode: match harness {
-                Some(mj_core::config::HarnessKind::Claude) => SteeringDeliveryMode::ClaudeTurnEnd,
-                _ => SteeringDeliveryMode::Acp,
-            },
+            steering_delivery_mode: harness
+                .map(|harness| SteeringDeliveryMode::for_harness(harness, false))
+                .unwrap_or_default(),
             snapshot,
             journal_spans,
             hot_events,
@@ -841,13 +858,8 @@ impl DurableRelay {
         harness: mj_core::config::HarnessKind,
         claude_post_tool_batch_hook: bool,
     ) {
-        self.steering_delivery_mode = match (harness, claude_post_tool_batch_hook) {
-            (mj_core::config::HarnessKind::Claude, true) => {
-                SteeringDeliveryMode::ClaudePostToolBatch
-            }
-            (mj_core::config::HarnessKind::Claude, false) => SteeringDeliveryMode::ClaudeTurnEnd,
-            _ => SteeringDeliveryMode::Acp,
-        };
+        self.steering_delivery_mode =
+            SteeringDeliveryMode::for_harness(harness, claude_post_tool_batch_hook);
     }
 
     /// The relay-owned turn boundary shared by command promotion, checkpoint
