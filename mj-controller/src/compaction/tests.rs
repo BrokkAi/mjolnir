@@ -464,7 +464,7 @@ fn exchanges(turns: &[(&str, &str)]) -> CanonicalSessionSnapshot {
     )
 }
 
-// Hard-won: Jev billing investigation: recent turns retained full tool payloads.
+// Hard-won: 55814448c: recent-turn classification retained full tool payloads.
 #[test]
 fn recent_turns_use_compaction_grouping_and_markup_before_selecting_the_tail() {
     let mut snapshot = exchanges(&[

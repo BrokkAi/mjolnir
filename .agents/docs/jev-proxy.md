@@ -136,6 +136,10 @@ compaction preserves. Conversation messages and plans remain available. The
 creation prompt interprets these summaries and requires successful creation
 with identifying evidence; a failed or unfinished command, or a generic
 creation command without the created item's identity, does not establish ownership.
+If an identity appeared only in discarded tool output, such as the URL from
+`gh pr create --fill`, the session can receive its own item notification before
+the assistant reports it. This is the accepted summary-only evidence tradeoff:
+abstain from ownership instead of suppressing another session's relevant item.
 
 `python3 scripts/jev-github-item-eval.py --run --output <file>` evaluates the
 synthetic summary-only controls in
