@@ -1312,6 +1312,71 @@ pub(super) fn load_materialized_session_with(
     connection: &rusqlite::Transaction<'_>,
     session_id: &str,
 ) -> Result<Option<MaterializedSession>> {
+    load_materialized_session_bounded(connection, session_id, None)
+}
+
+/// The projection with its transcript cut to the session's last `turns` user
+/// turns. Rendering a session's recent turns then reads those turns rather
+/// than everything that ever happened in it. A session with fewer turns is
+/// loaded whole.
+pub fn load_materialized_recent_turns(
+    session_id: &str,
+    turns: usize,
+) -> Result<Option<MaterializedSession>> {
+    load_materialized_recent_turns_from(&database_path(), session_id, turns)
+}
+
+pub(super) fn load_materialized_recent_turns_from(
+    path: &Path,
+    session_id: &str,
+    turns: usize,
+) -> Result<Option<MaterializedSession>> {
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
+    let start = match turns.checked_sub(1) {
+        None => None,
+        Some(skip) => connection
+            .query_row(
+                "SELECT position, stable_id
+                 FROM materialized_transcript_items
+                 WHERE session_id = ?1
+                   AND json_extract(
+                       CASE
+                           WHEN stable_id GLOB 'user:*' OR stable_id GLOB 'user-*'
+                           THEN body_json
+                           ELSE '{}'
+                       END,
+                       '$.kind'
+                   ) = 'user'
+                 ORDER BY position DESC, stable_id DESC
+                 LIMIT 1 OFFSET ?2",
+                params![session_id, skip as i64],
+                |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?,
+    };
+    let limit = match (turns, start) {
+        (0, _) => Some(0),
+        (_, None) => None,
+        // The transcript is ordered by position, then stable id, so the items
+        // from the start onward are exactly the newest this many.
+        (_, Some((position, stable_id))) => Some(connection.query_row(
+            "SELECT COUNT(*)
+             FROM materialized_transcript_items
+             WHERE session_id = ?1
+               AND (position > ?2 OR (position = ?2 AND stable_id >= ?3))",
+            params![session_id, position as i64, stable_id],
+            |row| row.get::<_, usize>(0),
+        )?),
+    };
+    load_materialized_session_bounded(&connection, session_id, limit)
+}
+
+fn load_materialized_session_bounded(
+    connection: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    transcript_limit: Option<usize>,
+) -> Result<Option<MaterializedSession>> {
     let Some(fields) = read_materialized_session_fields(connection, session_id)? else {
         return Ok(None);
     };
@@ -1323,7 +1388,7 @@ pub(super) fn load_materialized_session_with(
         execution: fields.execution,
         session_title: fields.session_title,
         configuration: fields.configuration,
-        transcript: read_materialized_transcript(connection, session_id, None)?,
+        transcript: read_materialized_transcript(connection, session_id, transcript_limit)?,
         queued_prompts: read_materialized_queued_prompts(connection, session_id)?,
         pending_elicitations: fields.pending_elicitations,
         active_turn: fields.active_turn,
