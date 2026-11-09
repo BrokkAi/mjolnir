@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 119;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 121;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2267,12 +2267,13 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
-    // Compatible: rows that belong to a session which is gone (deleted, or
+    // Breaking: rows that belong to a session which is gone (deleted, or
     // destroyed with data loss) are removed by triggers in the transaction
     // that removes the session, and an insert for a gone session is ignored,
-    // so no ordering of writers can leave one behind. Older builds read and
-    // write the same columns; they only find that such rows no longer exist,
-    // which their own periodic cleanup also ensured. The floor stays at 119.
+    // so no ordering of writers can leave one behind. A revision-120 build
+    // reads an enqueued event back after inserting it; when a trigger ignores
+    // that insert the read fails and rolls back the build's whole write, so
+    // older builds must not write this store.
     if version < 121 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
@@ -2313,6 +2314,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
                  SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss');
              DELETE FROM github_watch_classification_failures WHERE session_id NOT IN (
                  SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss');
+             UPDATE schema_compatibility SET minimum_compatible_version = 121 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (121, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
              PRAGMA user_version = 121;

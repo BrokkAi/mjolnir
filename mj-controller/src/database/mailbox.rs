@@ -86,6 +86,22 @@ pub(crate) struct SubagentMailboxMessage {
     pub accepted_ordinal: Option<u64>,
 }
 
+/// What an enqueue did. The store ignores an event for a session that is
+/// gone (schema revision 121), so the caller learns there is no one to
+/// deliver to and decides whether that is an error for its sender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Enqueued {
+    Inserted,
+    AlreadyQueued,
+    TargetGone,
+}
+
+impl Enqueued {
+    pub(crate) fn inserted(self) -> bool {
+        self == Self::Inserted
+    }
+}
+
 /// Insert one event once. Reusing a key for a different target or payload is a
 /// producer error; silently treating it as the original event could deliver
 /// the wrong message to the wrong session.
@@ -95,7 +111,7 @@ pub(crate) fn enqueue_mailbox_event(
     event_json: &str,
     wake: bool,
     unpark: bool,
-) -> Result<bool> {
+) -> Result<Enqueued> {
     let event_key = event_key.to_owned();
     let target_session_id = target_session_id.to_owned();
     let event_json = event_json.to_owned();
@@ -109,7 +125,7 @@ pub(crate) fn enqueue_mailbox_event(
             unpark,
         )
     })?;
-    if inserted {
+    if inserted.inserted() {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
     }
     Ok(inserted)
@@ -122,7 +138,7 @@ pub(crate) fn enqueue_mailbox_event_with(
     event_json: &str,
     wake: bool,
     unpark: bool,
-) -> Result<bool> {
+) -> Result<Enqueued> {
     let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(event_json)?;
     ensure!(
         event.key == event_key && event.wake == wake,
@@ -150,9 +166,7 @@ pub(crate) fn enqueue_mailbox_event_with(
         )
         .optional()?
     else {
-        // The store ignores an event for a session that is gone (see schema
-        // revision 121): there is no one left to deliver it to.
-        return Ok(false);
+        return Ok(Enqueued::TargetGone);
     };
     let original: mj_core::mailbox::MailboxEvent = serde_json::from_str(&existing.1)?;
     if existing.0 != target_session_id
@@ -169,7 +183,11 @@ pub(crate) fn enqueue_mailbox_event_with(
     }
     // The durable row is authoritative on a retry. Timestamp, source, and
     // unpark metadata from a later request do not rewrite the first event.
-    Ok(inserted)
+    Ok(if inserted {
+        Enqueued::Inserted
+    } else {
+        Enqueued::AlreadyQueued
+    })
 }
 
 /// Select a bounded batch for each target so blocked targets cannot starve others.
@@ -450,7 +468,7 @@ mod tests {
                 false,
             )
             .unwrap();
-            assert!(!inserted, "{gone}");
+            assert_eq!(inserted, Enqueued::TargetGone, "{gone}");
             assert_eq!(rows(gone), 0, "{gone}");
         }
     }

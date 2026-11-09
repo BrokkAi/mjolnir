@@ -284,12 +284,17 @@ impl ApiBackend {
         let event_key = event_key.to_owned();
         let target = target.to_owned();
         let admission = crate::upgrade::activity_unless_draining("session message outbox write")?;
-        blocking("enqueue session message", move || {
+        let recipient = target.clone();
+        let enqueued = blocking("enqueue session message", move || {
             let _admission = admission;
             crate::database::enqueue_mailbox_event(&event_key, &target, &event_json, true, unpark)
         })
-        .await
-        .map(|_| ())
+        .await?;
+        anyhow::ensure!(
+            enqueued != crate::database::Enqueued::TargetGone,
+            "session {recipient} no longer exists, so the message was not delivered"
+        );
+        Ok(())
     }
 
     pub(super) async fn subagent_input_progress(&self, parent: &str) -> Result<InputProgress> {
@@ -564,7 +569,8 @@ impl ApiBackend {
                     via: "mailbox",
                     source,
                 })?;
-        blocking("enqueue parent message for child", move || {
+        let recipient = target.clone();
+        let enqueued = blocking("enqueue parent message for child", move || {
             let _admission = admission;
             crate::database::enqueue_mailbox_event(&event_key, &target, &event_json, true, true)
         })
@@ -573,6 +579,15 @@ impl ApiBackend {
             via: "mailbox",
             source,
         })?;
+        if enqueued == crate::database::Enqueued::TargetGone {
+            return Err(InputDeliveryFailure {
+                via: "mailbox",
+                source: anyhow::anyhow!(
+                    "session {recipient} no longer exists, so the message was not delivered"
+                ),
+            }
+            .into());
+        }
         Ok(())
     }
 }
