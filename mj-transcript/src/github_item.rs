@@ -17,11 +17,15 @@ const MENTION_LEAD_BYTES: usize = 96;
 /// plain prefix would drop the reference the mention was chosen for. The
 /// parser's offset, not a text search, places the window: `#12` must not
 /// land on `#123`, and each occurrence keeps its own context.
-fn mention_window(line: &str, at: usize) -> String {
+fn mention_window(line: &str, at: usize, reference_len: usize) -> String {
     if line.len() <= MENTION_BYTES {
         return line.to_owned();
     }
-    let start = line.floor_char_boundary(at.saturating_sub(MENTION_LEAD_BYTES));
+    // Shrink the lead so the whole reference fits: a URL with long owner and
+    // repository names can take most of the window by itself.
+    let lead_bytes = MENTION_LEAD_BYTES
+        .min(MENTION_BYTES.saturating_sub(reference_len + 2 * MENTION_ELISION.len()));
+    let start = line.floor_char_boundary(at.saturating_sub(lead_bytes));
     let lead = if start > 0 { MENTION_ELISION } else { "" };
     let rest = &line[start..];
     let room = MENTION_BYTES - lead.len();
@@ -115,7 +119,7 @@ pub fn session_digest(session: &MaterializedSession) -> SessionContext {
         // Index full lines before conversation truncation or the reference-list cap.
         for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
             for reference in mj_core::github_reference::github_references(line) {
-                let window = mention_window(line, reference.start);
+                let window = mention_window(line, reference.start, reference.text.len());
                 digest.mention_candidates.push((reference, window));
             }
         }
@@ -205,8 +209,18 @@ mod tests {
             .find(|r| r.number == 12)
             .unwrap()
             .start;
-        let window = mention_window(&long, at);
+        let window = mention_window(&long, at, "#12".len());
         assert!(window.len() <= MENTION_BYTES && window.contains("reviewing #12 next"));
+        // GitHub allows 39-byte owners and 100-byte repository names.
+        let url = format!(
+            "https://github.com/{}/{}/pull/123456",
+            "o".repeat(39),
+            "r".repeat(100)
+        );
+        let long = format!("{} {url} {}", "x".repeat(300), "y".repeat(300));
+        let at = long.find(&url).unwrap();
+        let window = mention_window(&long, at, url.len());
+        assert!(window.len() <= MENTION_BYTES && window.contains(&url));
         assert!(window.starts_with(MENTION_ELISION) && window.ends_with(MENTION_ELISION));
     }
 
