@@ -292,8 +292,6 @@ pub struct DurableRelay {
     /// Whether Kimi's provider-owned background work is synchronized. Other
     /// policies leave this absent.
     background_work_known: Option<bool>,
-    /// Agent output observed during the current process-local harness turn.
-    harness_turn_output_seen: bool,
     /// Whether the daemon will act on a `Continue` verdict. Off when the
     /// launch environment says automatic continuation is disabled.
     continuation_enabled: bool,
@@ -606,7 +604,6 @@ impl DurableRelay {
             kimi_observed_task_ids: BTreeSet::new(),
             kimi_observed_tool_ids: BTreeSet::new(),
             background_work_known: None,
-            harness_turn_output_seen: false,
             continuation_enabled: true,
             task_settled_at_ms: None,
             active_agent_terminals: BTreeMap::new(),
@@ -1322,9 +1319,6 @@ impl DurableRelay {
         if claude && !ack && self.opens_harness_turn(&update) {
             self.open_harness_turn_if_allowed()?;
         }
-        if claude && !ack && self.snapshot.harness_turn.is_some() && is_agent_output(&update) {
-            self.harness_turn_output_seen = true;
-        }
         self.foreground_tools.observe_with_start(
             &update,
             self.step_clock.started_at_ms().unwrap_or_else(epoch_millis),
@@ -1356,18 +1350,10 @@ impl DurableRelay {
         {
             return Ok(());
         }
-        // claude-agent-acp 0.97.0 dist/acp-agent.js (4906–4911, 5230–5238):
-        // successful zero-turn results precede the coalesced task follow-up.
-        if result.num_turns == 0
-            && !result.is_error
-            && self.air_tasks.values().any(|entry| {
-                entry.turn_ordinal().is_some_and(|ordinal| {
-                    self.snapshot
-                        .harness_turn
-                        .is_some_and(|turn| turn.first_ordinal == ordinal)
-                })
-            })
-        {
+        // Since claude-agent-acp 0.101.1 (#1455), an announced task owns its
+        // boundary. Raw results can precede its final output or belong to a
+        // previous cycle; only that task's terminal edge may release its turn.
+        if self.announced_harness_turn() {
             return Ok(());
         }
         self.settle_harness_turn(
@@ -1385,6 +1371,15 @@ impl DurableRelay {
         )
     }
 
+    /// The announced task owns this turn's completion, including after a stop.
+    fn announced_harness_turn(&self) -> bool {
+        self.snapshot.harness_turn.is_some_and(|turn| {
+            self.air_tasks
+                .values()
+                .any(|entry| entry.turn_ordinal() == Some(turn.first_ordinal))
+        })
+    }
+
     /// The first ordinal of the open Claude harness turn a stop was applied
     /// to, while nothing has answered that stop yet. Claude Code answers a
     /// stop of a running cycle with the cycle's result; a turn it never ran
@@ -1392,7 +1387,7 @@ impl DurableRelay {
     /// [`HARNESS_TURN_STOP_GRACE`]. The snapshot owns the stop: a journal
     /// event records it, so it is the same on every path and after a restart.
     pub fn unanswered_harness_turn_stop(&self) -> Option<u64> {
-        if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter {
+        if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter || self.announced_harness_turn() {
             return None;
         }
         let turn = self.snapshot.autonomous_harness_turn()?;
@@ -1542,7 +1537,6 @@ impl DurableRelay {
         self.end_checkpoint_hold()?;
         if self.can_open_harness_turn() {
             self.task_settled_at_ms = None;
-            self.harness_turn_output_seen = false;
             self.append_relay_event(
                 None,
                 RelayObservation::HarnessTurnStarted {

@@ -348,8 +348,8 @@ async fn locate_in_image(
     })
 }
 
-/// The target's `bridge` on `PATH` when it is usable: present, and for Codex,
-/// the pinned version.
+/// The target's `bridge` on `PATH` when it is usable: present, and for Codex
+/// and Claude, the pinned version their worker-side protocol handling requires.
 async fn compatible_bridge(
     harness: HarnessKind,
     bridge: crate::harness_runtime::NpmBridge,
@@ -363,7 +363,7 @@ async fn compatible_bridge(
     let Some(selected) = selected else {
         return Ok(None);
     };
-    if harness != HarnessKind::Codex {
+    if !matches!(harness, HarnessKind::Codex | HarnessKind::Claude) {
         return Ok(Some(selected));
     }
     let mut probe = tokio::process::Command::new(&selected);
@@ -373,10 +373,14 @@ async fn compatible_bridge(
     }
     let output = crate::subprocess::run_bounded(&mut probe, 64 * 1024, Duration::from_secs(10))
         .await
-        .context("check installed Codex bridge version")?;
+        .with_context(|| format!("check installed {} bridge version", harness.display_name()))?;
+    let expected = if harness == HarnessKind::Claude {
+        bridge.version.to_owned()
+    } else {
+        format!("{} {}", bridge.package, bridge.version)
+    };
     let compatible = output.status.success()
-        && String::from_utf8_lossy(&output.stdout).trim_end_matches('\n')
-            == format!("{} {}", bridge.package, bridge.version);
+        && String::from_utf8_lossy(&output.stdout).trim_end_matches('\n') == expected;
     Ok(compatible.then_some(selected))
 }
 
@@ -2503,6 +2507,74 @@ mod tests {
         }
     }
 
+    // Hard-won: #1477: upgrading a retained container's worker left its older Claude bridge in use.
+    #[test]
+    fn an_older_container_claude_bridge_selects_the_managed_pin_without_replacing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_home = temp.path().join("cache");
+        let cache = managed_harness_cache_root(Some(cache_home.as_os_str()), None).unwrap();
+        let selected = pin(HarnessKind::Claude);
+        let root = cache.join(HarnessKind::Claude.id());
+        complete_fake(
+            &root,
+            HarnessKind::Claude,
+            selected.install_id,
+            selected.entrypoint,
+        );
+        let install = root.join(selected.install_id);
+        executable(
+            &install.join(HarnessKind::Claude.extra_managed_entrypoint().unwrap()),
+            "#!/bin/sh\nexit 0\n",
+        );
+        let mut environment = fake_node_tools(temp.path(), &temp.path().join("unused"));
+        environment.insert(
+            "XDG_CACHE_HOME".into(),
+            cache_home.to_string_lossy().into_owned(),
+        );
+        environment.insert("HOME".into(), temp.path().to_string_lossy().into_owned());
+        let image_bridge = temp.path().join("bin/claude-agent-acp");
+        let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bridge-version.sh");
+        std::os::unix::fs::symlink(&probe, &image_bridge).unwrap();
+        environment.insert("MJ_TEST_BRIDGE_VERSION".into(), "0.99.0".into());
+        let (command, args) = crate::harness_runtime::fallback_launch(
+            HarnessKind::Claude,
+            ExecutionPolicy::ConfiguredApprovals,
+        );
+        let located = run_async(locate(
+            HarnessRuntimePolicy::Ambient,
+            HarnessKind::Claude,
+            ExecutionPolicy::ConfiguredApprovals,
+            Path::new(&command),
+            &args,
+            &environment,
+        ))
+        .unwrap();
+        assert!(located.managed.is_some());
+        assert_eq!(located.command, install.join(selected.entrypoint));
+        assert_eq!(
+            located.environment["CLAUDE_CODE_EXECUTABLE"],
+            install.join(selected.cli_entrypoint).to_string_lossy(),
+        );
+        assert_eq!(std::fs::read_link(&image_bridge).unwrap(), probe);
+        drop(located);
+
+        environment.insert(
+            "MJ_TEST_BRIDGE_VERSION".into(),
+            npm_bridge(HarnessKind::Claude).unwrap().version.into(),
+        );
+        let located = run_async(locate(
+            HarnessRuntimePolicy::Ambient,
+            HarnessKind::Claude,
+            ExecutionPolicy::ConfiguredApprovals,
+            Path::new(&command),
+            &args,
+            &environment,
+        ))
+        .unwrap();
+        assert!(located.managed.is_none());
+        assert_eq!(located.command, image_bridge.canonicalize().unwrap());
+    }
+
     /// The daemon container's only harness source is its image: a missing
     /// program is an error naming the image, a complete image is used as is,
     /// and neither case touches a managed cache under `HOME`.
@@ -2541,6 +2613,10 @@ mod tests {
         let codex = npm_bridge(HarnessKind::Codex).unwrap();
         let versions = [
             ("codex-acp", format!("{} {}", codex.package, codex.version)),
+            (
+                "claude-agent-acp",
+                crate::harness_runtime::CLAUDE_ACP_VERSION.to_owned(),
+            ),
             (
                 "dsh-acp",
                 format!("dsh-acp {}", crate::harness_runtime::DSH_ACP_VERSION),

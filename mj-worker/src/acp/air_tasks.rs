@@ -84,6 +84,7 @@ pub(super) fn air_task_update(
                 Some(state @ ("completed" | "failed" | "stopped")) => AirTaskUpdate::Finished {
                     task_id,
                     settled: state != "stopped",
+                    failed: state == "failed",
                 },
                 state => return Err(format!("unknown AIR async task state {state:?}")),
             }
