@@ -100,6 +100,10 @@ pub enum RelayRequest {
     Attach {
         after_ordinal: u64,
         after_digest: String,
+        /// The digest of the operational state the controller holds, from
+        /// [`RelayResponsePayload::Attached`]. Protocol 57.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        known_state_digest: Option<String>,
     },
     Acknowledge {
         through_ordinal: u64,
@@ -706,6 +710,17 @@ pub enum RelayResponsePayload {
     },
     Attached {
         state: RelayOperationalState,
+        events: Vec<RelayEvent>,
+        through_ordinal: u64,
+        through_digest: String,
+        /// [`super::relay_state_digest`] of `state`, for a controller that
+        /// negotiated protocol 57 to name in its next attach.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state_digest: Option<String>,
+    },
+    /// An attach whose `known_state_digest` still matches: the state is the
+    /// one the controller holds, so only the events are sent. Protocol 57.
+    AttachedWithKnownState {
         events: Vec<RelayEvent>,
         through_ordinal: u64,
         through_digest: String,

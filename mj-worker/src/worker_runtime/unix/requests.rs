@@ -15,6 +15,7 @@ use super::*;
 pub(crate) async fn handle_request(
     relay: &Arc<Mutex<DurableRelay>>,
     envelope: RelayRequestEnvelope,
+    harness_preparation: Option<mj_core::relay::HarnessPreparation>,
 ) -> Result<RelayResponseEnvelope> {
     // Sealing and garbage collection can move the segments a plan named
     // while it is being read. That is not the controller's fault and not
@@ -31,6 +32,7 @@ pub(crate) async fn handle_request(
         }
     };
     for _ in 0..REPLAN_ATTEMPTS {
+        deferred.set_harness_preparation(harness_preparation.clone());
         let generation = deferred.journal_generation();
         let response = tokio::task::spawn_blocking(move || deferred.finish())
             .await

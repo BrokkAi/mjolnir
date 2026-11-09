@@ -1152,8 +1152,7 @@ fn catch_up_page_stops_at_the_frontier_captured_before_stream_growth() {
         ordinal: all[1].ordinal,
         digest: all[1].digest.clone(),
     };
-    let page = RelayAttachment {
-        state: relay.operational_state(),
+    let page = RelayEventPage {
         events: all[1..].to_vec(),
         through_ordinal: all[2].ordinal,
         through_digest: all[2].digest.clone(),

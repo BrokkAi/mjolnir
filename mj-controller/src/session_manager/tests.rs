@@ -1609,6 +1609,16 @@ fn leased_relay_child_serves_stdio() {
                     ..
                 }
             );
+            // This fake edits the state below, after the relay digested it, so
+            // it cannot vouch for a digest: every attach gets the whole state.
+            let mut request = request;
+            if preparation.is_some()
+                && let RelayRequest::Attach {
+                    known_state_digest, ..
+                } = &mut request.request
+            {
+                *known_state_digest = None;
+            }
             let mut response =
                 if let mj_core::relay::RelayRequest::Reviewer { role, .. } = &request.request {
                     if let Some(marker) = &marker
@@ -1649,12 +1659,24 @@ fn leased_relay_child_serves_stdio() {
             }
             if let Some(preparation) = preparation {
                 relay.dispatch_preparation_lifecycle().unwrap();
-                if let RelayResponseBody::Ok {
-                    payload:
-                        RelayResponsePayload::Status(state)
-                        | RelayResponsePayload::Attached { state, .. },
-                } = &mut response.body
-                {
+                let state = match &mut response.body {
+                    RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::Status(state),
+                    } => Some(state),
+                    RelayResponseBody::Ok {
+                        payload:
+                            RelayResponsePayload::Attached {
+                                state,
+                                state_digest,
+                                ..
+                            },
+                    } => {
+                        *state_digest = None;
+                        Some(state)
+                    }
+                    _ => None,
+                };
+                if let Some(state) = state {
                     state.harness_preparation = Some(preparation);
                     if let Ok(shell) =
                         std::fs::read(PathBuf::from(&root).join("active-user-shell.json"))

@@ -211,7 +211,7 @@ pub(super) async fn read_bounded_frame_with_limit(
 }
 
 pub(super) fn clip_catch_up_page(
-    page: RelayAttachment,
+    page: RelayEventPage,
     previous: &RelayCursor,
     frontier: &RelayCursor,
 ) -> Result<RelayEventPage> {

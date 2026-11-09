@@ -74,6 +74,7 @@ fn relay_events(relay: &mut DurableRelay, request_id: &str) -> Vec<mj_core::rela
         request: RelayRequest::Attach {
             after_ordinal: 0,
             after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            known_state_digest: None,
         },
     });
     let RelayResponseBody::Ok {
@@ -83,6 +84,7 @@ fn relay_events(relay: &mut DurableRelay, request_id: &str) -> Vec<mj_core::rela
                 through_ordinal: _,
                 through_digest: _,
                 state: _,
+                state_digest: _,
             },
     } = response.body
     else {
@@ -275,6 +277,7 @@ fn real_mailbox_hook_drains_once_over_the_control_socket_with_large_stdin() {
         request: RelayRequest::Attach {
             after_ordinal: 0,
             after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            known_state_digest: None,
         },
     });
     let RelayResponseBody::Ok {

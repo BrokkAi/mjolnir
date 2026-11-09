@@ -15,8 +15,9 @@ After this work, orphan rows cannot exist, so the sweep is gone; a worker omits 
 
 - [x] (2026-11-09) Profile and locate the three costs; record evidence under `/mnt/optane/tmp/mj-cpu-20261106/` (`after5.data`, `after5.script`).
 - [x] (2026-11-09) Milestone 1: migration 121 adds triggers that make orphan mailbox and GitHub rows impossible; the five-second sweep and `prune_mailbox_events_for_missing_sessions` are removed. Test `rows_of_a_gone_session_cannot_outlive_it`; 629 + 913 controller tests and clippy pass. Historical fixtures drop the triggers (`drop_session_row_triggers`), and two fixtures now save the session their GitHub rows name.
-- [ ] Milestone 2: relay protocol 57; `Attach` carries the daemon's state digest and the worker omits an unchanged state.
-- [ ] Milestone 3: relay protocol 57 `WaitForChange` on a dedicated connection; session actors stop timer polling for workers that support it.
+- [x] (2026-11-09) Review of milestone 1: an enqueue for a gone target now returns `Enqueued::TargetGone`, which user and agent messages report as an error; migration 121 raises the compatibility floor to 121 (older builds' read-back after insert would fail). Pushed f4c920a50 and installed; the daemon handoff waits for an ordinary `mj` command.
+- [x] (2026-11-09) Milestone 2: relay protocol 57. `Attach` names `known_state_digest`; the worker answers `AttachedWithKnownState` when it matches and otherwise `Attached` with `state_digest`. `RelayClient` keeps the last state with its digest. The worker's harness preparation now joins the state before the digest (it used to be overlaid on the reply afterwards). Tests `an_attach_skips_a_state_the_controller_already_holds` and `a_changed_preparation_is_never_taken_for_a_known_state`.
+- [ ] Milestone 3: relay protocol 58 `WaitForChange` on a dedicated connection; session actors stop timer polling for workers that support it.
 - [ ] Measure after installation and record the outcome.
 
 
@@ -27,6 +28,10 @@ After this work, orphan rows cannot exist, so the sweep is gone; a worker omits 
 - Observation: the worker builds `RelayOperationalState` on demand (`DurableRelay::operational_state` in `mj-worker/src/relay.rs`) from many fields: the durable snapshot, ACP activity clocks, foreground tools, terminals and more. There is no single mutation point, so a revision counter would be fragile; comparing a digest of the serialized state is robust.
 
 - Observation: every change to the worker's relay state takes the lock on `Arc<Mutex<DurableRelay>>` (117 lock sites in 7 files). Notifying on every lock release is therefore a complete change signal without listing mutation points.
+
+- Observation: a worker speaks only the current relay protocol (`envelope_rejection` negotiates exactly `RELAY_PROTOCOL_VERSION`), so a worker never serves an older controller. Only the controller needs version checks, because it talks to older workers until they are replaced.
+
+- Observation: the worker's connection loop overlaid `harness_preparation` onto attach replies after the relay built them (`overlay_preparation_state`). With digests that would hide a preparation change; the preparation now joins the state before the digest (`DeferredRelayAttach::set_harness_preparation`). A session-manager test fake had the same pattern and now clears digests when it edits state.
 
 
 ## Decision Log
@@ -41,6 +46,10 @@ After this work, orphan rows cannot exist, so the sweep is gone; a worker omits 
 
 - Decision: "unchanged state" means equal SHA-256 digests of the state's JSON serialization, computed by the worker; the daemon sends back the digest of the state it holds.
   Rationale: robust against any field changing, costs the worker one hash of bytes it already produces, and needs no revision bookkeeping.
+  Date/Author: 2026-11-09, Claude.
+
+- Decision: milestones 2 and 3 ship separately, so milestone 2 is protocol 57 and milestone 3 protocol 58.
+  Rationale: each protocol bump must match one released behavior.
   Date/Author: 2026-11-09, Claude.
 
 - Decision: "push" is a long-held request, `WaitForChange`, on a separate relay connection per session, answered when the worker's latest event ordinal or state digest differs from what the daemon sent, or after a bounded wait so a lost connection is noticed. The worker wakes waiters whenever the relay lock is released.

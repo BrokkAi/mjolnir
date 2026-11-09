@@ -512,17 +512,14 @@ fn preparation_error(snapshot: &PreparationSnapshot, operation: &str) -> Option<
     }
 }
 
+/// Attach replies carry the preparation already; see [`handle_request`].
 fn overlay_preparation_state(response: &mut RelayResponseEnvelope, snapshot: &PreparationSnapshot) {
-    let state = match &mut response.body {
-        RelayResponseBody::Ok {
-            payload: RelayResponsePayload::Status(state),
-        }
-        | RelayResponseBody::Ok {
-            payload: RelayResponsePayload::Attached { state, .. },
-        } => state,
-        _ => return,
-    };
-    state.harness_preparation = snapshot.state.clone();
+    if let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::Status(state),
+    } = &mut response.body
+    {
+        state.harness_preparation = snapshot.state.clone();
+    }
 }
 
 fn unavailable_request(envelope: RelayRequestEnvelope, message: String) -> RelayResponseEnvelope {
@@ -2408,7 +2405,13 @@ pub(super) async fn serve_client_with_memory(
                 }
             );
             let operation = envelope.request.method_name();
-            let mut response = match handle_request(&relay, envelope).await {
+            // An attach's state carries the preparation before the relay
+            // digests it, so a changed preparation is never mistaken for a
+            // state the controller already holds.
+            let attach_preparation = preparation
+                .as_ref()
+                .and_then(|receiver| receiver.borrow().state.clone());
+            let mut response = match handle_request(&relay, envelope, attach_preparation).await {
                 Ok(response) => response,
                 Err(error) => {
                     tracing::error!(
@@ -2667,6 +2670,7 @@ mod preparation_tests {
             RelayRequest::Attach {
                 after_ordinal: 0,
                 after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+                known_state_digest: None,
             },
         )
         .await;
@@ -2804,6 +2808,7 @@ mod preparation_tests {
             RelayRequest::Attach {
                 after_ordinal: 0,
                 after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+                known_state_digest: None,
             },
         )
         .await;
@@ -3021,6 +3026,7 @@ mod preparation_tests {
             RelayRequest::Attach {
                 after_ordinal: 0,
                 after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+                known_state_digest: None,
             },
         )
         .await;

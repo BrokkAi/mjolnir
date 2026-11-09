@@ -2070,6 +2070,59 @@ fn record_paged_history(relay: &mut DurableRelay, events: usize) {
     }
 }
 
+/// A controller that names the digest of the state it holds is not sent that
+/// state again. A stale digest or a changed state brings the whole state back;
+/// the worker rebuilds the state for every attach, so the unchanged case also
+/// shows that equal states give equal digests.
+#[test]
+fn an_attach_skips_a_state_the_controller_already_holds() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let attach = |relay: &mut DurableRelay, id: &str, known: Option<&str>| {
+        let latest = relay.latest_ordinal();
+        relay
+            .handle(relay_request(
+                id,
+                RelayRequest::Attach {
+                    after_ordinal: latest,
+                    after_digest: relay.digest_at(latest).unwrap().unwrap(),
+                    known_state_digest: known.map(str::to_owned),
+                },
+            ))
+            .body
+    };
+    let full = |body: RelayResponseBody| match body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::Attached {
+                    state,
+                    state_digest,
+                    ..
+                },
+        } => (state, state_digest),
+        other => panic!("expected the whole state, got {other:?}"),
+    };
+    let (state, digest) = full(attach(&mut relay, "first", None));
+    let digest = digest.expect("protocol 57 names the state's digest");
+    assert_eq!(digest, mj_core::relay::relay_state_digest(&state).unwrap());
+    assert!(matches!(
+        attach(&mut relay, "unchanged", Some(&digest)),
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::AttachedWithKnownState { .. }
+        }
+    ));
+    let (_, again) = full(attach(&mut relay, "stale", Some("stale")));
+    assert_eq!(again.as_deref(), Some(digest.as_str()));
+
+    relay
+        .record_observation(RelayObservation::Warning {
+            message: "the state moves on".into(),
+        })
+        .unwrap();
+    let (_, changed) = full(attach(&mut relay, "changed", Some(&digest)));
+    assert_ne!(changed.as_deref(), Some(digest.as_str()));
+}
+
 fn attach_envelope(
     relay: &DurableRelay,
     request_id: &str,
@@ -2080,6 +2133,7 @@ fn attach_envelope(
         RelayRequest::Attach {
             after_ordinal,
             after_digest: relay.digest_at(after_ordinal).unwrap().unwrap(),
+            known_state_digest: None,
         },
     )
 }
@@ -2122,6 +2176,7 @@ fn a_deferred_attach_reads_its_page_while_the_relay_keeps_recording() {
                 through_ordinal,
                 through_digest,
                 state,
+                state_digest: _,
             },
     } = response.body
     else {

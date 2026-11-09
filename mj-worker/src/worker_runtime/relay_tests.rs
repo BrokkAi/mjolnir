@@ -5365,6 +5365,7 @@ async fn closed_relay_stays_attachable_after_the_acp_runtime_stops() {
         request: RelayRequest::Attach {
             after_ordinal: 0,
             after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            known_state_digest: None,
         },
     };
     let mut encoded = serde_json::to_vec(&request).unwrap();
@@ -6355,6 +6356,7 @@ fn attach_frame(request_id: &str, after_ordinal: u64, after_digest: &str) -> Vec
         request: RelayRequest::Attach {
             after_ordinal,
             after_digest: after_digest.to_owned(),
+            known_state_digest: None,
         },
     })
     .unwrap();
@@ -6478,8 +6480,10 @@ async fn a_replaying_controller_does_not_stall_live_event_recording() {
             request: RelayRequest::Attach {
                 after_ordinal: 0,
                 after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+                known_state_digest: None,
             },
         },
+        None,
     )
     .await
     .unwrap();
@@ -6543,8 +6547,10 @@ async fn a_catch_up_completes_while_the_journal_keeps_sealing_under_it() {
                 request: RelayRequest::Attach {
                     after_ordinal: cursor.0,
                     after_digest: cursor.1.clone(),
+                    known_state_digest: None,
                 },
             },
+            None,
         )
         .await
         .unwrap()
@@ -6610,10 +6616,14 @@ async fn catch_up_recording_throughput() {
                 request: RelayRequest::Attach {
                     after_ordinal: cursor.0,
                     after_digest: cursor.1.clone(),
+                    known_state_digest: None,
                 },
             };
             let body = if defer_page_reads {
-                unix::handle_request(&relay, envelope).await.unwrap().body
+                unix::handle_request(&relay, envelope, None)
+                    .await
+                    .unwrap()
+                    .body
             } else {
                 // The coupled policy: the whole read runs under the lock.
                 relay
@@ -8708,5 +8718,73 @@ fn push_gate_startup_reports_a_refused_hook_install_once() {
     assert_eq!(
         std::fs::read_to_string(hooks.join("pre-push")).unwrap(),
         "existing hook"
+    );
+}
+
+/// The harness preparation joins an attach's state before the relay digests
+/// it. A preparation that moves on while the relay itself is unchanged must
+/// still bring the whole state back, or the controller keeps a stale one.
+#[tokio::test]
+async fn a_changed_preparation_is_never_taken_for_a_known_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "test").unwrap(),
+    ));
+    let attach = |known: Option<String>| RelayRequestEnvelope {
+        request_id: "attach".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Attach {
+            after_ordinal: 0,
+            after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            known_state_digest: known,
+        },
+    };
+    let preparing = mj_core::relay::HarnessPreparation::Preparing {
+        step: "harness-profile".into(),
+        since_ms: 1,
+    };
+    let RelayResponseBody::Ok {
+        payload:
+            RelayResponsePayload::Attached {
+                state,
+                state_digest,
+                ..
+            },
+    } = unix::handle_request(&relay, attach(None), Some(preparing.clone()))
+        .await
+        .unwrap()
+        .body
+    else {
+        panic!("expected the whole state");
+    };
+    assert_eq!(state.harness_preparation, Some(preparing.clone()));
+    let held = state_digest.unwrap();
+
+    let unchanged = unix::handle_request(&relay, attach(Some(held.clone())), Some(preparing))
+        .await
+        .unwrap()
+        .body;
+    assert!(matches!(
+        unchanged,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::AttachedWithKnownState { .. }
+        }
+    ));
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::Attached { state, .. },
+    } = unix::handle_request(
+        &relay,
+        attach(Some(held)),
+        Some(mj_core::relay::HarnessPreparation::Started),
+    )
+    .await
+    .unwrap()
+    .body
+    else {
+        panic!("a changed preparation must resend the state");
+    };
+    assert_eq!(
+        state.harness_preparation,
+        Some(mj_core::relay::HarnessPreparation::Started)
     );
 }

@@ -168,6 +168,9 @@ pub struct RelayClient {
     /// Invalidated under this connection's exclusive borrow before applying
     /// queue changes; partial-page failures cannot leave a valid stale view.
     subagent_publication: Option<SubagentQueueSnapshot>,
+    /// The operational state the worker last sent on this connection and its
+    /// digest. A protocol-57 worker skips resending a state that matches it.
+    known_state: Option<(String, mj_core::relay::RelayOperationalState)>,
     /// The shared-connection session the proxy runs on, held for as long as
     /// the proxy runs.
     ssh_session: Option<SshSessionLease>,

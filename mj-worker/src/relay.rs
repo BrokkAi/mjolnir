@@ -1538,6 +1538,7 @@ pub(crate) mod test_support {
             RelayRequest::Attach {
                 after_ordinal,
                 after_digest,
+                known_state_digest: None,
             },
         ))
     }

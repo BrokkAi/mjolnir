@@ -90,7 +90,8 @@ impl DurableRelay {
             RelayRequest::Attach {
                 after_ordinal,
                 after_digest,
-            } => match self.attach(*after_ordinal, after_digest)? {
+                known_state_digest,
+            } => match self.attach(*after_ordinal, after_digest, known_state_digest.as_deref())? {
                 Ok(payload) => payload,
                 Err(error) => return Ok(RelayResponseBody::Error { error }),
             },
@@ -261,10 +262,11 @@ impl DurableRelay {
         &mut self,
         after_ordinal: u64,
         after_digest: &str,
+        known_state_digest: Option<&str>,
     ) -> Result<std::result::Result<RelayResponsePayload, RelayProtocolError>> {
         let state = self.operational_state();
         self.replay_plan()
-            .attach(after_ordinal, after_digest, state)
+            .attach(after_ordinal, after_digest, state, known_state_digest)
     }
 
     fn acknowledge(
