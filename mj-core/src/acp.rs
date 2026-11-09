@@ -531,6 +531,8 @@ pub enum AirTaskUpdate {
     Finished {
         task_id: String,
         settled: bool,
+        #[serde(default)]
+        failed: bool,
     },
 }
 

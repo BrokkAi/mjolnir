@@ -3257,6 +3257,7 @@ fn autonomous_spawn_and_output_share_one_durable_turn_in_either_order() {
                 crate::acp::AirTaskUpdate::Finished {
                     task_id: "turn-a".into(),
                     settled: true,
+                    failed: false,
                 },
             )
             .unwrap();
@@ -3292,9 +3293,9 @@ fn autonomous_spawn_and_output_share_one_durable_turn_in_either_order() {
             1
         );
         relay
-            .claude_turn_result(&cycle_result("task-notification"))
+            .apply_claude_task_fixture("turn-a".into(), false, false, true, false)
             .unwrap();
-        // A later autonomous cycle starts before the old task end arrives.
+        // A duplicate old task end cannot settle a later autonomous cycle.
         relay
             .apply_claude_task_fixture("turn-b".into(), true, true, false, false)
             .unwrap();
@@ -3315,18 +3316,27 @@ fn autonomous_spawn_and_output_share_one_durable_turn_in_either_order() {
 }
 
 #[test]
-fn a_silent_autonomous_task_end_releases_its_queued_prompt_once() {
-    for completed in [false, true] {
+fn an_autonomous_task_end_after_output_releases_its_queued_prompt_once() {
+    for (settled, failed) in [(true, false), (true, true), (false, false)] {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(temp.path());
+        relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
         relay
             .apply_claude_task_fixture("silent-turn".into(), true, true, false, false)
             .unwrap();
+        relay.record_session_update(tool_call_update()).unwrap();
         submit_relay(&mut relay, "next-prompt", prompt("answer next"));
         assert!(relay.claim_pending_commands(true).unwrap().is_empty());
-        // Both completed/failed and stopped are boundaries, without any output.
+        // Every terminal state ends its own turn and preserves its outcome.
         relay
-            .apply_claude_task_fixture("silent-turn".into(), false, false, completed, false)
+            .air_task_changed(
+                relay.snapshot.native_session_id.clone().unwrap(),
+                crate::acp::AirTaskUpdate::Finished {
+                    task_id: "silent-turn".into(),
+                    settled,
+                    failed,
+                },
+            )
             .unwrap();
         // Repeated terminal edges still name an autonomous task, never a new
         // background-task completion or a second completion boundary.
@@ -3359,7 +3369,7 @@ fn a_silent_autonomous_task_end_releases_its_queued_prompt_once() {
 
 // Hard-won: agentclientprotocol/claude-agent-acp#1390: a num_turns 0 placeholder result closed an announced autonomous turn early.
 #[test]
-fn autonomous_placeholder_keeps_the_turn_and_queued_prompt_until_the_real_result() {
+fn autonomous_results_keep_the_turn_and_queued_prompt_until_task_end() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay
@@ -3375,6 +3385,11 @@ fn autonomous_placeholder_keeps_the_turn_and_queued_prompt_until_the_real_result
     relay.record_session_update(tool_call_update()).unwrap();
     relay
         .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    assert_eq!(relay.snapshot.harness_turn.unwrap().first_ordinal, ordinal);
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    relay
+        .apply_claude_task_fixture("turn".into(), false, false, true, false)
         .unwrap();
     assert!(relay.snapshot.harness_turn.is_none());
     assert_eq!(
@@ -3422,9 +3437,9 @@ fn autonomous_placeholder_without_output_settles_on_task_end() {
     );
 }
 
-// Hard-won: agentclientprotocol/claude-agent-acp#1453: a lagging idle ended the next autonomous turn's task while it still ran.
+// Hard-won: agentclientprotocol/claude-agent-acp#1453: trailing cycle events closed the next autonomous turn early.
 #[test]
-fn a_lagging_idle_task_end_cannot_settle_the_next_turn_after_output() {
+fn trailing_results_and_old_task_ends_cannot_settle_the_next_announced_turn() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay
@@ -3432,23 +3447,25 @@ fn a_lagging_idle_task_end_cannot_settle_the_next_turn_after_output() {
         .unwrap();
     relay.record_session_update(tool_call_update()).unwrap();
     relay
-        .claude_turn_result(&cycle_result("task-notification"))
+        .apply_claude_task_fixture("turn-a".into(), false, false, true, false)
         .unwrap();
-    // B's first output can precede the synthetic spawn and A's trailing idle.
-    relay.record_session_update(tool_call_update()).unwrap();
-    let ordinal = relay.snapshot.harness_turn.unwrap().first_ordinal;
     relay
         .apply_claude_task_fixture("turn-b".into(), true, true, false, false)
         .unwrap();
+    relay.record_session_update(tool_call_update()).unwrap();
+    let ordinal = relay.snapshot.harness_turn.unwrap().first_ordinal;
     assert_eq!(relay.turn_task_ordinal("turn-b"), Some(ordinal));
     submit_relay(&mut relay, "queued-prompt", prompt("next"));
     relay
-        .apply_claude_task_fixture("turn-b".into(), false, false, true, false)
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    relay
+        .apply_claude_task_fixture("turn-a".into(), false, false, true, false)
         .unwrap();
     assert_eq!(relay.snapshot.harness_turn.unwrap().first_ordinal, ordinal);
     assert!(relay.claim_pending_commands(true).unwrap().is_empty());
     relay
-        .claude_turn_result(&cycle_result("task-notification"))
+        .apply_claude_task_fixture("turn-b".into(), false, false, true, false)
         .unwrap();
     assert!(relay.snapshot.harness_turn.is_none());
     assert_eq!(
@@ -3482,7 +3499,7 @@ fn replayed_autonomous_spawn_and_untyped_end_leave_no_imminent_turn() {
 }
 
 #[test]
-fn zero_turn_results_still_settle_unbound_turns_and_autonomous_errors() {
+fn zero_turn_results_only_settle_turns_without_an_announced_task() {
     for bound in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(temp.path());
@@ -3497,6 +3514,12 @@ fn zero_turn_results_still_settle_unbound_turns_and_autonomous_errors() {
         result.num_turns = 0;
         result.is_error = bound;
         relay.claude_turn_result(&result).unwrap();
+        if bound {
+            assert!(relay.snapshot.harness_turn.is_some());
+            relay
+                .apply_claude_task_fixture("turn".into(), false, false, false, false)
+                .unwrap();
+        }
         assert!(relay.snapshot.harness_turn.is_none());
     }
 }
@@ -3606,43 +3629,63 @@ fn observations(relay: &DurableRelay) -> Vec<RelayObservation> {
 // Hard-won: #1450 review: autonomous outcomes must preserve turn identity and queued work.
 #[test]
 fn a_harness_turn_refused_for_quota_ends_with_nothing_left_set() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = claude_relay(temp.path());
-    relay
-        .record_session_update(agent_text_chunk(
-            "You've hit your session limit \u{b7} resets 1:10pm",
-        ))
-        .unwrap();
-    assert!(
+    for announced in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(temp.path());
+        if announced {
+            relay
+                .apply_claude_task_fixture("quota-turn".into(), true, true, false, false)
+                .unwrap();
+        }
         relay
-            .operational_state()
-            .facts()
-            .harness_turn_started_at_ms
-            .is_some()
-    );
-    let refusal = mj_core::acp::ClaudeTurnResult::from_sdk_message(&serde_json::json!({
-        "type": "result", "subtype": "success", "is_error": true, "num_turns": 0,
-        "stop_reason": "stop_sequence", "result": "You've hit your session limit",
-        "usage": {"input_tokens": 0, "output_tokens": 0},
-        "origin": {"kind": "task-notification"},
-    }))
-    .unwrap()
-    .unwrap();
-    relay.claude_turn_result(&refusal).unwrap();
-    // Hard-won: #1450 review: quota refusals were recorded as successful turns.
-    assert!(
-        matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "error")
-    );
-    let facts = relay.operational_state().facts();
-    assert_eq!(facts.harness_turn_started_at_ms, None);
-    assert!(facts.tools_in_flight.is_empty());
-    assert_eq!(facts.execution, RelayExecutionState::Idle);
-    // The bare test relay has no ACP connection, the one fact that may differ.
-    let ready = mj_core::activity::ActivityFacts {
-        acp_ready: Some(true),
-        ..facts
-    };
-    assert!(mj_core::activity::can_submit(&ready), "{ready:?}");
+            .record_session_update(agent_text_chunk(
+                "You've hit your session limit \u{b7} resets 1:10pm",
+            ))
+            .unwrap();
+        assert!(
+            relay
+                .operational_state()
+                .facts()
+                .harness_turn_started_at_ms
+                .is_some()
+        );
+        let refusal = mj_core::acp::ClaudeTurnResult::from_sdk_message(&serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": true, "num_turns": 0,
+            "stop_reason": "stop_sequence", "result": "You've hit your session limit",
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "origin": {"kind": "task-notification"},
+        }))
+        .unwrap()
+        .unwrap();
+        relay.claude_turn_result(&refusal).unwrap();
+        if announced {
+            assert!(relay.snapshot.harness_turn.is_some());
+            relay
+                .air_task_changed(
+                    "root".into(),
+                    crate::acp::AirTaskUpdate::Finished {
+                        task_id: "quota-turn".into(),
+                        settled: true,
+                        failed: true,
+                    },
+                )
+                .unwrap();
+        }
+        // Hard-won: #1450 review: quota refusals were recorded as successful turns.
+        assert!(
+            matches!(observations(&relay).last(), Some(RelayObservation::HarnessTurnSettled { autonomous: Some(turn), .. }) if turn.stop_reason == "error")
+        );
+        let facts = relay.operational_state().facts();
+        assert_eq!(facts.harness_turn_started_at_ms, None);
+        assert!(facts.tools_in_flight.is_empty());
+        assert_eq!(facts.execution, RelayExecutionState::Idle);
+        // The bare test relay has no ACP connection, the one fact that may differ.
+        let ready = mj_core::activity::ActivityFacts {
+            acp_ready: Some(true),
+            ..facts
+        };
+        assert!(mj_core::activity::can_submit(&ready), "{ready:?}");
+    }
 }
 
 // Hard-won: 6b6e684c: Claude cycles without an origin marker left sessions running until a later marker.
@@ -3751,11 +3794,11 @@ fn a_claude_harness_turn_settles_on_its_result_and_not_on_the_origin_marker() {
 }
 
 /// Stop while Claude Code works on its own after a background task sends
-/// `session/cancel`; the interrupted cycle's result then ends the turn. With
+/// `session/cancel`; the announced task's terminal update ends the turn. With
 /// nothing running, or during a Codex goal turn, Stop is still refused.
 // Hard-won: 4c379acf: Stop was unavailable while Claude ran a cycle started by a completed background task.
 #[test]
-fn stop_during_a_claude_harness_turn_is_dispatched_and_the_interrupted_result_ends_it() {
+fn stop_during_a_claude_harness_turn_waits_for_its_announced_task_to_end() {
     let refused = |relay: &mut DurableRelay, command_id: &str| {
         let response = relay.handle(relay_request(
             &format!("request-{command_id}"),
@@ -3789,10 +3832,17 @@ fn stop_during_a_claude_harness_turn_is_dispatched_and_the_interrupted_result_en
         .unwrap();
     assert!(
         relay.operational_state().harness_turn.is_some(),
-        "the turn runs until Claude Code reports the interrupted cycle"
+        "the turn runs until the announced task ends"
     );
+    let ordinal = relay.snapshot.harness_turn.unwrap().first_ordinal;
+    assert!(relay.unanswered_harness_turn_stop().is_none());
+    assert!(!relay.end_unanswered_harness_turn_stop(ordinal).unwrap());
     relay
         .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    assert_eq!(relay.snapshot.harness_turn.unwrap().first_ordinal, ordinal);
+    relay
+        .apply_claude_task_fixture("silent-turn".into(), false, false, false, false)
         .unwrap();
     let state = relay.operational_state();
     assert!(state.harness_turn.is_none());
@@ -4096,7 +4146,7 @@ fn a_prompt_queued_during_a_harness_turn_waits_then_dispatches_once() {
     );
 
     relay
-        .claude_turn_result(&cycle_result("task-notification"))
+        .apply_claude_task_fixture("autonomous-turn".into(), false, false, true, false)
         .unwrap();
     let claimed = relay.claim_pending_commands(true).unwrap();
     assert_eq!(claimed.len(), 1);
@@ -5042,6 +5092,7 @@ fn air_tasks_are_authoritative_and_replay_does_not_anticipate_a_turn() {
                 AirTaskUpdate::Finished {
                     task_id: "historical".into(),
                     settled: true,
+                    failed: false,
                 },
             )
             .unwrap();
@@ -5058,6 +5109,7 @@ fn air_tasks_are_authoritative_and_replay_does_not_anticipate_a_turn() {
                 AirTaskUpdate::Finished {
                     task_id: "live".into(),
                     settled: true,
+                    failed: false,
                 },
             )
             .unwrap();

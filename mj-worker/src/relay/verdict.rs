@@ -1066,6 +1066,7 @@ mod settled_task_tests {
                 crate::acp::AirTaskUpdate::Finished {
                     task_id: "a".into(),
                     settled: true,
+                    failed: false,
                 },
             )
             .unwrap();
@@ -1391,6 +1392,7 @@ mod settled_task_tests {
                 crate::acp::AirTaskUpdate::Finished {
                     task_id: "build".into(),
                     settled: true,
+                    failed: false,
                 },
             )
             .unwrap();
@@ -1523,6 +1525,7 @@ mod settled_task_tests {
                 crate::acp::AirTaskUpdate::Finished {
                     task_id: "b".into(),
                     settled: false,
+                    failed: false,
                 },
             )
             .unwrap();
@@ -1534,6 +1537,7 @@ mod settled_task_tests {
                 crate::acp::AirTaskUpdate::Finished {
                     task_id: "a".into(),
                     settled: true,
+                    failed: false,
                 },
             )
             .unwrap();

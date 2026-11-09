@@ -432,6 +432,27 @@ async fn an_autonomous_spawn_waits_for_the_prompt_boundary_unless_it_already_end
                     break;
                 }
             }
+            assert!(
+                peer.relay
+                    .lock()
+                    .unwrap()
+                    .claim_pending_commands(true)
+                    .unwrap()
+                    .is_empty()
+            );
+            peer.probe
+                .send(
+                    json!({"jsonrpc":"2.0", "method":"session/update", "params": {
+                        "sessionId": SESSION, "update": {"sessionUpdate":"async_task_state_update",
+                        "asyncTaskId":"next-turn", "state":"completed"}
+                    }}),
+                )
+                .await;
+            loop {
+                if matches!(peer.event().await, RuntimeEvent::AirTaskChanged { .. }) {
+                    break;
+                }
+            }
             assert_eq!(
                 peer.relay
                     .lock()

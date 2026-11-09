@@ -188,8 +188,8 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
 # pins" in AGENTS.md). Muse installs below from its runtime.json file.
 RUN npm install --global --no-audit --no-fund \
         @brokkai/codex-acp@1.15.0 \
-        @agentclientprotocol/claude-agent-acp@0.99.0 \
-        @anthropic-ai/claude-code@2.1.308 \
+        @agentclientprotocol/claude-agent-acp@0.102.0 \
+        @anthropic-ai/claude-code@2.1.321 \
         @brokkai/dsh-acp@0.5.0 \
         @brokkai/muse-acp@0.21.0 \
         @moonshot-ai/kimi-code@2.4.0 \
