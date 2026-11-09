@@ -7,6 +7,8 @@ pub struct GithubReference {
     pub repo: Option<String>,
     pub number: u64,
     pub text: String,
+    /// Byte offset of `text` in the parsed string.
+    pub start: usize,
 }
 
 pub fn github_references(text: &str) -> Vec<GithubReference> {
@@ -39,6 +41,7 @@ pub fn github_references(text: &str) -> Vec<GithubReference> {
                 repo: capture.get(repo).map(|m| m.as_str().to_owned()),
                 number: capture.get(number)?.as_str().parse().ok()?,
                 text: span.as_str().to_owned(),
+                start: span.start(),
             })
         })
         .collect()

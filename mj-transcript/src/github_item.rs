@@ -12,14 +12,15 @@ const MENTION_ELISION: &str = "…";
 /// to it ("reviewing", "blocked on") usually survives.
 const MENTION_LEAD_BYTES: usize = 96;
 
-/// The part of `line` around `reference`, at most [`MENTION_BYTES`]. Agent
-/// paragraphs are often one long line, so a plain prefix would drop the
-/// reference the mention was chosen for.
-fn mention_window(line: &str, reference: &str) -> String {
+/// The part of `line` around the reference parsed at byte offset `at`, at
+/// most [`MENTION_BYTES`]. Agent paragraphs are often one long line, so a
+/// plain prefix would drop the reference the mention was chosen for. The
+/// parser's offset, not a text search, places the window: `#12` must not
+/// land on `#123`, and each occurrence keeps its own context.
+fn mention_window(line: &str, at: usize) -> String {
     if line.len() <= MENTION_BYTES {
         return line.to_owned();
     }
-    let at = line.find(reference).unwrap_or(0);
     let start = line.floor_char_boundary(at.saturating_sub(MENTION_LEAD_BYTES));
     let lead = if start > 0 { MENTION_ELISION } else { "" };
     let rest = &line[start..];
@@ -114,7 +115,7 @@ pub fn session_digest(session: &MaterializedSession) -> SessionContext {
         // Index full lines before conversation truncation or the reference-list cap.
         for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
             for reference in mj_core::github_reference::github_references(line) {
-                let window = mention_window(line, &reference.text);
+                let window = mention_window(line, reference.start);
                 digest.mention_candidates.push((reference, window));
             }
         }
@@ -194,9 +195,18 @@ mod tests {
             digest.for_item(&item).mentions,
             ["pending #49", "pending #1"]
         );
-        let long = format!("{} reviewing #7 next {}", "é".repeat(200), "x".repeat(400));
-        let window = mention_window(&long, "#7");
-        assert!(window.len() <= MENTION_BYTES && window.contains("reviewing #7"));
+        let long = format!(
+            "#123 first {} reviewing #12 next {}",
+            "é".repeat(200),
+            "x".repeat(400)
+        );
+        let at = mj_core::github_reference::github_references(&long)
+            .into_iter()
+            .find(|r| r.number == 12)
+            .unwrap()
+            .start;
+        let window = mention_window(&long, at);
+        assert!(window.len() <= MENTION_BYTES && window.contains("reviewing #12 next"));
         assert!(window.starts_with(MENTION_ELISION) && window.ends_with(MENTION_ELISION));
     }
 
