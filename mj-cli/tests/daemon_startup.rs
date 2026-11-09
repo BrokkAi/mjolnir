@@ -250,9 +250,16 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Restore the singleton preference table used before schema 101.
     // Restore the review table before migrations 104 and 106 add these columns.
     // Restore prompt_history before migration 116 adds its triggers, search table and command column.
+    // Hard-won: #1187: revision-121 cleanup triggers referenced tables removed by this legacy fixture.
     connection
         .execute_batch(
-            "DROP TRIGGER prompt_history_top_level_only;
+            "DROP TRIGGER IF EXISTS session_rows_deleted;
+         DROP TRIGGER IF EXISTS session_rows_destroyed;
+         DROP TRIGGER IF EXISTS mailbox_outbox_live_target;
+         DROP TRIGGER IF EXISTS github_watch_items_live_creator;
+         DROP TRIGGER IF EXISTS github_watch_classifications_live_session;
+         DROP TRIGGER IF EXISTS github_watch_classification_failures_live_session;
+         DROP TRIGGER prompt_history_top_level_only;
          DROP TRIGGER prompt_history_child_registered;
          DROP TRIGGER prompt_history_session_destroyed;
          DROP TRIGGER prompt_history_text_insert;
