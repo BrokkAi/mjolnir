@@ -8851,4 +8851,16 @@ async fn a_change_wait_answers_on_a_relay_change_or_at_its_bound() {
         ordinal + 1,
         "a stale view is answered at once"
     );
+
+    // Waits only observe the relay, so two of them on an unchanged relay stay
+    // idle until their bound instead of waking each other.
+    let (ordinal, digest) = current();
+    let started = tokio::time::Instant::now();
+    let (first, second) = tokio::join!(
+        unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest)),
+        unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest)),
+    );
+    assert_eq!(observed(first.unwrap()).0, ordinal);
+    assert_eq!(observed(second.unwrap()).0, ordinal);
+    assert_eq!(started.elapsed(), mj_core::relay::RELAY_CHANGE_WAIT_BOUND);
 }

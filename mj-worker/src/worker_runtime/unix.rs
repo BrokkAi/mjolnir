@@ -534,24 +534,21 @@ pub(crate) async fn wait_for_change(
     let deadline = tokio::time::Instant::now() + mj_core::relay::RELAY_CHANGE_WAIT_BOUND;
     loop {
         // Mark each signal seen before looking, so a change while looking
-        // still wakes the wait below.
+        // still wakes the wait below. Looking only observes the relay, which
+        // is not counted as a change.
+        if let Some(releases) = &mut releases {
+            releases.borrow_and_update();
+        }
         if let Some(generations) = &mut generations {
             generations.borrow_and_update();
         }
         let harness_preparation = preparation
             .as_mut()
             .and_then(|receiver| receiver.borrow_and_update().state.clone());
-        // Looking takes the relay lock, and releasing it counts as a change.
-        // Nothing else can release while this holds the lock, so after this
-        // look the count is exactly one more than now; only a count past that
-        // is someone else's change.
-        let (mut state, looked) = {
-            let relay = relay.lock().expect("relay state lock poisoned");
-            let looked = releases
-                .as_ref()
-                .map(|releases| releases.borrow().wrapping_add(1));
-            (relay.operational_state(), looked)
-        };
+        let mut state = relay
+            .observe()
+            .expect("relay state lock poisoned")
+            .operational_state();
         state.harness_preparation = harness_preparation;
         let latest_ordinal = state.latest_ordinal;
         let digest = mj_core::relay::relay_state_digest(&state)?;
@@ -573,11 +570,9 @@ pub(crate) async fn wait_for_change(
         // watching it instead of waking on its closure forever.
         tokio::select! {
             changed = async {
-                match (&mut releases, looked) {
-                    (Some(receiver), Some(looked)) => {
-                        receiver.wait_for(|count| *count != looked).await.is_ok()
-                    }
-                    _ => std::future::pending().await,
+                match &mut releases {
+                    Some(receiver) => receiver.changed().await.is_ok(),
+                    None => std::future::pending().await,
                 }
             } => if !changed { releases = None },
             changed = async {

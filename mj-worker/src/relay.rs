@@ -117,10 +117,13 @@ pub enum BackgroundWorkPolicy {
     KimiTasks,
 }
 
-/// The relay behind its lock. Every change to the relay takes this lock, so
-/// each release is counted as a possible change: a connection waiting for one
-/// (see [`mj_core::relay::RelayRequest::WaitForChange`]) wakes and compares
-/// what it is waiting on, without the relay listing its mutations.
+/// The relay behind its lock. Every change to the relay takes this lock
+/// through [`Self::lock`], so each such release is counted as a possible
+/// change: a connection waiting for one (see
+/// [`mj_core::relay::RelayRequest::WaitForChange`]) wakes and compares what it
+/// is waiting on, without the relay listing its mutations. A waiting
+/// connection reads through [`Self::observe`], which cannot change the relay
+/// and is not counted, so waits never wake one another.
 pub struct RelayCell {
     relay: std::sync::Mutex<DurableRelay>,
     released: tokio::sync::watch::Sender<u64>,
@@ -145,7 +148,13 @@ impl RelayCell {
         }
     }
 
-    /// Changes on every release of the lock.
+    /// Read the relay without counting as a possible change. The guard only
+    /// reads, so nothing a change wait must see can happen under it.
+    pub fn observe(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, DurableRelay>> {
+        self.relay.lock()
+    }
+
+    /// Changes on every release of a [`Self::lock`] guard.
     pub fn releases(&self) -> tokio::sync::watch::Receiver<u64> {
         self.released.subscribe()
     }

@@ -107,8 +107,8 @@ impl StandaloneSession {
         self.subagent_queue.waits_for_changes()
     }
 
-    /// Resolves when the worker reported a relay change, or its change waits
-    /// failed and the session must be polled again.
+    /// Resolves when the worker reported a relay change, the delegation queue
+    /// changed, or its change waits failed and the session must be polled.
     pub(super) async fn relay_changed(&mut self) {
         self.subagent_queue.relay_changed().await;
     }

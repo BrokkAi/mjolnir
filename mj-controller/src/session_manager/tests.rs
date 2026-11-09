@@ -4454,11 +4454,18 @@ async fn model_policy_refilters_the_same_actor_and_preserves_raw_observations() 
     // Disabling a profile for new sessions must not remove its live-session policy.
     profile.enabled = false;
     manager.control.update_model_policies(&controller);
-    let update = next_policy_update(&mut manager.updates).await;
-    assert_eq!(
-        values(&update.view.snapshot.unwrap().operational),
-        ["current", "hidden"]
-    );
+    // A sync already under way may still publish what it saw before the
+    // edit; the edit must reach the next views, not necessarily the first.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let update = next_policy_update(&mut manager.updates).await;
+            if values(&update.view.snapshot.unwrap().operational) == ["current", "hidden"] {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the policy edit refilters the live session's models");
     let same = manager.control.session(LEASED_RELAY_SESSION).await.unwrap();
     assert!(
         handle.commands.same_channel(&same.commands),

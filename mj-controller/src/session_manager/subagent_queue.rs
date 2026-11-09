@@ -13,8 +13,8 @@ pub(super) struct SubagentQueueObserver {
     view: watch::Receiver<Observation>,
     task: tokio::task::JoinHandle<()>,
     active: watch::Sender<bool>,
-    /// Counts the relay changes this connection's waits observed, for the
-    /// session actor to sync on.
+    /// Counts the relay changes this connection's waits observed and the
+    /// queue changes it published, for the session actor to sync on.
     relay_changes: watch::Receiver<u64>,
     /// Whether this connection is waiting for changes on a worker that
     /// supports it, so the actor need not poll.
@@ -87,7 +87,7 @@ impl SubagentQueueObserver {
                     Ok((queue, change)) => {
                         delay = RECONNECT_INTERVAL;
                         if let Some((requests, completions)) = queue {
-                            tx.send_if_modified(|view| {
+                            let published = tx.send_if_modified(|view| {
                                 let next = Observation {
                                     requests,
                                     completions,
@@ -100,6 +100,11 @@ impl SubagentQueueObserver {
                                     true
                                 }
                             });
+                            // The actor reads the queue on its next sync, which
+                            // a quiet session no longer runs on a short timer.
+                            if published {
+                                relay_changed.send_modify(|count| *count = count.wrapping_add(1));
+                            }
                         }
                         match change {
                             // A worker that waits for changes answers as they
@@ -175,7 +180,8 @@ impl SubagentQueueObserver {
         *self.waiting.borrow() && !self.task.is_finished()
     }
 
-    /// Resolves when a wait observed a relay change, or the waits failed.
+    /// Resolves when a wait observed a relay change, the queue changed, or the
+    /// waits failed.
     pub async fn relay_changed(&mut self) {
         if self.relay_changes.changed().await.is_err() {
             std::future::pending::<()>().await;
