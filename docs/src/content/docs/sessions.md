@@ -644,17 +644,17 @@ take turns re-indexing everything until you upgrade the command. When a newer
 SessionWiki wrote the index, Mjolnir leaves it alone and search stays closed
 until you upgrade Mjolnir.
 
-This build links the `sessionwiki` crate, version 0.34.5. Install the matching
-tool with either:
+This build links the `brokk-sessionwiki` crate, version 0.34.22. Install the
+matching tool with:
 
 ```sh
-cargo install --locked sessionwiki@0.34.5
-npm install --global @youdie006/sessionwiki@0.34.5
+cargo install --locked brokk-sessionwiki@0.34.22
 ```
 
-If you installed `brokk-sessionwiki` for an earlier Mjolnir build, run
-`cargo uninstall brokk-sessionwiki` first. Both packages install a command named
-`sessionwiki`.
+If you installed the `sessionwiki` package for an earlier Mjolnir build, remove
+it first with `cargo uninstall sessionwiki` or
+`npm uninstall --global @youdie006/sessionwiki`. Both packages install a command
+named `sessionwiki`.
 
 ## Recover an orphaned worker
 

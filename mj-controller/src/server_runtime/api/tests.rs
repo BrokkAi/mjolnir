@@ -4827,6 +4827,22 @@ async fn an_expired_delivery_leaves_a_busy_child_running_and_is_reported_beside_
         panic!("wrong event: {event:?}");
     };
     assert_eq!(report.state, "error");
+
+    // A cleanly stopped child is never news, so reconciling skips its record
+    // and still says why when asked about it.
+    exports.set_child_state(SessionState::Stopped);
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    assert_eq!(
+        crate::database::pending_mailbox_events(10).unwrap().len(),
+        2
+    );
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 1)
+            .await
+            .unwrap(),
+        ChildReport::NotNews("the child is stopping or stopped")
+    ));
     exports.set_child_state(SessionState::Running);
 
     // The child can still be given a message, and gets it.

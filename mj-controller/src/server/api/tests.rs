@@ -364,6 +364,7 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
             false,
         )
         .unwrap()
+        .inserted()
     );
     let row = crate::database::pending_mailbox_events(10)
         .unwrap()
@@ -386,6 +387,7 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
             false,
         )
         .unwrap()
+        .inserted()
     );
     writer.shutdown().unwrap();
 }

@@ -175,16 +175,6 @@ async fn reconcile_durable_state(state: &RuntimeState, stop: &CancellationToken)
             "removed pending mailbox messages for stopped children"
         );
     }
-    let pruned =
-        tokio::task::spawn_blocking(crate::database::prune_mailbox_events_for_missing_sessions)
-            .await
-            .context("mailbox orphan cleanup task failed")??;
-    if pruned > 0 {
-        tracing::info!(
-            count = pruned,
-            "removed mailbox events for destroyed sessions"
-        );
-    }
     // Lifecycle recovery can settle a finish after startup reconciliation.
     // Rebuild missing events from durable state on the same bounded sweep
     // that retries their delivery, including after a missed completion update.

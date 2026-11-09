@@ -252,6 +252,7 @@ impl RelayClient {
             subagent_acknowledged: None,
             subagent_queue: BTreeMap::new(),
             subagent_publication: None,
+            known_state: None,
             ssh_session,
         };
         match client

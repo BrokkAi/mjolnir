@@ -1,7 +1,7 @@
 use crate::test_support::{git, wait_for};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::{
@@ -14,9 +14,9 @@ use super::*;
 use crate::acp::{CommandRequest, RuntimeEvent};
 use crate::relay::{
     BackgroundWorkPolicy, DurableRelay, RELAY_EVENT_GENESIS_DIGEST, RELAY_PROTOCOL_VERSION,
-    RelayCommand, RelayErrorCode, RelayExecutionState, RelayObservation, RelayProtocolError,
-    RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
-    RelayResponsePayload,
+    RelayCell, RelayCommand, RelayErrorCode, RelayExecutionState, RelayObservation,
+    RelayProtocolError, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
+    RelayResponseEnvelope, RelayResponsePayload,
 };
 use mj_core::config::ExecutionPolicy;
 use mj_core::elicitation::ElicitationResponse;
@@ -82,7 +82,7 @@ async fn oversized_legacy_delegation_history_replays_only_completion_receipts() 
             .len()
             < 100_000
     );
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(root, SESSION_ID, "test").unwrap(),
     ));
     let (wake, _) = mpsc::channel(1);
@@ -190,7 +190,7 @@ fn runtime_event_channel() -> (TestRuntimeEventSender, mpsc::Receiver<RuntimeEve
 /// Protocol fixtures have no classifier. Verdict fixtures supply their own
 /// local HTTP endpoint instead of resolving the host's default service.
 async fn run_relay_coordinator(
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     events: mpsc::Receiver<RuntimeEvent>,
     wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
@@ -864,7 +864,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
 
     let temp = tempfile::tempdir().unwrap();
     let relay_root = temp.path().join("relay");
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(&relay_root, SESSION_ID, "1.0.0").unwrap(),
     ));
     let endpoint = credential_endpoint(&launch_config(&temp.path().to_string_lossy())).unwrap();
@@ -1222,7 +1222,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
 #[tokio::test]
 async fn protocol_v1_cannot_respond_to_elicitation() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path().join("relay"), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
@@ -1266,7 +1266,7 @@ async fn protocol_v1_cannot_respond_to_elicitation() {
 #[tokio::test]
 async fn incompatible_protocol_cannot_read_or_mutate_credentials() {
     let home = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(home.path().join("relay"), SESSION_ID, "1.0.0").unwrap(),
     ));
     let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
@@ -1560,7 +1560,7 @@ fn elicitation_request() -> CommandRequest {
 /// Whether a runtime warning reached durable state. A coordinator that
 /// parked on a command send stops draining runtime events, so this stays
 /// false forever once that happens.
-fn recorded_warning(relay: &Arc<Mutex<DurableRelay>>, message: &str) -> bool {
+fn recorded_warning(relay: &Arc<RelayCell>, message: &str) -> bool {
     relay
         .lock()
         .unwrap()
@@ -1639,7 +1639,7 @@ async fn kimi_diagnostic_is_enriched_before_durable_completion() {
         .active_prompt
         .unwrap()
         .started_at_ms;
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut monitor = Some(unix::KimiTaskMonitor::new(Ok(home)));
     monitor
         .as_mut()
@@ -1723,7 +1723,7 @@ async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure(
         .active_prompt
         .unwrap()
         .started_at_ms;
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut monitor = Some(unix::KimiTaskMonitor::new(Ok(home)));
     monitor
         .as_mut()
@@ -1856,7 +1856,7 @@ async fn kimi_turn_usage_is_recorded_from_native_records() {
         .active_prompt
         .unwrap()
         .started_at_ms;
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut monitor = Some(unix::KimiTaskMonitor::new(Ok(home)));
     monitor
         .as_mut()
@@ -1949,7 +1949,7 @@ async fn kimi_native_task_level_blocks_replacement_until_termination() {
             config_options: Vec::new(),
         })
         .unwrap();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut monitor = unix::KimiTaskMonitor::new(Ok(home));
     monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
 
@@ -2058,7 +2058,7 @@ async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
             config_options: Vec::new(),
         })
         .unwrap();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut monitor = unix::KimiTaskMonitor::new(Ok(home.clone()));
     monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
     assert_eq!(
@@ -2130,7 +2130,7 @@ async fn kimi_native_task_monitor_retains_tasks_and_deduplicates_failure_warning
             config_options: Vec::new(),
         })
         .unwrap();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut monitor = unix::KimiTaskMonitor::new(Ok(home.clone()));
     monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
     std::fs::remove_file(home.join("session_index.jsonl")).unwrap();
@@ -2166,7 +2166,7 @@ async fn offline_prompt_queue_runs_serially_without_a_controller() {
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-1", prompt("first"));
     submit(&mut durable, "prompt-2", prompt("second"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -2228,7 +2228,7 @@ async fn config_during_a_prompt_waits_but_cancel_dispatches_immediately() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "active-prompt", prompt("running"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -2312,7 +2312,7 @@ async fn cancel_turn_interrupts_a_running_prompt_without_steering_or_cutting_a_c
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "active-prompt", prompt("running"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -2490,7 +2490,7 @@ async fn prompt_dispatch_preserves_the_complete_acp_content_vector() {
             prompt: content.clone(),
         },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
@@ -2539,7 +2539,7 @@ async fn same_priority_queue_entries_dispatch_in_acceptance_order() {
             value: "second".into(),
         },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
@@ -2631,7 +2631,7 @@ async fn dispatch_batch_does_not_outgrow_the_bounded_acp_command_channel() {
     // so only the bounded channel limits the durable batch.
     submit(&mut durable, "prompt-first", prompt("running"));
     submit(&mut durable, "cancel-second", RelayCommand::Cancel);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
@@ -2683,7 +2683,7 @@ async fn dispatch_batch_does_not_outgrow_the_bounded_acp_command_channel() {
 async fn out_of_band_sends_cannot_steal_reserved_dispatch_capacity() {
     const COMMAND_CAPACITY: usize = 2;
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (command_tx, mut command_rx) = mpsc::channel(COMMAND_CAPACITY);
@@ -2758,7 +2758,7 @@ async fn coordinator_drains_events_while_the_acp_command_channel_is_full() {
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-batched", prompt("queued turn"));
     submit(&mut durable, "cancel-batched", RelayCommand::Cancel);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
@@ -2830,7 +2830,7 @@ async fn coordinator_drains_events_while_the_acp_command_channel_is_full() {
 async fn a_selector_hel_applied_for_itself_is_durable_without_a_relay_command() {
     let temp = tempfile::tempdir().unwrap();
     let durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, _command_rx) = mpsc::channel(2);
@@ -2887,7 +2887,7 @@ async fn different_command_types_dispatch_in_acceptance_order() {
         },
     );
     submit(&mut durable, "prompt-second", prompt("after config"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
@@ -2945,7 +2945,7 @@ async fn rejected_prompt_is_durable_and_does_not_stall_the_queue() {
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-1", prompt("first"));
     submit(&mut durable, "prompt-2", prompt("second"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -3000,7 +3000,7 @@ async fn rejected_prompt_is_durable_and_does_not_stall_the_queue() {
 #[tokio::test]
 async fn set_session_mode_waits_for_idle_then_records_a_durable_outcome() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -3075,7 +3075,7 @@ async fn set_session_mode_waits_for_idle_then_records_a_durable_outcome() {
 #[tokio::test(start_paused = true)]
 async fn a_rejected_session_mode_change_reports_the_failure_and_leaves_the_mode_alone() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -3131,7 +3131,7 @@ async fn execution_mode_restoration_waits_for_idle_and_records_the_confirmed_mod
     assert!(request.supported_at(RELAY_PROTOCOL_VERSION));
 
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -3214,7 +3214,7 @@ async fn execution_mode_restoration_waits_for_idle_and_records_the_confirmed_mod
 #[tokio::test(start_paused = true)]
 async fn config_cancel_and_close_commands_have_durable_terminal_outcomes() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -3355,7 +3355,7 @@ async fn config_cancel_and_close_commands_have_durable_terminal_outcomes() {
 }
 
 async fn wait_for_relay_state(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     predicate: impl Fn(&mj_core::relay::RelayOperationalState) -> bool,
 ) {
     wait_for("relay state to reach the expected condition", async {
@@ -3372,7 +3372,7 @@ async fn wait_for_relay_state(
 #[test]
 fn typed_acp_observations_are_journaled() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let mut in_flight = BTreeMap::new();
@@ -3435,7 +3435,7 @@ fn typed_acp_observations_are_journaled() {
 #[test]
 fn advertised_steering_enables_automatic_steering() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let mut in_flight = BTreeMap::new();
@@ -3473,7 +3473,7 @@ fn harness_restarting_interrupts_in_flight_commands() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-1", prompt("go"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut in_flight = BTreeMap::new();
     in_flight.insert("prompt-1".into(), prompt("go"));
 
@@ -3522,7 +3522,7 @@ fn harness_restarting_interrupts_in_flight_commands() {
 #[test]
 fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let mut in_flight = BTreeMap::new();
@@ -3640,7 +3640,7 @@ fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
 #[test]
 fn a_fast_terminal_cannot_be_resurrected_by_a_late_start_event() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let mut in_flight = BTreeMap::new();
@@ -3699,7 +3699,7 @@ fn claude_result(origin: &str) -> mj_core::acp::ClaudeTurnResult {
     .unwrap()
 }
 
-fn harness_turn_open(relay: &Arc<Mutex<DurableRelay>>) -> bool {
+fn harness_turn_open(relay: &Arc<RelayCell>) -> bool {
     relay
         .lock()
         .unwrap()
@@ -3716,7 +3716,7 @@ async fn a_self_started_turn_holds_prompt_promotion_and_checkpoint_admission() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -3878,7 +3878,7 @@ async fn a_bridge_restart_releases_a_held_prompt_after_session_readiness() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -3968,7 +3968,7 @@ async fn harness_exit_during_a_turn_releases_held_prompt_after_worker_recovery()
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -4026,7 +4026,7 @@ async fn harness_exit_during_a_turn_releases_held_prompt_after_worker_recovery()
     recovered
         .record_observation(RelayObservation::SessionRestarted)
         .unwrap();
-    let relay = Arc::new(Mutex::new(recovered));
+    let relay = Arc::new(RelayCell::new(recovered));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -4063,7 +4063,7 @@ async fn cancel_turn_during_a_claude_harness_turn_dispatches_queued_prompt_once(
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -4207,7 +4207,7 @@ async fn a_model_change_answer_opens_no_turn_and_an_unanswered_stop_ends_one() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -4324,7 +4324,7 @@ async fn checkpoint_waits_for_current_session_configuration_then_stays_local() {
             reason: Some("test".into()),
         },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
@@ -4394,7 +4394,7 @@ async fn checkpoint_waits_for_an_in_flight_config_command() {
             reason: Some("after config".into()),
         },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
@@ -4502,7 +4502,7 @@ async fn a_released_checkpoint_barrier_is_not_cancelled_when_its_connection_drop
     assert_eq!(durable.claim_pending_commands(true).unwrap().len(), 1);
     durable.record_checkpoint_ready("released-barrier").unwrap();
     let floor_before = durable.operational_state().recovery_floor_ordinal;
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
 
     let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
     let (wake_tx, _wake_rx) = mpsc::channel(1);
@@ -4574,7 +4574,7 @@ async fn a_released_checkpoint_barrier_is_not_cancelled_when_its_connection_drop
 #[tokio::test]
 async fn checkpoint_wake_records_already_queued_runtime_events_first() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -4653,7 +4653,7 @@ async fn checkpoint_wake_is_not_starved_by_a_runtime_event_flood() {
             reason: Some("event flood fairness".into()),
         },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = mpsc::channel(8);
     event_tx
         .try_send(RuntimeEvent::SessionConfigured {
@@ -4742,7 +4742,7 @@ async fn checkpoint_freezes_effectful_commands_submitted_after_the_barrier() {
             value: "later-model".into(),
         },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
@@ -4810,7 +4810,7 @@ async fn a_removed_worker_root_reports_a_fatal_failure_to_the_daemon() {
         .unwrap();
     let through = durable.latest_ordinal();
     let digest = durable.latest_digest().to_owned();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
     let (fatal_tx, mut fatal_rx) = fatal_reports();
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
@@ -4868,7 +4868,7 @@ async fn a_removed_worker_root_reports_a_fatal_failure_to_the_daemon() {
 #[tokio::test]
 async fn client_disconnect_releases_checkpoint_and_runs_queued_prompt() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -4996,7 +4996,7 @@ async fn client_disconnect_releases_checkpoint_and_runs_queued_prompt() {
 #[tokio::test]
 async fn relay_client_rejects_unknown_envelope_fields_without_disconnect() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
@@ -5056,7 +5056,7 @@ async fn relay_client_rejects_unknown_envelope_fields_without_disconnect() {
 #[tokio::test]
 async fn an_unknown_relay_method_is_named_in_its_rejection() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
@@ -5119,7 +5119,7 @@ async fn an_unknown_relay_method_is_named_in_its_rejection() {
 #[tokio::test]
 async fn disconnect_between_close_and_checkpoint_completion_dispatches_close() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -5220,7 +5220,7 @@ async fn disconnect_between_close_and_checkpoint_completion_dispatches_close() {
 #[tokio::test]
 async fn relay_v1_client_disconnect_does_not_own_command_execution() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -5341,7 +5341,7 @@ async fn closed_relay_stays_attachable_after_the_acp_runtime_stops() {
     durable
         .record_observation(RelayObservation::Closed)
         .unwrap();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
 
     let socket = temp.path().join("closed-relay.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -5365,6 +5365,7 @@ async fn closed_relay_stays_attachable_after_the_acp_runtime_stops() {
         request: RelayRequest::Attach {
             after_ordinal: 0,
             after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            known_state_digest: None,
         },
     };
     let mut encoded = serde_json::to_vec(&request).unwrap();
@@ -6182,7 +6183,7 @@ async fn request_line_limit_is_enforced_while_the_line_is_read() {
 #[test]
 fn repeated_dispatch_wakes_coalesce_to_one_pending_token() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (wake_tx, mut wake_rx) = mpsc::channel(1);
@@ -6325,7 +6326,7 @@ fn a_used_native_session_is_reported_as_used_after_a_worker_restart() {
     // transmitted.
     let mut in_flight = BTreeMap::new();
     unix::record_runtime_event(
-        &Arc::new(Mutex::new(relay)),
+        &Arc::new(RelayCell::new(relay)),
         &mut in_flight,
         RuntimeEvent::NativeSessionUsed,
     )
@@ -6355,6 +6356,7 @@ fn attach_frame(request_id: &str, after_ordinal: u64, after_digest: &str) -> Vec
         request: RelayRequest::Attach {
             after_ordinal,
             after_digest: after_digest.to_owned(),
+            known_state_digest: None,
         },
     })
     .unwrap();
@@ -6372,7 +6374,7 @@ struct LiveRecorder {
 }
 
 impl LiveRecorder {
-    fn start(relay: Arc<Mutex<DurableRelay>>) -> Self {
+    fn start(relay: Arc<RelayCell>) -> Self {
         // Sample the lock often enough that a page read cannot hide in the
         // gaps, but append rarely enough that the fsync per event neither
         // dominates the sampling nor grows the active segment far enough
@@ -6422,7 +6424,7 @@ async fn a_replaying_controller_does_not_stall_live_event_recording() {
     let temp = tempfile::tempdir().unwrap();
     let durable = paged_relay_history(temp.path(), 80);
     let frontier = durable.latest_ordinal();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
 
     let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
     let (wake_tx, _wake_rx) = mpsc::channel(1);
@@ -6478,8 +6480,10 @@ async fn a_replaying_controller_does_not_stall_live_event_recording() {
             request: RelayRequest::Attach {
                 after_ordinal: 0,
                 after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+                known_state_digest: None,
             },
         },
+        None,
     )
     .await
     .unwrap();
@@ -6510,7 +6514,7 @@ async fn a_catch_up_completes_while_the_journal_keeps_sealing_under_it() {
     let durable = paged_relay_history(temp.path(), 96);
     let target = durable.latest_ordinal();
     let generation = durable.journal_generation();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
 
     // Events large enough to seal a segment every few appends, written as
     // fast as the durable path allows.
@@ -6543,8 +6547,10 @@ async fn a_catch_up_completes_while_the_journal_keeps_sealing_under_it() {
                 request: RelayRequest::Attach {
                     after_ordinal: cursor.0,
                     after_digest: cursor.1.clone(),
+                    known_state_digest: None,
                 },
             },
+            None,
         )
         .await
         .unwrap()
@@ -6597,7 +6603,7 @@ async fn catch_up_recording_throughput() {
         let durable = paged_relay_history(temp.path(), HISTORY_EVENTS);
         let frontier = durable.latest_ordinal();
         let genesis = RELAY_EVENT_GENESIS_DIGEST.to_owned();
-        let relay = Arc::new(Mutex::new(durable));
+        let relay = Arc::new(RelayCell::new(durable));
         let recorder = LiveRecorder::start(relay.clone());
 
         let started = std::time::Instant::now();
@@ -6610,10 +6616,14 @@ async fn catch_up_recording_throughput() {
                 request: RelayRequest::Attach {
                     after_ordinal: cursor.0,
                     after_digest: cursor.1.clone(),
+                    known_state_digest: None,
                 },
             };
             let body = if defer_page_reads {
-                unix::handle_request(&relay, envelope).await.unwrap().body
+                unix::handle_request(&relay, envelope, None)
+                    .await
+                    .unwrap()
+                    .body
             } else {
                 // The coupled policy: the whole read runs under the lock.
                 relay
@@ -6988,7 +6998,7 @@ async fn large_photo_transfer_is_verified_without_journaling_image_bytes() {
     use mj_core::attachment::{AttachmentRef, MAX_IMAGE_BYTES};
     let temp = tempfile::tempdir().unwrap();
     let relay_root = temp.path().join("relay");
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(&relay_root, SESSION_ID, "1.0.0").unwrap(),
     ));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
@@ -7114,7 +7124,7 @@ async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
     facts.capacity_retry_armed = false;
     assert!(mj_core::activity::is_quiet(&facts), "{facts:?}");
     let configured_ordinal = state.latest_ordinal();
-    let relay = Arc::new(Mutex::new(state));
+    let relay = Arc::new(RelayCell::new(state));
     let (event_tx, event_rx) = runtime_event_channel();
     let (_wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -7826,7 +7836,7 @@ async fn coordinator_behind_a_ready_barrier(
     temp: &tempfile::TempDir,
     capacity: usize,
 ) -> (
-    Arc<Mutex<DurableRelay>>,
+    Arc<RelayCell>,
     mpsc::Sender<RuntimeEvent>,
     mpsc::Sender<()>,
     tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -7838,7 +7848,7 @@ async fn coordinator_behind_a_ready_barrier(
         "checkpoint-barrier",
         RelayCommand::BeginCheckpoint { reason: None },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = mpsc::channel(capacity);
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, _command_rx) = mpsc::channel(4);
@@ -7875,7 +7885,7 @@ async fn coordinator_behind_a_ready_barrier(
     (relay, event_tx, wake_tx, coordinator, cut)
 }
 
-fn journaled_notices(relay: &Arc<Mutex<DurableRelay>>) -> Vec<String> {
+fn journaled_notices(relay: &Arc<RelayCell>) -> Vec<String> {
     relay
         .lock()
         .unwrap()
@@ -8002,7 +8012,7 @@ async fn a_question_during_a_ready_barrier_is_journaled_at_once() {
 #[tokio::test]
 async fn expired_mailbox_hook_lease_starts_idle_wake_without_another_request() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -8130,7 +8140,7 @@ async fn expired_mailbox_hook_lease_starts_idle_wake_without_another_request() {
 #[tokio::test]
 async fn cpu_usage_answers_from_the_sampler_without_journaling() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (wake, _wakes) = mpsc::channel(1);
@@ -8199,7 +8209,7 @@ async fn cpu_usage_answers_from_the_sampler_without_journaling() {
 
 /// A sub-agent's coordinator: it observes its agent's work when a prompt ends.
 async fn run_capturing_coordinator(
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     events: mpsc::Receiver<RuntimeEvent>,
     wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
@@ -8226,9 +8236,7 @@ async fn run_capturing_coordinator(
 
 /// The facts a prompt's published outcome carries, once it is published:
 /// `Some(None)` is an outcome without any.
-fn prompt_outcome_facts(
-    relay: &Arc<Mutex<DurableRelay>>,
-) -> Option<Option<mj_core::work_facts::WorkFacts>> {
+fn prompt_outcome_facts(relay: &Arc<RelayCell>) -> Option<Option<mj_core::work_facts::WorkFacts>> {
     relay
         .lock()
         .unwrap()
@@ -8277,7 +8285,7 @@ esac
 
 #[cfg(unix)]
 fn capture_observer(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     directory: &Path,
     git: PathBuf,
 ) -> crate::work_facts::WorkObserver {
@@ -8302,7 +8310,7 @@ async fn a_sub_agents_prompt_outcome_carries_its_facts_and_the_next_prompt_waits
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-first", prompt("first"));
     submit(&mut durable, "prompt-second", prompt("second"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let git = gated_git(work.path(), true);
     let observer = capture_observer(&relay, work.path(), git);
     let (event_tx, event_rx) = runtime_event_channel();
@@ -8363,7 +8371,7 @@ async fn a_capture_cancelled_by_the_harness_stopping_publishes_unavailable_facts
     let work = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-only", prompt("only"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     // A Git read that never ends: only the stop can end the capture.
     let git = gated_git(work.path(), false);
     let observer = capture_observer(&relay, work.path(), git);
@@ -8424,7 +8432,7 @@ async fn a_cancellation_accepted_during_a_capture_ends_it() {
     let work = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-only", prompt("only"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let git = gated_git(work.path(), false);
     let observer = capture_observer(&relay, work.path(), git);
     let (event_tx, event_rx) = runtime_event_channel();
@@ -8491,7 +8499,7 @@ async fn a_cancellation_accepted_before_a_capture_starts_ends_it() {
     let work = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-only", prompt("only"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let git = gated_git(work.path(), false);
     let observer = capture_observer(&relay, work.path(), git);
     let (event_tx, event_rx) = runtime_event_channel();
@@ -8548,7 +8556,7 @@ async fn an_ordinary_sessions_prompt_outcome_carries_no_facts() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-only", prompt("only"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (_wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -8709,4 +8717,150 @@ fn push_gate_startup_reports_a_refused_hook_install_once() {
         std::fs::read_to_string(hooks.join("pre-push")).unwrap(),
         "existing hook"
     );
+}
+
+/// The harness preparation joins an attach's state before the relay digests
+/// it. A preparation that moves on while the relay itself is unchanged must
+/// still bring the whole state back, or the controller keeps a stale one.
+#[tokio::test]
+async fn a_changed_preparation_is_never_taken_for_a_known_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "test").unwrap(),
+    ));
+    let attach = |known: Option<String>| RelayRequestEnvelope {
+        request_id: "attach".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Attach {
+            after_ordinal: 0,
+            after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            known_state_digest: known,
+        },
+    };
+    let preparing = mj_core::relay::HarnessPreparation::Preparing {
+        step: "harness-profile".into(),
+        since_ms: 1,
+    };
+    let RelayResponseBody::Ok {
+        payload:
+            RelayResponsePayload::Attached {
+                state,
+                state_digest,
+                ..
+            },
+    } = unix::handle_request(&relay, attach(None), Some(preparing.clone()))
+        .await
+        .unwrap()
+        .body
+    else {
+        panic!("expected the whole state");
+    };
+    assert_eq!(state.harness_preparation, Some(preparing.clone()));
+    let held = state_digest.unwrap();
+
+    let unchanged = unix::handle_request(&relay, attach(Some(held.clone())), Some(preparing))
+        .await
+        .unwrap()
+        .body;
+    assert!(matches!(
+        unchanged,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::AttachedWithKnownState { .. }
+        }
+    ));
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::Attached { state, .. },
+    } = unix::handle_request(
+        &relay,
+        attach(Some(held)),
+        Some(mj_core::relay::HarnessPreparation::Started),
+    )
+    .await
+    .unwrap()
+    .body
+    else {
+        panic!("a changed preparation must resend the state");
+    };
+    assert_eq!(
+        state.harness_preparation,
+        Some(mj_core::relay::HarnessPreparation::Started)
+    );
+}
+
+/// A change wait answers when the relay changes and not before, and with the
+/// values it was given once its bound passes without a change. Every relay
+/// change takes the relay lock, so the lock's release is what wakes it.
+#[tokio::test(start_paused = true)]
+async fn a_change_wait_answers_on_a_relay_change_or_at_its_bound() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "test").unwrap(),
+    ));
+    let feed = super::subagents::SubagentFeed::default();
+    let current = || {
+        let mut state = relay.lock().unwrap().operational_state();
+        state.harness_preparation = None;
+        (
+            state.latest_ordinal,
+            mj_core::relay::relay_state_digest(&state).unwrap(),
+        )
+    };
+    let observed = |body: RelayResponseBody| match body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ChangeObserved {
+                    latest_ordinal,
+                    state_digest,
+                    subagent_queue_changed,
+                },
+        } => (latest_ordinal, state_digest, subagent_queue_changed),
+        other => panic!("expected an observed change, got {other:?}"),
+    };
+    let (ordinal, digest) = current();
+
+    let started = tokio::time::Instant::now();
+    let quiet = unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest))
+        .await
+        .unwrap();
+    assert_eq!(observed(quiet), (ordinal, digest.clone(), false));
+    assert_eq!(started.elapsed(), mj_core::relay::RELAY_CHANGE_WAIT_BOUND);
+
+    let started = tokio::time::Instant::now();
+    let wait = unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest));
+    let record = async {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        relay
+            .lock()
+            .unwrap()
+            .record_observation(RelayObservation::Warning {
+                message: "something happened".into(),
+            })
+            .unwrap();
+    };
+    let (changed, ()) = tokio::join!(wait, record);
+    let (latest, changed_digest, _) = observed(changed.unwrap());
+    assert_eq!(latest, ordinal + 1);
+    assert_ne!(changed_digest, digest);
+    assert_eq!(started.elapsed(), std::time::Duration::from_secs(1));
+
+    let stale = unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest))
+        .await
+        .unwrap();
+    assert_eq!(
+        observed(stale).0,
+        ordinal + 1,
+        "a stale view is answered at once"
+    );
+
+    // Waits only observe the relay, so two of them on an unchanged relay stay
+    // idle until their bound instead of waking each other.
+    let (ordinal, digest) = current();
+    let started = tokio::time::Instant::now();
+    let (first, second) = tokio::join!(
+        unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest)),
+        unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest)),
+    );
+    assert_eq!(observed(first.unwrap()).0, ordinal);
+    assert_eq!(observed(second.unwrap()).0, ordinal);
+    assert_eq!(started.elapsed(), mj_core::relay::RELAY_CHANGE_WAIT_BOUND);
 }

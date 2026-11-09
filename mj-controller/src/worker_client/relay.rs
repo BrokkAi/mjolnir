@@ -71,6 +71,11 @@ impl RelayClient {
         self.protocol_version
     }
 
+    /// The digest of the operational state this connection last received.
+    pub fn known_state_digest(&self) -> Option<&str> {
+        self.known_state.as_ref().map(|(digest, _)| digest.as_str())
+    }
+
     pub fn latest_ordinal(&self) -> u64 {
         self.latest_ordinal
     }
@@ -85,11 +90,16 @@ impl RelayClient {
         after_digest: impl Into<String>,
     ) -> Result<RelayAttachment> {
         let after_digest = after_digest.into();
-        match self
+        let known_state_digest = (self.protocol_version
+            >= mj_core::relay::RELAY_STATE_DIGEST_PROTOCOL)
+            .then(|| self.known_state.as_ref().map(|(digest, _)| digest.clone()))
+            .flatten();
+        let (state, events, through_ordinal, through_digest) = match self
             .call_with_timeout(
                 RelayRequest::Attach {
                     after_ordinal,
                     after_digest: after_digest.clone(),
+                    known_state_digest: known_state_digest.clone(),
                 },
                 RELAY_HISTORY_TIMEOUT,
             )
@@ -100,32 +110,47 @@ impl RelayClient {
                 events,
                 through_ordinal,
                 through_digest,
+                state_digest,
             } => {
-                let mut cursor = RelayCursor {
-                    ordinal: after_ordinal,
-                    digest: after_digest,
-                };
-                for event in &events {
-                    validate_relay_event(cursor.ordinal, &cursor.digest, event)
-                        .context("verify relay attachment event chain")?;
-                    cursor.ordinal = event.ordinal;
-                    cursor.digest.clone_from(&event.digest);
-                }
-                if cursor.ordinal != through_ordinal || cursor.digest != through_digest {
-                    bail!("relay attachment frontier does not match its event chain");
-                }
                 state.relay_protocol_version = Some(self.protocol_version);
-                self.latest_ordinal = state.latest_ordinal;
-                self.latest_digest = state.latest_digest.clone();
-                Ok(RelayAttachment {
-                    state,
-                    events,
-                    through_ordinal,
-                    through_digest,
-                })
+                self.known_state = state_digest.map(|digest| (digest, state.clone()));
+                (state, events, through_ordinal, through_digest)
+            }
+            RelayResponsePayload::AttachedWithKnownState {
+                events,
+                through_ordinal,
+                through_digest,
+            } => {
+                let held = self
+                    .known_state
+                    .as_ref()
+                    .filter(|(digest, _)| Some(digest) == known_state_digest.as_ref())
+                    .context("relay answered with a state this connection does not hold")?;
+                (held.1.clone(), events, through_ordinal, through_digest)
             }
             _ => bail!("relay returned an unexpected attach response"),
+        };
+        let mut cursor = RelayCursor {
+            ordinal: after_ordinal,
+            digest: after_digest,
+        };
+        for event in &events {
+            validate_relay_event(cursor.ordinal, &cursor.digest, event)
+                .context("verify relay attachment event chain")?;
+            cursor.ordinal = event.ordinal;
+            cursor.digest.clone_from(&event.digest);
         }
+        if cursor.ordinal != through_ordinal || cursor.digest != through_digest {
+            bail!("relay attachment frontier does not match its event chain");
+        }
+        self.latest_ordinal = state.latest_ordinal;
+        self.latest_digest = state.latest_digest.clone();
+        Ok(RelayAttachment {
+            state,
+            events,
+            through_ordinal,
+            through_digest,
+        })
     }
 
     /// Start a bounded catch-up by capturing the relay frontier before the
@@ -147,8 +172,21 @@ impl RelayClient {
             ordinal: after_ordinal,
             digest: after_digest,
         };
-        let state = first.state.clone();
-        let first_page = clip_catch_up_page(first, &previous, &frontier)?;
+        let RelayAttachment {
+            state,
+            events,
+            through_ordinal,
+            through_digest,
+        } = first;
+        let first_page = clip_catch_up_page(
+            RelayEventPage {
+                events,
+                through_ordinal,
+                through_digest,
+            },
+            &previous,
+            &frontier,
+        )?;
         Ok(RelayCatchUp {
             state,
             frontier,
@@ -167,10 +205,23 @@ impl RelayClient {
         if previous.ordinal >= frontier.ordinal {
             bail!("relay catch-up is already at its fixed frontier");
         }
-        let attachment = self
+        let RelayAttachment {
+            events,
+            through_ordinal,
+            through_digest,
+            ..
+        } = self
             .attach(previous.ordinal, previous.digest.clone())
             .await?;
-        clip_catch_up_page(attachment, previous, frontier)
+        clip_catch_up_page(
+            RelayEventPage {
+                events,
+                through_ordinal,
+                through_digest,
+            },
+            previous,
+            frontier,
+        )
     }
 
     pub async fn acknowledge(

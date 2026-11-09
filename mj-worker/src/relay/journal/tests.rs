@@ -1466,6 +1466,7 @@ fn large_relay_history_stays_disk_backed_and_replays_across_segments() {
             RelayRequest::Attach {
                 after_ordinal: cursor.ordinal,
                 after_digest: cursor.digest.clone(),
+                known_state_digest: None,
             },
         ));
         let RelayResponseBody::Ok {
@@ -1531,6 +1532,7 @@ fn reopening_does_not_decompress_historical_sealed_segments() {
         RelayRequest::Attach {
             after_ordinal: 0,
             after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            known_state_digest: None,
         },
     ));
     let RelayResponseBody::Error { error } = response.body else {

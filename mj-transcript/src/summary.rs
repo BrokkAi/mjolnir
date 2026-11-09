@@ -145,7 +145,7 @@ fn tool_value(call: &Value, presentation: Option<&ToolCallPresentation>, full: b
     };
     let mut compact = json!({
         "toolCallId": call.get("toolCallId").and_then(Value::as_str).unwrap_or("unknown"),
-        "name": excerpt(&name, 256),
+        "name": mj_core::activity::verdict::tool_title(&name),
         "kind": call.get("kind").and_then(Value::as_str).unwrap_or("other"),
         "status": call.get("status").and_then(Value::as_str).unwrap_or("pending"),
     });

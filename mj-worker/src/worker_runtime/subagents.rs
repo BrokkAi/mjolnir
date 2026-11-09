@@ -890,11 +890,14 @@ struct Collections {
 pub struct SubagentEndpoint {
     path: PathBuf,
     admission: Arc<SocketAdmission>,
-    relay: Option<Arc<Mutex<crate::relay::DurableRelay>>>,
+    relay: Option<Arc<crate::relay::RelayCell>>,
     state: Arc<Mutex<QueueState>>,
     /// Woken whenever a result lands, so a socket call awaiting its own request
     /// returns the moment the daemon completes it.
     completed: Arc<Notify>,
+    /// The queue's generation, published by every write so a connection
+    /// waiting for a change (`WaitForChange`) wakes.
+    generations: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl SubagentEndpoint {
@@ -915,6 +918,7 @@ impl SubagentEndpoint {
             relay: None,
             state: Arc::new(Mutex::new(state)),
             completed: Arc::new(Notify::new()),
+            generations: Arc::new(tokio::sync::watch::Sender::new(0)),
         };
         endpoint.import_legacy_results()?;
         Ok(endpoint)
@@ -1109,7 +1113,15 @@ impl SubagentEndpoint {
         mj_core::config::atomic_write(&self.path, &body)
             .with_context(|| format!("write sub-agent queue {}", self.path.display()))?;
         state.generation = state.generation.wrapping_add(1);
+        // The writer still holds the queue lock, so a woken waiter reads the
+        // queue after this write is committed.
+        self.generations.send_replace(state.generation);
         Ok(())
+    }
+
+    /// Changes after every write to the queue.
+    pub(in crate::worker_runtime) fn generations(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.generations.subscribe()
     }
 }
 
@@ -2538,7 +2550,7 @@ enabled = false
     fn admission_stamps_worker_turn_and_replay_cannot_retarget_it() {
         use crate::relay::test_support::{prompt, submit_relay};
         let root = tempfile::tempdir().unwrap();
-        let relay = Arc::new(Mutex::new(
+        let relay = Arc::new(crate::relay::RelayCell::new(
             crate::relay::DurableRelay::open(root.path(), "session-123", "test").unwrap(),
         ));
         {
@@ -2589,7 +2601,7 @@ enabled = false
     fn handback_admission_owns_the_harness_turn_in_either_order() {
         for opened in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let relay = Arc::new(Mutex::new(
+            let relay = Arc::new(crate::relay::RelayCell::new(
                 crate::relay::DurableRelay::open(root.path(), "session-123", "test").unwrap(),
             ));
             {
@@ -2902,7 +2914,7 @@ struct SocketReply {
 pub(super) fn serve(
     runtime: &tokio::runtime::Handle,
     root: &Path,
-    relay: Arc<Mutex<crate::relay::DurableRelay>>,
+    relay: Arc<crate::relay::RelayCell>,
     _harness: mj_core::config::HarnessKind,
 ) -> Result<(SubagentEndpoint, SubagentSocketGuard)> {
     let mut endpoint = SubagentEndpoint::open(root)?;

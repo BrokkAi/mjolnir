@@ -1474,7 +1474,7 @@ fn a_never_policy_is_not_pre_pulled() {
 
 /// Apple's `container` CLI spells both commands differently from Podman and
 /// Docker: `image pull` rather than `pull`, no `--format` on `image inspect`,
-/// no `--platform` (it runs native images only) and no verified prune.
+/// no `--platform` (it runs native images only), and no `-f` on `image prune`.
 // Hard-won: 8c5355ea: Auto images left first Create waiting for a background download.
 #[test]
 fn an_apple_container_image_refresh_uses_the_container_cli() {
@@ -1497,7 +1497,8 @@ fn an_apple_container_image_refresh_uses_the_container_cli() {
         refresh.image_id.args,
         ["image", "inspect", "ghcr.io/example/dev:latest"]
     );
-    assert!(refresh.prune.is_none(), "{:?}", refresh.prune);
+    assert_eq!(refresh.prune.program, "container");
+    assert_eq!(refresh.prune.args, ["image", "prune"]);
 }
 
 /// A launch never waits on a registry under the default policy. The daemon

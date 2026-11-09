@@ -13,8 +13,9 @@ use super::*;
 /// agent's turn stalls with it. So attach captures a plan under the lock
 /// and does its reading on a blocking thread with the lock released.
 pub(crate) async fn handle_request(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     envelope: RelayRequestEnvelope,
+    harness_preparation: Option<mj_core::relay::HarnessPreparation>,
 ) -> Result<RelayResponseEnvelope> {
     // Sealing and garbage collection can move the segments a plan named
     // while it is being read. That is not the controller's fault and not
@@ -31,6 +32,7 @@ pub(crate) async fn handle_request(
         }
     };
     for _ in 0..REPLAN_ATTEMPTS {
+        deferred.set_harness_preparation(harness_preparation.clone());
         let generation = deferred.journal_generation();
         let response = tokio::task::spawn_blocking(move || deferred.finish())
             .await
@@ -153,7 +155,7 @@ pub(crate) async fn elicitation_response(
 pub(crate) async fn background_task_stop_response(
     envelope: RelayRequestEnvelope,
     commands: Option<&mpsc::Sender<CommandRequest>>,
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
 ) -> RelayResponseEnvelope {
     let protocol_version = envelope.protocol_version;
     let request_id = envelope.request_id;

@@ -117,6 +117,77 @@ pub enum BackgroundWorkPolicy {
     KimiTasks,
 }
 
+/// The relay behind its lock. Every change to the relay takes this lock
+/// through [`Self::lock`], so each such release is counted as a possible
+/// change: a connection waiting for one (see
+/// [`mj_core::relay::RelayRequest::WaitForChange`]) wakes and compares what it
+/// is waiting on, without the relay listing its mutations. A waiting
+/// connection reads through [`Self::observe`], which cannot change the relay
+/// and is not counted, so waits never wake one another.
+pub struct RelayCell {
+    relay: std::sync::Mutex<DurableRelay>,
+    released: tokio::sync::watch::Sender<u64>,
+}
+
+impl RelayCell {
+    pub fn new(relay: DurableRelay) -> Self {
+        Self {
+            relay: std::sync::Mutex::new(relay),
+            released: tokio::sync::watch::Sender::new(0),
+        }
+    }
+
+    pub fn lock(&self) -> std::sync::LockResult<RelayGuard<'_>> {
+        let released = &self.released;
+        match self.relay.lock() {
+            Ok(guard) => Ok(RelayGuard { guard, released }),
+            Err(poisoned) => Err(std::sync::PoisonError::new(RelayGuard {
+                guard: poisoned.into_inner(),
+                released,
+            })),
+        }
+    }
+
+    /// Read the relay without counting as a possible change. The guard only
+    /// reads, so nothing a change wait must see can happen under it.
+    pub fn observe(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, DurableRelay>> {
+        self.relay.lock()
+    }
+
+    /// Changes on every release of a [`Self::lock`] guard.
+    pub fn releases(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.released.subscribe()
+    }
+}
+
+pub struct RelayGuard<'a> {
+    guard: std::sync::MutexGuard<'a, DurableRelay>,
+    released: &'a tokio::sync::watch::Sender<u64>,
+}
+
+impl std::ops::Deref for RelayGuard<'_> {
+    type Target = DurableRelay;
+
+    fn deref(&self) -> &DurableRelay {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for RelayGuard<'_> {
+    fn deref_mut(&mut self) -> &mut DurableRelay {
+        &mut self.guard
+    }
+}
+
+impl Drop for RelayGuard<'_> {
+    fn drop(&mut self) {
+        // A woken waiter takes the lock to look, so it sees this holder's
+        // writes once the mutex guard below is released.
+        self.released
+            .send_modify(|count| *count = count.wrapping_add(1));
+    }
+}
+
 /// Durable, session-side ACP store-and-forward relay.
 ///
 /// `RelaySnapshot` is the canonical operational state. Journal spans retain
@@ -1538,6 +1609,7 @@ pub(crate) mod test_support {
             RelayRequest::Attach {
                 after_ordinal,
                 after_digest,
+                known_state_digest: None,
             },
         ))
     }

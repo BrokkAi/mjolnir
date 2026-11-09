@@ -114,18 +114,34 @@ pub fn discover() -> Result<Environment> {
     anyhow::bail!("target login environment requires a Unix account")
 }
 
-/// Interactive startup runs plugin and version managers, so the probe allows
-/// more time than a profile read needs. The deadline still fails a startup file
-/// that waits for input instead of hanging a session.
-#[cfg(unix)]
-const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long the login-shell probe may run. The probe reproduces everything a
+/// terminal session pays at shell startup — version managers, profile
+/// scripts, prompt setup — so on a loaded host it can take far longer than a
+/// profile read, and any fixed budget smaller than the worker-startup budget
+/// fails spawns that the controller's own wait would have outlasted.
+///
+/// This budget is the controller's worker-startup ceiling
+/// (`WORKER_STARTUP_CONNECT_CEILING`, 300s) minus 60s the launch itself can
+/// spend reaching the probe on a loaded machine, so the probe deadline always
+/// fires before the startup wait would give up on a living worker. While the
+/// probe runs, the worker records the
+/// [`crate::relay::WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT`] startup step, and
+/// the startup wait defers to this deadline for exactly that step; the test
+/// `login_probe_deadline_fits_inside_the_worker_startup_ceiling` pins the
+/// ordering so the two cannot silently disagree. The probe records its own
+/// exit when the deadline passes, so the worker's own sentence, not the wait
+/// giving up, is what a too-slow startup reports. The 240s comes from that
+/// measured ceiling; it is not an independent guess at how long a shell may
+/// take.
+pub const LOGIN_ENVIRONMENT_PROBE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(240);
 
 #[cfg(unix)]
 pub fn discover() -> Result<Environment> {
     let started = std::time::Instant::now();
     let account = Account::current()?;
     let shell = account.shell.clone();
-    let environment = discover_account(account, DISCOVERY_TIMEOUT)?;
+    let environment = discover_account(account, LOGIN_ENVIRONMENT_PROBE_TIMEOUT)?;
     let path_entries = environment
         .get("PATH")
         .map(|path| std::env::split_paths(path).count())

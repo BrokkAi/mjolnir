@@ -272,7 +272,7 @@ impl ClaudeProbe {
 #[cfg(unix)]
 struct RelayPeer {
     probe: ClaudeProbe,
-    relay: Arc<Mutex<crate::relay::DurableRelay>>,
+    relay: Arc<crate::relay::RelayCell>,
     in_flight: BTreeMap<String, crate::relay::RelayCommand>,
     _directory: tempfile::TempDir,
 }
@@ -287,7 +287,7 @@ impl RelayPeer {
         durable.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
         let mut peer = Self {
             probe: ClaudeProbe::new().await,
-            relay: Arc::new(Mutex::new(durable)),
+            relay: Arc::new(crate::relay::RelayCell::new(durable)),
             in_flight: BTreeMap::new(),
             _directory: directory,
         };
@@ -796,7 +796,7 @@ async fn a_move_checkpoint_waits_for_the_cancelled_claude_prompt_response() {
     let directory = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(directory.path(), SESSION, "test").unwrap();
     durable.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(crate::relay::RelayCell::new(durable));
     let mut in_flight = BTreeMap::new();
     let mut probe = ClaudeProbe::new().await;
     loop {

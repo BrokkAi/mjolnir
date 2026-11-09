@@ -1616,8 +1616,11 @@ impl ApiBackend {
         Ok(())
     }
 
-    /// Resolve every child and the existing finished predicate from one
-    /// current observation for a parent notification.
+    /// Resolve every child that can still be reported, and the existing
+    /// finished predicate, from one current observation for a parent
+    /// notification. A cleanly stopped child is never news (see
+    /// [`subagent_status`]), so its record is not read; a parent can hold
+    /// thousands of them.
     async fn notification_children(
         &self,
         parent_id: &str,
@@ -1626,7 +1629,24 @@ impl ApiBackend {
         Vec<NotificationChildSnapshot>,
     )> {
         let inputs = self.subagent_input_progress(parent_id).await?;
-        let relations = self.list_subagents(parent_id.to_owned()).await?;
+        let parent = parent_id.to_owned();
+        let ids = blocking("list the parent's children", move || {
+            crate::database::list_subagent_ids(&parent)
+        })
+        .await?
+        .into_iter()
+        .filter(|id| {
+            !self
+                .exports
+                .session_record(id)
+                .is_some_and(|record| record.is_cleanly_stopped())
+        })
+        .collect::<Vec<_>>();
+        let parent = parent_id.to_owned();
+        let relations = blocking("load the parent's reportable children", move || {
+            crate::database::list_subagents_among(&parent, &ids)
+        })
+        .await?;
         let ids = relations
             .iter()
             .map(|relation| relation.child_session_id.clone())
@@ -1699,9 +1719,7 @@ impl ApiBackend {
             return Ok(ChildReport::NotNews("the parent is closing"));
         }
         match reconciled.children.get(child_id) {
-            None => Ok(ChildReport::NotNews(
-                "the child is not a worker of this parent",
-            )),
+            None => self.unreconciled_child_report(parent_id, child_id).await,
             Some(ChildDisposition::NotNews(why)) => Ok(ChildReport::NotNews(why)),
             Some(ChildDisposition::NotFinished) => Ok(ChildReport::NotFinished),
             Some(ChildDisposition::Reported) => {
@@ -1831,13 +1849,46 @@ impl ApiBackend {
         Ok(reconciled)
     }
 
+    /// What `reconcile_children` would have said about a child it skipped:
+    /// one that is cleanly stopped, or that is not this parent's child at all.
+    /// The checks keep `reconcile_children`'s order.
+    async fn unreconciled_child_report(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+    ) -> Result<ChildReport> {
+        let relation = self.owned_relation(parent_id, child_id).await?;
+        Ok(ChildReport::NotNews(match relation {
+            None => "the child is not a worker of this parent",
+            Some(relation) if relation.kind == mj_core::subagent::SubagentKind::Reviewer => {
+                "a reviewer is reported by its review"
+            }
+            Some(_) if self.exports.close_is_requested(child_id) => {
+                "a close of the child was requested"
+            }
+            Some(_) => "the child is stopping or stopped",
+        }))
+    }
+
+    /// The child's relation when it belongs to this parent.
+    async fn owned_relation(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+    ) -> Result<Option<mj_core::subagent::SubagentRecord>> {
+        let child = child_id.to_owned();
+        Ok(blocking("read the child's relation", move || {
+            crate::database::load_subagent(&child)
+        })
+        .await?
+        .filter(|relation| relation.parent_session_id == parent_id))
+    }
+
     async fn require_owned_child(&self, parent_id: &str, child_id: &str) -> Result<()> {
         anyhow::ensure!(
-            self.list_subagents(parent_id.to_owned())
+            self.owned_relation(parent_id, child_id)
                 .await?
-                .iter()
-                .any(|child| child.child_session_id == child_id
-                    && child.kind == mj_core::subagent::SubagentKind::Worker),
+                .is_some_and(|child| child.kind == mj_core::subagent::SubagentKind::Worker),
             "session {child_id} does not belong to parent {parent_id}"
         );
         Ok(())

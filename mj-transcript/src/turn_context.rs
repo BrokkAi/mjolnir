@@ -325,13 +325,12 @@ impl TurnContext {
             .filter(|e| e.role == crate::summary::SummaryRole::Tool)
             .take(IN_FLIGHT_TOOLS)
             .map(|e| mj_core::activity::verdict::ToolOutcome {
-                name: tail(
+                name: tool_title(
                     e.tool
                         .as_ref()
                         .and_then(|t| t.get("name"))
                         .and_then(|n| n.as_str())
                         .unwrap_or(&e.text),
-                    TOOL_TITLE_BYTES,
                 ),
                 status: e
                     .tool
@@ -356,15 +355,13 @@ impl TurnContext {
                 .iter()
                 .take(IN_FLIGHT_TOOLS)
                 .map(|tool| ToolEvidence {
-                    title: tail(
-                        &state
+                    title: tool_title(
+                        state
                             .summary
                             .entries
                             .iter()
                             .find(|e| e.id == tool.tool_call_id)
-                            .map(|e| e.text.clone())
-                            .unwrap_or_else(|| "unknown tool".into()),
-                        TOOL_TITLE_BYTES,
+                            .map_or("unknown tool", |e| e.text.as_str()),
                     ),
                     running_s: now_ms.saturating_sub(tool.started_at_ms).max(0) as u64 / 1000,
                 })

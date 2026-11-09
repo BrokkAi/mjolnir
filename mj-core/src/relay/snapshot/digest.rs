@@ -178,6 +178,15 @@ fn digest_over(domain: &[u8], encoded: &[u8]) -> String {
     lower_hex(hasher.finalize())
 }
 
+/// A digest of an operational state's serialized form, which the worker
+/// compares with the one a controller names to tell whether that controller
+/// already holds this exact state. Only the worker computes it, over the same
+/// type and serializer each time, so equal states give equal digests.
+pub fn relay_state_digest(state: &super::RelayOperationalState) -> Result<String> {
+    let encoded = serde_json::to_vec(state).context("serialize relay operational state")?;
+    Ok(lower_hex(Sha256::digest(encoded)))
+}
+
 /// Compute the domain-separated SHA-256 digest for a relay event, using the
 /// formula that matches the record's format. The `digest` field itself is
 /// excluded; for v2 so is `previous_digest`.

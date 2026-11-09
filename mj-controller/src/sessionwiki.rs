@@ -3290,15 +3290,15 @@ mod tests {
     fn the_documented_sessionwiki_install_is_the_linked_version() {
         const LOCK: &str = include_str!("../../Cargo.lock");
         const DOCS: &str = include_str!("../../docs/src/content/docs/sessions.md");
+        const CRATE: &str = "brokk-sessionwiki";
         let linked = LOCK
             .split("[[package]]\n")
-            .find_map(|package| package.strip_prefix("name = \"sessionwiki\"\nversion = \""))
+            .find_map(|package| package.strip_prefix(&format!("name = \"{CRATE}\"\nversion = \"")))
             .and_then(|rest| rest.split('"').next())
-            .expect("Cargo.lock resolves sessionwiki");
+            .expect("Cargo.lock resolves the SessionWiki crate");
         for line in [
-            format!("This build links the `sessionwiki` crate, version {linked}."),
-            format!("cargo install --locked sessionwiki@{linked}\n"),
-            format!("npm install --global @youdie006/sessionwiki@{linked}\n"),
+            format!("This build links the `{CRATE}` crate, version {linked}."),
+            format!("cargo install --locked {CRATE}@{linked}\n"),
         ] {
             assert!(DOCS.contains(&line), "sessions.md must say {line:?}");
         }

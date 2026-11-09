@@ -122,7 +122,18 @@ pub const RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL: u32 = 55;
 /// prompt outcome record, and the finish-report facts that carry them. Older
 /// readers ignore the field; older workers get the report as text.
 pub const RELAY_FINISH_FACTS_PROTOCOL: u32 = 56;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_FINISH_FACTS_PROTOCOL;
+/// 57 lets an attach name the digest of the operational state the controller
+/// already holds. The worker then answers `AttachedWithKnownState` instead of
+/// sending an identical state again, and `Attached` carries the digest of the
+/// state it does send. Older workers reject the unknown field, so controllers
+/// send it only to workers that negotiated 57.
+pub const RELAY_STATE_DIGEST_PROTOCOL: u32 = 57;
+/// 58 adds `WaitForChange`: the worker holds the request until its events,
+/// its operational state, or this connection's sub-agent queue differ from
+/// what the controller names, so the controller syncs on change instead of on
+/// a timer.
+pub const RELAY_CHANGE_WAIT_PROTOCOL: u32 = 58;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHANGE_WAIT_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -174,6 +185,12 @@ pub const WORKER_PID_FILE: &str = "worker.pid";
 /// control socket, so a controller waiting for that socket can tell a worker
 /// that is still making progress from one that died without a word.
 pub const WORKER_STARTUP_FILE: &str = "worker-startup.json";
+/// The startup step a worker records while it reads the account's login-shell
+/// environment. That probe carries its own deadline
+/// ([`crate::login_environment::LOGIN_ENVIRONMENT_PROBE_TIMEOUT`]), so the
+/// controller watching a starting worker defers to the probe's deadline for
+/// this step instead of applying its stall detection to it.
+pub const WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT: &str = "login-environment";
 /// File a dying worker daemon writes with the reason it stopped.
 pub const WORKER_EXIT_FILE: &str = "worker-exit.json";
 /// File in which a worker records which untracked paths each repository held

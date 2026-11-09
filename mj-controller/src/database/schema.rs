@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 119;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 121;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2250,6 +2250,78 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Compatible: adds an index only. Reading a parent's child messages joined
+    // the outbox to each child by `target_session_id` with no index, scanning
+    // every outbox row per child (27 s for a parent with 2,209 children).
+    // Older builds read and write the same rows and SQLite maintains the index
+    // for them, so the compatibility floor stays where it is.
+    if version < 120 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE INDEX IF NOT EXISTS mailbox_outbox_target
+                 ON mailbox_outbox(target_session_id);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (120, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 120;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: rows that belong to a session which is gone (deleted, or
+    // destroyed with data loss) are removed by triggers in the transaction
+    // that removes the session, and an insert for a gone session is ignored,
+    // so no ordering of writers can leave one behind. A revision-120 build
+    // reads an enqueued event back after inserting it; when a trigger ignores
+    // that insert the read fails and rolls back the build's whole write, so
+    // older builds must not write this store.
+    if version < 121 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TRIGGER IF NOT EXISTS session_rows_deleted AFTER DELETE ON sessions BEGIN
+                     DELETE FROM mailbox_outbox WHERE target_session_id = OLD.session_id;
+                     DELETE FROM github_watch_items WHERE creator_session_id = OLD.session_id;
+                     DELETE FROM github_watch_classifications WHERE session_id = OLD.session_id;
+                     DELETE FROM github_watch_classification_failures WHERE session_id = OLD.session_id;
+                 END;
+             CREATE TRIGGER IF NOT EXISTS session_rows_destroyed
+                 AFTER UPDATE OF state ON sessions
+                 WHEN NEW.state = 'destroyed-with-data-loss' BEGIN
+                     DELETE FROM mailbox_outbox WHERE target_session_id = NEW.session_id;
+                     DELETE FROM github_watch_items WHERE creator_session_id = NEW.session_id;
+                     DELETE FROM github_watch_classifications WHERE session_id = NEW.session_id;
+                     DELETE FROM github_watch_classification_failures WHERE session_id = NEW.session_id;
+                 END;
+             CREATE TRIGGER IF NOT EXISTS mailbox_outbox_live_target BEFORE INSERT ON mailbox_outbox
+                 WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.target_session_id AND state <> 'destroyed-with-data-loss')
+                 BEGIN SELECT RAISE(IGNORE); END;
+             CREATE TRIGGER IF NOT EXISTS github_watch_items_live_creator
+                 BEFORE INSERT ON github_watch_items
+                 WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.creator_session_id AND state <> 'destroyed-with-data-loss')
+                 BEGIN SELECT RAISE(IGNORE); END;
+             CREATE TRIGGER IF NOT EXISTS github_watch_classifications_live_session
+                 BEFORE INSERT ON github_watch_classifications
+                 WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.session_id AND state <> 'destroyed-with-data-loss')
+                 BEGIN SELECT RAISE(IGNORE); END;
+             CREATE TRIGGER IF NOT EXISTS github_watch_classification_failures_live_session
+                 BEFORE INSERT ON github_watch_classification_failures
+                 WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.session_id AND state <> 'destroyed-with-data-loss')
+                 BEGIN SELECT RAISE(IGNORE); END;
+             DELETE FROM mailbox_outbox WHERE target_session_id NOT IN (
+                 SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss');
+             DELETE FROM github_watch_items WHERE creator_session_id NOT IN (
+                 SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss');
+             DELETE FROM github_watch_classifications WHERE session_id NOT IN (
+                 SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss');
+             DELETE FROM github_watch_classification_failures WHERE session_id NOT IN (
+                 SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss');
+             UPDATE schema_compatibility SET minimum_compatible_version = 121 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (121, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 121;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2679,8 +2751,25 @@ pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible
     forget_verified_schema(path);
 }
 
+/// Revision 121's triggers name tables that historical fixtures drop or
+/// reshape, so a fixture older than 121 removes them first.
+#[cfg(test)]
+pub(super) fn drop_session_row_triggers(connection: &Connection) {
+    connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS session_rows_deleted;
+             DROP TRIGGER IF EXISTS session_rows_destroyed;
+             DROP TRIGGER IF EXISTS mailbox_outbox_live_target;
+             DROP TRIGGER IF EXISTS github_watch_items_live_creator;
+             DROP TRIGGER IF EXISTS github_watch_classifications_live_session;
+             DROP TRIGGER IF EXISTS github_watch_classification_failures_live_session;",
+        )
+        .unwrap();
+}
+
 #[cfg(test)]
 pub(super) fn restore_github_v84_schema(connection: &Connection) {
+    drop_session_row_triggers(connection);
     if !legacy_schema::table_has_column(connection, "github_watch_items", "timeline_at").unwrap() {
         return;
     }
@@ -2724,6 +2813,9 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
 /// Historical fixtures must remove review columns introduced afterward.
 #[cfg(test)]
 pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
+    if version < 121 {
+        drop_session_row_triggers(connection);
+    }
     if version < 119
         && legacy_schema::table_has_column(connection, "sessions", "no_github_credentials").unwrap()
     {
@@ -3350,6 +3442,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("github-migration.sqlite3");
         drop(open_writer(&path).unwrap());
+        save_session_to(&path, &super::super::tests::session("creator", "project")).unwrap();
         stamp_schema_version(&path, 84);
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch(

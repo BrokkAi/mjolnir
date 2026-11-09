@@ -1361,6 +1361,8 @@ fn leased_relay_child_serves_stdio() {
         let mut input = std::io::stdin().lock();
         let mut output = std::io::stdout().lock();
         let mut subagent_known_ids = std::collections::BTreeSet::new();
+        // The queue files this connection last reported to a change wait.
+        let mut reported_queue: Option<[Option<Vec<u8>>; 2]> = None;
         while let Some(request) = mj_core::relay::read_relay_frame(&mut input).unwrap() {
             use mj_core::relay::{
                 RelayRequest, RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload,
@@ -1401,6 +1403,48 @@ fn leased_relay_child_serves_stdio() {
                                 false,
                                 None,
                             ),
+                        },
+                    },
+                )
+                .unwrap();
+                continue;
+            }
+            if let RelayRequest::WaitForChange {
+                after_ordinal,
+                state_digest,
+            } = &request.request
+            {
+                // Each connection to this fake is its own process, and only the
+                // session's own connection may open the relay journal. So this
+                // wait reports the relay as the controller named it and holds,
+                // like the real worker, until the queue files it rereads change.
+                let queue_files = || {
+                    ["subagent-request.json", "subagent-result.json"]
+                        .map(|name| std::fs::read(PathBuf::from(&root).join(name)).ok())
+                };
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                let queue_changed = loop {
+                    let queue = queue_files();
+                    if reported_queue.as_ref() != Some(&queue) {
+                        reported_queue = Some(queue);
+                        break true;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                };
+                mj_core::relay::write_relay_frame(
+                    &mut output,
+                    &RelayResponseEnvelope {
+                        request_id: request.request_id,
+                        protocol_version: request.protocol_version,
+                        body: RelayResponseBody::Ok {
+                            payload: RelayResponsePayload::ChangeObserved {
+                                latest_ordinal: *after_ordinal,
+                                state_digest: state_digest.clone().unwrap_or_default(),
+                                subagent_queue_changed: queue_changed,
+                            },
                         },
                     },
                 )
@@ -1609,6 +1653,16 @@ fn leased_relay_child_serves_stdio() {
                     ..
                 }
             );
+            // This fake edits the state below, after the relay digested it, so
+            // it cannot vouch for a digest: every attach gets the whole state.
+            let mut request = request;
+            if preparation.is_some()
+                && let RelayRequest::Attach {
+                    known_state_digest, ..
+                } = &mut request.request
+            {
+                *known_state_digest = None;
+            }
             let mut response =
                 if let mj_core::relay::RelayRequest::Reviewer { role, .. } = &request.request {
                     if let Some(marker) = &marker
@@ -1649,12 +1703,24 @@ fn leased_relay_child_serves_stdio() {
             }
             if let Some(preparation) = preparation {
                 relay.dispatch_preparation_lifecycle().unwrap();
-                if let RelayResponseBody::Ok {
-                    payload:
-                        RelayResponsePayload::Status(state)
-                        | RelayResponsePayload::Attached { state, .. },
-                } = &mut response.body
-                {
+                let state = match &mut response.body {
+                    RelayResponseBody::Ok {
+                        payload: RelayResponsePayload::Status(state),
+                    } => Some(state),
+                    RelayResponseBody::Ok {
+                        payload:
+                            RelayResponsePayload::Attached {
+                                state,
+                                state_digest,
+                                ..
+                            },
+                    } => {
+                        *state_digest = None;
+                        Some(state)
+                    }
+                    _ => None,
+                };
+                if let Some(state) = state {
                     state.harness_preparation = Some(preparation);
                     if let Ok(shell) =
                         std::fs::read(PathBuf::from(&root).join("active-user-shell.json"))
@@ -3330,6 +3396,9 @@ async fn a_quiet_session_stops_polling_its_worker_until_work_is_in_flight() {
         quiet.reason()
     );
 
+    // The delegation connection reads the queue and acknowledges that read
+    // as it connects; count what the quiet session costs after that.
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let before = relay_requests_logged(relay_root.path());
     tokio::time::sleep(Duration::from_secs(3)).await;
     let idle = relay_requests_logged(relay_root.path()) - before;
@@ -4385,11 +4454,18 @@ async fn model_policy_refilters_the_same_actor_and_preserves_raw_observations() 
     // Disabling a profile for new sessions must not remove its live-session policy.
     profile.enabled = false;
     manager.control.update_model_policies(&controller);
-    let update = next_policy_update(&mut manager.updates).await;
-    assert_eq!(
-        values(&update.view.snapshot.unwrap().operational),
-        ["current", "hidden"]
-    );
+    // A sync already under way may still publish what it saw before the
+    // edit; the edit must reach the next views, not necessarily the first.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let update = next_policy_update(&mut manager.updates).await;
+            if values(&update.view.snapshot.unwrap().operational) == ["current", "hidden"] {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the policy edit refilters the live session's models");
     let same = manager.control.session(LEASED_RELAY_SESSION).await.unwrap();
     assert!(
         handle.commands.same_channel(&same.commands),

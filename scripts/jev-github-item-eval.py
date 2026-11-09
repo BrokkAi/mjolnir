@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Evaluate synthetic GitHub item fixtures using compaction tool summaries.
+"""Evaluate synthetic GitHub item fixtures against Jev.
 
-By default validate the checked-in fixtures without network requests. Use
---run --output <file> to send them to Jev with the current shared questions.
-Results contain the frozen questions, fixtures, and provider responses.
+--contract v2 (the default, used by current daemons) sends compact session
+digests and asks only `interested`; --contract v1 sends the released v1
+summary-only turns and also asks `created`. By default validate the checked-in
+fixtures without network requests. Use --run --output <file> to send them to
+Jev with the frozen questions. Results contain the questions, fixtures, and
+provider responses.
 """
 import argparse
 import json
@@ -12,8 +15,12 @@ from pathlib import Path
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURES = ROOT / "services/jev-proxy/tests/fixtures/github-item-controls.json"
-QUESTIONS = ROOT / "mj-core/src/github_item/questions.json"
+CONTRACTS = {
+    "v1": (ROOT / "services/jev-proxy/tests/fixtures/github-item-controls.json",
+           ROOT / "mj-core/src/github_item/questions.json", ("interested", "created")),
+    "v2": (ROOT / "services/jev-proxy/tests/fixtures/github-item-controls-v2.json",
+           ROOT / "mj-core/src/github_item/questions_v2.json", ("interested",)),
+}
 
 
 def main():
@@ -21,13 +28,15 @@ def main():
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--contract", choices=sorted(CONTRACTS), default="v2")
     args = parser.parse_args()
-    fixtures = json.loads(FIXTURES.read_text())
-    questions = json.loads(QUESTIONS.read_text())
+    fixtures_path, questions_path, axes = CONTRACTS[args.contract]
+    fixtures = json.loads(fixtures_path.read_text())
+    questions = json.loads(questions_path.read_text())
+    assert set(questions) == set(axes)
     for case in fixtures:
-        assert set(case["expected"]) == {"interested", "created"}
+        assert set(case["expected"]) == set(axes)
         assert all(isinstance(value, bool) for value in case["expected"].values())
-        assert case["state"]["session"]["recent_turns"].strip()
         assert len(json.dumps({"model": "jev-latest", "state": case["state"],
                                "questions": questions}).encode()) <= 64 * 1024
     if not args.run:
@@ -53,13 +62,13 @@ def main():
             with urllib.request.urlopen(request, timeout=30) as response:
                 answer = json.loads(response.read(65537))
             scores = {}
-            for axis in ("interested", "created"):
+            for axis in axes:
                 value = answer["answers"][axis]
                 assert value["type"] == "noul"
                 probability = value["noul"]
                 assert not isinstance(probability, bool) and 0 <= probability <= 1
                 scores[axis] = probability
-            actual = {axis: score >= .5 for axis, score in scores.items()}
+            actual = {axis: score >= (.4 if args.contract == "v2" else .5) for axis, score in scores.items()}
             result = {"id": case["id"], "repeat": repeat, "scores": scores,
                       "actual": actual, "passed": actual == case["expected"], "response": answer}
             results.append(result)

@@ -650,11 +650,25 @@ async fn connect_to_starting_worker<P: StartingWorkerProbe>(
                             });
                         }
                         StartupVerdict::Working(reported) => {
+                            // A worker alive on the login-environment step is a
+                            // shell probe still running, not a stall: the probe
+                            // owns that step's deadline and records its own exit
+                            // if the deadline passes, so each look extends the
+                            // wait (bounded by the ceiling) and stall detection
+                            // keeps applying to the steps that follow it.
+                            let probing_login_environment = matches!(
+                                reported.as_deref(),
+                                Some(step)
+                                    if step == mj_core::relay::WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT
+                            );
                             if accepting {
                                 deadline = ceiling;
                                 step = reported;
                                 stalled_on = None;
-                            } else if reported != step {
+                            } else if reported != step || probing_login_environment {
+                                // The worker is getting somewhere. Let it, up to
+                                // the ceiling: what it is doing takes as long as
+                                // the session's own data takes.
                                 step = reported;
                                 deadline =
                                     std::cmp::min(ceiling, now + WORKER_STARTUP_PROGRESS_GRACE);
@@ -1452,7 +1466,7 @@ mod tests {
         let executor = CancellableProcessExecutor::new(cancelled);
         let mut worker = FakeStartingWorker {
             vanishes_after_attempts: Some(1),
-            stuck_step: Some("login-environment"),
+            stuck_step: Some(mj_core::relay::WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT),
             ..FakeStartingWorker::never_accepts()
         };
         let started = tokio::time::Instant::now();
@@ -1493,6 +1507,53 @@ mod tests {
         assert!(
             reported.contains("review-baseline") && reported.contains("without progress"),
             "{reported}"
+        );
+    }
+
+    /// A worker that stays on the login-environment step while its shell probe
+    /// runs is not stalled: the probe owns that step's deadline, so the wait
+    /// outlasts the per-step grace instead of reporting a healthy, slow
+    /// startup as a failure.
+    // Hard-won: #1452: a fixed 10s probe cap contradicted the startup ceiling,
+    // and raising only the cap still died at the stall grace; the probe budget
+    // and the startup wait must be one budget.
+    #[tokio::test(start_paused = true)]
+    async fn startup_connect_outlasts_a_slow_login_shell_probe() {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(cancelled);
+        // 150 attempts at 500ms is 75 seconds: past the 60-second stall grace,
+        // well inside the startup ceiling.
+        let mut worker = FakeStartingWorker {
+            stuck_step: Some(mj_core::relay::WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT),
+            ..FakeStartingWorker::accepting_after(150)
+        };
+        let started = tokio::time::Instant::now();
+
+        let relay =
+            connect_to_starting_worker(&mut worker, &executor, WORKER_STARTUP_CONNECT_TIMEOUT)
+                .await
+                .unwrap();
+
+        assert_eq!(relay, "relay");
+        assert!(
+            started.elapsed() > WORKER_STARTUP_PROGRESS_GRACE,
+            "the wait must outlast the stall grace for a running probe, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The login probe's deadline and the startup wait's ceiling are one
+    /// budget: the probe must always fit inside the ceiling, with slack for
+    /// the launch itself, so a shell startup that overran reports the worker's
+    /// own exit record instead of the wait giving up on a living worker.
+    #[test]
+    fn login_probe_deadline_fits_inside_the_worker_startup_ceiling() {
+        assert!(
+            mj_core::login_environment::LOGIN_ENVIRONMENT_PROBE_TIMEOUT + Duration::from_secs(60)
+                <= NATIVE_SESSION_STARTUP_TIMEOUT,
+            "login probe budget {} plus 60s launch slack must fit the {} startup ceiling",
+            mj_core::login_environment::LOGIN_ENVIRONMENT_PROBE_TIMEOUT.as_secs(),
+            NATIVE_SESSION_STARTUP_TIMEOUT.as_secs()
         );
     }
 
