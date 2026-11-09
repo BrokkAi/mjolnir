@@ -192,7 +192,7 @@ mod tests {
             url: "https://github.com/owner/repo/issues/49".into(),
         };
         assert_eq!(
-            digest.for_item(&item).mentions,
+            digest.for_item(&item, true).mentions,
             ["pending #49", "pending #1"]
         );
         let long = format!(
