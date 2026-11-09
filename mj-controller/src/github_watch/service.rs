@@ -187,16 +187,7 @@ fn sessions_by_github_repo(
         {
             continue;
         }
-        let Some(project) = &session.project else {
-            continue;
-        };
-        let mut repositories = BTreeSet::new();
-        for identity in project.identities.values() {
-            if let RepositoryIdentity::Github(owner, repo) = identity {
-                repositories.insert((owner.to_ascii_lowercase(), repo.to_ascii_lowercase()));
-            }
-        }
-        for repository in repositories {
+        for repository in session_github_repositories(session) {
             sessions_by_repo
                 .entry(repository)
                 .or_default()
@@ -204,6 +195,21 @@ fn sessions_by_github_repo(
         }
     }
     sessions_by_repo
+}
+
+/// The GitHub repositories a session's project is checked out from.
+fn session_github_repositories(session: &SessionRecord) -> BTreeSet<(String, String)> {
+    let mut repositories = BTreeSet::new();
+    for identity in session
+        .project
+        .iter()
+        .flat_map(|project| project.identities.values())
+    {
+        if let RepositoryIdentity::Github(owner, repo) = identity {
+            repositories.insert((owner.to_ascii_lowercase(), repo.to_ascii_lowercase()));
+        }
+    }
+    repositories
 }
 
 async fn poll_repository(
@@ -563,7 +569,7 @@ async fn classify_for_session(
     let own_account = credential_login.is_none_or(|login| login.eq_ignore_ascii_case(&item.author));
     let created = own_account
         && opened_by_session(&session.id, &item.created_at, item.number as u64, &item.url).await?;
-    let evidence = GithubItemEvidence {
+    let mut evidence = GithubItemEvidence {
         item: GithubItem {
             repo: repo_label.clone(),
             kind,
@@ -575,6 +581,10 @@ async fn classify_for_session(
         },
         session: digest,
     };
+    // A bare `#N` in the session names the item's repository only when the
+    // session works in no other one.
+    let bare_is_item_repo = session_github_repositories(&session).len() == 1;
+    evidence.session = evidence.session.for_item(&evidence.item, bare_is_item_repo);
     // The creator already knows its item, so it is never told about it and
     // Jev is not asked; its stored interest is false.
     let interested = if created {

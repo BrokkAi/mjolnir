@@ -14,7 +14,8 @@
       "session": {
         "conversation": "User: Implement mailbox delivery through tool hooks.\nAgent: I am implementing mailbox support.\n",
         "files": [],
-        "references": []
+        "references": [],
+        "mentions": []
       }
     },
     "expected": {
@@ -36,7 +37,8 @@
       "session": {
         "conversation": "User: Fix AWS capacity reporting.\nAgent: Corrected memory accounting in the EC2 picker.\n",
         "files": [],
-        "references": []
+        "references": [],
+        "mentions": []
       }
     },
     "expected": {
@@ -60,7 +62,8 @@
         "files": [],
         "references": [
           "https://github.com/brokkai/mjolnir/pull/42"
-        ]
+        ],
+        "mentions": []
       }
     },
     "expected": {
@@ -84,7 +87,8 @@
         "files": [],
         "references": [
           "#42"
-        ]
+        ],
+        "mentions": []
       }
     },
     "expected": {
@@ -106,7 +110,8 @@
       "session": {
         "conversation": "User: Implement mailbox support.\nAgent: Opening the PR failed with authentication denied.\n",
         "files": [],
-        "references": []
+        "references": [],
+        "mentions": []
       }
     },
     "expected": {
@@ -128,7 +133,8 @@
       "session": {
         "conversation": "User: Implement mailbox support.\nAgent: I will open a PR after validation.\n",
         "files": [],
-        "references": []
+        "references": [],
+        "mentions": []
       }
     },
     "expected": {
@@ -152,7 +158,8 @@
         "files": [],
         "references": [
           "https://github.com/brokkai/mjolnir/pull/43"
-        ]
+        ],
+        "mentions": []
       }
     },
     "expected": {
@@ -174,7 +181,8 @@
       "session": {
         "conversation": "User: Fix terminal keyboard event delivery.\nAgent: Working on escape key parsing in the terminal input loop.\n",
         "files": [],
-        "references": []
+        "references": [],
+        "mentions": []
       }
     },
     "expected": {
@@ -196,7 +204,8 @@
       "session": {
         "conversation": "User: Implement mailbox support and open the PR.\n",
         "files": [],
-        "references": []
+        "references": [],
+        "mentions": []
       }
     },
     "expected": {
@@ -221,7 +230,8 @@
           "mj-controller/src/mailbox/hooks.rs",
           "mj-controller/src/mailbox/delivery.rs"
         ],
-        "references": []
+        "references": [],
+        "mentions": []
       }
     },
     "expected": {
@@ -246,7 +256,8 @@
           "mj-tui/src/input/keys.rs",
           "mj-tui/src/render/status.rs"
         ],
-        "references": []
+        "references": [],
+        "mentions": []
       }
     },
     "expected": {
@@ -270,7 +281,33 @@
         "files": [
           "mj-controller/src/mailbox/hooks.rs"
         ],
-        "references": []
+        "references": [],
+        "mentions": []
+      }
+    },
+    "expected": {
+      "interested": true
+    }
+  },
+  {
+    "id": "referenced-issue-mention-only",
+    "state": {
+      "item": {
+        "repo": "brokkai/mjolnir",
+        "kind": "pull_request",
+        "number": 42,
+        "title": "Update worker coordination",
+        "body": "Resolves #7642.",
+        "author": "agent",
+        "url": "https://github.com/brokkai/mjolnir/pull/42"
+      },
+      "session": {
+        "conversation": "Agent: Checking the final patch.\n",
+        "files": [],
+        "references": [],
+        "mentions": [
+          "#7642 is on my pending review list."
+        ]
       }
     },
     "expected": {

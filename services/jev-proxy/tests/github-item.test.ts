@@ -99,10 +99,15 @@ test("GitHub item v2 accepts compact evidence and an interested-only answer", as
   assert.equal(boundary.status, 200);
 });
 
-test("GitHub item v2 rejects over-limit and unknown fields", async () => {
+test("GitHub item v2 rejects over-limit and unknown fields", async t => {
+  t.mock.method(globalThis, "fetch", async () => Response.json({ answers: { interested: { type: "noul", noul: 0.8 } } }));
   const valid = { item: evidence.item, session: { conversation: "", files: [], references: [] } };
   const call = (body: unknown) => proxy.fetch(new Request("https://proxy.example/v2/github-item-verdict", { method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(body) }), env());
+  for (const mentions of [[], ["é".repeat(128)], Array(16).fill("pending #42")]) {
+    assert.equal((await call({ ...valid, session: { ...valid.session, mentions } })).status, 200);
+  }
   for (const value of [
+    ...[[""], [" "], ["é".repeat(129)], Array(17).fill("pending #42"), null].map(mentions => ({ ...valid, session: { ...valid.session, mentions } })),
     { ...valid, extra: true },
     { ...valid, item: { ...valid.item, extra: true } },
     { ...valid, item: { ...valid.item, body: "x".repeat(4225) } },

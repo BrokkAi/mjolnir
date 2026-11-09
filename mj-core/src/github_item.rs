@@ -16,6 +16,9 @@ pub const MAX_FILES: usize = 32;
 pub const FILE_BYTES: usize = 256;
 pub const MAX_REFERENCES: usize = 32;
 pub const REFERENCE_BYTES: usize = 128;
+// Design budgets sizing item-conditioned evidence, motivated by the 83-pair replay.
+pub const MAX_MENTIONS: usize = 16;
+pub const MENTION_BYTES: usize = 256;
 const BODY_TRUNCATION_MARKER: &str = "\n[GitHub item body truncated.]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +46,47 @@ pub struct SessionContext {
     pub conversation: String,
     pub files: Vec<String>,
     pub references: Vec<String>,
+    #[serde(default)]
+    pub mentions: Vec<String>,
+    /// Per-session reference index; never included in a provider request.
+    #[serde(skip)]
+    pub mention_candidates: Vec<(crate::github_reference::GithubReference, String)>,
+}
+
+impl SessionContext {
+    /// Select the lines that mention `item` or an issue its title or body
+    /// references. A bare `#N` in the item means the item's repository. In
+    /// the session it does only when `bare_is_item_repo`: a session whose
+    /// project spans several GitHub repositories cannot say which one `#42`
+    /// names, and must not have the line presented as a mention of every
+    /// watched repository's #42.
+    pub fn for_item(mut self, item: &GithubItem, bare_is_item_repo: bool) -> Self {
+        use crate::github_reference::{GithubReference, github_references};
+        let mut targets = github_references(&format!("{}\n{}", item.title, item.body));
+        targets.extend(github_references(&format!("{}#{}", item.repo, item.number)));
+        let identity = |r: &GithubReference, bare_is_item_repo: bool| {
+            let repo = match (&r.owner, &r.repo) {
+                (Some(owner), Some(repo)) => format!("{owner}/{repo}"),
+                _ if bare_is_item_repo => item.repo.clone(),
+                _ => return None,
+            };
+            Some((repo.to_ascii_lowercase(), r.number))
+        };
+        let targets: Vec<_> = targets.iter().filter_map(|t| identity(t, true)).collect();
+        self.mentions.clear();
+        for (reference, line) in self.mention_candidates.iter().rev() {
+            if identity(reference, bare_is_item_repo).is_some_and(|r| targets.contains(&r))
+                && !self.mentions.contains(line)
+            {
+                self.mentions.push(line.clone());
+                if self.mentions.len() == MAX_MENTIONS {
+                    break;
+                }
+            }
+        }
+        self.mention_candidates.clear();
+        self
+    }
 }
 
 /// The GitHub item deliberately serializes before its session-specific context,
@@ -112,6 +156,15 @@ impl GithubItemEvidence {
             "invalid GitHub session references"
         );
         ensure!(
+            self.session.mentions.len() <= MAX_MENTIONS
+                && self
+                    .session
+                    .mentions
+                    .iter()
+                    .all(|s| !s.trim().is_empty() && s.len() <= MENTION_BYTES),
+            "invalid GitHub session mentions"
+        );
+        ensure!(
             self.item.body.len() <= ITEM_BODY_BYTES + BODY_TRUNCATION_MARKER.len(),
             "GitHub item body is too long"
         );
@@ -169,7 +222,8 @@ impl GithubItemVerdict {
                 probability.is_finite() && (0.0..=1.0).contains(&probability),
                 "invalid GitHub item probability"
             );
-            Ok(probability >= 0.5)
+            // The 83-pair production replay found relevant items just below 0.5.
+            Ok(probability >= 0.4)
         }
 
         let answers = response["answers"]
@@ -218,8 +272,43 @@ mod tests {
                     .into(),
                 files: vec!["mj-worker/src/lib.rs".into()],
                 references: vec!["#42".into()],
+                ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn item_mentions_resolve_bare_references_without_crossing_repositories() {
+        let item = GithubItem {
+            repo: "owner/repo".into(),
+            kind: GithubItemKind::Issue,
+            number: 42,
+            title: "Fix #7642".into(),
+            body: String::new(),
+            author: String::new(),
+            url: "https://github.com/owner/repo/issues/42".into(),
+        };
+        let mut session = SessionContext::default();
+        for line in [
+            "pending #7642",
+            "other/repo#42",
+            "owner/repo#42",
+            "pending #7642",
+        ] {
+            for reference in crate::github_reference::github_references(line) {
+                session.mention_candidates.push((reference, line.into()));
+            }
+        }
+        // A multi-repository session's bare #7642 names no repository.
+        let ambiguous = session.clone().for_item(&item, false);
+        assert_eq!(ambiguous.mentions, ["owner/repo#42"]);
+        let selected = session.for_item(&item, true);
+        assert_eq!(selected.mentions, ["pending #7642", "owner/repo#42"]);
+        assert!(
+            !serde_json::to_string(&selected)
+                .unwrap()
+                .contains("mention_candidates")
+        );
     }
 
     #[test]
@@ -240,6 +329,7 @@ mod tests {
             conversation: "x".repeat(CONVERSATION_BYTES),
             files: vec!["x".repeat(FILE_BYTES); MAX_FILES],
             references: vec!["x".repeat(REFERENCE_BYTES); MAX_REFERENCES],
+            ..Default::default()
         };
         let bounded = maximal.bounded_for_request().unwrap();
         assert_eq!(
