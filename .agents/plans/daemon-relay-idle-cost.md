@@ -19,7 +19,7 @@ After this work, orphan rows cannot exist, so the sweep is gone; a worker omits 
 - [x] (2026-11-09) Milestone 2: relay protocol 57. `Attach` names `known_state_digest`; the worker answers `AttachedWithKnownState` when it matches and otherwise `Attached` with `state_digest`. `RelayClient` keeps the last state with its digest. The worker's harness preparation now joins the state before the digest (it used to be overlaid on the reply afterwards). Tests `an_attach_skips_a_state_the_controller_already_holds` and `a_changed_preparation_is_never_taken_for_a_known_state`.
 - [x] (2026-11-09) Milestone 2 pushed (73759df3e) and installed; the daemon handoff waits for an ordinary `mj` command.
 - [x] (2026-11-09) Milestone 3: relay protocol 58 `WaitForChange`, served on the existing delegation (sub-agent queue) connection. The worker wraps its relay in `RelayCell`, whose lock release wakes waits, and publishes the sub-agent queue's generation. The queue observer waits instead of polling, reads the queue only when the wait reports queue changes, and tells the actor about relay changes; quiet sessions on protocol-58 workers sync on change or every 10 s. Tests `a_change_wait_answers_on_a_relay_change_or_at_its_bound`; three test fakes answer `WaitForChange`.
-- [ ] Measure after installation and record the outcome.
+- [x] (2026-11-09) Measure after installation and record the outcome: 32% steady with 51 running sessions, from 43%.
 
 
 ## Surprises & Discoveries
@@ -66,7 +66,11 @@ After this work, orphan rows cannot exist, so the sweep is gone; a worker omits 
 
 ## Outcomes & Retrospective
 
-Milestones 1 and 2 are installed; milestone 3 is committed. Measured outcome is pending installation of all three. Busy sessions still poll every 150 ms (attach plus history-request check); making those event-driven needs history requests and daemon-side job completions to signal the actor, which this plan does not do.
+All three milestones are installed (daemon 47acf8117, 2026-11-09 14:06Z). Measured the same way as the baseline, a 60 s `pidstat` window with a call-graph profile (`/mnt/optane/tmp/mj-cpu-20261106/after7.data`), the daemon used 32% of a core (24% user, 8% system) with 51 running sessions, against 43% with 50 before this plan. The five-second orphan sweep no longer appears in profiles. These are single live windows, not a controlled benchmark.
+
+The protocol bump replaces every live session's worker, and that rollout is expensive: for about 20 minutes after the handoff the daemon used 86% (50% system), most of it in profile copies for new workers and in checkpoint archive verification, whose parallel readers each reopen the archive and reread its whole central directory (`mj-checkpoint/src/archive.rs`, `par_iter().map_init(|| open_archive(path) ...)`). Sharing one opened archive index across those readers is the obvious next fix.
+
+Busy sessions still poll every 150 ms (attach plus history-request check); making those event-driven needs history requests and daemon-side job completions to signal the actor, which this plan does not do. The remaining steady profile is led by session actor syncs (12%), event-page application (11%) and the mailbox outbox loop (9%).
 
 
 ## Context and Orientation
