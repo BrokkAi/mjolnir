@@ -260,7 +260,7 @@ pub fn start_refusal_notice(reason: &str) -> String {
     format!("Review did not start: {reason}. Commit tracked changes and request review again.")
 }
 
-/// The transcript line a resolution leaves behind, on every surface.
+/// The transcript line a resolution leaves behind, when it adds information.
 #[must_use]
 pub fn resolution_notice(
     phase: &TurnReviewPhase,
@@ -273,7 +273,7 @@ pub fn resolution_notice(
         Resolution::Completed => match last_verdict {
             Some(ReviewVerdict::Clean) => "Review complete: no material findings".into(),
             Some(ReviewVerdict::Failed { reason }) => format!("Review failed: {reason}"),
-            _ => "Review findings sent to the agent".into(),
+            _ => return None,
         },
         Resolution::Cancelled => match last_verdict {
             Some(ReviewVerdict::Failed { reason }) => {
