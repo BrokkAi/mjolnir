@@ -211,6 +211,43 @@ pub fn list_subagents(parent_session_id: &str) -> Result<Vec<mj_core::subagent::
         .collect()
 }
 
+/// A parent's child session ids in registration order, read from the index
+/// without decoding any record.
+pub fn list_subagent_ids(parent_session_id: &str) -> Result<Vec<String>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT child_session_id FROM subagent_sessions
+         WHERE parent_session_id = ?1 ORDER BY rowid",
+    )?;
+    statement
+        .query_map([parent_session_id], |row| row.get(0))?
+        .map(|row| row.map_err(Into::into))
+        .collect()
+}
+
+/// The parent's records for the given children, in registration order. A
+/// parent can hold thousands of children; a caller that needs a few decodes
+/// only those.
+pub fn list_subagents_among(
+    parent_session_id: &str,
+    child_session_ids: &[String],
+) -> Result<Vec<mj_core::subagent::SubagentRecord>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT record_json FROM subagent_sessions
+         WHERE parent_session_id = ?1
+           AND child_session_id IN (SELECT value FROM json_each(?2))
+         ORDER BY rowid",
+    )?;
+    let ids = serde_json::to_string(child_session_ids)?;
+    statement
+        .query_map(rusqlite::params![parent_session_id, ids], |row| {
+            row.get::<_, String>(0)
+        })?
+        .map(|row| serde_json::from_str(&row?).context("decode sub-agent record"))
+        .collect()
+}
+
 /// Record, on the parent's session, the sub-agents its suspend is about to
 /// stop. A child already listed keeps its place and takes the newer details,
 /// so a suspend that runs again after a restart lists each child once.
@@ -1350,7 +1387,7 @@ pub(super) fn validate_session_record(session: &SessionRecord) -> Result<()> {
 }
 
 /// Remove one operational session while retaining its relational history
-/// context and prompt history.
+/// context. A database trigger removes its prompt history with it.
 pub fn delete_session(session_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     submit_database_write("delete_session", move |_| {

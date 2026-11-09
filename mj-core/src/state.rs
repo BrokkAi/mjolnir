@@ -324,6 +324,10 @@ pub struct MaterializedTurnOutcome {
     pub completed_ordinal: u64,
     pub completed_at_ms: i64,
     pub outcome: TurnOutcomeKind,
+    /// What the child's worker observed when this turn ended (see
+    /// `RelayCommandOutcome::Prompt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_facts: Option<crate::work_facts::WorkFacts>,
 }
 
 impl MaterializedTurnOutcome {
@@ -1546,6 +1550,9 @@ pub struct SessionRecord {
     // Read legacy saved session JSON; creation requests have no old-name alias.
     #[serde(default, alias = "no_mailbox", skip_serializing_if = "is_false")]
     pub no_github_events: bool,
+    /// Withhold GitHub credentials; inherited by children.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     pub target_template_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_allocation: Option<SessionResourceAllocation>,
@@ -2046,6 +2053,25 @@ impl SessionRecord {
         )
     }
 
+    /// How this session's harness realizes its target's execution policy:
+    /// the policy recorded when its target was selected, so a later change
+    /// to the target template does not move it, and the profile's Muse
+    /// auto-review choice. `None` when the policy cannot be resolved or the
+    /// harness keeps its own configuration.
+    pub fn execution_enforcement(
+        &self,
+        config: &Config,
+    ) -> Option<crate::config::ExecutionEnforcement> {
+        let policy = self.target_runtime_settings(config).ok()?.execution_policy;
+        let muse_auto_review = config
+            .profiles
+            .get(&self.last_profile)
+            .and_then(|profile| profile.muse_auto_review)
+            .unwrap_or(false);
+        self.harness_kind
+            .resolve_execution_enforcement(policy, muse_auto_review)
+    }
+
     /// The target access settings this session's commands use: the ones
     /// recorded when its target was selected, with the machine's current ssh
     /// options while they still reach the same host, user, and port, or the
@@ -2355,7 +2381,9 @@ fn repository_source_identity(repository: &ProjectRepository) -> Option<ProjectS
     repository
         .github
         .as_deref()
-        .and_then(ProjectSourceIdentity::git_remote)
+        .and_then(|source| {
+            ProjectSourceIdentity::git_remote(source, crate::remote_git::Shorthand::Allowed)
+        })
         .or_else(|| {
             repository
                 .local
@@ -2409,10 +2437,12 @@ impl ProjectSourceIdentity {
     }
 
     /// Canonicalizes a Git remote so raw checkouts group as the same project
-    /// even when their worktree paths differ.
-    pub fn git_remote(source: &str) -> Option<Self> {
-        let identity = crate::repository::RepositoryIdentity::from_remote(source)?;
-        let full = crate::repository::RepositoryIdentity::remote_label(source)?;
+    /// even when their worktree paths differ. `shorthand` says whether a bare
+    /// `owner/repository` is GitHub; text read from `git config` must not
+    /// allow it, because there it is a relative path.
+    pub fn git_remote(source: &str, shorthand: crate::remote_git::Shorthand) -> Option<Self> {
+        let identity = crate::repository::RepositoryIdentity::from_remote_with(source, shorthand)?;
+        let full = crate::repository::RepositoryIdentity::remote_label_with(source, shorthand)?;
         Some(Self {
             key: identity.key(),
             short: full.rsplit(['/', ':']).next()?.to_owned(),
@@ -2521,6 +2551,47 @@ impl State {
             .copied()
             .unwrap_or(true)
     }
+
+    /// The review choice that governs `session_id`. An ordinary sub-agent
+    /// reviews under the choice of the session that spawned it, followed up
+    /// the chain to a top-level session, so the parent's record stays the only
+    /// copy and a later change to it applies to its children. Every other
+    /// session uses its own record. Both the launch that offers the review
+    /// tools and the review host that picks reviewers ask this one function.
+    ///
+    /// Fails with the id of a missing ancestor record, or with the session
+    /// itself when the parent chain loops.
+    pub fn effective_review(
+        &self,
+        session_id: &str,
+    ) -> std::result::Result<Option<&crate::config::SessionReview>, String> {
+        let mut current = session_id;
+        // A chain longer than the relation table repeats a session.
+        for _ in 0..=self.subagents.len() {
+            match self.subagents.get(current) {
+                Some(child) if child.kind == crate::subagent::SubagentKind::Worker => {
+                    if !self.sessions.contains_key(&child.parent_session_id) {
+                        return Err(child.parent_session_id.clone());
+                    }
+                    current = &child.parent_session_id;
+                }
+                _ => return Ok(self.sessions.get(current).and_then(|s| s.review.as_ref())),
+            }
+        }
+        Err(session_id.to_owned())
+    }
+
+    /// `effective_review`, with a parent chain that cannot be followed
+    /// reviewing as Off. Launch (no review tools), the review host, the
+    /// delegation completion and the viewer all read the choice through this
+    /// one rule.
+    pub fn effective_review_or_off(
+        &self,
+        session_id: &str,
+    ) -> Option<&crate::config::SessionReview> {
+        const OFF: &crate::config::SessionReview = &crate::config::SessionReview::Off;
+        self.effective_review(session_id).unwrap_or(Some(OFF))
+    }
 }
 
 /// The effective code checkout for one session, including who owns it.
@@ -2589,6 +2660,17 @@ impl<'a> Checkout<'a> {
         }
     }
 
+    /// The record that owns a borrowed checkout, following nested borrowing
+    /// to the session that holds the workspace. `None` for a checkout the
+    /// session owns itself.
+    #[must_use]
+    pub fn owner(&self) -> Option<&'a SessionRecord> {
+        match self {
+            Self::Borrowed { owner, checkout } => checkout.owner().or(Some(*owner)),
+            Self::Attached { .. } | Self::ManagedWorktree { .. } | Self::ManagedWorkspace => None,
+        }
+    }
+
     /// The concrete repository directory when the record stores one.
     /// Bundle workspace paths are target-specific and are not in the record.
     #[must_use]
@@ -2646,6 +2728,22 @@ pub fn live_session_ids(
 }
 
 impl State {
+    /// Managed children that a parent suspend or Move stop hook must end,
+    /// including parked children and oracles.
+    #[must_use]
+    pub fn active_child_session_ids(&self, parent_session_id: &str) -> Vec<String> {
+        self.subagents
+            .values()
+            .filter(|child| child.parent_session_id == parent_session_id)
+            .filter(|child| {
+                self.sessions
+                    .get(&child.child_session_id)
+                    .is_some_and(|session| session.state.is_active())
+            })
+            .map(|child| child.child_session_id.clone())
+            .collect()
+    }
+
     /// Whether a sub-agent of `parent_session_id` still has a target. A
     /// child's worker, parked or live, runs in its parent's container, so
     /// recreating that container would end it.
@@ -2713,6 +2811,19 @@ impl State {
             });
         }
         Ok(session.checkout())
+    }
+
+    /// The record whose workspace `session_id` works in: the session itself,
+    /// or, for a sub-agent, the parent it borrows from. Facts about how the
+    /// workspace was created (its exact checkout, its history cutoff) belong
+    /// to that record, so a reader asks here instead of the child's own
+    /// fields, which a child leaves empty.
+    pub fn workspace_owner(&self, session_id: &str) -> Result<&SessionRecord> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        Ok(self.checkout(session_id)?.owner().unwrap_or(session))
     }
 
     /// How a notice names a session: the title the session list shows

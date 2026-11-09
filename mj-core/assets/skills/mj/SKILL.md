@@ -42,8 +42,8 @@ To rerun automatic agent and repository discovery, use `mj setup`. For host prer
 `mj setup instructions --platform linux` or `--platform macos` prints an
 agent preparation guide. `mj set-config` changes one live session's harness
 settings (model, effort, etc.); it does not edit the user's mj defaults. In an
-interactive conversation, `/config` lists every setting the harness advertises,
-`/config <key>` opens its values, and `/config <key> <value>` applies one.
+interactive conversation, `/config` lists user-settable settings the harness advertises,
+`/config <key>` opens its values, and `/config <key> <value>` applies one. The target permission policy owns permission settings; use plan mode to enter or leave Plan.
 
 ## Change the user's dashboard for them
 
@@ -94,7 +94,9 @@ child sessions in the same target and filesystem:
   `task_type` and the parent delegates straightforward work. The user configures model/effort choices globally in Settings →
   Sub-agents; returns `child_session_id` at once, before the child has started
   running.
-- `list_agents` — this parent's children and their status.
+- `list_agents` — this parent's children and their status. An entry's `facts` hold
+  what Mjolnir observed when the child finished (processes its agent left running,
+  its working tree). Read them against the child's own report.
 - `send_message` — send follow-up work to one child. With a worker that supports
   structured events, a running child receives it at its next tool boundary without its turn being cancelled; an idle child wakes and
   a parked child starts again. Several messages sent while the child is busy

@@ -101,6 +101,18 @@ impl StandaloneSession {
     /// connection runs still has a result to deliver on its next sync. A
     /// classification that is still pending well after its turn ended is left
     /// to the slow sweep, so no worker state can hold the fast cadence forever.
+    /// Whether this session's worker reports changes as they happen, so a
+    /// quiet session need not be polled.
+    pub(super) fn waits_for_changes(&self) -> bool {
+        self.subagent_queue.waits_for_changes()
+    }
+
+    /// Resolves when the worker reported a relay change, the delegation queue
+    /// changed, or its change waits failed and the session must be polled.
+    pub(super) async fn relay_changed(&mut self) {
+        self.subagent_queue.relay_changed().await;
+    }
+
     pub(super) fn follows_closely(&self) -> bool {
         const FRESH_CLASSIFICATION_MS: i64 = 60_000;
         let now = mj_core::clock::epoch_millis();
@@ -175,6 +187,10 @@ impl StandaloneSession {
                 }
                 Err(error) => return Err(error),
             }
+        }
+        if let Some(digest) = self.client.known_state_digest() {
+            self.subagent_queue
+                .note_synced(self.operational.latest_ordinal, digest);
         }
         let previous_requests = self.subagent_requests.clone();
         let previous_results = self.subagent_completions.clone();

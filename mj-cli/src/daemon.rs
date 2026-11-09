@@ -243,7 +243,8 @@ async fn connect_or_start_holding(startup: &DaemonStartGuard) -> Result<DaemonCl
         .await
         .context("read daemon metadata task failed")?
     {
-        ensure_supported_daemon_protocol(&metadata)?;
+        // A record whose daemon is gone is not a daemon of any protocol.
+        ensure_supported_or_gone(&metadata).await?;
     }
     maybe_replace_stale_development_daemon().await?;
     if let Some(client) = prepare_existing_daemon(startup).await? {
@@ -758,6 +759,81 @@ async fn inspect_existing_daemon(_held: &SharedStartGuard) -> Result<ExistingDae
     decide_existing_daemon().await
 }
 
+/// Whether the daemon a `daemon.json` records has provably exited.
+///
+/// "Gone" needs positive evidence that the process ended. A timeout or a
+/// failed query is never that evidence: a busy daemon answers slowly, and a
+/// daemon that is still finishing accepted work must not be replaced. Each
+/// check below can only rule the daemon in; the record is gone when none finds
+/// it, and any check that cannot be answered leaves the record in place.
+///
+/// 1. The record is a host daemon's. A container daemon's record carries PID
+///    0, and nothing on the host can show that it exited: its guard is in the
+///    container's volume, the record does not name the engine that ran it,
+///    and a running container may or may not still run its daemon. It is
+///    never called gone here, so its handoff waits as it always has (#1458).
+/// 2. The host controller store guard is held: a host daemon owns the store.
+///    The operating system releases it when the process ends however it ends,
+///    so a free guard cannot be a reused process id.
+/// 3. The recorded PID is a live `mj daemon-run`. A PID that is another
+///    program is not this daemon. This also covers a 2.65 container daemon,
+///    which shared the host's process namespace and so shows up here;
+///    `legacy_placement` reads the same PID and can say nothing more once the
+///    process is gone.
+/// 4. The endpoint answers `Ping`. An answer is more evidence of life; a
+///    failure to answer proves nothing.
+async fn recorded_daemon_is_gone(metadata: &DaemonMetadata) -> Result<bool> {
+    let pid = metadata.pid;
+    if pid == 0 {
+        return Ok(false);
+    }
+    let unowned = tokio::task::spawn_blocking(ControllerStoreGuard::try_acquire)
+        .await
+        .context("probe controller ownership task failed")??;
+    let Some(guard) = unowned else {
+        return Ok(false);
+    };
+    drop(guard);
+    if tokio::task::spawn_blocking(move || daemon_still_runs(pid))
+        .await
+        .context("probe daemon process task failed")?
+        // Another program owns the PID now; that is not this daemon.
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+    let answered = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut client = DaemonClient::connect(metadata.clone()).await?;
+        ping_daemon(&mut client).await
+    })
+    .await;
+    if matches!(answered, Ok(Ok(()))) {
+        return Ok(false);
+    }
+    tracing::info!(
+        pid,
+        build = %metadata.build_version,
+        "the recorded daemon is gone: no process owns the store, none runs the recorded PID, \
+         and its endpoint does not answer"
+    );
+    Ok(true)
+}
+
+/// Refuse a record this client cannot speak to, unless its daemon is gone.
+/// Returns whether the record names a daemon that may still run.
+async fn ensure_supported_or_gone(metadata: &DaemonMetadata) -> Result<bool> {
+    match ensure_supported_daemon_protocol(metadata) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            if recorded_daemon_is_gone(metadata).await? {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 async fn decide_existing_daemon() -> Result<ExistingDaemon> {
     let metadata = tokio::task::spawn_blocking(read_metadata_any)
         .await
@@ -765,11 +841,21 @@ async fn decide_existing_daemon() -> Result<ExistingDaemon> {
     let Ok(metadata) = metadata else {
         return Ok(ExistingDaemon::Absent);
     };
-    ensure_supported_daemon_protocol(&metadata)?;
+    if !ensure_supported_or_gone(&metadata).await? {
+        return Ok(ExistingDaemon::Absent);
+    }
     let daemon =
         BuildIdentity::parse(&metadata.build_version).context("parse daemon build version")?;
     let release = daemon.version().cmp_precedence(this_build().version());
     if metadata.protocol_version < PROTOCOL_VERSION || release.is_lt() {
+        // The same-protocol path below treats an unreachable daemon as absent.
+        // This path replaces a daemon it cannot ask, so it first has to know
+        // that one still owns the store: a record left by a daemon that died
+        // with its host must not make the client wait for a handoff that no
+        // process will ever accept.
+        if recorded_daemon_is_gone(&metadata).await? {
+            return Ok(ExistingDaemon::Absent);
+        }
         // An older protocol cannot answer `Identity`, so this is the one
         // legacy question still asked of the operating system: whether the
         // daemon was launched in a container. Every daemon of this protocol
@@ -1358,6 +1444,7 @@ async fn hand_off_daemon(metadata: &DaemonMetadata) -> Result<()> {
             }
         })
         .await;
+        let accepted_handoff = matches!(ready, Ok(Ok(true)));
         match ready {
             Ok(Ok(true)) => {
                 let accepted = Instant::now();
@@ -1403,6 +1490,17 @@ async fn hand_off_daemon(metadata: &DaemonMetadata) -> Result<()> {
                 tracing::debug!(%error, "automatic upgrade is waiting for the daemon to answer")
             }
             Ok(Ok(false)) => not_yet = "the daemon is finishing accepted work".to_owned(),
+        }
+        // A daemon that died during the wait will never accept. Only a daemon
+        // that did not take the handoff gets here, so a gone owner is
+        // replaced, and a live one keeps being asked.
+        if !accepted_handoff && recorded_daemon_is_gone(metadata).await? {
+            tracing::info!(
+                pid = metadata.pid,
+                waited_ms = asked.elapsed().as_millis(),
+                "the daemon exited before it accepted the handoff"
+            );
+            return Ok(());
         }
         if Instant::now() >= notice_at {
             if Instant::now() >= log_at {
@@ -1813,6 +1911,9 @@ mod tests {
         if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
             return;
         }
+        // A live daemon owns the store; the handoff treats a free store as a
+        // daemon that has gone.
+        let _store = ControllerStoreGuard::acquire().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let metadata = DaemonMetadata {
             protocol_version: PROTOCOL_VERSION,

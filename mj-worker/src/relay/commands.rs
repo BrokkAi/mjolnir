@@ -14,7 +14,7 @@ pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
 
 impl DurableRelay {
     fn return_boundary_steer_after_turn_end(&mut self, active_prompt_id: &str) -> Result<()> {
-        if self.steering_delivery_mode == SteeringDeliveryMode::Acp {
+        if self.steering_delivery_mode.uses_acp() {
             return Ok(());
         }
         let Some(steering) = self
@@ -145,7 +145,9 @@ impl DurableRelay {
                 StoredQueuedRelayPayload::Prompt { prompt } => {
                     !mj_core::acp::prompt_is_slash_command(prompt)
                         && match self.steering_delivery_mode {
-                            SteeringDeliveryMode::Acp => self.steering_supported != Some(false),
+                            SteeringDeliveryMode::Acp | SteeringDeliveryMode::AcpWithMailbox => {
+                                self.steering_supported != Some(false)
+                            }
                             SteeringDeliveryMode::ClaudePostToolBatch => {
                                 mj_core::acp::steering_text_context(prompt).is_some()
                             }
@@ -1105,6 +1107,20 @@ impl DurableRelay {
                 "Turn or queue changed before control delivery",
             )?;
         }
+        // Mailbox and user input share the same serialized steering decision.
+        // Claim the events into the durable queue before dispatch, so a hook,
+        // retry, restart or idle wake cannot also deliver them.
+        if self.steering_delivery_mode == SteeringDeliveryMode::AcpWithMailbox
+            && self.snapshot.queued_prompts.is_empty()
+            && self.automatic_steer_active_prompt().is_some()
+            && self
+                .snapshot
+                .pending_mailbox_events
+                .iter()
+                .any(|event| event.wake)
+        {
+            self.enqueue_mailbox_wake()?;
+        }
         self.submit_automatic_steer()?;
         self.promote_next_queued_command()?;
         if self
@@ -1157,7 +1173,7 @@ impl DurableRelay {
                 if dispatch.state != RelayDispatchState::Pending {
                     return None;
                 }
-                if self.steering_delivery_mode != SteeringDeliveryMode::Acp
+                if !self.steering_delivery_mode.uses_acp()
                     && matches!(dispatch.command, RelayCommand::Steer { .. })
                 {
                     // Claude's steer is completed by its PostToolBatch hook,
@@ -1211,7 +1227,7 @@ impl DurableRelay {
         let mut claimed = Vec::with_capacity(claimable.len());
         let mut next_snapshot = self.snapshot.clone();
         for (accepted_ordinal, command_id) in claimable {
-            let steering_prompt = (self.steering_delivery_mode == SteeringDeliveryMode::Acp
+            let steering_prompt = (self.steering_delivery_mode.uses_acp()
                 && matches!(
                     next_snapshot.dispatches[&command_id].command,
                     RelayCommand::Cancel | RelayCommand::Steer { .. }
@@ -1304,6 +1320,17 @@ impl DurableRelay {
     /// bridge advertises steering and nothing is waiting for the running turn
     /// to end. The bridge queues the steer to its next safe boundary.
     fn automatic_steer_target(&self) -> Option<(String, String)> {
+        self.automatic_steer_active_prompt()?;
+        match self.turn_controls().primary?.command {
+            RelayCommand::Steer {
+                active_prompt_id,
+                queued_prompt_id,
+            } => Some((active_prompt_id, queued_prompt_id)),
+            _ => None,
+        }
+    }
+
+    fn automatic_steer_active_prompt(&self) -> Option<&str> {
         if !self.automatic_steering || self.checkpoint_only || self.has_held_claude_turn() {
             return None;
         }
@@ -1314,6 +1341,9 @@ impl DurableRelay {
         // harness-initiated turn, the agent cannot read the steer until its
         // current tool call returns; Esc can cancel that turn instead.
         let active = &self.snapshot.active_prompt.as_ref()?.command_id;
+        if self.snapshot.dispatches.get(active)?.state != RelayDispatchState::InFlight {
+            return None;
+        }
         if self.snapshot.cancelling_prompt_id.is_some()
             || self.snapshot.checkpoint_barrier.is_some()
             || self.next_queued_checkpoint().is_some()
@@ -1330,13 +1360,7 @@ impl DurableRelay {
         {
             return None;
         }
-        match self.turn_controls().primary?.command {
-            RelayCommand::Steer {
-                active_prompt_id,
-                queued_prompt_id,
-            } => Some((active_prompt_id, queued_prompt_id)),
-            _ => None,
-        }
+        Some(active)
     }
 
     /// Advance only lifecycle commands after the old owning process was stopped.
@@ -1709,11 +1733,9 @@ impl DurableRelay {
                 (RelayCommand::SetConfig { key, value }, RelayCommandOutcome::Configured) => {
                     Some(format!("{key} set to {value}"))
                 }
-                (RelayCommand::RestoreExecutionMode, RelayCommandOutcome::Configured) => self
-                    .snapshot
-                    .config
-                    .get("mode")
-                    .map(|mode| format!("mode restored to {mode}")),
+                (RelayCommand::RestoreExecutionMode, RelayCommandOutcome::Configured) => {
+                    Some("Execution policy restored".to_owned())
+                }
                 (RelayCommand::SetSessionMode { mode_id }, RelayCommandOutcome::SessionModeSet) => {
                     Some(format!("Session mode: {mode_id}"))
                 }
@@ -1906,6 +1928,27 @@ impl DurableRelay {
         self.close_requested()
     }
 
+    /// Whether a cancellation is accepted but not yet delivered to the harness,
+    /// or a Close is accepted and not finished. Work the worker does for its own
+    /// purposes, such as observing a finished turn, ends when this is true, so
+    /// that the command is not held behind it. A cancellation already delivered
+    /// is not held by anything, and is how a cancelled turn ends.
+    pub fn undelivered_cancellation_or_close_pending(&self) -> bool {
+        self.close_requested()
+            || self.snapshot.dispatches.values().any(|dispatch| {
+                matches!(
+                    dispatch.command,
+                    RelayCommand::Cancel
+                        | RelayCommand::CancelTurn
+                        | RelayCommand::CancelTurnFor { .. }
+                        | RelayCommand::ApplyQueuedFor { .. }
+                ) && matches!(
+                    dispatch.state,
+                    RelayDispatchState::Queued | RelayDispatchState::Pending
+                )
+            })
+    }
+
     fn pending_close_barrier_id(&self) -> Option<&str> {
         self.snapshot.dispatches.values().find_map(|dispatch| {
             if matches!(
@@ -2020,7 +2063,8 @@ impl DurableRelay {
         let mut random = [0u8; 16];
         getrandom::fill(&mut random)
             .map_err(|error| anyhow!("generate mailbox wake ID: {error}"))?;
-        let command_id = format!("mailbox-wake-{}", mj_core::hex::lower_hex(random));
+        let command_id = mj_core::continuation::GeneratedPrompt::MailboxWake
+            .command_id(mj_core::hex::lower_hex(random));
         self.append_relay_event(
             Some(&command_id),
             RelayObservation::CommandQueued {
@@ -2092,6 +2136,7 @@ impl DurableRelay {
                 lease_id: None,
                 text: None,
                 count: 0,
+                contexts: Vec::new(),
             });
         }
         let events = self.snapshot.pending_mailbox_events.clone();
@@ -2101,6 +2146,7 @@ impl DurableRelay {
                 lease_id: None,
                 text: None,
                 count: 0,
+                contexts: Vec::new(),
             });
         }
         let mut random = [0u8; 16];
@@ -2135,6 +2181,13 @@ impl DurableRelay {
             lease_id: Some(lease.lease_id),
             text: Some(text),
             count,
+            contexts: events
+                .iter()
+                .map(|event| mj_core::relay::MailboxHookContext {
+                    key: event.key.clone(),
+                    text: mj_core::mailbox::render_mailbox_events(std::slice::from_ref(event)),
+                })
+                .collect(),
         })
     }
 

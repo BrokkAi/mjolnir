@@ -26,12 +26,18 @@ then get an `ask_oracle` tool whatever their delegation choice. **Create** and
 **Move…** show an Oracle row when a model is set.
 
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
-requires a Claude, Codex, or DSH profile and a configured Straightforward task.
+requires a Claude, Codex, DSH, or OpenCode profile and a configured Straightforward task.
 DSH has no sub-agents of its own, so for a DSH profile they offer **Mjolnir** or
 **None** instead. A DSH session starts on Mjolnir when the last choice was
 Mjolnir and Straightforward is configured, and on None otherwise. Its choice
 becomes the remembered one on interactive creation only when it is Mjolnir, so choosing None for DSH
 does not change what the next Claude or Codex session starts with.
+OpenCode has no steering, so a child's report reaches an OpenCode parent when
+its current turn ends, not between its tool calls. An OpenCode older than 2.2.6
+(for example in a container built from an older image) loads its MCP tools
+shortly after it connects, so the worker holds its first prompt for 250 ms.
+Under configured approvals OpenCode asks the person before each `mj-agents`
+call; choose "always allow" to stop it asking for the rest of the session.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.
 
@@ -220,6 +226,56 @@ inference profile. `mj models --profile bedrock-luna` asks Codex for its
 built-in Bedrock catalog; Mjolnir does not try to fetch `/models` with an API
 key. If Codex reports no models, the command says so and the `model` configured
 in `config.toml` remains the profile's default.
+
+### Limiting the AWS credentials sessions receive
+
+By default a Bedrock profile's container and SSH sessions receive a copy of the
+controller host's AWS credentials, so code in a session can do whatever that
+identity can. To give each session credentials limited to one IAM role instead,
+add a table to the profile. It works for Claude Code and Codex Bedrock
+profiles alike:
+
+```toml
+[profiles.bedrock-luna.aws]
+role_arn = "arn:aws:iam::123456789012:role/mj-bedrock-session"
+# session_policy = '{"Version":"2012-10-17","Statement":[...]}'
+# session_policy_arns = ["arn:aws:iam::aws:policy/AmazonBedrockReadOnly"]
+# duration_seconds = 3600
+# source_identity = true
+```
+
+Mjolnir assumes the role (AWS `sts assume-role`) with the host's AWS login for
+each session, names the role session `mj-<session id>` so CloudTrail shows
+which session made each call, and installs the temporary credentials in the
+session. It renews them when half of their lifetime has passed. The host's own
+credentials stay on the controller.
+
+`session_policy` (inline JSON) and `session_policy_arns` (managed policies)
+narrow the role further for the session; they can only remove permissions,
+never add them. With neither set, Mjolnir uses a built-in policy that allows
+invoking and listing Bedrock models and nothing else. `duration_seconds`
+defaults to AWS's own default of 3600 and may be 900 up to the role's maximum
+session duration; AWS rejects other values. `source_identity = true` also sets
+AWS `SourceIdentity`, which the role's trust policy must allow with
+`sts:SetSourceIdentity`.
+
+The controller's AWS login (the profile's `AWS_PROFILE`, or the default) needs
+`sts:AssumeRole` on the role, and the role's trust policy must name that login.
+`mj doctor` assumes the role once to check this. If AWS refuses, a new session
+fails to start with AWS's error and what to change. A running session keeps the
+scoped credentials Mjolnir issued until they expire, and has any other AWS
+credentials it holds (the host's own, from before you added the role) withdrawn;
+the session's other synchronization continues and the failure is reported. you can also remove the table to return to
+copying the host's credentials. A table that cannot apply to a session
+has no effect there: sessions start without it, with a notice that names the
+reason, and `mj doctor` warns, per target. The reasons are a profile that does
+not authenticate with the AWS credential chain, a raw local target (it reads the
+host's own AWS files), an EC2 machine (it uses its instance role), and a target
+or profile whose environment sets its own AWS profile or credentials. This applies only to container and SSH
+sessions that receive synced credentials: raw local sessions read the host's
+AWS files directly, EC2 sessions use their instance role, and a Bedrock API key
+(`AWS_BEARER_TOKEN_BEDROCK`) is not covered. The table is edited in
+`config.toml`; Settings preserves it but does not yet offer a form for it.
 
 ## Codex with a custom provider
 
@@ -836,6 +892,14 @@ Mjolnir then adds its own files to the staged home:
 - for Muse, the permission profile in its settings;
 - for OpenCode under an unconstrained policy, the `"permission": "allow"`
   setting in `opencode.json`;
+- for every OpenCode session, permission rules in `OPENCODE_CONFIG_CONTENT`
+  that turn off OpenCode's `execute` tool, so the `mj-agents` tools are
+  ordinary tools named `mj-agents_spawn` and so on instead of reachable only
+  through scripts, and, unless the session uses OpenCode's own delegation
+  (Native), its own `subagent` tool. OpenCode names a tool
+  `<server>_<tool>`, so another server can carry the same name as a Mjolnir
+  tool; the worker therefore never answers OpenCode's permission requests,
+  and under configured approvals the person approves Mjolnir's tools too;
 - for DSH, the staged `AGENTS.md` in the session's `DSH_ACP_DATA_DIR` (with
   `DSH_ACP_SYSTEM_PROMPT` cleared), and dsh-acp's `permission_mode` on every
   session open: `ask` under configured approvals, `allow` under an

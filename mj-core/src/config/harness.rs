@@ -159,6 +159,33 @@ impl StagedSetting {
 }
 
 impl ExecutionEnforcement {
+    /// ACP selectors reserved for the target's execution policy: the selector
+    /// the policy mode lives on, and the policy setting. The mode selector is
+    /// the policy's named one when the bridge has it, else its Mode selector
+    /// (Muse images before muse-acp 0.10 carry approvals on `mode`). It stays
+    /// owned when the bridge does not offer the policy's mode right now, such
+    /// as Auto on a model without it, so no other mode can be chosen then.
+    pub fn owned_config_keys(
+        self,
+        options: &[agent_client_protocol::v1::schema::SessionConfigOption],
+    ) -> Vec<String> {
+        // `mode` resolves the way a SetConfig for it does: the option with
+        // that id, else the Mode-category one.
+        let mode = self.acp_mode.and_then(|_| {
+            self.acp_mode_selector
+                .and_then(|selector| {
+                    options
+                        .iter()
+                        .find(|option| option.id.to_string() == selector)
+                })
+                .or_else(|| crate::acp::find_session_config_option(options, "mode"))
+                .map(|option| option.id.to_string())
+        });
+        mode.into_iter()
+            .chain(self.acp_setting.map(|(key, _)| key.to_owned()))
+            .collect()
+    }
+
     /// Name reported to the UI for the mode this session runs in.
     pub const fn label(self) -> &'static str {
         self.label
@@ -935,9 +962,22 @@ impl HarnessKind {
     /// Whether this harness receives Mjolnir's delegation tools: a parent's
     /// `spawn` and related tools, and a child's `handback`. Such a harness
     /// gets the subagent choice in the wizards. Claude reads the tools from
-    /// its staged profile; Codex and DSH take them over ACP, and DSH reads
-    /// the delegation policy from its staged `AGENTS.md`.
+    /// its staged profile; Codex, DSH and OpenCode take them over ACP, and
+    /// DSH and OpenCode read the delegation policy from their staged
+    /// `AGENTS.md`.
     pub const fn supports_delegation_tools(self) -> bool {
+        matches!(
+            self,
+            Self::Claude | Self::Codex | Self::Dsh | Self::OpenCode
+        )
+    }
+
+    /// Whether a session on this harness is offered the review tools, and a
+    /// primary one can be held to push review: the `mj-review` server, the
+    /// push hook and `MJ_REVIEW_GATE`. Separate from
+    /// `supports_delegation_tools`, which OpenCode satisfies without having
+    /// the gate.
+    pub const fn supports_review_gate(self) -> bool {
         matches!(self, Self::Claude | Self::Codex | Self::Dsh)
     }
 
@@ -1043,6 +1083,12 @@ pub struct HarnessProfile {
     /// changes nothing there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muse_auto_review: Option<bool>,
+    /// The IAM role Mjolnir assumes for each session of a profile that
+    /// authenticates with the AWS credential chain (Bedrock), so the session
+    /// gets short-lived credentials limited to that role instead of a copy
+    /// of the controller host's credentials. See [`AwsRoleConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws: Option<super::AwsRoleConfig>,
     /// The models Mjolnir offers from this profile, as exact values from the
     /// profile's advertised catalogue (`openrouter/deepseek/deepseek-v4.1-flash-1017`).
     /// Empty offers everything the harness advertises. Some harnesses, such as
@@ -1139,6 +1185,7 @@ impl HarnessProfile {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             models: Default::default(),
             legacy_subagents: None,
         }
@@ -1476,6 +1523,9 @@ impl HarnessProfile {
         }
         if self.muse_auto_review.is_some() && self.kind != HarnessKind::Muse {
             bail!("profile {id:?}: `muse_auto_review` applies only to a Muse profile");
+        }
+        if let Some(aws) = &self.aws {
+            aws.validate(id)?;
         }
         Ok(())
     }

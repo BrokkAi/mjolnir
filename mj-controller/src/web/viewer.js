@@ -405,8 +405,7 @@ function applyRoute() {
     if (!session
       || (route.subagentParentId && !childSessionIds(virtualParent, route.childKind).includes(session.id))
       || (session.detail !== false
-        && !session.capabilities?.open
-        && !isTransitioningSession(session)
+        && !canViewConversation(session)
         && !isLoadingConversationSession(session))) {
       navigate(route.subagentParentId
         ? childWorkspaceRoute(route.subagentParentId, route.childKind)
@@ -1075,6 +1074,16 @@ function isTransitioningSession(session) {
   return Boolean(session.operation && session.operation.kind !== 'checkpoint');
 }
 
+/// A failed Move has a status view even after its transcript worker stops.
+function canViewConversation(session) {
+  return Boolean(session && (session.capabilities?.open
+    || isTransitioningSession(session) || session.move_recovery?.failure_notice));
+}
+
+function isMoveFailureStatus(session) {
+  return !session?.capabilities?.open && Boolean(session?.move_recovery?.failure_notice);
+}
+
 /// A live session can briefly lose its conversation projection just after a
 /// lifecycle operation hands it back to the running worker. This is not a
 /// lifecycle transition (and therefore must not make ordinary checkpoints or
@@ -1089,7 +1098,8 @@ function isLoadingConversationSession(session) {
     && session.operation?.kind !== 'checkpoint'
     && session.lifecycle === 'live'
     && !session.has_error
-    && (conversationMode === 'loading' || conversationMode?.startsWith('transition:')),
+    && (conversationMode === 'loading' || conversationMode?.startsWith('transition:')
+      || conversationMode?.startsWith('move-failure:')),
   );
 }
 
@@ -1540,7 +1550,7 @@ function sessionMenuActions(session) {
 function updateSessionCard(card, session) {
   card._session = session;
   const can = session.capabilities || {};
-  const openable = can.open === true || isTransitioningSession(session);
+  const openable = canViewConversation(session);
   // A stopped sub-agent has no live conversation to open; the controller says
   // its stored one can be read.
   const readable = !openable && can.read_history === true;
@@ -2431,7 +2441,7 @@ function selectNewProfile(draft, profileId) {
 // Mirrors HarnessKind::supports_delegation_tools.
 function subagentChoiceApplies(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind === 'claude' || kind === 'codex' || kind === 'dsh';
+  return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'opencode';
 }
 
 // Every top-level session's message-only server carries ask_oracle, whatever its harness.
@@ -4385,6 +4395,11 @@ function updateResumeCard(card, session, rebuild = false) {
     if (recovery.checkpoint_retained && !move.explanation) body.append(el('p', 'dim', 'A verified recovery checkpoint is retained.'));
   }
   const queuePinned = move.queuePinned;
+  if (recovery?.failure_notice) {
+    const view = button('View Move failure', 'secondary');
+    view.onclick = () => navigate({ name: 'conversation', workspaceId: session.workspace_id, sessionId: session.id });
+    body.append(view);
+  }
   if (move.explanation) body.append(el('p', 'dim', move.explanation));
   if (move.retry) {
     const moveRow = el('div', 'row');
@@ -6142,7 +6157,7 @@ function refreshOpenConversationDetail(id) {
   errorNode.textContent = 'Refreshing session details…';
   ensureSessionDetail(id).then(session => {
     if (route.name !== 'conversation' || route.sessionId !== id || currentSession !== id) return;
-    if (!session?.capabilities?.open && !isTransitioningSession(session)) {
+    if (!canViewConversation(session) && !isLoadingConversationSession(session)) {
       navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
       return;
     }
@@ -6200,8 +6215,7 @@ function presentSnapshot(detailChangedIds = []) {
       return true;
     }
     if (!session
-      || (!session.capabilities?.open
-        && !isTransitioningSession(session)
+      || (!canViewConversation(session)
         && !isLoadingConversationSession(session))) {
       navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
       return true;
@@ -7437,13 +7451,15 @@ async function searchHistory(query) {
       // Saying the answer is partial is the whole reason the bound reports it.
       paletteMatches.push({
         insert: composerText(),
-        label: `More matches than ${paletteMatches.length} — narrow the search`,
+        label: `Stopped after ${paletteMatches.length} matches — narrow the search`,
         hint: '',
       });
     }
     paletteSelected = 0;
     if (!paletteMatches.length) {
-      commandPalette.replaceChildren(el('p', 'dim palette-row', 'No earlier prompts match.'));
+      // The daemon's trigram index matches substrings of three characters or more.
+      const hint = [...query].length < 3 ? 'Type at least 3 characters.' : 'No earlier prompts match.';
+      commandPalette.replaceChildren(el('p', 'dim palette-row', hint));
       commandPalette.classList.remove('hidden');
       return;
     }
@@ -8117,12 +8133,21 @@ function paintEntry(node, entry, unansweredPrompt) {
 /// The prompt an unanswered-turn row offers to put back, or null.
 ///
 /// The text comes from the newest user row before the warning, which is the
-/// prompt that turn was running.
+/// prompt that turn was running. When Mjolnir submitted that prompt (the
+/// server marks the row `generated`), there is nothing of the person's to put
+/// back, and an earlier request would be unrelated work.
 function unansweredPromptFor(entry, lastUserText) {
   if (entry.role === 'user') return null;
   const text = (entry.lines || []).join('\n');
   if (!text.includes(PROMPT_UNANSWERED_MARKER)) return null;
   return lastUserText || null;
+}
+
+/// The prompt text a later warning in this turn may offer back. A user row
+/// starts the turn; Mjolnir's own prompts (`generated`) leave nothing to offer.
+function turnPromptText(entry, previous) {
+  if (entry.role !== 'user') return previous;
+  return entry.generated ? null : (entry.lines || []).join('\n');
 }
 
 function renderEntries(entries, replace) {
@@ -8135,7 +8160,7 @@ function renderEntries(entries, replace) {
   let appended = false;
   let lastUserText = null;
   for (const entry of entries) {
-    if (entry.role === 'user') lastUserText = (entry.lines || []).join('\n');
+    lastUserText = turnPromptText(entry, lastUserText);
     const unansweredPrompt = unansweredPromptFor(entry, lastUserText);
     const identity = entry.stable_id || entry.id;
     let node = entryNodes.get(identity);
@@ -8190,7 +8215,9 @@ function syncConversationMode(session) {
   const transition = isTransitioningSession(session);
   const loading = !transition && isLoadingConversationSession(session);
   const operationId = session?.operation?.id || session?.state || session?.lifecycle || '';
-  const next = transition ? `transition:${operationId}` : loading ? 'loading' : 'conversation';
+  const statusOnly = isMoveFailureStatus(session);
+  const next = transition ? `transition:${operationId}` : loading ? 'loading'
+    : statusOnly ? `move-failure:${session.move_recovery.operation_id}` : 'conversation';
   if (next === conversationMode) return;
   conversationMode = next;
   conversationGeneration += 1;
@@ -8203,10 +8230,29 @@ function syncConversationMode(session) {
 }
 
 function renderConversationTransition(session) {
+  const moveFailure = document.querySelector('#conversation-move-failure');
+  const recovery = session?.move_recovery;
+  const notice = recovery?.failure_notice;
+  const signature = JSON.stringify([session?.id, recovery, session?.lifecycle, session?.capabilities?.resume]);
+  if (moveFailure._signature !== signature) {
+    moveFailure._signature = signature;
+    moveFailure.hidden = !notice;
+    moveFailure.replaceChildren();
+    if (notice) {
+      moveFailure.append(el('p', 'error', notice));
+      const guidance = resumeMoveRecovery(session);
+      if (guidance.retry) {
+        const retry = button('Retry move', 'secondary');
+        retry.onclick = () => navigate({ name: 'move', workspaceId: session.workspace_id, sessionId: session.id });
+        moveFailure.append(retry);
+      }
+    }
+  }
   const transition = isTransitioningSession(session);
   const loading = !transition && isLoadingConversationSession(session);
-  const unavailable = transition || loading;
-  conversationTransition.hidden = !unavailable;
+  const statusOnly = isMoveFailureStatus(session);
+  const unavailable = transition || loading || statusOnly;
+  conversationTransition.hidden = !transition && !loading;
   feedScroll.hidden = unavailable;
   jumpToLatest.hidden = unavailable;
   elicitations.hidden = unavailable;
@@ -8218,16 +8264,16 @@ function renderConversationTransition(session) {
   );
   document.querySelector('#prompt-form').hidden = unavailable;
   cancelTurnButton.classList.toggle('hidden', unavailable || !session?.capabilities?.interrupt_turn);
-  if (!unavailable) return;
+  if (!transition && !loading) return;
   conversationTransitionTitle.textContent = loading ? 'Loading conversation' : session.title || session.id;
   conversationTransitionStage.textContent = loading ? 'Waiting for the conversation…' : sessionActivityLabel(session);
-  const notice = loading
+  const transitionNotice = loading
     ? ''
     : session.operation?.notice
       || session.configuration_issue
       || (session.has_error ? 'The operation needs recovery. Use the available action to try again.' : '');
-  conversationTransitionNotice.textContent = notice;
-  conversationTransitionNotice.hidden = !notice;
+  conversationTransitionNotice.textContent = transitionNotice;
+  conversationTransitionNotice.hidden = !transitionNotice;
   conversationTransitionCancel.dataset.id = session.id;
   conversationTransitionCancel.disabled = !session.capabilities?.cancel_operation
     || pendingActions.has(`cancel:${session.id}`);
@@ -8241,7 +8287,7 @@ async function loadConversation(delta = false) {
   if (!currentSession) return;
   const current = sessionById(currentSession);
   if (!current?.capabilities?.open || isTransitioningSession(current)) {
-    if (isTransitioningSession(current) || isLoadingConversationSession(current)) {
+    if (canViewConversation(current) || isLoadingConversationSession(current)) {
       renderConversationTransition(current);
     }
     return;
@@ -8347,7 +8393,7 @@ async function openConversation(id) {
     errorNode.textContent = '';
   }
   if (!session) return;
-  if (!session.capabilities?.open && !isTransitioningSession(session)) {
+  if (!canViewConversation(session)) {
     navigate(route.subagentParentId
       ? childWorkspaceRoute(route.subagentParentId, route.childKind)
       : { name: 'dashboard', workspaceId: selectedWorkspaceId() });

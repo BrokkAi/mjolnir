@@ -1,0 +1,257 @@
+{
+  "id": "L2603",
+  "title": "Python lexical certainty golden review",
+  "category": "still-open-user-question",
+  "harness": "codex",
+  "source": {
+    "kind": "transcript",
+    "session": "b944830bd2367693c69cfc4c290cc7a8",
+    "session_title": "py-switch-lib-test-triage",
+    "reply_position": 6007,
+    "captured_at": "2026-10-28T22:56:48.273Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "agent:25",
+          "role": "assistant",
+          "text": "I’ll inspect the two incomplete native answers first, then update the obsolete assertions and run the requested library checks in the switch worktree."
+        },
+        {
+          "id": "agent:171",
+          "role": "assistant",
+          "text": "The tests use `AnalyzerFixture`, which builds an ephemeral workspace through the production analyzer constructor. I’m checking whether that build selects the Python summary; the full native completion and diagnostics will distinguish missing lifecycle setup from a precision gap."
+        },
+        {
+          "id": "agent:430",
+          "role": "assistant",
+          "text": "Both tests select a native summary and find `service.Service.run`, but report `Incomplete` with `UnsupportedSemantic` reasons. The named-reason list is empty, and the public diagnostic says `incomplete_binding`. I’m tracing where those reasons originate before reporting the switch decision; the `Resolved` expectations remain unchanged."
+        },
+        {
+          "id": "agent:760",
+          "role": "assistant",
+          "text": "For the four obsolete-state tests, I’ll retain the receiver-isolation and re-export-order answer checks, remove their legacy counters, and delete the legacy cache-capacity test. The empty/recovered-file test will assert canonical module scope and export facts, plus the facts recovered from malformed source."
+        },
+        {
+          "id": "agent:1298",
+          "role": "assistant",
+          "text": "The two status changes are case (2): native precision gaps with a selected environment. I’m leaving those tests and the resolver unchanged for your decision. The other test migrations are in place, and the three-crate library run is underway."
+        },
+        {
+          "id": "agent:1526",
+          "role": "assistant",
+          "text": "The library run finished: 1,240 passed, with only the two native-certainty failures remaining; four tests were skipped. The retained answer checks and the updated empty/recovered-file test pass. Formatting passed, and test-support Clippy is running."
+        },
+        {
+          "id": "agent:1663",
+          "role": "assistant",
+          "text": "Test-support Clippy passed on both touched crates, and formatting is clean. I’ll hand back the two precision decisions with full answer dumps and minimal fixtures, along with the uncommitted test changes."
+        },
+        {
+          "id": "agent:1709",
+          "role": "assistant",
+          "text": "Implemented the test cleanup without committing. Library tests: 1,240 passed; only the two native-certainty failures remain for your decision. Clippy and formatting passed.\n\nDetails: [REPORT.md](/tmp/py-switch-logs/switch-libtests/REPORT.md)."
+        },
+        {
+          "id": "agent:1797",
+          "role": "assistant",
+          "text": "I’ll read the IDs from the request’s identity catalog, trace where their obligations enter the answer, and compare annotated, locally constructed, and `self` receivers. I’ll remove all instrumentation and verify the worktree is clean before handing back."
+        },
+        {
+          "id": "agent:2134",
+          "role": "assistant",
+          "text": "The producer does lower an ordinary parameter annotation into a declared type and a runtime-value transfer. I also found native graph fixtures with annotated-parameter method calls. The diagnostic run will show which catalogued gap survives on the binding answer and whether the same gap affects the comparison receivers."
+        },
+        {
+          "id": "agent:2495",
+          "role": "assistant",
+          "text": "The catalog confirms that IDs 76 and 77 refer to an `UnsupportedScopeOrBinder` gap on the `service` parameter declaration. The producer emits it when that lexical declaration has no CodeUnit, even though it records the parameter and its type.\n\nI also checked the ID encoding: `4611686018427387916` is an operation-local ID, not a shared-name ID. I’m reading its service-reason entry next."
+        },
+        {
+          "id": "agent:2986",
+          "role": "assistant",
+          "text": "The operation interner names the extra reason `missing-declaration-type-property`, attached to the `run` declaration. It comes from projecting the method’s value type and appears only in the full typed completion; it does not cause the binding status change.\n\nThe annotated and locally constructed receivers both retain a gap on the local `service` declaration. That points to a producer defect rather than an annotation or subclass rule."
+        },
+        {
+          "id": "agent:3355",
+          "role": "assistant",
+          "text": "The report is complete. IDs 76/77 come from a gap on supported lexical declarations; the interner and producer trace confirm the mapping. Existing native goldens already show incomplete annotated-member results. All four receiver probes found `Service.run` but returned `Incomplete`.\n\nAll instrumentation is removed, formatting passed, and `git status` is clean."
+        },
+        {
+          "id": "agent:3428",
+          "role": "assistant",
+          "text": "Confirmed a producer defect: IDs 76/77 mark the supported `service` parameter as unsupported because it lacks a CodeUnit. Its annotation is lowered correctly.\n\nThe extra ID is an operation-local `missing-declaration-type-property` obligation on `run`, separate from binding certainty.\n\n[REPORT-A.md](/tmp/py-switch-logs/switch-libtests/REPORT-A.md) contains mappings, comparisons, and evidence. Instrumentation removed; worktree clean."
+        },
+        {
+          "id": "agent:3551",
+          "role": "assistant",
+          "text": "I’ll remove the spurious gaps from supported lexical value declarations, check that parameter and reassignment definitions present correctly, then run the requested suites without blessing. I’ll leave the nested class/def arm unchanged and won’t commit."
+        },
+        {
+          "id": "agent:3791",
+          "role": "assistant",
+          "text": "All eight event kinds that reach the value arm are handled by native lexical selection: Parameter, Assign, Augment, Import, Iteration, With, Exception, and Pattern. I removed the gap from that arm and made the cases explicit. Delete/Annotation and Function/Class retain their separate behavior. The focused presentation checks are compiling."
+        },
+        {
+          "id": "agent:3876",
+          "role": "assistant",
+          "text": "The focused checks passed: both original method-target tests now return `Resolved`, and the new regression check confirms complete, nonempty Parameter and reassignment definitions. I’ll now check the four receiver cases and run the library and golden suites."
+        },
+        {
+          "id": "agent:4031",
+          "role": "assistant",
+          "text": "The library run is underway. The focused regression confirms that the shared native presentation path handles the lexical declarations, so no resolver change is needed. I’m leaving golden expectations untouched to make the completeness changes reviewable."
+        },
+        {
+          "id": "agent:4557",
+          "role": "assistant",
+          "text": "All 1,243 library tests passed, with four skipped. I’m using temporary diagnostics for the receiver comparison and any remaining `self.run()` obligations. I’ll remove those diagnostics before running the golden suites."
+        },
+        {
+          "id": "agent:4613",
+          "role": "assistant",
+          "text": "The parameter/local fix is in place. The receiver diagnostic build is still linking; once it finishes, I’ll remove the temporary code and run the requested golden suites without blessing. I found one unused legacy counter helper after the test cleanup and will remove it before Clippy."
+        },
+        {
+          "id": "agent:4682",
+          "role": "assistant",
+          "text": "After the fix, annotated direct, facade, and constructed-local calls return `Resolved`. `self.run()` still returns `Incomplete`; the remaining reasons map to the unannotated `self` type and its expression/receiver slots. I’ve recorded those mappings and removed all temporary diagnostics. The golden suites are now compiling."
+        },
+        {
+          "id": "agent:5109",
+          "role": "assistant",
+          "text": "Clippy and formatting passed. The remaining `self.run()` incompleteness includes the existing `ReceiverSubclass` obligation, projected onto three typed slots, plus an unannotated-parameter type gap. Those are separate from the binder defect fixed here. The golden binaries are still compiling."
+        },
+        {
+          "id": "agent:5257",
+          "role": "assistant",
+          "text": "I found five pre-existing golden mismatches in the earlier switch log and saved their actual outputs for comparison. That will let me separate changes from this fix from the earlier import-module operand changes. The final source diff is limited to the producer correction and test cleanup/regression check."
+        },
+        {
+          "id": "agent:5405",
+          "role": "assistant",
+          "text": "The golden run finished: 19 tests passed and 15 reported output mismatches. I haven’t blessed anything. I’m capturing the rendered outputs outside the checkout to inventory every changed case and distinguish completeness improvements from earlier module-token and ordinal changes."
+        },
+        {
+          "id": "agent:5645",
+          "role": "assistant",
+          "text": "One control needs separate review: `read_subclass(value: Parent)` expects incompleteness because `Child` can mutate `f`, but it now returns complete. I’ve kept that assertion unchanged and will flag it.\n\nI’m also running a control with only the producer correction reverted temporarily. That will establish which of the wider golden differences were already present on the switch branch."
+        },
+        {
+          "id": "agent:5835",
+          "role": "assistant",
+          "text": "The control comparison is complete. All 29 cases already had unblessed output differences on the switch branch. This fix adds changes to five captured cases: four member-completeness flips, one removed generic obligation repeated across runtime/typing, and the expected source/lowered gap reductions. The subclass control also changes from incomplete to complete and hits its unchanged assertion. The producer correction is restored in the worktree."
+        },
+        {
+          "id": "agent:5926",
+          "role": "assistant",
+          "text": "The final diff touches two files, and no golden expectation changed. Both original tests, the lexical presentation regression, and all 1,243 library tests pass. Clippy and fmt pass too.\n\nThe report includes every differing golden case, the controlled causes, and the subclass assertion that still needs your decision. I’ve left the resolver policy and that assertion unchanged."
+        },
+        {
+          "id": "agent:6007",
+          "role": "assistant",
+          "text": "Implemented without committing. Both original tests and all 1,243 library tests pass; Clippy and fmt pass.\n\nGoldens remain unblessed. One subclass-certainty assertion needs your decision.\n\nDetails: [REPORT-FIX.md](/tmp/py-switch-logs/switch-libtests/REPORT-FIX.md)."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "codex",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "Implemented without committing. Both original tests and all 1,243 library tests pass; Clippy and fmt pass.\n\nGoldens remain unblessed. One subclass-certainty assertion needs your decision.\n\nDetails: [REPORT-FIX.md](/tmp/py-switch-logs/switch-libtests/REPORT-FIX.md).",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      5645,
+      5835,
+      5926,
+      6007
+    ],
+    "user_position": 3547,
+    "input_rationale": "The parent said not to change expectations. The fix turns read_subclass(value: Parent) from incomplete to complete, and the agent left the assertion unchanged and asks the parent to decide. The parent's next message decides it.",
+    "label": "required_final",
+    "triggers": [
+      "needs you"
+    ],
+    "project": "bifrost-dev",
+    "is_child": true,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:5645",
+      "agent:5835",
+      "agent:5926",
+      "agent:6007"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-28T22:58:39.537Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-28T22:58:40.924Z",
+        "kind": "user",
+        "text": "Good work. Two follow-ups in the same worktree; do not commit.  1. Fix the exposed hole: python_attribute_space_owners_match_golden's expectation for read_subclass(value: Parent) (incomplete) is right"
+      },
+      {
+        "at": "2026-10-28T22:58:51.899Z",
+        "kind": "agent",
+        "text": "I’ll trace where the subclass-mutation obligation is recorded and lost, then attach the named reason without evaluating subclasses per cell. After that fix is validated, I’ll run the temporary nominal"
+      },
+      {
+        "at": "2026-10-28T23:04:16.487Z",
+        "kind": "agent",
+        "text": "I found the missing attachment: `PythonReverseView::open` records `python_dynamic_receiver_mutation_open`, but forward member answers never consume it. Forward mutation checks only inspect owners alre"
+      },
+      {
+        "at": "2026-10-28T23:06:23.819Z",
+        "kind": "agent",
+        "text": "Legacy production answers `self.run()` as `Resolved` to `service.Service.run`, with no diagnostics, `call_application=Unknown`, and no dispatch-extensibility evidence. The temporary test is removed an"
+      },
+      {
+        "at": "2026-10-28T23:07:23.591Z",
+        "kind": "agent",
+        "text": "Legacy `self.run()` resolves completely to `service.Service.run`; the temporary probe is removed.  Implementation and measurement await the forward-obligation boundary decision described in [REPORT-SE"
+      }
+    ]
+  }
+}

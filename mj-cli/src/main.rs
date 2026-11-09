@@ -523,13 +523,13 @@ fn main() -> Result<()> {
     // child inherits it. This also covers `daemon-run`, which is this same
     // binary, so a per-instance daemon validates its own environment on boot.
     mj_core::config::apply_instance_flag(cli.instance.as_deref())?;
-    if matches!(cli.command, Some(Command::DaemonRun)) {
+    if matches!(cli.command, Some(Command::DaemonRun | Command::Node)) {
         // Set this before starting threads: the launcher's session checkout
-        // can be removed while the daemon is still running.
-        let home =
-            mj_core::path_input::user_home().context("locate the daemon's home directory")?;
+        // can be removed while the daemon or its sibling node is still running.
+        let home = mj_core::path_input::user_home()
+            .context("locate the background process's home directory")?;
         std::env::set_current_dir(&home)
-            .with_context(|| format!("set daemon working directory to {}", home.display()))?;
+            .with_context(|| format!("set background working directory to {}", home.display()))?;
     }
     let log = Some(logging::ControllerLog::start(
         command_name(cli.command.as_ref()),
@@ -580,6 +580,7 @@ fn run(cli: Cli) -> Result<()> {
         update_notice,
         cli.no_splash,
     ));
+    let runtime_shutdown_started = std::time::Instant::now();
     if daemon {
         shutdown_daemon_runtime(runtime);
     } else if matches!(
@@ -603,6 +604,7 @@ fn run(cli: Cli) -> Result<()> {
             RUNTIME_SHUTDOWN_GRACE,
         );
     }
+    dashboard::log_quit_timings(runtime_shutdown_started);
     match result? {
         DashboardExit::Restart { target, resume } => resume.restart(&target),
         _ => Ok(()),
@@ -3434,6 +3436,7 @@ mod tests {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 target_template_id: "podman".into(),
                 resource_allocation: None,
                 additional_mounts: Vec::new(),

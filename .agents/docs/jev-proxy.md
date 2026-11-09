@@ -126,7 +126,60 @@ Deployed on 2026-10-09 as version `8bdbc740-9b8a-402d-a37e-2d059a639263` from `d
 
 ## GitHub item verdict
 
+`POST /v2/github-item-verdict` accepts `{item: {repo, kind, number, title, body, author, url}, session: {conversation, files, references, mentions?}}`. Item fields retain the v1 limits except `body` is capped at 4,224 UTF-8 bytes. Optional mentions preserve up to 16 distinct newest lines (256 UTF-8 bytes each) mentioning this item or references in its title/body, selected from a per-session index before digest truncation. These request-sizing budgets follow the 83-pair replay; the daemon interest threshold is 0.4 based on that replay. Older callers may omit mentions. Conversation is at most 8 KiB of UTF-8 text; each message is capped at 2 KiB including its truncation marker; files contain at most 32 strings of 256 bytes; references contain at most 32 strings of 128 bytes. Empty conversation/body strings are allowed; file and reference strings must be nonempty. Unknown fields are rejected. Jev receives the frozen one-question resource `mj-core/src/github_item/questions_v2.json` and returns only a typed Noul `interested` answer. V1 remains unchanged for released daemons, and both routes share `GITHUB_ITEM_RATE_LIMITER`.
+Deployed v2 on 2026-11-08 as version `71d9aadf-343d-417c-818f-b8285a49651a` from `3bfa7d0b9`, following explicit user authorization. Before publication, TypeScript checking, all 37 proxy tests, the deployment dry run, and 36/36 live synthetic v2 controls passed. Hosted smoke checks without a User-Agent: the related v2 control scored interested 0.88 and the unrelated one 0.05; a v2 request with an extra session field returned 400; v1 still returned both answers (interested 0.97, created 0.01 for its related control). No private conversation was sent. Results are in `/mnt/optane/jev-github-v2-20261108/deployment-smoke.json`.
+
+Current daemons call v2 (`mj-controller/src/github_item_verdict.rs`). The session digest comes from `mj-transcript/src/github_item.rs`: user and assistant message text from the last three materialized turns, and the newest distinct tool-call file locations and GitHub references (`mj-core/src/github_reference.rs`). Conversation fills from newest messages first, then renders oldest to newest with User/Agent labels. It omits tool payloads, automatic continuation prompts and /compact or /clear commands, and keeps peer/mailbox text. Labels, newlines and truncation markers count against the total budget. Each live session's digest is computed once per poll and reused for every item in it. Jev no longer judges creation. The daemon counts an item from its own GitHub login as opened by a session when the item's URL or `owner/repo#N` reference appears in the output of a tool call running at GitHub's creation time (`load_github_session_creation_output`). Later text in the same turn is not evidence: a session that views or mentions another session's new item would otherwise claim it and take over its creator watch. Output redirected or suppressed by the command is a miss; the creator then receives a redundant interest notice. Jev is not asked about an item its session opened.
+
+The conversation budgets were compared on the same 83 stored item/session pairs (44 v1 positives, 39 negatives). At 0.5, 8 KiB total with a 2 KiB message cap retained 32/44 positives and recovered 15/18 provisionally adjudicated real misses, with 0/39 new positives. None of the four tested variants met the requested 16/18 recovery cutoff at 0.5; these constants choose the best recovery among them, not demonstrated accuracy parity. The replay used creation-time-plus-60-second fallback timestamps and cannot rewind later materialized-row edits. Average provider request size fell from 57,158 bytes (reconstructed v1) to 13,525. The earlier structured digest (512-byte requests and reply instead of conversation) kept only 19/44 positives at 6,384 bytes: bare references lose the relationships stated in prose. Results and dossiers are in `/mnt/optane/jev-github-v2-20261108/replay/`. The interest threshold was later lowered to 0.4 (below).
+
+Blind labels then replaced production's verdicts as the reference: one agent labeled all 83 pairs from each session's own transcript up to the classification time, without seeing any classifier's verdict (`/mnt/optane/jev-github-v2-20261108/adjudication/labels.jsonl`; 45 relevant, 58 high-confidence labels). Against them, production v1 scored precision 0.86, recall 0.84, accuracy 0.84 at 57 KB per request. The 8 KiB conversation digest scored 0.97/0.69/0.82 at 0.5 and 0.92/0.76/0.83 at 0.4. Adding `mentions` and the 0.4 threshold scored 0.92/0.80/0.84 to 0.93/0.82/0.87 across two runs at about 14.9 KB; the second run windows each mention around its reference (`mention_window`), after 26 of 499 prefix-cut mentions had lost theirs. Run-to-run score differences averaged 0.02, and flips were all within 0.06 of the threshold. Results are in `/mnt/optane/jev-github-v2-20261108/mentions/` and `mentions-window/`.
+
+Deployed optional `mentions` on 2026-11-08 as version `fbb5a09a-c342-4956-b48b-1ef93142c5b4` from `54322a3d1`, following explicit user authorization, before pushing the daemon that sends it. TypeScript checking, the proxy tests and 39/39 live synthetic v2 controls passed first. Hosted smoke checks without a User-Agent: a v2 request whose only link is a mention of a referenced issue scored 0.51; a v2 request without `mentions`, as older daemons send, scored 0.91 for the related control; a 300-byte mention returned 400; v1 still returned both answers. Results are in `/mnt/optane/jev-github-v2-20261108/deployment-smoke-mentions.json`.
+
+A per-session work summary was prototyped on the same 83 pairs and not adopted. The utility-model resolver (Kimi k3.1-pro) wrote a summary of about 1.6 KB from about 48 KB of each session's recent text, in about 27 s per summary. Against the blind labels at 0.4, the summary alone scored recall 0.67 and agreement 0.80; summary plus mentions scored recall 0.78 and agreement 0.84, the same agreement as the shipped digest (recall 0.80), with 35% fewer Jev input tokens (3,280 versus 5,013). That saving does not justify a 48 KB utility-model call per turn on the user's subscriptions, nor the summary lifecycle state it would add. Summaries also dropped relationships the mentions field restores. Evidence is in `/mnt/optane/jev-github-v2-20261108/summary/` (`report.md`, `metrics.json`, `prompt.txt`).
+
+`python3 scripts/jev-github-item-eval.py --run --output <file>` evaluates the v2 synthetic controls in `services/jev-proxy/tests/fixtures/github-item-controls-v2.json` (`--contract v1` runs the v1 set). On 2026-11-08 the conversation-field question matched all 36 classifications (12 cases, three repeats); the closest scores were 0.76 for a session reporting a different item number and 0.20 for one identified only by unrelated files. Results are in `/mnt/optane/jev-github-v2-20261108/fixtures-v2-conversation.json`.
+
 `POST /v1/github-item-verdict` accepts `{item: {repo, kind, number, title, body, author, url}, session: {recent_turns}}`, with the item first so the provider prompt prefix is shared by every session classified for one item. `kind` is `issue` or `pull_request`; `recent_turns` is the compaction rendering of the session's last three user turns. The proxy supplies `mj-core/src/github_item/questions.json` and returns Noul `interested` and `created` answers. The daemon's GitHub watcher calls it once per new item per live primary session (`mj-controller/src/github_item_verdict.rs`); see `.agents/plans/session-mailbox-and-github-watch.md`. Item text is untrusted evidence. The route has its own `GITHUB_ITEM_RATE_LIMITER` (120 per 60 s per IP), so a burst of new items cannot use up the continuation budget.
+
+Released daemons on v1 build `recent_turns` with `TranscriptSummary::from_snapshot_keeping(snapshot, 0)`:
+the same compaction filter and turn grouping, with every tool reduced to its
+name, status, and exit outcome. It never includes raw call inputs, results, or
+terminal output, including the newest eight calls that ordinary handoff
+compaction preserves. Conversation messages and plans remain available. The
+creation prompt interprets these summaries and requires successful creation
+with identifying evidence; a failed or unfinished command, or a generic
+creation command without the created item's identity, does not establish ownership.
+If an identity appeared only in discarded tool output, such as the URL from
+`gh pr create --fill`, the session can receive its own item notification before
+the assistant reports it. This is the accepted summary-only evidence tradeoff:
+abstain from ownership instead of suppressing another session's relevant item.
+
+`python3 scripts/jev-github-item-eval.py --run --output <file>` evaluates the
+synthetic summary-only controls in
+`services/jev-proxy/tests/fixtures/github-item-controls.json`. On 2026-11-08,
+the previous prompt incorrectly treated a failed creation as successful
+(created probability 0.51). Review also identified that a generic completed
+creation command cannot establish which item was opened. The final prompt
+passed 27/27 classifications over three repeats, scoring creation at 0.01 for
+both failures and commands without identity. This is a small control set, not
+a production accuracy estimate. Local evidence is under
+`/mnt/optane/jev-summary-20261108/`. Shipping smaller evidence requires the
+updated daemon; hosted prompt changes additionally require deploying the proxy.
+
+Deployed the summary-aware GitHub ownership questions on 2026-11-08 as version
+`ed0d18cc-6aba-43e1-98e8-8fe50c73f651` from `aed371dfe`, following explicit user
+authorization. It replaces `49d6f62b-4489-454c-b132-614f58384a5a`. Before
+publication, all 34 proxy tests, TypeScript checking, the deployment dry run,
+and 27 live synthetic model controls passed. Hosted smoke checks returned 200
+for all four requests: identified PR creation scored created 0.96; failed
+creation and creation without item identity each scored 0.01; v7 turn verdict
+retained its five answers and classified the synthetic completed reply as
+finished/closing. Smoke requests used no User-Agent as documented above; the
+default Python User-Agent received 403 at the edge. No private conversation
+content was sent. Results are in
+`/mnt/optane/jev-summary-20261108/deployment-smoke.json`.
 
 Deployed on 2026-10-07 as version `684c5a50-d4ba-4392-822e-09152a1cb57b`, replacing `14ca6393-f397-40c7-a1c2-615c9bb32b6e`, following explicit user authorization. TypeScript check, 28 proxy tests and the dry run passed first. Synthetic smoke checks without a User-Agent: a pull request the session's turns show it opening scored interested 0.96 and created 0.97; an unrelated README typo issue scored 0.03 and 0.02; a malformed item returned 400; v6 (running turn), v1 turn-verdict and v1 continuation returned 200. A v6 request with `phase: replied` and no `completion` correctly returns 400. No private conversation was sent.
 
@@ -137,3 +190,7 @@ Deployed on 2026-10-07 as version `684c5a50-d4ba-4392-822e-09152a1cb57b`, replac
 The proxy builds the `request_reply` choice question from `mj-core/src/activity/question_locator.json` and the number of replies, then calls `jev-latest`. It uses `TURN_RATE_LIMITER`. A valid response is `{"choice":"r0","probabilities":{"r0":0.8,"none":0.2},"confidence":0.8}` (keys vary with reply count); `none` means no reply was located. Malformed upstream answers return HTTP 502.
 
 Deployed on 2026-11-05 as version `bb1bb11b-4b4f-4f9b-afa3-b3d01567b717`, from commit `f598ac442`; the previous version was `8bdbc740-9b8a-402d-a37e-2d059a639263`. Synthetic requests without a User-Agent returned HTTP 200 for a three-reply locator case (`r0` at 0.96, the reply that assigned a decision), HTTP 400 `invalid_evidence` for a reply index that did not match its position, and HTTP 200 with all five answers from `/v7/turn-verdict`. No private conversation text was sent.
+
+## Still-open input wording and locator (2026-11-06)
+
+Deployed on 2026-11-06 as version `49d6f62b-4489-454c-b132-614f58384a5a` from `ac2f93ea9`, following explicit user authorization; the previous version was `bb1bb11b-4b4f-4f9b-afa3-b3d01567b717`. It carries the new `input` instructions in `verdict_questions.json` (v7) and the matching `question_locator.json`; frozen v1-v6 files are unchanged. Proxy check, 34 tests and the dry run passed first. Synthetic smoke requests without a User-Agent: an offer after a delivered answer scored `input = required` 0.97 with `work = finished` and `reply = closing`; a reply only waiting on a test run scored `none` 1.00; "Want me to proceed and push it?" for assigned work scored `redundant_request` 0.99; a closing "Still open: your sign-off on ..." item scored `required` 0.95; the locator chose the offer reply (`r1`, 1.00); v6 returned its four answers. No private conversation was sent. Evaluation: [still-open input detection](jev-still-open-20261106.md).

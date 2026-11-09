@@ -44,6 +44,7 @@ fn runtime_view(
     projection_digest: &str,
 ) -> crate::daemon::RuntimeSessionView {
     crate::daemon::RuntimeSessionView {
+        policy_config_keys: Vec::new(),
         session_id: session_id.to_owned(),
         projection_ordinal,
         projection_digest: projection_digest.to_owned(),
@@ -125,6 +126,7 @@ fn podman_controller(state: SessionState) -> Controller {
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: false,
             target_template_id: "podman".into(),
             resource_allocation: None,
             additional_mounts: Vec::new(),
@@ -1102,6 +1104,7 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },
         );
@@ -1197,6 +1200,7 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },
         );
@@ -1397,7 +1401,9 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(Vec::new()),
+            step_failures: Vec::new(),
         }],
+        partial: false,
     };
 
     let claude = CredentialSyncNotices::default()
@@ -1424,7 +1430,9 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err("worker proxy disconnected".into()),
+            step_failures: Vec::new(),
         }],
+        partial: false,
         ..result
     };
     let claude_failure = CredentialSyncNotices::default()
@@ -1450,7 +1458,9 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            step_failures: Vec::new(),
         }],
+        partial: false,
     };
     let notice = CredentialSyncNotices::default()
         .notice(&result, None, &State::default())
@@ -1472,6 +1482,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
         }),
         failure: Some("controller credential file is unreadable".into()),
         outcomes: Vec::new(),
+        partial: false,
     };
     let leveled = CredentialSyncNotices::default()
         .leveled_notice(&result, None, &State::default())
@@ -1495,7 +1506,9 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err(detail.to_owned()),
+            step_failures: Vec::new(),
         }],
+        partial: false,
     };
     let mut notices = CredentialSyncNotices::default();
 
@@ -1534,13 +1547,95 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         outcomes: vec![CredentialSyncOutcome {
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            step_failures: Vec::new(),
         }],
+        partial: false,
     };
     assert_eq!(notices.notice(&healthy, None, &State::default()), None);
     assert!(
         notices
             .notice(&failed("container is gone"), None, &State::default())
             .is_some()
+    );
+}
+
+#[test]
+fn a_result_clears_only_the_failures_of_the_steps_it_checked() {
+    use mj_core::credentials::{
+        CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult, StepFailure, SyncStep,
+    };
+
+    let result = |partial: bool, step_failures: Vec<StepFailure>| CredentialSyncResult {
+        profile_id: "work".into(),
+        trigger: None,
+        failure: None,
+        outcomes: vec![CredentialSyncOutcome {
+            session_id: "018f9dd2-a3b4".into(),
+            outcome: Ok(vec![CredentialSyncAction::Pushed]),
+            step_failures,
+        }],
+        partial,
+    };
+    let failure = |step, detail: &str| {
+        vec![StepFailure {
+            step,
+            detail: detail.into(),
+        }]
+    };
+    // The session's own AWS renewal reports (a partial result); the profile's
+    // pass reports the login (a full one).
+    let aws_failed = || result(true, failure(SyncStep::Aws, "AWS credentials: refused"));
+    let aws_fine = || result(true, Vec::new());
+    let login_failed = || {
+        result(
+            false,
+            failure(SyncStep::HarnessLogin, "harness login: refused"),
+        )
+    };
+    let login_fine = || result(false, Vec::new());
+    let mut notices = CredentialSyncNotices::default();
+    let state = State::default();
+
+    assert!(notices.notice(&aws_failed(), None, &state).is_some());
+    assert!(notices.notice(&login_failed(), None, &state).is_some());
+
+    // The AWS success ends the AWS failure only: the login failure is not
+    // reported again, and a recurrence of the AWS one is.
+    assert_eq!(notices.notice(&aws_fine(), None, &state), None);
+    assert_eq!(notices.notice(&login_failed(), None, &state), None);
+    assert!(notices.notice(&aws_failed(), None, &state).is_some());
+
+    // The login success ends the login failure only.
+    assert_eq!(notices.notice(&login_fine(), None, &state), None);
+    assert_eq!(notices.notice(&aws_failed(), None, &state), None);
+    assert!(notices.notice(&login_failed(), None, &state).is_some());
+
+    // Two steps failing in one pass are both said, in one notice.
+    let mut two_steps = login_failed();
+    two_steps.outcomes[0].step_failures.push(StepFailure {
+        step: SyncStep::Skills,
+        detail: "skills: archive unreadable".into(),
+    });
+    let said = CredentialSyncNotices::default()
+        .notice(&two_steps, None, &state)
+        .unwrap();
+    assert!(
+        said.contains("harness login: refused") && said.contains("skills: archive unreadable"),
+        "{said}"
+    );
+
+    // Two failures of one step are both said.
+    let mut both = aws_failed();
+    both.outcomes[0].step_failures.push(StepFailure {
+        step: SyncStep::Aws,
+        detail: "AWS credentials withdrawal: worker too old".into(),
+    });
+    let said = CredentialSyncNotices::default()
+        .notice(&both, None, &state)
+        .unwrap();
+    assert!(
+        said.contains("AWS credentials: refused") && said.contains("worker too old"),
+        "{said}"
     );
 }
 
@@ -1554,6 +1649,7 @@ fn a_repeated_whole_sync_failure_is_reported_once_per_profile() {
         trigger: None,
         failure: Some("controller home is unreadable".into()),
         outcomes: Vec::new(),
+        partial: false,
     };
     let mut notices = CredentialSyncNotices::default();
 
@@ -1588,6 +1684,109 @@ impl RefreshReports {
 
     fn taken(&self) -> Vec<ImageRefreshReport> {
         std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+// Hard-won: #1358: the image refresher restarted an Apple container service the user had stopped
+// Hard-won: #1476: Apple image refreshes omitted cleanup and accumulated 128 GB of old data.
+#[test]
+fn the_image_refresher_skips_a_stopped_apple_container_service_without_starting_it() {
+    struct AppleExecutor {
+        service_running: bool,
+        failed_command: Option<&'static str>,
+        commands: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for AppleExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let line = format!("{} {}", command.program, command.args.join(" "));
+            let stopped = line == "container system status" && !self.service_running;
+            let failed = self.failed_command == Some(line.as_str());
+            self.commands.lock().unwrap().push(line);
+            Ok(CommandOutput {
+                status: i32::from(stopped || failed),
+                stdout: b"sha256:1111\n".to_vec(),
+                stderr: if failed {
+                    b"image store unavailable".to_vec()
+                } else {
+                    Vec::new()
+                },
+            })
+        }
+    }
+
+    let refresh = || {
+        crate::targets::image_refresh(
+            crate::targets::ImageHost::AppleContainer,
+            "ghcr.io/example/dev:latest",
+            None,
+            mj_core::config::ImagePullPolicy::Auto,
+        )
+        .expect("a remote latest image is refreshed")
+    };
+    let reports = RefreshReports::default();
+
+    let stopped = AppleExecutor {
+        service_running: false,
+        failed_command: None,
+        commands: std::sync::Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        refresh_one_host(refresh(), &stopped, &reports.record()),
+        None
+    );
+    assert_eq!(
+        *stopped.commands.lock().unwrap(),
+        ["container system status"],
+        "a stopped service is observed, never started, and nothing is pulled"
+    );
+    assert!(reports.taken().is_empty());
+
+    let running = AppleExecutor {
+        service_running: true,
+        failed_command: None,
+        commands: std::sync::Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        refresh_one_host(refresh(), &running, &reports.record()),
+        Some((
+            "apple container".to_owned(),
+            "ghcr.io/example/dev:latest".to_owned(),
+            None
+        ))
+    );
+    let commands = running.commands.lock().unwrap();
+    assert_eq!(
+        *commands,
+        [
+            "container system status",
+            "container image inspect ghcr.io/example/dev:latest",
+            "container image pull ghcr.io/example/dev:latest",
+            "container image inspect ghcr.io/example/dev:latest",
+            "container image prune",
+        ],
+        "a successful pull must reclaim orphaned data without deleting tagged preloads"
+    );
+    drop(commands);
+
+    for failed_command in [
+        "container image pull ghcr.io/example/dev:latest",
+        "container image prune",
+    ] {
+        let failing = AppleExecutor {
+            service_running: true,
+            failed_command: Some(failed_command),
+            commands: std::sync::Mutex::new(Vec::new()),
+        };
+        let (_, _, error) = refresh_one_host(refresh(), &failing, &reports.record())
+            .expect("the failure is returned for the daemon to report");
+        assert!(error.unwrap().contains("image store unavailable"));
+        let commands = failing.commands.lock().unwrap();
+        assert_eq!(
+            commands.last().map(String::as_str),
+            Some(failed_command),
+            "a failed download must not proceed to cleanup"
+        );
     }
 }
 
@@ -1925,9 +2124,11 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
                     vec![CredentialSyncOutcome {
                         session_id: session_id.into(),
                         outcome,
+                        step_failures: Vec::new(),
                     }]
                 })
                 .unwrap_or_default(),
+            partial: false,
         };
     let results = [
         triggered(
@@ -1967,7 +2168,9 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             outcomes: vec![CredentialSyncOutcome {
                 session_id: session_id.into(),
                 outcome: Err("worker proxy disconnected".into()),
+                step_failures: Vec::new(),
             }],
+            partial: false,
         },
     ];
     for result in &results {
@@ -2027,6 +2230,7 @@ fn a_deferred_credential_sync_does_not_claim_the_login_was_checked() {
             }),
             failure: None,
             outcomes: Vec::new(),
+            partial: false,
         };
         assert!(
             CredentialSyncNotices::default()
@@ -2122,4 +2326,108 @@ fn cancelled_operation_leaves_the_running_recovery_copy_alone() {
         waiting.join().unwrap()
     });
     assert!(reservation.is_ok());
+}
+
+// Hard-won: c2d74db67: the refresher's first look could run while daemon startup was still starting Apple's container service, read it as stopped, and skip a whole interval.
+#[tokio::test(start_paused = true)]
+async fn only_the_apple_container_refresh_waits_for_its_startup() {
+    let refresh = |host| {
+        crate::targets::image_refresh(
+            host,
+            "ghcr.io/example/dev:latest",
+            None,
+            mj_core::config::ImagePullPolicy::Auto,
+        )
+        .expect("a remote latest image is refreshed")
+    };
+    let settled = tokio_util::sync::CancellationToken::new();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let ran = |name: &'static str| move |_| Some((name.to_owned(), String::new(), None));
+    let apple = tokio::spawn(refresh_host_after_startup(
+        refresh(crate::targets::ImageHost::AppleContainer),
+        settled.clone(),
+        cancellation.clone(),
+        ran("apple"),
+    ));
+    // A slow Apple start holds no other host's refresh.
+    let docker = refresh_host_after_startup(
+        refresh(crate::targets::ImageHost::LocalDocker),
+        settled.clone(),
+        cancellation.clone(),
+        ran("docker"),
+    )
+    .await;
+    assert_eq!(docker.map(|(host, ..)| host).as_deref(), Some("docker"));
+
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    assert!(
+        !apple.is_finished(),
+        "the Apple refresh looked before startup finished"
+    );
+    settled.cancel();
+    let apple = apple.await.unwrap();
+    assert_eq!(apple.map(|(host, ..)| host).as_deref(), Some("apple"));
+}
+
+#[test]
+fn a_result_about_one_sessions_aws_renewal_does_not_end_other_sessions_failures() {
+    use mj_core::credentials::{
+        CredentialSyncOutcome, CredentialSyncResult, StepFailure, SyncStep,
+    };
+
+    let outcome = |session: &str, detail: Option<&str>| CredentialSyncOutcome {
+        session_id: session.into(),
+        outcome: Ok(Vec::new()),
+        step_failures: detail
+            .map(|detail| StepFailure {
+                step: SyncStep::Aws,
+                detail: detail.to_owned(),
+            })
+            .into_iter()
+            .collect(),
+    };
+    let result = |partial, outcomes| CredentialSyncResult {
+        profile_id: "work".into(),
+        trigger: None,
+        failure: None,
+        outcomes,
+        partial,
+    };
+    let mut notices = CredentialSyncNotices::default();
+    // The first session sorts before the second, so if its failure were forgotten it
+    // would be the notice's first new message.
+    let both_failing = || {
+        result(
+            false,
+            vec![
+                outcome("0-first-session", Some("container is gone")),
+                outcome("a-second-session", Some("worker is gone")),
+            ],
+        )
+    };
+    assert!(
+        notices
+            .notice(&both_failing(), None, &State::default())
+            .is_some()
+    );
+    assert_eq!(
+        notices.notice(&both_failing(), None, &State::default()),
+        None
+    );
+
+    // The second session's AWS renewal succeeds. That ends its failure and says nothing
+    // about the first's, which must not be announced again.
+    assert_eq!(
+        notices.notice(
+            &result(true, vec![outcome("a-second-session", None)]),
+            None,
+            &State::default()
+        ),
+        None
+    );
+    let again = notices
+        .notice(&both_failing(), None, &State::default())
+        .unwrap();
+    assert!(again.contains("a-second"), "{again}");
+    assert!(!again.contains("0-first-"), "{again}");
 }

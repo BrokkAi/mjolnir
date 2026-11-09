@@ -66,7 +66,7 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 21
+version = 22
 ```
 
 The top-level keys are listed below. The legacy `[mailbox] enabled` switch is
@@ -74,7 +74,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `21`. |
+| `version` | integer | yes | none | Configuration schema version; use `22`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -101,7 +101,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 21 configuration. Older
+A missing or empty file is treated as an empty version 22 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -339,7 +339,7 @@ precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
 [review]
 [[review.reviewers]]
 model = "gpt-6.10-terra"
-effort = "xhigh"
+effort = "high"
 
 [[review.reviewers]]
 model = "gpt-6.1-sol"
@@ -350,7 +350,7 @@ effort = "medium"
 | --- | --- | --- | --- | --- |
 | `reviewers` | array of tables | no | empty | Up to three choices, each with a nonempty `model` and optional `effort`. Each choice is served by an enabled profile offering that model and effort. |
 
-An empty reviewer list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers from enabled profiles' advertised models. The first available combination wins: Terra, Sol, and Haiku; Terra and Sol; three Haiku; two DeepSeek Flash; Grok; or Kimi K3.1 or newer. Within a family, the newest advertised version wins. If no match exists, choose reviewers in **Settings → Code Review**. Reviewers run as hidden child sessions with independent conversations. See [Code review](/turn-review/).
+An empty reviewer list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers from enabled profiles' advertised models. The first available combination wins: Terra at high effort plus Sol at medium effort; two Sonnet reviewers at high effort; two DeepSeek Pro reviewers at high effort; two Grok reviewers at high effort; or two Kimi reviewers at high effort. Other providers, including Gemini, GLM, and Muse, use two copies of their best advertised full model at high effort. When Terra and Sol are available, Anthropic models are not added. Within a family, full models are preferred over reduced variants such as Flash or Mini, then subscription offerings win over usage-priced offerings, then models offered by more enabled profiles, then the newest advertised version. If no match exists, choose reviewers in **Settings → Code Review**. Reviewers run as hidden child sessions with independent conversations. See [Code review](/turn-review/).
 
 Push review is available for Claude Code, Codex, and DSH primaries, the harnesses that receive Mjolnir delegation tools. They receive `request_review` and a pre-push gate; other harnesses run without review and receive a transcript notice.
 
@@ -517,8 +517,10 @@ command-line tool must match the version Mjolnir links.
 
 ## Sub-agents `[subagents]`
 
-A Claude, Codex, or DSH session can use Mjolnir's `spawn` tool. Create and Move offer
-Native or Mjolnir. Native uses the harness's own delegation. DSH has none, so
+A Claude, Codex, DSH, or OpenCode session can use Mjolnir's `spawn` tool. Create and Move offer
+Native or Mjolnir. Native uses the harness's own delegation. OpenCode gets the tools
+as `mj-agents_spawn` and so on, learns of finished children at the end of its turn (it has
+no steering), and loses its own `subagent` tool unless the choice is Native. DSH has none, so
 for a DSH profile they offer Mjolnir or None, starting on Mjolnir only when the
 last choice was Mjolnir and it is configured; a DSH session's None does not
 change the remembered choice that Claude and Codex sessions start from. Mjolnir needs a
@@ -571,7 +573,7 @@ optional effort must be offered by an enabled profile. Each effort flag requires
 its matching model flag; `adaptive` and combining an override with `native` or
 `none` are rejected. Omitted effort uses the harness default. The retired
 `--subagent-model` and `--subagent-effort` flags fail with guidance to use the
-four per-type flags. `none` (CLI only) gives a Claude, Codex, or DSH session no
+four per-type flags. `none` (CLI only) gives a Claude, Codex, DSH, or OpenCode session no
 delegation tools.
 
 `mj new` and `mj move` take `--oracle enabled|disabled` and `--subagent-oracle M`
@@ -713,6 +715,31 @@ an older build reports the entry as an invalid type. Plain strings keep
 working everywhere.
 
 ## Session GitHub token `[github]`
+
+Use `mj new --no-github-credentials` to withhold GitHub authentication from a
+session and all its Mjolnir children, including oracles and reviewers. The API
+creation payload and child `spawn` tool accept `no_github_credentials: true`.
+A child can also opt out individually; it cannot undo its parent's opt-out.
+This choice is saved with the session and survives restart, resume and Move.
+`--no-github-events` independently controls watcher delivery.
+
+To withhold credentials by default from new sessions in this instance:
+
+```toml
+[github]
+session_credentials = false
+```
+
+Changing this default does not change existing sessions. Opted-out workers
+receive no GitHub token environment or token file, refuse token refreshes,
+and use separate unauthenticated `gh` and Git configurations. Git author
+name and email remain available. Public repositories and API data can still be
+read anonymously. A bare target shares the Unix account's readable files; this
+setting does not isolate the filesystem or prevent deliberate use of other
+credentials on that account. A child also shares its parent's filesystem.
+The daemon may still authenticate its own repository provisioning without
+passing the credential to the worker.
+
 
 Set a controller-side token file to give sessions a dedicated GitHub PAT instead
 of the host GitHub CLI login:
@@ -1188,7 +1215,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 21
+version = 22
 
 [phone]
 enabled = true
@@ -1246,9 +1273,7 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_CONTROLLER_BINARY` | Path to `mj` when `mj-desktop` cannot find its sibling controller. |
 | `MJ_VOICE_WORKER` | Path to the local dictation helper. |
 | `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
-| `MJ_SSH_MAX_CONCURRENT` | Cap on concurrent SSH connections per host; see the SSH target guide. |
-| `MJ_SSH_SESSIONS_PER_CONNECTION` | Sessions per shared OpenSSH connection; defaults to `8`. See the [SSH guide](/ssh/#sharing-connections-per-host). |
-| `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. |
+| `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. Mjolnir learns how many sessions each shared connection carries from the server's refusal and has no setting for it; see the [SSH guide](/ssh/#sharing-connections-per-host). |
 | `MJ_DEV_RESTART_STALE_DAEMON` | When set to any value, a client restarts a running daemon whose executable was replaced, or whose development workers changed, since it started, unless the daemon's build is newer than the client's. For development checkouts. |
 | `MJ_TURN_STALL_TIMEOUT_MS` | Milliseconds of harness silence, with no tool call open, after which the worker ends the turn with the reason `harness_inactive`. Off unless set to a positive value. |
 | `MJ_TURN_TOOL_STALL_TIMEOUT_MS` | Milliseconds one tool call may run before the worker ends the turn the same way. Off unless set to a positive value. |

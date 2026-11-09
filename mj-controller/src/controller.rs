@@ -604,6 +604,8 @@ pub struct SessionLaunchOptions {
     pub no_project_memory: bool,
     /// Exclude this session from GitHub watcher delivery targets; see `SessionRecord::no_github_events`.
     pub no_github_events: bool,
+    /// Withhold GitHub credentials; inherited by children.
+    pub no_github_credentials: bool,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
@@ -920,6 +922,7 @@ impl Controller {
             mut review,
             no_project_memory,
             no_github_events,
+            no_github_credentials,
             initial_prompt,
             workspace_id,
             additional_mounts,
@@ -1121,6 +1124,7 @@ impl Controller {
             review,
             no_project_memory,
             no_github_events,
+            no_github_credentials: no_github_credentials || !self.config.github.session_credentials,
             target_template_id: target_id.to_string(),
             resource_allocation,
             additional_mounts: additional_mounts.clone(),
@@ -1669,6 +1673,12 @@ pub fn resolve_machine_input_path(
 
 fn execute_checked(executor: &impl CommandExecutor, command: CommandSpec) -> Result<CommandOutput> {
     let output = executor.execute(&command)?;
+    check_output(&command, output)
+}
+
+/// `output` of `command` when it succeeded, otherwise the error its stderr
+/// describes.
+fn check_output(command: &CommandSpec, output: CommandOutput) -> Result<CommandOutput> {
     if output.status != 0 {
         let detail = command_error_detail(&output.stderr);
         if detail.is_empty() {

@@ -25,11 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:20",
-          "role": "user",
-          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /home/jonathan/Projects/bifrost/.mj/clones/07d292ca700ead3ba5c751211efb3228/.mj/agents/47d9e5820070b33b0dff3c3a0aa59d71. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nBifrost #8386 Milestone 4, first slice: answer RQL's registered value-flow question through the shared composition search. Read AGENTS.md, .agents/docs/rql-and-policy.md, .agents/docs/architecture-and-analyzer-store.md and the plan (.agents/plans/8386-native-summary-architecture.md) first. Lane .mj/lanes/m4-value-flow, branch 8386-m4-value-flow-slice1, from origin/master bd0d8ba7ee. Master has the generic composition search (#8908): ComposeLabels, LabelFunctions, ComposeQuery, CompositionProvider generic over Fact and Function, and taint as its first client. The investigation is at /tmp/8386-m4-vf/REPORT.md; read it.\n\nToday, RQL `procedure_of -> value_flow(plan_ref) -> witness` runs the ICFG-style solve_value_flow_with_witnesses through WorkspaceIcfgProvider, with a query-local result cache (crates/bifrost-rql/src/structural/search/value_flow.rs ~101-570). Its endpoint contract: per sink, Reached (Exact or May certainty), NotReached only for a complete analysis, else Inconclusive; plus ambiguity, semantic status, path qualities, stable IDs and optional witness steps.\n\nDesign (parent decision):\n- A value-flow client of the shared search: Fact = unit (reachability), Function = identity (a trivial ComposeLabels). Sources and sinks come from the registered ValueFlowPlan. The provider is the existing taint composition provider's local-transfer half (partial flows, interior flows, dispatch, callers), reused, not copied.\n- Admission: the languages composition already admits for taint (Rust, and Go once its admission lands), and only plan features this slice supports: one or more explicit sources and sinks, intraprocedural plus call composition. Plans with features it does not support (modeled effects, locations, witness steps if path projection is not ready) stay on the existing ICFG path, chosen by an explicit engine-selection function, as taint does with select_taint_engine. Record the reason.\n- Result mapping: produce exactly the existing endpoint contract. Reached when the search finds a pair, with certainty from hop quality. NotReached only when the composed run is complete. Inconclusive otherwise, with its incompleteness. If witnesses are requested and path projection is not implemented, the plan stays on ICFG.\n- No new cache, table or key. Composition results are query-local.\nTests: an equivalence golden through RQL over a small native Rust fixture: an intraprocedural reached sink, a not-reached sink, a cross-procedure call reach, and an incomplete case (an unresolved call). Run each with forced ICFG and with composition, and assert equal endpoint rows (reached, not reached, certainty, completeness). Use a test-only override to force the engine, mirroring with_icfg_taint_engine_for_test.\nIdentity: answers should not change where both engines are exact. If an answer moves (for example May certainty), report it, and the levers it needs (an ICFG pair or policy token); do not choose numbers.\nValidation: RQL, flow and policy libs; the new golden; `cargo check -p brokk-bifrost --features brokk-bifrost/python,devtools,release-tooling --tests`; clippy --all-targets --all-features on rql, flow and policy; fmt. Use eatmydata and nice -n 10, and unset RUSTUP_TOOLCHAIN. No commit, push or cloud. Report the design as built, the files, the golden rows for both engines and validation with logs. If the result contract cannot be met for a feature, keep that feature on ICFG and say so; do not approximate."
-        },
-        {
           "id": "agent:198",
           "role": "assistant",
           "text": "I found a dependency boundary that blocks a safe RQL integration in this lane: the reusable local-transfer logic is embedded in the policy provider, and the policy crate already depends on RQL. The plan also assigns provider work on this seam to another session. I’ll hand this back for coordination before editing that shared file."
@@ -40,11 +35,6 @@
           "text": "I found a crate boundary that needs coordination: RQL cannot use the policy-only composition provider, and the plan assigns provider work on this seam to another session. I handed the parent the relevant code paths and the ownership decision needed before implementation. No files changed or tests ran."
         },
         {
-          "id": "user:349",
-          "role": "user",
-          "text": "Parent decision: this lane owns the provider split. The plan already lists it as the next step of Layer B slice 1 (\"split CompositionProvider into a label-free local-transfer half and a client half\"). I am telling session b3172a8d; it owns the declared-effects client and #8980, not this split.\nDesign:\n- A neutral, label-free provider in bifrost-flow (next to crates/bifrost-flow/src/taint/compose/provider.rs, outside the taint module if the types are not taint-specific): snapshot access, partial_flows, interior_flows / stored_interior_flows, dispatch (with its query-local memo), callers, lexical_parent, call models and unmodeled-call behavior, openness, snapshot_status, matching_calls. Move the code; do not copy it.\n- PolicyCompositionProvider keeps only what reads policy or taint data (endpoints, source_evidence, value-type barriers, sanitizer/model labels, fallback ports if they are label-bearing) and delegates the rest to the neutral provider. Taint answers must not change: suite_bench_policy and the composition goldens stay byte-equal, with no re-bless.\n- If a method reads policy-only inputs that RQL cannot reach (for example policy model selection), list it and stop at that method: give the input, where it comes from, and a proposal. Do not route policy data into RQL.\n- Then the value-flow client from your first brief (unit fact, identity function, engine selection, endpoint mapping, the forced-engine equivalence golden).\nBase: create the branch from origin/master merged with #8980's head (`gh pr view 8980 --json headRefOid`, branch 2508-execution-effects; it is ready and will land), because #8980 changes the same seam. #8931 (draft) also edits both provider files (StoreWriteObservation gains an owning ProcedureHandle; may_share_call_storage); it will land before you, so keep the move mechanical so that its later merge is easy. Fetch first.\nOrder: send me the split map first (method by method: neutral or client, and the reason, plus any blocking policy-only input) before you move code. Short message, then continue with the move unless the map shows a blocker. Validation as in your first brief, plus flow, policy and rql libs and full suite_bench_policy outside the sandbox. No commit, push or cloud."
-        },
-        {
           "id": "agent:355",
           "role": "assistant",
           "text": "I’ll fetch #8980 and map each provider method before moving code. I’ll flag any method whose inputs come from policy data and send the split map before editing."
@@ -53,11 +43,6 @@
           "id": "agent:421",
           "role": "assistant",
           "text": "I sent the parent the method-by-method split map and stopped at the policy-only model selection that affects dispatch and caller completeness. I also reported that the sandbox blocked `git fetch` and GitHub was unreachable, so I could not obtain #8980’s head. No files changed."
-        },
-        {
-          "id": "user:504",
-          "role": "user",
-          "text": "Parent: base is ready. I merged #8980's head a4e108ad3c into your branch (merge commit e28db1cee6, clean; master is still bd0d8ba7ee). Your sandbox cannot write .git, so ask me for any further fetch or merge.\nDecision on call models: the neutral provider is generic over a client trait (not a closure), for example `CallModelSource`, with required methods and no default implementations, so a policy-free client cannot silently treat a modeled call as complete. It decides, per call and its raw dispatch/caller candidates, the coverage/model outcome that call_models and store_calls decide today. Language intrinsic models are neutral: both clients get them through one shared helper in the neutral provider. Policy implements the trait with its current selection (external_models, taint universe, binder external summaries, store_calls synthetic model) and taint answers stay byte-equal. RQL value flow implements it with the plan's own models plus intrinsics; a call it cannot decide gets no model, and then the plan's unmodeled_call_behavior applies. A plan with modeled effects that this client does not support stays on ICFG at admission, with the reason recorded. If the equivalence golden shows ICFG applying models that the RQL client lacks (for example semantic-pack library summaries), report the case and its source; do not paper over it.\nConsumer requirements from b3172a8d (declared effects, #8980), not extra scope: the split should let the effects client implement only invocations, execution_dispatch, execution_endpoints and discharge_execution_residual, not the value-flow/taint hooks. Keep consumer-scoped artifact and dispatch read replay on memo hits. Do not collapse same-target dispatch arms or turn lexical containment into execution. Keep Hop::Invocation {call, ordinal, target, function, quality} and the per-arm distinction intact. If the trait split naturally separates the execution hooks from the value-flow hooks, do it; otherwise leave the execution hooks where #8980 put them.\nContinue with the move, then the value-flow client and the golden. Validation as before. No commit or push."
         },
         {
           "id": "agent:511",
@@ -73,11 +58,6 @@
           "id": "agent:634",
           "role": "assistant",
           "text": "The provider split exposed a policy-owned discovery cache that supplies snapshot and dispatch reads, including read replay on memo hits. I sent the parent the dependency and a proposed injected discovery trait, then stopped at that contract choice as instructed. No files changed."
-        },
-        {
-          "id": "user:709",
-          "role": "user",
-          "text": "Parent: approved. The neutral local-transfer provider is generic over an injected discovery trait built on ValueFlowProvider plus prefetch_callers/require_outcome. Policy keeps PolicyDiscoveryProvider and its DiscoveryMaterializationCache (they also serve ICFG taint); RQL implements the trait over the provider its ICFG value-flow path already uses, with a query-local cache. The discovery implementation records consumer-scoped artifact and dispatch reads on every memo hit, as policy does today. The neutral provider owns the shared algorithms and requires CallModelSource. #8980's execution hooks and per-arm dispatch stay as they are.\nFrom here, do not stop for further dependency-shape choices of this kind: make the smallest split that keeps taint answers byte-equal, and list each such choice in your final report. Stop only for a soundness question or a contract change (an answer, a key, completeness reporting). Continue with the move, the value-flow client and the golden, then the validation."
         },
         {
           "id": "agent:718",
@@ -133,11 +113,6 @@
           "id": "agent:1706",
           "role": "assistant",
           "text": "The provider split is incomplete. I moved four label-free helpers into the flow crate and added the discovery trait; policy compile, clippy, formatting, and pack drift checks pass. The neutral provider, RQL client, equivalence golden, and full requested validation remain unfinished. I reported the checkpoint and log paths to the parent."
-        },
-        {
-          "id": "user:1798",
-          "role": "user",
-          "text": "Parent: I committed your checkpoint as 73c18e92e4 on 8386-m4-value-flow-slice1 (pushed). Continue from there: the neutral provider generic over LocalTransferDiscovery and the required CallModelSource (partial/interior flows, dispatch, callers, openness, snapshot status), policy delegating through it with byte-equal taint answers, then the RQL value-flow client, engine selection, endpoint mapping and the forced-engine equivalence golden, then the full validation. Your turns are limited to about 30 minutes, so at each natural step leave the tree compiling and send a one-line progress note; I will checkpoint-commit it."
         },
         {
           "id": "agent:1804",
@@ -205,11 +180,6 @@
           "text": "I handed back a compile-clean checkpoint: shared partial-flow, dispatch, and caller logic now delegates through the approved traits. Policy compile, clippy, formatting, and three focused composition tests pass. The remaining provider split and RQL client are still in progress."
         },
         {
-          "id": "user:3067",
-          "role": "user",
-          "text": "Parent: committed and pushed your second checkpoint. Continue: openness, snapshot status and the shared interior projection with policy barrier hooks; then the RQL discovery and model client, the unit-fact search, explicit admission, endpoint mapping and the forced-engine equivalence golden; then the full gates. One-line note at each compiling step."
-        },
-        {
           "id": "agent:3076",
           "role": "assistant",
           "text": "I’ll pick up from the pushed checkpoint and move the remaining shared algorithms first. I’ll verify each step compiles before starting the RQL client."
@@ -255,11 +225,6 @@
           "text": "The shared openness and interior projection changes compile, pass clippy and formatting, and keep the focused policy goldens byte equal. I handed the uncommitted checkpoint and test logs to the parent. RQL integration and full validation remain."
         },
         {
-          "id": "user:3855",
-          "role": "user",
-          "text": "Parent: committed and pushed your third checkpoint as 99a96ca761. Continue with the RQL discovery and CallModelSource client over the plan's models and intrinsics, the unit-fact search and its public wrapper, explicit admission with the engine override, endpoint mapping, and the forced-engine equivalence golden; then the full gates."
-        },
-        {
           "id": "agent:3860",
           "role": "assistant",
           "text": "I’ll connect RQL to the shared search from the new checkpoint, starting with the plan’s admission rules and the provider interfaces. I’ll keep the existing ICFG path for features whose result contract the composed client cannot yet express."
@@ -273,11 +238,6 @@
           "id": "agent:4099",
           "role": "assistant",
           "text": "The unit-fact search entry point compiles and passes clippy. I handed the checkpoint to the parent. RQL remains on ICFG until the admission checks, provider, and endpoint mapping are complete."
-        },
-        {
-          "id": "user:4166",
-          "role": "user",
-          "text": "Parent: committed and pushed as 56ab0b39c1. Continue with conservative admission (reject every unsupported plan feature you listed, with a typed reason, so those plans stay on ICFG), the RQL LocalTransferDiscovery and CallModelSource, endpoint mapping, the forced-engine equivalence golden and the full gates. You do not need to stop at every compiling step; send a one-line note when a turn is about to end."
         },
         {
           "id": "agent:4172",
@@ -300,11 +260,6 @@
           "text": "The typed admission gate compiles and passes clippy. I handed the checkpoint to the parent; RQL integration and the required golden and full validation remain."
         },
         {
-          "id": "user:4507",
-          "role": "user",
-          "text": "Parent: committed and pushed the admission exclusion. Continue as you planned: the RQL discovery wrapper over WorkspaceValueFlowProvider with a query-local cache, active models preserved, CallModelSource and CompositionProvider, explicit selection using the typed admission, endpoint mapping, the forced-engine equivalence golden and the full gates. Keep going across steps; send a note only when a turn is ending."
-        },
-        {
           "id": "agent:4847",
           "role": "assistant",
           "text": "The query-local discovery and unit-fact composition provider compile, and the focused policy goldens pass. I found a contract decision before wiring endpoint rows: a reached endpoint’s current public ID hashes ICFG-only meeting and fact details that the composed search does not produce. I’ll hand the exact dependency and options to the parent."
@@ -313,11 +268,6 @@
           "id": "agent:4915",
           "role": "assistant",
           "text": "The shared RQL provider compiles and the focused policy goldens remain byte equal. I handed the parent a decision on reached endpoint IDs: their current format depends on ICFG data the composed search does not produce. RQL wiring is paused pending that contract decision."
-        },
-        {
-          "id": "user:4994",
-          "role": "user",
-          "text": "Parent decision on reached endpoint IDs: option B, for both engines. A public ID must not depend on which engine answered, so do not give composition its own scheme beside ICFG's: change the reached endpoint ID in crates/bifrost-rql/src/structural/search/value_flow.rs (~935) to an engine-neutral one derived from the plan's identity and the stable identities of the reached source endpoint and sink endpoint, and use it on the ICFG path too. Certainty, path quality, meeting point and witnesses are row fields, not identity. Before changing it, check from the ICFG code and the existing value-flow goldens whether ICFG can emit more than one reached row for the same (source, sink) pair today (for example different meeting points or entry facts). If it can, tell me which stable element distinguishes them and whether those rows are distinct answers or duplicates; then I decide whether the neutral ID includes it or the rows merge (strongest certainty, union of witnesses). negative_endpoint_id stays as it is.\nIdentity: re-bless the value-flow goldens whose reached IDs rotate, only for that cause, with a sorted-lines audit; report every other change. I will get the lever from the coordinator (likely a policy substrate token, because persisted unit products can embed rendered rows); leave the literals alone and tell me where IDs reach persisted products. Then the mapping, admission wiring, forced-engine equivalence golden and full gates."
         },
         {
           "id": "agent:5000",
@@ -330,11 +280,6 @@
           "text": "The ICFG code can emit multiple reached rows for one source and sink through different summary entries, although the existing golden shows no such duplicate. I handed the parent the evidence and a recommendation to merge those alternative paths before changing the public ID."
         },
         {
-          "id": "user:5190",
-          "role": "user",
-          "text": "Parent decision: merge reached rows by (source, sink), explicitly, on both engines: one logical reachability answer per pair, with the strongest certainty and the union of path qualities and witnesses; neutral reached ID from plan identity plus stable source and sink endpoint identities. Document the merge where it happens (alternative derivations of one answer are merged; they are not distinct logical rows). Make sure no path-only input (entry fact, context, meeting point, uncertainty) is part of the ID. Then trace, with file:line, every recipient of reached row identity: row keys, joins, grouping and dedup in RQL, durable policy units, retained whole evaluations, and goldens; send me that list before you change persisted behavior, because the coordinator wants it before ruling on the identity lever. Then implement, re-bless only ID rotation and the merged rows with a per-line audit, and continue with the mapping, admission wiring, equivalence golden and gates."
-        },
-        {
           "id": "agent:5197",
           "role": "assistant",
           "text": "I’ll trace where reached endpoint IDs are used and persisted, then send the parent the file and line list before editing that behavior."
@@ -343,11 +288,6 @@
           "id": "agent:5352",
           "role": "assistant",
           "text": "I sent the parent the file and line trace for RQL row keys, joins, deduplication, witnesses, persisted policy units, retained evaluations, and goldens. No ID or persisted behavior changed."
-        },
-        {
-          "id": "user:5419",
-          "role": "user",
-          "text": "Parent: the coordinator approved the design and the token -8386-value-flow-neutral-endpoint-ids with its component row (no ICFG pair), with this implementation contract, which you must follow exactly:\n1. One reached endpoint is an existential proposition for the exact immutable registered plan plus the full source event plus the full sink event. This deliberately changes set, count and join identity from meeting-sensitive rows.\n2. Exact only if at least one actual admitted meeting already proves Exact. May (uncertain fact, proven path) joined with May (certain fact, unproven path) stays May. Status, ambiguity, coverage and stops stay independent; an exact positive does not close incomplete enumeration.\n3. Keep each witness alternative's original analysis owner, meeting or reached index and context. Never synthesize a meeting or rebuild another alternative through the first meeting's handle. Witnesses keep their own proof and uncertainty; endpoint Exact does not upgrade them.\n4. Union concrete path qualities; never OR proof or completeness axes. Keep the actual certainty-supporting alternative even when an uncertain better-quality path would dominate it in a quality-only frontier. Aggregate witness IDs and indexes must not collide; keep truncation, omission and reconstruction-budget evidence.\n5. Aggregate before lossy ID-keyed maps, and merge FlowEndpoint evidence and reconstruction handles at the later union, intersection, render and expansion seams (render.rs first-payload behavior is not enough; add the merge_evidence arm). Keep the authored projection mapping; an intersection can establish that an endpoint is reached through different branch paths, not that one path meets both.\n6. Use the exact immutable registered plan and full event identities, not dense solver IDs or syntax alone. Equal IDs across engines only for the same semantic plan and event namespace. Negatives stay separate. Request-lifetime storage within existing budgets.\nTests: one product golden family plus an order and idempotence property covering: two contexts; May+May no upgrade; Exact+May with witness evidence retained; incomparable qualities; union and intersection with later witness retrieval; same-quality witness collision; engine parity and scope-distinct IDs; caps and negatives. The existing golden strips IDs, so check IDs explicitly. No solver expansion.\nThen the mapping, admission wiring, equivalence golden and full gates. At the end send me the frozen head and diff with the aggregate handles and merge seams named, for the coordinator's final recipient check. Commit points: send a one-line note when a turn is ending."
         },
         {
           "id": "agent:5425",
@@ -378,11 +318,6 @@
           "id": "agent:6054",
           "role": "assistant",
           "text": "The pair aggregate compiles and the Java value-flow golden passes. I paused before committing the ID change: its current plan digest includes an allocation pointer, which would make persisted public IDs unstable across processes. I sent the parent the evidence and a stable fingerprint proposal."
-        },
-        {
-          "id": "user:6132",
-          "role": "user",
-          "text": "Parent: approved. Add an explicit stable public plan fingerprint in bifrost-flow, built from durable artifact and procedure keys and every immutable semantic plan input (no handle, pointer or dense solver ID), and use it for reached IDs; the pointer-bearing registration digest stays for allocation validation only, with a comment saying it must not reach a public or persisted identity. Add a debug assertion or test that two separately built registrations of the same plan in one process (different allocations) give the same fingerprint. Also check: does master's current reached ID (or any other public or persisted ID) already include ValueFlowPlanRegistration::plan_digest? If so, master's IDs vary across processes, which is a defect of its own: tell me the sites so I can record it, and this change fixes them. Then finish ordering and idempotence, the product golden with explicit ID checks, the composition mapping and admission, and the gates. Checkpoint note when a turn is ending."
         },
         {
           "id": "agent:6141",
@@ -432,7 +367,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Parent: approved. Add an explicit stable public plan fingerprint in bifrost-flow, built from durable artifact and procedure keys and every immutable semantic plan input (no handle, pointer or dense solver ID), and use it for reached IDs; the pointer-bearing registration digest stays for allocation validation only, with a comment saying it must not reach a public or persisted identity. Add a debug assertion or test that two separately built registrations of the same plan in one process (different allocations) give the same fingerprint. Also check: does master's current reached ID (or any other public or persisted ID) already include ValueFlowPlanRegistration::plan_digest? If so, master's IDs vary across processes, which is a defect of its own: tell me the sites so I can record it, and this change fixes them. Then finish ordering and idempotence, the product golden with explicit ID checks, the composition mapping and admission, and the gates. Checkpoint note when a turn is ending.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The fingerprint test is rebuilding the flow test binary after formatting. The earlier RQL library check passed; I’m waiting for the actual test result before treating this checkpoint as verified.",
     "completion": {
       "stop_reason": "EndTurn",

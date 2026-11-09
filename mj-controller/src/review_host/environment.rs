@@ -78,6 +78,20 @@ pub trait ReviewEnvironment: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// What the store holds about one reviewer child: whether its session has
+    /// ended, and the handback it recorded, if any. Blocking: production reads
+    /// the controller's database.
+    fn reviewer_child_standing(&self, _child: &str) -> Result<ChildStanding, String> {
+        Ok(ChildStanding::default())
+    }
+
+    /// Whether the store still has this session's record. A destroyed
+    /// session has none, and nothing about its reviews can be saved again.
+    /// Blocking: production reads the controller's database.
+    fn session_exists(&self, _session_id: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+
     /// Holds the session against background work for as long as a review
     /// needs its worker: waits until no recovery copy or worker upgrade is
     /// running (up to `deadline`), then keeps new ones from starting until
@@ -105,6 +119,25 @@ pub struct ReviewerChildRelation {
     pub parent_session_id: String,
     pub request_key: String,
     pub child_session_id: String,
+}
+
+/// What the store holds about a reviewer child, read at one moment.
+#[derive(Clone, Debug, Default)]
+pub struct ChildStanding {
+    /// Why its session can no longer run, or `None` while it still can.
+    pub ended: Option<String>,
+    /// The report it handed back, whether or not the review has taken it yet.
+    pub handback: Option<mj_core::subagent::SubagentHandback>,
+}
+
+impl ChildStanding {
+    /// The handback text, when the report answers the turn `command_id`
+    /// names: the same rule delegation applies to a finished reviewer turn.
+    pub(super) fn answer_to(self, command_id: &str) -> Option<String> {
+        self.handback
+            .filter(|handback| handback.answers(command_id))
+            .map(|handback| handback.message)
+    }
 }
 
 /// Keeps background work off a session while a review needs its worker.
@@ -192,7 +225,12 @@ impl ReviewEnvironment for ControllerEnvironment {
         event: &mj_core::mailbox::MailboxEvent,
     ) -> Result<(), String> {
         let json = serde_json::to_string(event).map_err(|error| error.to_string())?;
-        crate::database::enqueue_mailbox_event(&event.key, session_id, &json, true, false)
+        // A sub-agent that handed back and parked while its review ran is
+        // woken by the verdict; a top-level session is never parked.
+        let unpark = crate::database::load_subagent(session_id)
+            .map_err(|error| format!("{error:#}"))?
+            .is_some();
+        crate::database::enqueue_mailbox_event(&event.key, session_id, &json, true, unpark)
             .map(|_| ())
             .map_err(|error| format!("{error:#}"))
     }
@@ -219,6 +257,32 @@ impl ReviewEnvironment for ControllerEnvironment {
             })
             .collect())
     }
+
+    fn reviewer_child_standing(&self, child: &str) -> Result<ChildStanding, String> {
+        let ended = match crate::database::load_session_record(child)
+            .map_err(|error| format!("{error:#}"))?
+        {
+            None => Some("removed".to_owned()),
+            Some(record) if crate::session_manager::session_has_ended(record.state) => {
+                Some(match record.last_error {
+                    Some(cause) => format!("{}: {cause}", record.state.as_str()),
+                    None => record.state.as_str().to_owned(),
+                })
+            }
+            Some(_) => None,
+        };
+        let handback = crate::database::load_subagent_report(child)
+            .map_err(|error| format!("{error:#}"))?
+            .handback;
+        Ok(ChildStanding { ended, handback })
+    }
+
+    fn session_exists(&self, session_id: &str) -> Result<bool, String> {
+        crate::database::load_session_record(session_id)
+            .map(|record| record.is_some())
+            .map_err(|error| format!("{error:#}"))
+    }
+
     fn register_child(
         &self,
         session_id: &str,
@@ -236,6 +300,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         launch.fast_mode = reviewer.main.fast_mode.then_some(true);
         controller
             .register_subagent(crate::controller::RegisterSubagentRequest {
+                no_github_credentials: false,
                 kind: mj_core::subagent::SubagentKind::Reviewer,
                 reviewer_launch: Some(launch),
                 parent_session_id: session_id.to_owned(),
@@ -272,6 +337,11 @@ impl ReviewEnvironment for ControllerEnvironment {
     ) -> mj_client::session::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             let runtime = self.runtime().await?;
+            // A child that is already gone is closed; retrying an unknown
+            // session would never end.
+            if runtime.session_record(child).is_none() {
+                return Ok(());
+            }
             runtime
                 .suspend_session(child.to_owned())
                 .await

@@ -880,6 +880,7 @@ mod tests {
 
     fn session(id: &str) -> RuntimeSessionView {
         RuntimeSessionView {
+            policy_config_keys: Vec::new(),
             session_id: id.into(),
             projection_ordinal: 0,
             projection_digest: String::new(),
@@ -1075,6 +1076,7 @@ mod tests {
         assert_eq!(replica.projection.transcripts["s"], daemon);
         let mut with_answer = daemon.clone();
         with_answer.header.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+            work_facts: None,
             answered_through: Some(50),
             diagnostic: None,
             usage: None,

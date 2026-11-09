@@ -1,5 +1,5 @@
 //! Prompt history: reverse-i-search over the stored prompts and the up/down
-//! walk through this session's and this project's earlier prompts.
+//! walk through this session's earlier prompts.
 
 use crate::theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -7,9 +7,15 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use crate::text_input::TextInput;
-use mj_core::storage::{HistoryScope, PromptHistoryEntry};
+use mj_core::storage::{
+    HistoryCursor, HistoryScope, MIN_HISTORY_QUERY_CHARS, PromptHistoryEntry, PromptHistoryPage,
+};
 
 use super::{ChatDaemonRequest, ChatState, PromptPayload};
+
+/// How many matches the search keeps fetched beyond the selected one, so
+/// stepping to an older match never waits on the store.
+const HISTORY_LOOKAHEAD: usize = 8;
 
 #[derive(Debug, Clone)]
 pub(super) struct HistorySearch {
@@ -19,33 +25,73 @@ pub(super) struct HistorySearch {
     generation: u64,
     pub(super) query: TextInput,
     pub(super) scope: HistoryScope,
+    /// Every match fetched for this query, in the order the store listed
+    /// them, each text once.
     matches: Vec<PromptHistoryEntry>,
     selected: Option<usize>,
+    /// Where the next page starts. `None` before the first page arrives and
+    /// once the store has no more matches; `fetching` tells the two apart.
+    next: Option<HistoryCursor>,
+    /// A page request is queued or in flight for this generation.
+    fetching: bool,
     unavailable: Option<String>,
+}
+
+impl HistorySearch {
+    /// Fetched matches not yet stepped to.
+    fn ahead(&self) -> usize {
+        match self.selected {
+            Some(selected) => self.matches.len().saturating_sub(selected + 1),
+            None => self.matches.len(),
+        }
+    }
+
+    /// Whether the store may hold matches the search has not fetched.
+    fn more_may_follow(&self) -> bool {
+        self.fetching || self.next.is_some()
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct HistorySearchRequest {
     pub(super) generation: u64,
-    session_id: String,
     bundle_id: Option<String>,
     scope: HistoryScope,
     query: String,
-    local_history: Vec<String>,
+    after: Option<HistoryCursor>,
+    limit: usize,
 }
 
 impl ChatState {
-    pub(super) fn set_project_history(&mut self, entries: Vec<PromptHistoryEntry>) {
-        self.project_history_error = None;
-        // Entries arrive newest-first; split this session's prompts from the
-        // rest of the project so history navigation reaches them first.
-        let (session, project): (Vec<_>, Vec<_>) = entries
-            .into_iter()
-            .partition(|entry| entry.session_id == self.session_id);
-        let session_history = session.into_iter().rev().map(|entry| entry.text).collect();
-        let project_history = project.into_iter().rev().map(|entry| entry.text).collect();
-        self.session_history = session_history;
-        self.project_history = project_history;
+    /// Ask for this session's stored prompts again.
+    pub(super) fn request_session_history(&mut self) {
+        self.session_history_generation = self.session_history_generation.wrapping_add(1);
+        self.pending_session_history = Some(self.session_history_generation);
+    }
+
+    pub(super) fn take_session_history_request(&mut self) -> Option<u64> {
+        self.pending_session_history.take()
+    }
+
+    /// `entries` are this session's stored prompts, newest first, as listed
+    /// for request `generation`.
+    pub(super) fn set_session_history(
+        &mut self,
+        generation: u64,
+        entries: Vec<PromptHistoryEntry>,
+    ) {
+        if generation != self.session_history_generation {
+            return;
+        }
+        self.session_history_error = None;
+        self.session_history = entries.into_iter().rev().map(|entry| entry.text).collect();
+        // Prompts sent from here are stored before they are submitted, so a
+        // listing that holds one has it in its true place among prompts sent
+        // from elsewhere. Only prompts it does not hold yet stay local.
+        let stored: std::collections::HashSet<&str> =
+            self.session_history.iter().map(String::as_str).collect();
+        self.prompt_history
+            .retain(|text| !stored.contains(text.as_str()));
         if let Some(index) = self.history_index
             && index >= self.navigation_history().len()
         {
@@ -55,9 +101,12 @@ impl ChatState {
         }
     }
 
-    pub(super) fn set_project_history_unavailable(&mut self, error: String) {
-        if self.project_history_error.as_deref() != Some(error.as_str()) {
-            self.project_history_error = Some(error);
+    pub(super) fn set_session_history_unavailable(&mut self, generation: u64, error: String) {
+        if generation != self.session_history_generation {
+            return;
+        }
+        if self.session_history_error.as_deref() != Some(error.as_str()) {
+            self.session_history_error = Some(error);
         }
     }
 
@@ -69,37 +118,71 @@ impl ChatState {
             original_images: self.input_images.clone(),
             generation: self.next_history_search_generation,
             query: TextInput::new(),
-            scope: HistoryScope::Project,
+            scope: HistoryScope::All,
             matches: Vec::new(),
             selected: None,
+            next: None,
+            fetching: false,
             unavailable: None,
         });
         self.pending_history_search = None;
     }
 
+    /// Start the search again after its query or scope changed.
     pub(super) fn refresh_history_search(&mut self) {
+        let generation = self.next_history_search_generation.wrapping_add(1);
+        let Some(search) = self.history_search.as_mut() else {
+            return;
+        };
+        self.next_history_search_generation = generation;
+        search.generation = generation;
+        search.matches.clear();
+        search.selected = None;
+        search.next = None;
+        search.fetching = false;
+        self.pending_history_search = None;
+        let searchable = search.query.chars().count() >= MIN_HISTORY_QUERY_CHARS;
+        let original = PromptPayload {
+            text: search.original_input.clone(),
+            images: search.original_images.clone(),
+        };
+        let original_cursor = search.original_cursor;
+        self.set_input_payload(original);
+        self.input_cursor = original_cursor;
+        if searchable {
+            // The first match is shown, so the first page also fills the
+            // queue behind it.
+            self.queue_history_page(None, HISTORY_LOOKAHEAD + 1);
+        }
+    }
+
+    fn queue_history_page(&mut self, after: Option<HistoryCursor>, limit: usize) {
+        let Some(search) = self.history_search.as_mut() else {
+            return;
+        };
+        search.fetching = true;
+        self.pending_history_search = Some(HistorySearchRequest {
+            generation: search.generation,
+            bundle_id: self.bundle_id.clone(),
+            scope: search.scope,
+            query: search.query.to_string(),
+            after,
+            limit,
+        });
+    }
+
+    /// Fetch the next page when fewer than [`HISTORY_LOOKAHEAD`] matches lie
+    /// ahead of the selected one and the store may have more.
+    fn refill_history_search(&mut self) {
         let Some(search) = self.history_search.as_ref() else {
             return;
         };
-        let generation = self.next_history_search_generation.wrapping_add(1);
-        self.next_history_search_generation = generation;
-        let query = search.query.to_string();
-        let scope = search.scope;
-        if let Some(search) = self.history_search.as_mut() {
-            search.generation = generation;
+        let ahead = search.ahead();
+        if search.fetching || ahead >= HISTORY_LOOKAHEAD {
+            return;
         }
-        if query.is_empty() {
-            self.pending_history_search = None;
-            self.apply_history_search_results(generation, Ok(Vec::new()));
-        } else {
-            self.pending_history_search = Some(HistorySearchRequest {
-                generation,
-                session_id: self.session_id.clone(),
-                bundle_id: self.bundle_id.clone(),
-                scope,
-                query,
-                local_history: self.prompt_history.clone(),
-            });
+        if let Some(after) = search.next {
+            self.queue_history_page(Some(after), HISTORY_LOOKAHEAD - ahead);
         }
     }
 
@@ -114,39 +197,36 @@ impl ChatState {
     pub(super) fn apply_history_search_results(
         &mut self,
         generation: u64,
-        result: std::result::Result<Vec<PromptHistoryEntry>, String>,
+        result: std::result::Result<PromptHistoryPage, String>,
     ) {
-        let Some(search) = self.history_search.as_ref() else {
+        let Some(search) = self.history_search.as_mut() else {
             return;
         };
         if search.generation != generation {
             return;
         }
-        let original = PromptPayload {
-            text: search.original_input.clone(),
-            images: search.original_images.clone(),
-        };
-        let original_cursor = search.original_cursor;
+        search.fetching = false;
         match result {
-            Ok(matches) => {
-                if let Some(search) = self.history_search.as_mut() {
-                    search.matches = matches;
-                    search.selected = (!search.matches.is_empty()).then_some(0);
-                    search.unavailable = None;
-                }
-                if let Some(text) = self
-                    .history_search
-                    .as_ref()
-                    .and_then(|search| search.matches.first())
-                    .map(|entry| entry.text.clone())
+            Ok(page) => {
+                // The store lists each prompt text once across all pages.
+                search.matches.extend(page.entries);
+                search.next = page.next;
+                search.unavailable = None;
+                if search.selected.is_none()
+                    && let Some(first) = search.matches.first()
                 {
+                    let text = first.text.clone();
+                    search.selected = Some(0);
                     self.set_input(text);
-                } else {
-                    self.set_input_payload(original);
-                    self.input_cursor = original_cursor;
                 }
+                self.refill_history_search();
             }
             Err(error) => {
+                let original = PromptPayload {
+                    text: search.original_input.clone(),
+                    images: search.original_images.clone(),
+                };
+                let original_cursor = search.original_cursor;
                 self.set_input_payload(original);
                 self.input_cursor = original_cursor;
                 self.history_search = None;
@@ -156,33 +236,23 @@ impl ChatState {
         }
     }
 
-    fn local_history_search_results(request: &HistorySearchRequest) -> Vec<PromptHistoryEntry> {
-        request
-            .local_history
-            .iter()
-            .rev()
-            .enumerate()
-            .filter(|(_, text)| text.to_lowercase().contains(&request.query.to_lowercase()))
-            .map(|(index, text)| PromptHistoryEntry {
-                id: -(index as i64) - 1,
-                session_id: request.session_id.clone(),
-                text: text.clone(),
-            })
-            .collect()
-    }
-
     pub(super) async fn resolve_history_search_request(
         request: HistorySearchRequest,
         session: &mj_client::session::SessionHandle,
-    ) -> std::result::Result<Vec<PromptHistoryEntry>, String> {
-        if let Some(bundle_id) = request.bundle_id {
-            session
-                .search_prompts(bundle_id, request.scope, request.query)
-                .await
-                .map_err(|error| format!("{error:#}"))
-        } else {
-            Ok(Self::local_history_search_results(&request))
-        }
+    ) -> std::result::Result<PromptHistoryPage, String> {
+        let Some(bundle_id) = request.bundle_id else {
+            return Err("this chat has no project to search".to_owned());
+        };
+        session
+            .search_prompts(
+                bundle_id,
+                request.scope,
+                request.query,
+                request.after,
+                request.limit,
+            )
+            .await
+            .map_err(|error| format!("{error:#}"))
     }
 
     fn step_history_search(&mut self, direction: isize) {
@@ -201,16 +271,18 @@ impl ChatState {
         search.selected = Some(next);
         let text = search.matches[next].text.clone();
         self.set_input(text);
+        self.refill_history_search();
     }
 
     fn cycle_history_scope(&mut self) {
         let Some(search) = self.history_search.as_mut() else {
             return;
         };
+        // Each press narrows the search; the last wraps back to the widest.
         search.scope = match search.scope {
+            HistoryScope::All => HistoryScope::Project,
             HistoryScope::Project => HistoryScope::Session,
             HistoryScope::Session => HistoryScope::All,
-            HistoryScope::All => HistoryScope::Project,
         };
         self.refresh_history_search();
     }
@@ -288,10 +360,19 @@ impl ChatState {
         self.history_draft_images.clear();
     }
 
+    /// Stored prompts, then this visit's, oldest first. A prompt in both, or
+    /// sent again, is listed once at its newest place.
     fn navigation_history(&self) -> Vec<String> {
-        let mut history = self.project_history.clone();
-        history.extend(self.session_history.iter().cloned());
-        history.extend(self.prompt_history.iter().cloned());
+        let mut seen = std::collections::HashSet::new();
+        let mut history: Vec<String> = self
+            .session_history
+            .iter()
+            .chain(&self.prompt_history)
+            .rev()
+            .filter(|text| seen.insert(text.as_str()))
+            .cloned()
+            .collect();
+        history.reverse();
         history
     }
 
@@ -300,7 +381,7 @@ impl ChatState {
         if let Some(error) = self
             .bundle_id
             .as_ref()
-            .and(self.project_history_error.as_ref())
+            .and(self.session_history_error.as_ref())
         {
             self.set_notice(format!("History unavailable: {error}"));
         }
@@ -338,8 +419,8 @@ impl ChatState {
 
 pub(super) fn history_scope_name(scope: HistoryScope) -> &'static str {
     match scope {
-        HistoryScope::Project => "project",
         HistoryScope::Session => "session",
+        HistoryScope::Project => "project",
         HistoryScope::All => "all projects",
     }
 }
@@ -350,15 +431,25 @@ pub(super) fn history_search_footer(search: &HistorySearch) -> String {
         history_scope_name(search.scope),
         search.query
     );
+    let query_chars = search.query.chars().count();
     if let Some(error) = search.unavailable.as_deref() {
         footer.push_str(&format!("  unavailable: {error}"));
-    } else if !search.query.is_empty() && search.matches.is_empty() {
-        footer.push_str("  no match");
+    } else if query_chars > 0 && query_chars < MIN_HISTORY_QUERY_CHARS {
+        footer.push_str(&format!(
+            "  type {MIN_HISTORY_QUERY_CHARS}+ characters · Alt-R scope · Esc cancel"
+        ));
+    } else if query_chars > 0 && search.matches.is_empty() {
+        footer.push_str(if search.fetching {
+            "  searching…"
+        } else {
+            "  no match"
+        });
     } else if let Some(selected) = search.selected {
         footer.push_str(&format!(
-            "  {}/{} · Enter accept · Esc cancel · Alt-R scope",
+            "  {}/{}{} · Enter accept · Esc cancel · Alt-R scope",
             selected + 1,
-            search.matches.len()
+            search.matches.len(),
+            if search.more_may_follow() { "+" } else { "" }
         ));
     } else {
         footer.push_str("  type to search · Alt-R scope · Esc cancel");
@@ -448,13 +539,40 @@ mod tests {
     use crate::clipboard::{ClipboardContent, ClipboardImage};
     use crossterm::event::KeyCode;
 
-    fn apply_pending_history_search(chat: &mut ChatState) {
+    fn entry(id: i64, text: &str) -> PromptHistoryEntry {
+        PromptHistoryEntry {
+            id,
+            session_id: "1234567890".into(),
+            text: text.into(),
+        }
+    }
+
+    fn type_query(chat: &mut ChatState, query: &str) {
+        for character in query.chars() {
+            chat.handle_key(key(KeyCode::Char(character)));
+        }
+    }
+
+    /// Answers the queued page request with `texts` and `next`, returning the
+    /// request it answered.
+    fn answer_history_page(
+        chat: &mut ChatState,
+        texts: &[&str],
+        next: Option<HistoryCursor>,
+    ) -> HistorySearchRequest {
         let request = chat
             .take_history_search_request()
             .expect("history search request was queued");
-        let generation = request.generation;
-        let result = Ok(ChatState::local_history_search_results(&request));
-        chat.apply_history_search_results(generation, result);
+        let entries = texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| entry(index as i64, text))
+            .collect();
+        chat.apply_history_search_results(
+            request.generation,
+            Ok(PromptHistoryPage { entries, next }),
+        );
+        request
     }
 
     fn image_draft(chat: &mut ChatState) -> Vec<super::super::PromptImage> {
@@ -493,33 +611,74 @@ mod tests {
     #[test]
     fn stale_history_search_results_are_dropped() {
         let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.prompt_history = vec!["fix parser".into(), "fix renderer".into()];
+        chat.set_history_context("bundle");
         chat.set_input("draft".into());
 
         chat.handle_key(ctrl('r'));
-        chat.handle_key(key(KeyCode::Char('f')));
+        type_query(&mut chat, "fix");
         let stale = chat
             .take_history_search_request()
             .expect("first search request");
-        chat.handle_key(key(KeyCode::Char('i')));
-        let current = chat
-            .take_history_search_request()
-            .expect("second search request");
+        chat.handle_key(key(KeyCode::Char(' ')));
 
         chat.apply_history_search_results(
             stale.generation,
-            Ok(vec![PromptHistoryEntry {
-                id: 1,
-                session_id: "1234567890".into(),
-                text: "fix parser".into(),
-            }]),
+            Ok(PromptHistoryPage {
+                entries: vec![entry(1, "fix parser")],
+                next: None,
+            }),
         );
         assert_eq!(chat.input, "draft");
 
-        let generation = current.generation;
-        let result = Ok(ChatState::local_history_search_results(&current));
-        chat.apply_history_search_results(generation, result);
+        answer_history_page(&mut chat, &["fix renderer"], None);
         assert_eq!(chat.input, "fix renderer");
+    }
+
+    #[test]
+    fn history_search_keeps_eight_matches_queued_and_refills_from_the_cursor() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_history_context("bundle");
+        chat.handle_key(ctrl('r'));
+        type_query(&mut chat, "fi");
+        assert!(
+            chat.take_history_search_request().is_none(),
+            "two characters are too short for the index"
+        );
+        assert!(history_search_footer(chat.history_search.as_ref().unwrap()).contains("type 3+"));
+        chat.handle_key(key(KeyCode::Char('x')));
+
+        // The first page fills the shown match and the eight behind it.
+        let first_page: Vec<String> = (0..9).map(|index| format!("fix {index}")).collect();
+        let first_page: Vec<&str> = first_page.iter().map(String::as_str).collect();
+        let cursor = HistoryCursor {
+            tier: 1,
+            before: 40,
+            through: 60,
+        };
+        let request = answer_history_page(&mut chat, &first_page, Some(cursor));
+        assert_eq!((request.after, request.limit), (None, 9));
+        assert_eq!(chat.input, "fix 0");
+        assert!(
+            chat.take_history_search_request().is_none(),
+            "eight matches are already queued"
+        );
+        assert!(history_search_footer(chat.history_search.as_ref().unwrap()).contains("1/9+"));
+
+        // Stepping leaves seven ahead, so the next page resumes at the cursor.
+        chat.handle_key(ctrl('r'));
+        assert_eq!(chat.input, "fix 1");
+        let request = answer_history_page(&mut chat, &["fix elsewhere"], None);
+        assert_eq!((request.after, request.limit), (Some(cursor), 1));
+
+        for _ in 0..20 {
+            chat.handle_key(ctrl('r'));
+        }
+        assert_eq!(chat.input, "fix elsewhere");
+        assert!(
+            chat.take_history_search_request().is_none(),
+            "the store reported no more matches"
+        );
+        assert!(history_search_footer(chat.history_search.as_ref().unwrap()).contains("10/10 "));
     }
 
     #[test]
@@ -527,11 +686,12 @@ mod tests {
         let mut chat = ChatState::new(&snapshot(), &[]);
         let images = image_draft(&mut chat);
         let draft = chat.input.clone();
-        chat.prompt_history = vec!["old history prompt".into()];
+        chat.set_history_context("bundle");
 
         chat.handle_key(ctrl('r'));
-        chat.handle_key(key(KeyCode::Char('h')));
-        apply_pending_history_search(&mut chat);
+        type_query(&mut chat, "his");
+        answer_history_page(&mut chat, &["old history prompt"], None);
+        assert_eq!(chat.input, "old history prompt");
         assert!(chat.input_images.is_empty());
 
         chat.handle_key(key(KeyCode::Esc));
@@ -561,48 +721,66 @@ mod tests {
 
     // Hard-won: b6b9787: this session's prompts appeared interleaved with other sessions' history
     #[test]
-    fn move_history_walks_this_session_before_the_rest_of_the_project() {
+    fn move_history_walks_only_this_sessions_prompts() {
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.set_history_context("bundle");
-        // Newest-first, with this session's prompts interleaved with another's.
-        chat.set_project_history(vec![
-            PromptHistoryEntry {
-                id: 4,
-                session_id: "other".into(),
-                text: "other newest".into(),
-            },
-            PromptHistoryEntry {
-                id: 3,
-                session_id: "1234567890".into(),
-                text: "mine newest".into(),
-            },
-            PromptHistoryEntry {
-                id: 2,
-                session_id: "other".into(),
-                text: "other oldest".into(),
-            },
-            PromptHistoryEntry {
-                id: 1,
-                session_id: "1234567890".into(),
-                text: "mine oldest".into(),
-            },
-        ]);
+        chat.request_session_history();
+        let generation = chat.take_session_history_request().unwrap();
+        chat.set_session_history(
+            generation,
+            vec![
+                PromptHistoryEntry {
+                    id: 3,
+                    session_id: "1234567890".into(),
+                    text: "mine newest".into(),
+                },
+                PromptHistoryEntry {
+                    id: 1,
+                    session_id: "1234567890".into(),
+                    text: "mine oldest".into(),
+                },
+            ],
+        );
         chat.record_prompt_history("this visit");
 
         let mut recalled = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..4 {
             chat.handle_key(key(KeyCode::Up));
             recalled.push(chat.input.clone());
         }
         assert_eq!(
             recalled,
+            vec!["this visit", "mine newest", "mine oldest", "mine oldest"]
+        );
+        chat.handle_key(key(KeyCode::Esc));
+
+        // Hard-won: 8e9b542d5: a prompt sent here earlier was recalled before a newer one sent from the web
+        chat.request_session_history();
+        let generation = chat.take_session_history_request().unwrap();
+        let stored = |id: i64, text: &str| PromptHistoryEntry {
+            id,
+            session_id: "1234567890".into(),
+            text: text.into(),
+        };
+        chat.set_session_history(
+            generation,
             vec![
-                "this visit",
-                "mine newest",
-                "mine oldest",
-                "other newest",
-                "other oldest",
-            ]
+                stored(5, "sent from the web"),
+                stored(4, "this visit"),
+                stored(3, "mine newest"),
+                stored(1, "mine oldest"),
+            ],
+        );
+        chat.history_index = None;
+        chat.clear_input();
+        let mut recalled = Vec::new();
+        for _ in 0..3 {
+            chat.handle_key(key(KeyCode::Up));
+            recalled.push(chat.input.clone());
+        }
+        assert_eq!(
+            recalled,
+            vec!["sent from the web", "this visit", "mine newest"]
         );
     }
 }

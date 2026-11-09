@@ -105,7 +105,35 @@ pub const RELAY_AUTONOMOUS_TURN_OUTCOME_PROTOCOL: u32 = 51;
 /// without moving the review base, and an explicit move of that base.
 pub const RELAY_REVIEW_BASE_PROTOCOL: u32 = 52;
 /// 53 removes per-turn capture and baseline advancement; push review remains.
-pub const RELAY_PROTOCOL_VERSION: u32 = 53;
+pub const RELAY_TURN_CAPTURE_REMOVED_PROTOCOL: u32 = 53;
+/// 54 renders a child report that is not a finish (a message to a working
+/// child failed) under its own heading, and says when a child whose turn
+/// failed can still take a message. Older workers get the report as text.
+pub const RELAY_SUBAGENT_REPORT_STATE_PROTOCOL: u32 = 54;
+/// 55 adds RemoveAwsCredentials and AwsCredentialsScope, and a scope on
+/// InstallAwsCredentials: the controller withdraws a session's AWS credentials
+/// when the profile requires role-scoped credentials and none can be issued,
+/// and recognises credentials it issued from what the worker recorded. The
+/// scope reply also names the AWS profile the session was staged with, which
+/// the controller keeps using for the session's life.
+pub const RELAY_AWS_CREDENTIALS_REMOVAL_PROTOCOL: u32 = 55;
+/// 56 adds the observed facts of a sub-agent's finished turn (its processes and
+/// working tree, captured by its worker before the outcome is published) to the
+/// prompt outcome record, and the finish-report facts that carry them. Older
+/// readers ignore the field; older workers get the report as text.
+pub const RELAY_FINISH_FACTS_PROTOCOL: u32 = 56;
+/// 57 lets an attach name the digest of the operational state the controller
+/// already holds. The worker then answers `AttachedWithKnownState` instead of
+/// sending an identical state again, and `Attached` carries the digest of the
+/// state it does send. Older workers reject the unknown field, so controllers
+/// send it only to workers that negotiated 57.
+pub const RELAY_STATE_DIGEST_PROTOCOL: u32 = 57;
+/// 58 adds `WaitForChange`: the worker holds the request until its events,
+/// its operational state, or this connection's sub-agent queue differ from
+/// what the controller names, so the controller syncs on change instead of on
+/// a timer.
+pub const RELAY_CHANGE_WAIT_PROTOCOL: u32 = 58;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHANGE_WAIT_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

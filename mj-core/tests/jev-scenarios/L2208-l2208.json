@@ -1,0 +1,360 @@
+{
+  "id": "L2208",
+  "title": "L2208",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "85d59a082c6a54892742d537ae16ef50",
+    "session_title": "eval37 4478 haikuhigh",
+    "reply_position": 6696,
+    "captured_at": "2026-10-09T18:09:25.898Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #4478: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 53e61919ae07e44c7603e755b9b14e1f29fade7f\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls (a cargo command that starts no compiler for\nmore than ten minutes), you may run that command through plain cargo\n(/usr/local/cargo/bin/cargo) and say so in your report; do not move target/\nor change shared cache settings.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the reposi\n[... 3945 bytes omitted from the middle of this message ...]\nitution and exact selected semantic provenance.\n- `real-project-v2-rust-04-2`: find_component returns the exact two required references and correct definition, but declaration-to-usages remains partial with `scan_usages_incomplete: semantic_analysis`. The report lacks the specific underlying gap; preserve that uncertainty and improve its structured diagnostic before narrowing scope.\n\nAcceptance: smallest realistic generic-impl and ordinary-call regressions, exact reverse locations plus complete status where proven, positive and near-miss controls, then pinned Dioxus replay. Do not suppress partial status, prefilter by source spelling, change frozen ground truth, or broaden expectations. Relates to #3828 and #4402; separate from the Go/C++ repairs in #4474.\n\n\nFurther reduction at the same pinned engine: the full unchanged `routable.rs` alone reproduces both unproven OptionMarker references. A four-line crate isolates the attribute-macro boundary:\n\n```rust\npub struct OptionMarker;\n#[rustversion::attr(since(1.78.0), diagnostic::on_unimplemented(message=\"missing\"))]\npub trait Query<M=()> {}\nimpl<T: Default> Query<OptionMarker> for Option<T> {}\n```\n\nQuerying OptionMarker at line 1 column 12 returns zero proven usages, one unproven impl-header candidate and `semantic_analysis` partial status. Removing only the attribute returns one proven usage with `partial=false`. Separate controls with an associated Err type/where bound, blanket impl, default generic parameter, trait Default bound, and a function-body unknown macro all return the exact proven marker reference. Thus generic impl syntax alone is not the cause: the attribute macro on the trait creates a declaration/binding expansion gap. Do not drop the gap or special-case source names. Require structured expansion/model evidence and near misses for attributes that actually alter declarations. Scratch reproduction is `/private/tmp/usagebench-marker-variants/attribute` with result.json and stderr.log; full-file reproduction is `/private/tmp/usagebench-routable-repro`.\n\n"
+        },
+        {
+          "id": "agent:5258",
+          "role": "assistant",
+          "text": "Nextest has an explicit `--target-dir`, so I can point its artifacts and store at the workspace-local directory without touching the `target` link. I'll add that flag to each nextest invocation and rerun the full list."
+        },
+        {
+          "id": "agent:5280",
+          "role": "assistant",
+          "text": "The log still shows the old store path. I'll check whether that log is from this run or a leftover, then look at the current state."
+        },
+        {
+          "id": "agent:5303",
+          "role": "assistant",
+          "text": "Passing `--target-dir` did not change the store location. Nextest's store is a config value, `store.dir`, defaulting to `target/nextest` relative to the workspace root. I'll check whether this nextest version accepts a store-directory override through its command-line config option, which would avoid editing the repository's config."
+        },
+        {
+          "id": "agent:5335",
+          "role": "assistant",
+          "text": "Cargo's `--config` only reaches cargo, not nextest. The clean option is a copy of the repository's `.config/nextest.toml` with a `[store] dir` entry added, passed through `--config-file`. That keeps every existing test setting, including the thread reservations, and leaves the repository untouched. I'll check the file for an existing `[store]` table first."
+        },
+        {
+          "id": "agent:5364",
+          "role": "assistant",
+          "text": "That error comes from my manual `list` command, which did not set `CARGO_TARGET_DIR`, so cargo tried the dangling `target` link. I'll rerun the check with the target variable set as the runner does."
+        },
+        {
+          "id": "agent:5385",
+          "role": "assistant",
+          "text": "Listing works with the copied config. I'll switch the runner to that config file and restart the full suite list."
+        },
+        {
+          "id": "agent:5398",
+          "role": "assistant",
+          "text": "The suites are running from a fresh build, which will take a while. Meanwhile I'll wait in bounded intervals and check the first result."
+        },
+        {
+          "id": "agent:5416",
+          "role": "assistant",
+          "text": "The `brokk-bifrost-rust` lib suite passes: 377 run, 377 passed, 3 skipped. Next is the large analysis lib suite."
+        },
+        {
+          "id": "agent:5465",
+          "role": "assistant",
+          "text": "The remaining failures are the three Go toolchain tests and one `unwritable_workspace_root` store test. That last one is probably an environment effect, since the container runs as root, and I'll confirm from its message once the run finishes."
+        },
+        {
+          "id": "agent:5494",
+          "role": "assistant",
+          "text": "This one is environmental too: the test expects an unwritable directory to refuse writes, and the container runs as root, which bypasses those permissions. So all four analysis failures are environmental: three need a Go toolchain that is not installed, and one needs a non-root user. To satisfy the requirement to check the same base, I'll run those four tests on an extracted base-commit copy after the suite runner finishes, since they share the target lock. Next I'll wait for the remaining suites."
+        },
+        {
+          "id": "agent:5539",
+          "role": "assistant",
+          "text": "Core has two failures of the same unwritable-directory kind, which I'll verify on the base copy with the others. I'll keep waiting for the rest of the list."
+        },
+        {
+          "id": "agent:5603",
+          "role": "assistant",
+          "text": "This one could be a real regression: it is a Rust scan-usages test, and the panic is an `unwrap` on `None` in the scan output. I'll read the assertion at line 7848 before deciding."
+        },
+        {
+          "id": "agent:5622",
+          "role": "assistant",
+          "text": "Line 7848 unwraps `usage[\"files\"]`, which the output omits when a symbol has no proven hits. I need to know whether this is my change or an existing failure. The cleanest check is to reproduce the fixture through the CLI with both the base binary and the new one. I'll read the start of the fixture first."
+        },
+        {
+          "id": "agent:5649",
+          "role": "assistant",
+          "text": "I'll recreate the fixture under `/workspace/evidence` and run the same symbol-based scan with the base binary and the new one."
+        },
+        {
+          "id": "agent:5664",
+          "role": "assistant",
+          "text": "The base binary reports all four symbols as `found` with one hit each, which is what the test expects. The new run failed only because the `target/debug/bifrost` link is dangling; the fresh binary lives in the workspace target directory. I'll build the binary there and rerun the same comparison."
+        },
+        {
+          "id": "agent:5692",
+          "role": "assistant",
+          "text": "The `Terminated` message means my foreground build hit its timeout, though the binary was written. The runner may still hold the cargo lock, so I'll check its state before doing anything else."
+        },
+        {
+          "id": "agent:5713",
+          "role": "assistant",
+          "text": "The runner is still going, and `suite-issues-rust` passed. The binary written at 16:12 already contains every Rust change, so I can use it directly for the comparison."
+        },
+        {
+          "id": "agent:5734",
+          "role": "assistant",
+          "text": "The CLI run with the new binary matches the base: all four symbols are `found` with one hit in `lib.rs`. So the failure depends on something specific to the test harness path, or it is flaky. I'll rerun that single test on its own to see whether it fails deterministically."
+        },
+        {
+          "id": "agent:5760",
+          "role": "assistant",
+          "text": "The failure is deterministic, so it is not flakiness. I need the actual payload the service returns. I'll temporarily add a payload print to this test, run it, and then restore the tracked test file from git so the change does not persist."
+        },
+        {
+          "id": "agent:5786",
+          "role": "assistant",
+          "text": "The anchor appears in two tests, so I'll patch only the occurrence after this function's name."
+        },
+        {
+          "id": "agent:5800",
+          "role": "assistant",
+          "text": "The payload explains it. The `files` entries use `hit_count` rather than `hits`, which is the summary rendering the service falls back to when the response exceeds its 8,192-byte budget. My change caused that: the semantic-note text now includes the full `Debug` of each gap, and the generic diagnostic's reason also prints every gap in its `Debug` list. That roughly doubles the note and pushes the response over budget. This is a real regression in the test and in users' results, so I must fix it. First I'll check which existing tests and fixtures depend on the note's exact text, to decide how far the change can go."
+        },
+        {
+          "id": "agent:5848",
+          "role": "assistant",
+          "text": "No fixture or test asserts the note text, so I can make it concise without breaking expectations. I'll fix both sources of bloat: the generic diagnostic will list only the non-gap reasons, and the semantic note will use each diagnostic's kind and reason instead of the full `Debug` dump, which also carried the duplicated gap structs."
+        },
+        {
+          "id": "agent:5892",
+          "role": "assistant",
+          "text": "Next, the semantic note in `scan_usages.rs`: I'll replace the full `Debug` dump with each diagnostic's kind and reason."
+        },
+        {
+          "id": "agent:5909",
+          "role": "assistant",
+          "text": "The tool reports the file changed since I last read it, because my earlier rustfmt run rewrote it. I'll reread the region and then make the edit."
+        },
+        {
+          "id": "agent:5941",
+          "role": "assistant",
+          "text": "Both changes are in. The runner is still executing suites against the old code, so those results are now stale. I'll stop my own runner and its cargo processes, then rebuild and run the whole list again."
+        },
+        {
+          "id": "agent:5962",
+          "role": "assistant",
+          "text": "Exit 144 suggests the `pkill` pattern matched this shell itself. I'll check what is still running and stop only the runner's processes by PID."
+        },
+        {
+          "id": "agent:5984",
+          "role": "assistant",
+          "text": "The runner is stopped. Results from before the note fix are stale, so I'll rerun the full list from the start, with clippy queued after it."
+        },
+        {
+          "id": "agent:6000",
+          "role": "assistant",
+          "text": "The full validation is running again, now including clippy. While it builds I'll poll on bounded waits and check the first results."
+        },
+        {
+          "id": "agent:6039",
+          "role": "assistant",
+          "text": "The analysis lib result is unchanged: 4,692 pass, and the same four environmental failures remain. I'll keep waiting for the rest of the list."
+        },
+        {
+          "id": "agent:6064",
+          "role": "assistant",
+          "text": "The symbols suite now passes, which confirms the note-size regression was the cause. I'll wait for the issues, persistence, MCP, Java/Go and clippy stages."
+        },
+        {
+          "id": "agent:6091",
+          "role": "assistant",
+          "text": "Persistence (79 passed) and the Rust issues suite (96 passed) are green, and the MCP server suite exited 0. The Java/Go and clippy stages remain."
+        },
+        {
+          "id": "agent:6117",
+          "role": "assistant",
+          "text": "A golden test for Go cross-language type lookup differs. Golden files are exact-text expectations, so this could be my note-format change. I'll read the diff."
+        },
+        {
+          "id": "agent:6141",
+          "role": "assistant",
+          "text": "The diff is in a Go type-lookup golden with `diagnostics` fields. The Go oracle needs the `go` binary, which is absent here, so I'll check whether the differing lines mention that."
+        },
+        {
+          "id": "agent:6165",
+          "role": "assistant",
+          "text": "The golden diff is in type-lookup diagnostics, which come from the Go oracle path and not from usage notes. My change did not touch that logic, but I still need the base comparison to make that claim. I'll wait for clippy to finish first, since the base check will share the target directory."
+        },
+        {
+          "id": "agent:6199",
+          "role": "assistant",
+          "text": "Clippy's `result_large_err` lint fires because `UsageAnalysisDiagnostic` now carries the inline `UsageSemanticGap`, which makes every `Result` containing a diagnostic large. The lint's own suggestion is to box the large element, so I'll box the gap. That touches the producer, the consumer, and the struct."
+        },
+        {
+          "id": "agent:6235",
+          "role": "assistant",
+          "text": "The edits are in place. Next I'll format the touched files and rerun clippy alone, which surfaces lint failures quickly without rerunning the suites."
+        },
+        {
+          "id": "agent:6268",
+          "role": "assistant",
+          "text": "You've hit your session limit · resets 5:20pm (UTC)"
+        },
+        {
+          "id": "agent:6306",
+          "role": "assistant",
+          "text": "Clippy passes with `-D warnings`. The Box change touched code after the last suite run, so I'll rerun the full suite list on the final code to get clean results for the report."
+        },
+        {
+          "id": "user:6336",
+          "role": "user",
+          "text": "Judge note. Your previous turn ended because the model provider's usage window was exhausted, not because of anything in your work; the window has reset. The workspace and any running background commands are as you left them. Continue from where you stopped; the brief's rules and reporting format are unchanged.\n"
+        },
+        {
+          "id": "agent:6339",
+          "role": "assistant",
+          "text": "I'm picking up from the final validation run. I'll check its progress before anything else."
+        },
+        {
+          "id": "user:6368",
+          "role": "user",
+          "text": "Judge note. Your previous turn ended because the model provider's usage window was exhausted, not because of anything in your work; the window has reset. The workspace and any running background commands are as you left them. Continue from where you stopped; the brief's rules and reporting format are unchanged.\n"
+        },
+        {
+          "id": "agent:6371",
+          "role": "assistant",
+          "text": "The judge note says the usage window has reset and the work continues under the same brief. I'll keep the final validation run going and check its progress."
+        },
+        {
+          "id": "user:6406",
+          "role": "user",
+          "text": "Judge note. Your previous turn ended because the model provider's usage window was exhausted, not because of anything in your work; the window has reset. The workspace and any running background commands are as you left them. Continue from where you stopped; the brief's rules and reporting format are unchanged.\n"
+        },
+        {
+          "id": "agent:6409",
+          "role": "assistant",
+          "text": "The judge note repeats the same instruction, so nothing changes. I'll check the analysis-lib result and the run's progress."
+        },
+        {
+          "id": "user:6443",
+          "role": "user",
+          "text": "Judge note. Your previous turn ended because the model provider's usage window was exhausted, not because of anything in your work; the window has reset. The workspace and any running background commands are as you left them. Continue from where you stopped; the brief's rules and reporting format are unchanged.\n"
+        },
+        {
+          "id": "agent:6446",
+          "role": "assistant",
+          "text": "The judge note repeats the same instruction again, so I'll continue the validation and check the summary."
+        },
+        {
+          "id": "agent:6489",
+          "role": "assistant",
+          "text": "The final validation run has finished. Clippy passes with `-D warnings`. The remaining failures are the four analysis tests, the two core cache tests, and the one Go golden test. To attribute them properly I need the base commit, so I'll extract it outside the checkout and run those seven tests there with the same target directory."
+        },
+        {
+          "id": "agent:6526",
+          "role": "assistant",
+          "text": "All four analysis failures reproduce on the base commit. Next I'll run the two core cache tests and the Go golden on the base copy."
+        },
+        {
+          "id": "agent:6548",
+          "role": "assistant",
+          "text": "All seven failures reproduce on the base commit, so none of them comes from this change. The Go golden case differs on base too. Next I'll rebuild the CLI binary from the final code, because the Box change came after my last binary build, and regenerate the before/after evidence for the report."
+        },
+        {
+          "id": "agent:6582",
+          "role": "assistant",
+          "text": "The binary is rebuilt. I'll rerun the final before/after evidence from it: the reproduction, the Dioxus `OptionMarker` and `find_component` scans, and the definition lookups. Each result goes to a file so the report can cite exact values."
+        },
+        {
+          "id": "agent:6615",
+          "role": "assistant",
+          "text": "The final binary reproduces the earlier results. The `find_component` JSON is 6,075 bytes, so the response stays under the 8,192-byte budget and its hits render in full. I'll check the working tree before committing, so only the intended files are staged."
+        },
+        {
+          "id": "agent:6639",
+          "role": "assistant",
+          "text": "The status matches the intended change set. I'll confirm formatting once more across all changed Rust files, then stage the exact file list and commit on the detached HEAD."
+        },
+        {
+          "id": "agent:6655",
+          "role": "assistant",
+          "text": "Those non-ASCII characters are on untouched lines that predate my change. I'll check only the lines I added."
+        },
+        {
+          "id": "agent:6676",
+          "role": "assistant",
+          "text": "The commit is in place as `b7c7196`, and the working tree is clean. Before writing the report, I'll pull the final counts for each suite from the final run's logs, so the numbers I cite come from that run."
+        },
+        {
+          "id": "agent:6696",
+          "role": "assistant",
+          "text": "FINAL REPORT\nIssue #4478 is partly fixed. Both impl-header references are now proven and their definitions resolve. The `find_component` and `OptionMarker` usage scans still report `semantic_analysis` partial, and they now name the gaps that keep them partial. The usage scan of the declaration at 171:12 does not reach `complete: true`, which the brief asked for. I did not remove any partial status. Base commit: `53e61919ae07e44c7603e755b9b14e1f29fade7f`. Final commit: `b7c7196396dbe458418291735bf458ba8ffb61b4`.\n\n**1. Confirmed cause**\n\n- **Attribute (confirmed).** `rust_item_attribute_boundary` in `crates/bifrost-rust/src/resolution.rs` returns `Transforming` for any attribute whose path is not a bare identifier. `#[rustversion::attr(...)]` is a scoped path, so the trait `FromQueryArgument` loses its binder. The reference `OptionMarker` in `impl ... Query<OptionMarker>` then stays unproven. Evidence:\n  - Reproduction (`/workspace/evidence/repro-4478/attribute`): base returns 0 proven, 1 unproven at 4:24, `semantic_analysis`. With the attribute removed it returns 1 proven at 3:24.\n  - The Dioxus definitions at 173:46 and 261:34 report `structure_unavailable` with six `unsupported_semantic` identities on base, and `resolved` with no diagnostics after the fix.\n  - The regression test fails on base and passes after the fix.\n- **Generic substitution (ruled out).** The controls (associated type with where bound, blanket impl, function-body unknown macro) are proven on the same base. The generic impl shape alone is not the cause.\n- **`find_component` (confirmed).** The reverse search reports 21 `UnsupportedSemanticGap` reasons. All 21 are `Extracted(UnsupportedExpression)` gaps in other CLI files (`build.rs`, `bundle.rs`, `config.rs`, `create.rs`, and others). They are not in `component.rs`. Base reports only the generic `InverseIndexResolutionIncomplete`.\n\n**2. Changes and reasons**\n\n- `resolution.rs`: an inert `rustversion::attr(<predicate>, <attribute>)` is source-preserving. The inner attribute must be a built-in inert name or a tool path (`diagnostic::`, `rustfmt::`, `clippy::`). The path must name the crate, so a local scope that binds `rustversion` does not match. Other rustversion macros (`since`, `before`, `nightly`) stay transforming. The built-in inert list is now a shared helper.\n- `epoch.rs`: Rust salt `rust-rustversion-attr-inert-boundary-4478-2026-10-09`, because the persisted `generated_surface` fact changes for such items.\n- Query-time located gaps (no persisted change, so no epoch bump):\n  - `resolution_operation/rust_reverse_rows.rs`: resolves each ordinary `UnsupportedSemantic` key through `resolution_gap_reasons` and `resolution_sites`, giving the origin and byte range.\n  - `rust/selected_reverse.rs` and `rust/native_usages.rs`: turn each gap into its own `UsageAnalysisDiagnostic` with a boxed `gap`.\n  - `searchtools/scan_usages.rs`: adds `semantic_gaps` (kind, path, lines, bytes, semantic id) to usage entries.\n- Size control. The first version doubled the note and pushed `hits` into summary rendering. The `notes` text now names each diagnostic's kind and reason, and the generic reason omits the gap structure. This fixed `scan_usages_by_reference_finds_exact_fully_qualified_rust_type_owners`.\n- Clippy `result_large_err` required boxing the gap.\n- Docs: `docs/src/content/docs/reference/mcp-tools.md` describes `semantic_gaps`.\n- Tests: `tests/suite_issues/issue_4478_rust_generic_impl_attribute.rs`, six tests. The main regression is tagged `#[hardwon]`. The controls, near misses, and structured-gap test are not tagged, since they were written with this change.\n\n**3. Validation**\n\nCommands (all with `BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1`, `JAVA_HOME` unset, `eatmydata`, `--max-fail 100`, `--config-file /workspace/cache/nextest-4478.toml`, `CARGO_TARGET_DIR=/workspace/cache/target-4478`):\n\n| Suite | Result | Notes |\n|---|---|---|\n| `-p brokk-bifrost-rust --lib` | 377 passed, 3 skipped | |\n| `-p brokk-bifrost-analysis --lib` | 4692 passed, 4 failed | Same 4 fail on base. |\n| `-p brokk-bifrost-core --lib` | 4\n[... 3228 bytes omitted from the middle of this message ...]\nnsupported_gap` re-reads each gap's source file per gap. This is bounded by the gap count per target. Caching it per projection is a follow-up.\n- **Environment:** the `target` symlink in the checkout points to `/mnt/nvme/mbx/targets/v1/da5332…`, and that directory no longer exists. I did not touch the shared mbx store. I used `CARGO_TARGET_DIR=/workspace/cache/target-4478` and a copy of `.config/nextest.toml` with `[store] dir` added. Plain `/usr/local/cargo/bin/cargo` was used after the mbx wrapper stalled on a lock for more than ten minutes.\n- ServerEvents (rust-04-3) is out of scope and untouched.\n- The pinned UsageBench harness was not available, so the replay used the CLI on the same commit.\n\n**6. Draft GitHub approach comment**\n\nThe `#[rustversion::attr(...)]` wrapper on the Dioxus `FromQueryArgument` trait was classified as a transforming attribute macro, so the trait lost its binder and the `OptionMarker` impl-header references stayed unproven. An attribute that adds only an inert inner attribute keeps the item on every compiler, so the classifier now treats `rustversion::attr` with an inert inner attribute as source-preserving, and only when the path names the crate. Other rustversion macros that remove the item stay transforming, and so do unknown inner attributes. This changes a persisted fact, so the Rust epoch salt moved. The two impl-header references are now proven at 173:46 and 261:34, and their definitions resolve. The usage scan for the declaration remains partial because six unrelated gaps in `routable.rs` and `router_cfg.rs` are still open, so it does not yet report complete. The `find_component` scan remains partial because of 21 `UnsupportedExpression` gaps in other CLI files. Usage results now list each gap's kind, file, and lines where the analyzer has them. Where a declaration-level gap has no persisted range, the range fields are absent. Persisting that range is a schema change left for a follow-up. Regression tests are in `tests/suite_issues/issue_4478_rust_generic_impl_attribute.rs`."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Judge note. Your previous turn ended because the model provider's usage window was exhausted, not because of anything in your work; the window has reset. The workspace and any running background commands are as you left them. Continue from where you stopped; the brief's rules and reporting format are unchanged.\n",
+    "assistant_text_tail": "nsupported_gap` re-reads each gap's source file per gap. This is bounded by the gap count per target. Caching it per projection is a follow-up.\n- **Environment:** the `target` symlink in the checkout points to `/mnt/nvme/mbx/targets/v1/da5332…`, and that directory no longer exists. I did not touch the shared mbx store. I used `CARGO_TARGET_DIR=/workspace/cache/target-4478` and a copy of `.config/nextest.toml` with `[store] dir` added. Plain `/usr/local/cargo/bin/cargo` was used after the mbx wrapper stalled on a lock for more than ten minutes.\n- ServerEvents (rust-04-3) is out of scope and untouched.\n- The pinned UsageBench harness was not available, so the replay used the CLI on the same commit.\n\n**6. Draft GitHub approach comment**\n\nThe `#[rustversion::attr(...)]` wrapper on the Dioxus `FromQueryArgument` trait was classified as a transforming attribute macro, so the trait lost its binder and the `OptionMarker` impl-header references stayed unproven. An attribute that adds only an inert inner attribute keeps the item on every compiler, so the classifier now treats `rustversion::attr` with an inert inner attribute as source-preserving, and only when the path names the crate. Other rustversion macros that remove the item stay transforming, and so do unknown inner attributes. This changes a persisted fact, so the Rust epoch salt moved. The two impl-header references are now proven at 173:46 and 261:34, and their definitions resolve. The usage scan for the declaration remains partial because six unrelated gaps in `routable.rs` and `router_cfg.rs` are still open, so it does not yet report complete. The `find_component` scan remains partial because of 21 `UnsupportedExpression` gaps in other CLI files. Usage results now list each gap's kind, file, and lines where the analyzer has them. Where a declaration-level gap has no persisted range, the range fields are absent. Persisting that range is a schema change left for a follow-up. Regression tests are in `tests/suite_issues/issue_4478_rust_generic_impl_attribute.rs`.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      6696
+    ],
+    "user_position": 21,
+    "input_rationale": "The final report says the brief's `complete: true` goal for the 171:12 usage scan is not met and names a soundness decision only the judge can make; the agent stopped there instead of continuing. The quoted 'still open' sentence (six gaps in the draft comment) is technical status; the explicit judge decision is what makes this required.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:6696"
+    ]
+  },
+  "context": {
+    "after": []
+  }
+}

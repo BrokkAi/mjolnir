@@ -537,13 +537,24 @@ fn harness_turn_windows(
     Ok(windows)
 }
 
-/// Commands of this session's tool calls that were running within a second
-/// of `at_ms`. GitHub timestamps have one-second precision.
-pub(crate) fn load_github_session_tool_commands_at(
+/// Output of this session's tool calls that were running within a second of
+/// `at_ms`; GitHub timestamps have one-second precision. Nothing can print a
+/// new item's URL before it exists, so this ignores how the command was
+/// composed. Later turn text is not evidence: a session that merely mentions
+/// another session's new item afterwards would otherwise claim it.
+pub(crate) fn load_github_session_creation_output(
     session_id: &str,
     at_ms: i64,
 ) -> Result<Vec<String>> {
-    let connection = open_reader(&database_path())?;
+    load_github_session_creation_output_from(&database_path(), session_id, at_ms)
+}
+
+fn load_github_session_creation_output_from(
+    path: &std::path::Path,
+    session_id: &str,
+    at_ms: i64,
+) -> Result<Vec<String>> {
+    let connection = open_reader(path)?;
     let mut statement = connection.prepare(
         "SELECT body_json FROM materialized_transcript_items
          WHERE session_id=?1 AND created_at_ms <= ?2 + 1000
@@ -554,27 +565,29 @@ pub(crate) fn load_github_session_tool_commands_at(
     let bodies = statement
         .query_map(params![session_id, at_ms], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut commands = Vec::new();
+    let mut output = Vec::new();
     for body in bodies {
         let mj_core::transcript::TranscriptBody::Tool {
-            call, presentation, ..
+            call,
+            terminal_outputs,
+            ..
         } = serde_json::from_str(&body)?
         else {
             continue;
         };
-        let Ok(call) = serde_json::from_value::<agent_client_protocol::v1::schema::ToolCall>(call)
-        else {
-            continue;
-        };
-        commands.push(
-            mj_transcript::transcript::materialized_tool_call_presentation(
-                presentation.as_deref(),
-                &call,
-            )
-            .source,
-        );
+        let call: agent_client_protocol::v1::schema::ToolCall = serde_json::from_value(call)?;
+        output.extend(mj_transcript::transcript::tool_content_details(
+            &call.content,
+            &terminal_outputs,
+            call.raw_output.as_ref(),
+            mj_transcript::transcript::tool_status(&call.status),
+        ));
+        // MCP tools can supply structured output without a text block.
+        if let Some(raw) = call.raw_output {
+            output.push(raw.to_string());
+        }
     }
-    Ok(commands)
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -700,6 +713,46 @@ mod tests {
                     .message_id(message_id),
             )),
         }
+    }
+
+    #[test]
+    fn creation_output_comes_only_from_calls_running_at_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creation.sqlite");
+        save_session_to(
+            &path,
+            &super::super::tests::session("session-1", "project-1"),
+        )
+        .unwrap();
+        let connection = open_reader(&path).unwrap();
+        let tool = |id: &str, output: &str| serde_json::json!({"kind":"tool", "call":{"toolCallId":id, "title":"script", "status":"completed", "content":[]}, "terminal_outputs":[{"terminal_id":id, "output":output, "exit_code":0}]});
+        // This fixture uses SQL to exercise the persisted transcript format.
+        for (position, started, changed, body) in [
+            (1, 1000, 2000, tool("before", "early")),
+            (
+                2,
+                3000,
+                6000,
+                tool("create", "https://github.com/owner/repo/issues/12"),
+            ),
+            // A later view or mention of the new item in the same turn would
+            // let a session that never opened it claim it.
+            (3, 7000, 7000, tool("view", "viewed later")),
+            (
+                4,
+                7000,
+                7000,
+                serde_json::json!({"kind":"agent", "chunks":[{"content":{"type":"text", "text":"mentioned later"}}], "streaming":false}),
+            ),
+        ] {
+            connection.execute("INSERT INTO materialized_transcript_items(session_id, stable_id, position, created_at_ms, last_changed_at_ms, body_json) VALUES ('session-1', ?1, ?2, ?3, ?4, ?5)", params![position.to_string(), position, started, changed, body.to_string()]).unwrap();
+        }
+        let output = load_github_session_creation_output_from(&path, "session-1", 5000)
+            .unwrap()
+            .join("\n");
+        assert!(output.contains("https://github.com/owner/repo/issues/12"));
+        assert!(!output.contains("early"));
+        assert!(!output.contains("later"));
     }
 
     // Hard-won: b4476dc76: comments a session posted in turns the harness started on its own still came back to it.

@@ -28,21 +28,14 @@ pub fn evidence_from_items(
         }
         let (role, text) = match &item.body {
             TranscriptBody::User { content } => {
-                let id = item
-                    .stable_id
-                    .strip_prefix("user:")
-                    .unwrap_or(&item.stable_id);
-                if mj_core::continuation::is_generated_prompt(id) {
+                let text = materialized_content_text(content);
+                if !mj_core::continuation::is_user_authored_message(Some(&item.stable_id), &text) {
                     continue;
                 }
                 ensure!(
                     content.iter().all(|v| v["type"] == "text"),
                     "authorization depends on non-text context"
                 );
-                let text = materialized_content_text(content);
-                if mj_core::continuation::is_generated_prompt_text(&text) {
-                    continue;
-                }
                 if matches!(
                     mj_core::acp::context_command_text(&text),
                     Some((mj_core::acp::ContextCommand::Clear, _))

@@ -1205,6 +1205,19 @@ fn a_probe_that_prints_something_else_is_an_error() {
 // Hard-won: a6ad3cc: concurrent checkpoint, upgrade, and recovery paths shared worker launch logs
 #[test]
 fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
+    const CHILD: &str = "MJ_TEST_PRIVATE_WORKER_LAUNCH_LOGS";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "starting_a_worker_uses_private_logs_without_touching_incumbent_files",
+        ))
+        .isolated_store(directory.path())
+        .env(CHILD, "1")
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
     let token_dir = tempfile::tempdir().unwrap();
     let token_path = token_dir.path().join("agent-pat");
     std::fs::write(&token_path, "github_pat_at_start").unwrap();
@@ -1237,6 +1250,10 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
             workspace_storage: Default::default(),
         },
     ] {
+        let session = crate::controller::test_support::checkpoint_test_session(
+            "13131313131313131313131313131313",
+        );
+        crate::database::save_session(&session).unwrap();
         let executor = RecordingExecutor {
             commands: RefCell::new(Vec::new()),
         };
@@ -1278,6 +1295,31 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
         assert!(!script.contains("worker-exit.json"));
         assert!(!script.contains("control.sock"));
         assert!(!script.contains("/worker.log"));
+        drop(commands);
+        let mut session = session;
+        session.no_github_credentials = true;
+        crate::database::save_session(&session).unwrap();
+        executor.commands.borrow_mut().clear();
+        start_worker(
+            &crate::worker_lifecycle::WorkerPermit::try_acquire(
+                &session.id,
+                "credential-free start",
+            )
+            .unwrap()
+            .unwrap(),
+            &executor,
+            &locator,
+            &targets::worker_root(&locator, &session.id).unwrap(),
+            &github,
+        )
+        .unwrap();
+        assert!(
+            executor
+                .commands
+                .borrow()
+                .iter()
+                .all(|command| command.purpose != "install configured session GitHub token")
+        );
     }
 }
 #[test]
@@ -1496,6 +1538,13 @@ impl CommandExecutor for SshHostExecutor {
             self.host_files
                 .borrow_mut()
                 .insert(format!("{directory}/hel"));
+        } else if command.purpose == "link shared Mjolnir worker into session" {
+            // Arguments end with: source temporary destination digest mode.
+            let words = remote.split_whitespace().collect::<Vec<_>>();
+            let source = words[words.len() - 5].trim_matches('\'');
+            if !self.host_files.borrow().contains(source) {
+                status = 75;
+            }
         } else if command.purpose == "verify shared Mjolnir worker" {
             let path = remote.split_whitespace().last().unwrap().trim_matches('\'');
             if self.host_files.borrow().contains(path) {
@@ -2582,6 +2631,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             ..mj_core::config::HarnessProfile::new(
                 kind,
                 directory.path().join(format!("{}-home", kind.id())),
@@ -2667,6 +2717,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             ..mj_core::config::HarnessProfile::new(
                 kind,
                 directory.path().join(format!("{}-home", kind.id())),
@@ -2759,6 +2810,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        aws: None,
     }
 }
 
@@ -3062,6 +3114,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        aws: None,
     }
 }
 
@@ -3418,6 +3471,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
 
@@ -3772,6 +3826,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        aws: None,
     }
 }
 
@@ -4643,6 +4698,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
+        no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
@@ -4673,9 +4729,18 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
     };
 
+    // A host of its own, so no other test has claimed this store's collection.
+    let locator = targets::TargetLocator::SshBare {
+        worker_id: None,
+        ssh: SshTarget {
+            destination: "managed-harness-upgrade@host.test".into(),
+            ssh_args: Vec::new(),
+        },
+        workspace: format!("/srv/mj/{session}"),
+    };
     prepare_managed_harness_for_upgrade(
         &executor,
-        &ssh_bare_locator(session),
+        &locator,
         session,
         &WorkerInstall::Host(source),
         &launch,
@@ -4693,16 +4758,8 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
             "clear managed harness preparation staging",
             "create managed harness preparation staging",
             "remove stale private worker staging",
-            "collect unused Mjolnir worker binaries",
-            "verify shared Mjolnir worker",
-            "create private worker store upload",
-            "stage replacement Mjolnir worker",
-            "replace installed Mjolnir worker",
-            "make replaced Mjolnir worker executable",
-            "verify uploaded Mjolnir worker",
-            "publish shared Mjolnir worker",
-            "discard private worker store upload",
             "link shared Mjolnir worker into session",
+            "collect unused Mjolnir worker binaries",
             "stage managed harness launch configuration",
             "prepare exact managed harness",
             "remove managed harness preparation staging",
@@ -4781,6 +4838,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         borrowed_from: None,
     };
     let launch = WorkerLaunchConfig {
+        no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
@@ -4889,6 +4947,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
+        no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
@@ -5335,6 +5394,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
 
@@ -5492,6 +5552,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };
         let canonical = profile.authentication_marker();
@@ -5642,6 +5703,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };
         let marker = profile.authentication_marker();
@@ -6091,7 +6153,12 @@ fn installed_digest_matches_bytes_on_linux_and_darwin_with_quoted_paths() {
 #[test]
 fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
     use mj_core::subagent::SubagentPolicy;
-    for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Dsh] {
+    for harness in [
+        HarnessKind::Claude,
+        HarnessKind::Codex,
+        HarnessKind::Dsh,
+        HarnessKind::OpenCode,
+    ] {
         let home = tempfile::tempdir().unwrap();
         let source = home.path().join(harness.agent_instructions_file());
         std::fs::write(&source, "User instructions without final newline").unwrap();
@@ -6231,4 +6298,81 @@ fn installing_a_local_stage_links_the_login_and_never_writes_through_an_earlier_
         std::fs::read_to_string(&profile_login).unwrap(),
         "profile login"
     );
+}
+
+#[test]
+fn refreshing_profile_configuration_clears_every_aws_file_including_the_scope_record() {
+    let executor = SshHostExecutor::default();
+    install::clear_profile_configuration(
+        &executor,
+        &targets::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: "c".repeat(64),
+            workspace_storage: Default::default(),
+        },
+        "0123456789abcdef0123456789abcdef",
+        "/home/agent/.codex",
+        HarnessKind::Codex,
+    )
+    .unwrap();
+    let commands = executor.commands.borrow();
+    let script = commands
+        .last()
+        .unwrap()
+        .args
+        .iter()
+        .find(|argument| argument.contains("rm -rf"))
+        .expect("the removal script runs");
+    for name in mj_core::aws_credentials::FILES {
+        assert!(script.contains(name), "{name} is not cleared: {script}");
+    }
+}
+
+#[test]
+fn launching_where_the_role_cannot_apply_announces_why() {
+    let home = tempfile::tempdir().unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let mut profile = mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path());
+    profile
+        .environment
+        .insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
+    profile.aws = Some(mj_core::config::AwsRoleConfig {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        session_policy: None,
+        session_policy_arns: Vec::new(),
+        duration_seconds: None,
+        source_identity: false,
+    });
+    let mut config = mj_core::config::Config::default();
+    config.profiles.insert("bedrock".into(), profile);
+    config.targets.insert(
+        "localhost".into(),
+        mj_core::config::TargetTemplate::LocalBare,
+    );
+    let mut session = crate::controller::test_support::checkpoint_test_session(id);
+    session.last_profile = "bedrock".into();
+    session.target_template_id = "localhost".into();
+    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: format!("/home/me/.local/share/hel/workers/{id}").into(),
+    });
+    let controller = Controller {
+        config,
+        state: mj_core::state::State {
+            sessions: [(id.to_owned(), session)].into_iter().collect(),
+            ..Default::default()
+        },
+    };
+
+    let notice = controller.aws_role_notice(id).unwrap().unwrap();
+
+    assert!(
+        notice.contains("[profiles.bedrock.aws] has no effect on this session"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("raw local sessions read the host's own AWS files"),
+        "{notice}"
+    );
+    // Nothing is minted or synced for a session the role cannot apply to.
+    assert!(controller.aws_credential_source(id).unwrap().is_none());
 }

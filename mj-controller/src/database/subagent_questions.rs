@@ -86,6 +86,7 @@ pub(super) fn forward_subagent_question_with(
         true,
         true,
     )
+    .map(super::mailbox::Enqueued::inserted)
 }
 
 /// Older workers leave forms open. Recover their pending questions without

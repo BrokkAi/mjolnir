@@ -10,9 +10,12 @@
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use mj_core::node::NodeFrame;
-use mj_core::targets::CommandSpec;
+use mj_core::targets::{CommandSpec, SshSessionLease, StartGate, StartScan};
+use std::pin::Pin;
 use std::process::Stdio;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::process::Command;
 
 pub(crate) type ProxyWriter = Box<dyn AsyncWrite + Unpin + Send>;
@@ -151,6 +154,82 @@ pub(crate) async fn collect_bounded(
 }
 
 pub(crate) async fn spawn_proxy(spec: &CommandSpec) -> Result<ProxyStdio> {
+    spawn_session_proxy(spec, None).await
+}
+
+/// Removes the SSH start marker from a proxy's stdout and reports the
+/// session's start to its lease's gate.
+struct StripStart<R> {
+    inner: R,
+    scan: StartScan,
+    gate: Arc<StartGate>,
+    /// Bytes the scan released that the reader has not taken yet.
+    ready: Vec<u8>,
+    offset: usize,
+    finished: bool,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for StripStart<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = &mut *self;
+        loop {
+            if this.offset < this.ready.len() {
+                let count = buf.remaining().min(this.ready.len() - this.offset);
+                buf.put_slice(&this.ready[this.offset..this.offset + count]);
+                this.offset += count;
+                if this.offset == this.ready.len() {
+                    this.ready.clear();
+                    this.offset = 0;
+                }
+                return Poll::Ready(Ok(()));
+            }
+            if this.finished {
+                return Poll::Ready(Ok(()));
+            }
+            let mut chunk = [0_u8; 8192];
+            let mut read = ReadBuf::new(&mut chunk);
+            match Pin::new(&mut this.inner).poll_read(cx, &mut read) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => {
+                    this.finished = true;
+                    this.gate.mark_ended();
+                    return Poll::Ready(Err(error));
+                }
+                Poll::Ready(Ok(())) if read.filled().is_empty() => {
+                    this.finished = true;
+                    this.scan.finish(&mut this.ready);
+                    this.gate.mark_ended();
+                }
+                Poll::Ready(Ok(())) => {
+                    if this.scan.push(read.filled(), &mut this.ready) {
+                        this.gate.mark_started();
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<R> Drop for StripStart<R> {
+    fn drop(&mut self) {
+        // A reader that goes away before the end saw no more than it saw.
+        self.gate.mark_ended();
+    }
+}
+
+/// [`spawn_proxy`] for a command that may run as an SSH session the daemon
+/// leased itself (`lease`). A command that prints the SSH start marker has it
+/// removed from the proxy's stdout, and the lease's gate learns when the
+/// session starts. A command run on the node needs no lease here: the node
+/// leases, retries refusals and strips the marker where SSH runs.
+pub(crate) async fn spawn_session_proxy(
+    spec: &CommandSpec,
+    lease: Option<&SshSessionLease>,
+) -> Result<ProxyStdio> {
     if let Some(host) = mj_core::targets::command_host(spec) {
         return spawn_on_node(host.as_ref(), spec).await;
     }
@@ -188,10 +267,21 @@ pub(crate) async fn spawn_proxy(spec: &CommandSpec) -> Result<ProxyStdio> {
         .stderr
         .take()
         .context("relay proxy stderr unavailable")?;
+    let stdout: ProxyReader = match lease.filter(|_| spec.expects_ssh_start_marker()) {
+        Some(lease) => Box::new(StripStart {
+            inner: stdout,
+            scan: StartScan::new(),
+            gate: lease.gate().clone(),
+            ready: Vec::new(),
+            offset: 0,
+            finished: false,
+        }),
+        None => Box::new(stdout),
+    };
     Ok(ProxyStdio {
         child: ProxyChild::Local(Box::new(child)),
         stdin: Box::new(stdin),
-        stdout: Box::new(stdout),
+        stdout,
         stderr: Box::new(stderr),
     })
 }
@@ -282,4 +372,41 @@ async fn spawn_on_node(
         stdout: Box::new(stdout),
         stderr: Box::new(stderr),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mj_core::targets::{SSH_START_MARKER, StartPhase};
+
+    /// The relay's stdout reader strips the marker even when it arrives in
+    /// pieces, passes the protocol bytes after it through whole (past a pipe's
+    /// worth), and reports the start before any protocol byte is read.
+    #[tokio::test]
+    async fn the_start_marker_is_stripped_from_a_relay_stream_split_across_writes() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let gate = StartGate::standalone();
+        let mut stripped = StripStart {
+            inner: reader,
+            scan: StartScan::new(),
+            gate: gate.clone(),
+            ready: Vec::new(),
+            offset: 0,
+            finished: false,
+        };
+        let payload: Vec<u8> = (0..200_000_u32).map(|n| (n % 251) as u8).collect();
+        let expected = payload.clone();
+        let feed = tokio::spawn(async move {
+            let (head, tail) = SSH_START_MARKER.as_bytes().split_at(9);
+            writer.write_all(head).await.unwrap();
+            tokio::task::yield_now().await;
+            writer.write_all(tail).await.unwrap();
+            writer.write_all(&payload).await.unwrap();
+        });
+        let mut received = Vec::new();
+        stripped.read_to_end(&mut received).await.unwrap();
+        feed.await.unwrap();
+        assert_eq!(received, expected);
+        assert_eq!(gate.phase(), StartPhase::Started);
+    }
 }

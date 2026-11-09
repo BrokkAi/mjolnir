@@ -167,6 +167,7 @@ pub fn import_native_session(
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: !config.github.session_credentials,
             target_template_id: raw_project.map_or(target_id, |(_, raw_target_id)| raw_target_id),
             resource_allocation: None,
             additional_mounts: Vec::new(),
@@ -467,8 +468,10 @@ pub(super) fn import_delta_base(path: &Path, fetch_url: &str) -> Result<String> 
             continue;
         };
         let same_source = url == fetch_url
-            || mj_core::state::ProjectSourceIdentity::git_remote(&url).is_some_and(|identity| {
-                Some(identity) == mj_core::state::ProjectSourceIdentity::git_remote(fetch_url)
+            // `url` comes from `git remote get-url`, where `owner/repo` is a
+            // relative path; `fetch_url` is a resolved source.
+            || mj_core::state::ProjectSourceIdentity::git_remote(&url, mj_core::remote_git::Shorthand::Rejected).is_some_and(|identity| {
+                Some(identity) == mj_core::state::ProjectSourceIdentity::git_remote(fetch_url, mj_core::remote_git::Shorthand::Allowed)
             });
         if !same_source {
             continue;

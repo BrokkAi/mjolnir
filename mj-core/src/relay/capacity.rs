@@ -1,4 +1,5 @@
 //! Durable server retry state. Legacy capacity names remain in stored and wire formats.
+use crate::continuation::GeneratedPrompt;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,7 +28,7 @@ impl CapacityRetry {
         Self {
             attempt,
             retry_at_ms: now_ms.saturating_add(delay_ms),
-            command_id: format!("{SERVER_RETRY_PREFIX}{ordinal}"),
+            command_id: GeneratedPrompt::ServerRetry.command_id(ordinal),
             submitted: false,
         }
     }
@@ -51,18 +52,13 @@ pub fn is_capacity_retry_command(command_id: &str) -> bool {
     retried_turn(command_id).is_some()
 }
 
-const SERVER_RETRY_PREFIX: &str = "server-retry-";
-
 /// The completion ordinal of the turn a worker retry command sends again.
 ///
 /// The worker names each retry after the turn it retries: its id carries the
 /// ordinal at which that turn completed. Older workers used the
 /// `capacity-retry-` prefix. `None` when the command is not a retry.
 pub fn retried_turn(command_id: &str) -> Option<u64> {
-    let ordinal = command_id
-        .strip_prefix("capacity-retry-")
-        .or_else(|| command_id.strip_prefix(SERVER_RETRY_PREFIX))?;
-    (!ordinal.is_empty() && ordinal.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| ordinal.parse().ok())
-        .flatten()
+    [GeneratedPrompt::CapacityRetry, GeneratedPrompt::ServerRetry]
+        .into_iter()
+        .find_map(|producer| producer.retry_ordinal(command_id))
 }

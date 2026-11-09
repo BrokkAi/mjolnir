@@ -1,0 +1,349 @@
+{
+  "id": "L2110",
+  "title": "eval35 3757 sonnethigh still-open label",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "17395d3f07e7f03ebc6516d1e2575446",
+    "session_title": "eval35 3757 sonnethigh",
+    "reply_position": 3992,
+    "captured_at": "2026-10-08T17:53:40.779Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3757: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 0722dea6bcb52ef5335695a701631d157c31cbf4\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls (a cargo command that starts no compiler for\nmore than ten minutes), you may run that command through plain cargo\n(/usr/local/cargo/bin/cargo) and say so in your report; do not move target/\nor change shared cache settings.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the reposi\n[... 11889 bytes omitted from the middle of this message ...]\ndels for Rust std and framework inputs: `std::env::args`/`var`, stdin, HTTP headers, and Axum/Actix handler extractors (`Query<T>`, `Path<T>`, `Json<T>`), including handler parameters as entry points.\n2. **SQL API contracts.** Reviewed models for SQLx, Diesel, rusqlite, postgres, and tokio-postgres. Separate the SQL text operand from bound values, and support generic, async, trait, and callback forms. A complete sink model must let analysis observe the SQL text at the call without the library body, and must leave unrelated effects open.\n3. **Caller completeness at modeled boundaries.** A procedure whose only unknowns are modeled calls should get complete semantics. Confirm or refute the \"likely\" root cause above.\n4. **Rust value construction.** `format!`, `+`/`push_str`, builders, closures, async fns, and trait-object dispatch.\n5. **Shipped policy.** A general Rust request-to-SQL security policy that uses these models, so users do not have to write endpoint models for common libraries.\n\nKeep the sound result contract: missing models stay visibly incomplete, with a diagnostic that names the missing model or capability. An empty result from incomplete discovery is never a clean result.\n\n## Acceptance criteria\n\n- A documented support matrix: the supported Rust sources, SQL sinks, sanitizers, and propagation shapes, and which remain incomplete.\n- Positive fixtures: a proven source-to-SQL-text path with a complete run.\n- Negative fixtures (parameterized, non-reaching, sanitized): proven no-flow with a complete run.\n- The three-case sample above passes as a regression test, plus independent cases for each supported API family.\n- The rerun CodeQL comparison on the sample gives matching complete results. Stretch goal: a real Rust web service with SQL.\n\n## Related\n\n- #3412: declared-storage Rust endpoint contracts (direct overlap on the store-based slice)\n- #3678: Rust sysroot summary binding\n- #1877: external-code activation and completeness\n- #2705: Rust container/std summaries\n- Background: #1871, #2596, #2519, #1951\n\n"
+        },
+        {
+          "id": "agent:24",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout state."
+        },
+        {
+          "id": "agent:60",
+          "role": "assistant",
+          "text": "I've verified the checkout (detached at 0722dea6bc, clean) and read the routed guidance. Next I'm looking for the existing Rust taint tests and the code that reports \"procedure semantics unknown\"."
+        },
+        {
+          "id": "agent:107",
+          "role": "assistant",
+          "text": "The dependency download and build are running in the background. Meanwhile I'm reading the code that turns calls into coverage gaps, which is where the issue's \"likely\" cause would be."
+        },
+        {
+          "id": "agent:153",
+          "role": "assistant",
+          "text": "Build is still compiling. While it runs, I'm checking the existing Rust golden pack and web-network pack, since my SQL/source models will need to follow their format."
+        },
+        {
+          "id": "agent:197",
+          "role": "assistant",
+          "text": "I'm still waiting on the compile (now in the analysis crate) and reading the shipped Java Servlet-to-JDBC policy, which is the closest template for external source and sink selectors."
+        },
+        {
+          "id": "agent:438",
+          "role": "assistant",
+          "text": "Build finished (24m46s). Now I'll run the head-to-head fixture through the CLI as the baseline."
+        },
+        {
+          "id": "agent:479",
+          "role": "assistant",
+          "text": "I'm writing a probe test that prints every procedure's semantic gaps for the three-case fixture, so I can see exactly which gap holds `api.rs::execute` open."
+        },
+        {
+          "id": "agent:555",
+          "role": "assistant",
+          "text": "I've reproduced the exact diagnostic and found that the cause is not the one the issue suspected. Next I'm tracing how the plan collects call bindings in `value_flow/discovery.rs`."
+        },
+        {
+          "id": "agent:601",
+          "role": "assistant",
+          "text": "Status: the instrumented build is running. While it does, I'm checking how Go's `os.Getenv` source model is built, since it's the closest existing pack for exact standard-library sources."
+        },
+        {
+          "id": "agent:652",
+          "role": "assistant",
+          "text": "My debug print used a method that doesn't exist on `ProcedureHandle`. I'm fixing it so the flow crate rebuilds against the existing artifacts."
+        },
+        {
+          "id": "agent:1152",
+          "role": "assistant",
+          "text": "Now I'll write the pack generator (scratch) that emits the reviewed pack sources deterministically."
+        },
+        {
+          "id": "agent:1196",
+          "role": "assistant",
+          "text": "The probe run hit my own 280 s guard. I'm rerunning it in the background and polling."
+        },
+        {
+          "id": "agent:1243",
+          "role": "assistant",
+          "text": "My CallSite-scoped gap tripped an IR validation rule (`gap_contract`). I'm locating that rule to see what a call-site-scoped gap is required to satisfy."
+        },
+        {
+          "id": "agent:1313",
+          "role": "assistant",
+          "text": "Status: the probe build is still compiling. In the meantime I'm checking the docs sidebar so I can place the support-matrix page correctly."
+        },
+        {
+          "id": "agent:1375",
+          "role": "assistant",
+          "text": "Now I'm rewriting the method-call identity function to type a call-result receiver (such as `std::io::stdin()`) from the model's declared return type when the resolver publishes no claim."
+        },
+        {
+          "id": "agent:1427",
+          "role": "assistant",
+          "text": "The build is on its last crates (runtime and mcp). I'll wait for it, then run the probe experiments with the method-call identity change."
+        },
+        {
+          "id": "agent:1478",
+          "role": "assistant",
+          "text": "Status: the probe is mid-run (E2 onward). While it finishes, I'm checking how `&self` parameters are classified for Drop, because the vB run still reported `Client.execute` as unknown."
+        },
+        {
+          "id": "agent:2157",
+          "role": "assistant",
+          "text": "Now the final test file. I'm replacing the probes with the permanent acceptance suite."
+        },
+        {
+          "id": "agent:2180",
+          "role": "assistant",
+          "text": "Now writing the final test file (the earlier write was refused because the probe file had changed)."
+        },
+        {
+          "id": "agent:2285",
+          "role": "assistant",
+          "text": "Status: debugging why zero-argument external calls (`stdin()`, `args()`) don't get selector proof while one-argument ones do. I'm reading how another suite runs a code query with models active."
+        },
+        {
+          "id": "agent:2375",
+          "role": "assistant",
+          "text": "Now the support-matrix documentation page. It states plainly what is complete and what is incomplete, and names the missing model or capability for each incomplete row."
+        },
+        {
+          "id": "agent:3209",
+          "role": "assistant",
+          "text": "I'm still working out why the unsafe-case finding is reported `possible/partial` instead of `definite/complete`. I'm now tracing how a finding's `proven` flag is computed."
+        },
+        {
+          "id": "agent:3321",
+          "role": "assistant",
+          "text": "I changed that test to pin the actual behavior. Next I'm adding the limitation to the docs, then starting the final validation pass."
+        },
+        {
+          "id": "agent:3336",
+          "role": "assistant",
+          "text": "Both analysis-lib failures reproduce at base, so they pre-date my changes. I'll clean up the base worktree and start the final validation in the background."
+        },
+        {
+          "id": "agent:3374",
+          "role": "assistant",
+          "text": "Formatting is clean. I'm waiting for the validation events."
+        },
+        {
+          "id": "agent:3384",
+          "role": "assistant",
+          "text": "The build is recompiling after I reverted the debug line, so I'm waiting on the monitor."
+        },
+        {
+          "id": "agent:3397",
+          "role": "assistant",
+          "text": "Validation is still running. The watchers will notify me as each suite finishes."
+        },
+        {
+          "id": "agent:3447",
+          "role": "assistant",
+          "text": "The Go latency test is a wall-clock threshold (the cold run took 6.7s) hit on a loaded host, and the code is Go, not Rust. I'll rerun it alone once the suites finish and wait for the monitor."
+        },
+        {
+          "id": "agent:3468",
+          "role": "assistant",
+          "text": "The remaining suites are still running, and the monitor will notify me when they finish."
+        },
+        {
+          "id": "agent:3493",
+          "role": "assistant",
+          "text": "The inventory test passes (4/4), and the crate-level suite is at test 1485 of 1907. I'm waiting for the monitor."
+        },
+        {
+          "id": "agent:3507",
+          "role": "assistant",
+          "text": "Nothing else is pending, so I'm waiting for the validation run to finish."
+        },
+        {
+          "id": "agent:3536",
+          "role": "assistant",
+          "text": "The run is progressing normally (1893 of 1907 in the current suite). The monitor is still armed."
+        },
+        {
+          "id": "agent:3566",
+          "role": "assistant",
+          "text": "The suites are still running. I'm re-armed on each suite's exit status and will act when results arrive. The PR notices in the mailbox are unrelated to #3757, so I'm ignoring them."
+        },
+        {
+          "id": "agent:3598",
+          "role": "assistant",
+          "text": "`-p brokk-bifrost-rql -p brokk-bifrost-policy -p brokk-bifrost-flow` passes (exit 0). The `brokk-bifrost-analysis --lib` run is in progress, with the remaining suites queued behind it."
+        },
+        {
+          "id": "agent:3621",
+          "role": "assistant",
+          "text": "Waiting for the analysis-lib and integration suites to finish."
+        },
+        {
+          "id": "agent:3637",
+          "role": "assistant",
+          "text": "These are the same two analysis-lib failures that reproduce at base, so they pre-date my changes. The other suites are still running."
+        },
+        {
+          "id": "agent:3650",
+          "role": "assistant",
+          "text": "Waiting on `suite_semantic`, `suite_usages`, `suite_issues`, `suite_cross_language` and `suite_analyzers`."
+        },
+        {
+          "id": "agent:3663",
+          "role": "assistant",
+          "text": "`suite_semantic` passes (exit 0), including the updated generic-method conformance test. Usages, issues, cross-language and analyzers are still running."
+        },
+        {
+          "id": "agent:3689",
+          "role": "assistant",
+          "text": "`suite_usages` is running now. The monitor `b74tmjeeq` is still armed for the final completion."
+        },
+        {
+          "id": "agent:3714",
+          "role": "assistant",
+          "text": "Still waiting on usages, issues, cross-language and analyzers."
+        },
+        {
+          "id": "agent:3724",
+          "role": "assistant",
+          "text": "`suite_usages` passes. Issues, cross-language and analyzers remain."
+        },
+        {
+          "id": "agent:3745",
+          "role": "assistant",
+          "text": "`suite_issues` is running now. The `bg3a0525x` monitor will report its exit."
+        },
+        {
+          "id": "agent:3758",
+          "role": "assistant",
+          "text": "`suite_issues` passes. Cross-language and analyzers remain."
+        },
+        {
+          "id": "agent:3804",
+          "role": "assistant",
+          "text": "The final clippy run started alongside the last two suites. I'm waiting for both."
+        },
+        {
+          "id": "agent:3834",
+          "role": "assistant",
+          "text": "All integration suites pass. Cross-language and analyzers exited 0. Clippy is still running, so I'll wait for it before rerunning the timing-sensitive Go test alone."
+        },
+        {
+          "id": "agent:3850",
+          "role": "assistant",
+          "text": "Waiting for clippy to finish."
+        },
+        {
+          "id": "agent:3861",
+          "role": "assistant",
+          "text": "Clippy finished clean with `-D warnings`. Now I'll rerun the Go latency test alone, with the host no longer loaded."
+        },
+        {
+          "id": "agent:3876",
+          "role": "assistant",
+          "text": "The test fails even when run alone (cold run 5.2s). Before I call it pre-existing, I need to check it against base. First I'll read the threshold."
+        },
+        {
+          "id": "agent:3927",
+          "role": "assistant",
+          "text": "The base build is running. In the meantime, I'll commit the remaining work after a status check."
+        },
+        {
+          "id": "agent:3946",
+          "role": "assistant",
+          "text": "The work is committed (`3a249bbb19`) and the working tree is clean. Now I'm waiting on the base latency measurement."
+        },
+        {
+          "id": "agent:3959",
+          "role": "assistant",
+          "text": "The base build is still compiling from scratch, and the monitor `bogpr9l4p` will report the result when the test finishes."
+        },
+        {
+          "id": "agent:3974",
+          "role": "assistant",
+          "text": "The test also fails at base (cold run 5.6s, limit 5s), so it's a host-load timing failure that pre-dates my changes. I'll remove the base worktree and write the final report."
+        },
+        {
+          "id": "agent:3992",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nIssue #3757 is partly resolved. The \"likely\" cause is wrong. Three method-call defects held the run open, and a fourth defect was a missing model route for external method calls. All five are fixed. The issue's fixture as written still ends `inconclusive`, because of three constructs that are not SQL-driver models. Over a modeled driver, the three cases give one finding and two proven negatives in a decided run. That finding is reported `possible`/`partial`.\n\n`★ Insight ─────────────────────────────────────`\n- A reviewed summary on a path call already closes its caller. The caller ends `proven_by_summary`. Method calls were the problem: each published a gap that nothing could answer.\n- \"Run complete\" and \"finding proven\" are different tests in the flow crate. Completion forgives implicit-abort-only edges, and the finding's proof flag doesn't.\n`─────────────────────────────────────────────────`\n\n## 1. Confirmed cause\n\nThe issue's \"likely\" cause, that a modeled sink call does not close its caller, is **refuted for path calls**. I put a reviewed summary on `std::str::from_utf8(source())`. The caller then ended `ProvenBySummary` with one finding. Without the pack it ended `Inconclusive`, with no finding. The cause-pinning tests in `tests/suite_bench_policy/issue_3757_rust_sql_injection.rs` hold this.\n\nWhat held the sample open (confirmed from plan debug output, per-call-binding statuses, and unproven-edge text):\n1. **Receiver-adjustment gap.** Each Rust method call published a point-scoped `Calls` gap (`rust/semantic.rs`). `call_target_refinement_call` never mapped it to a call, so every method-call binding stayed `Unknown/Open`. The ICFG also weakened call transfers by that gap (`semantic/icfg.rs`).\n2. **`&self`/`&mut self` counted as owned.** The `self_parameter` node has no `type` field, so borrowed-self methods published parameter-drop gaps.\n3. **Receiver abort edge had no proof.** It did not state `NonRejoiningExceptionalExit`. Callees containing a method call returned an unproven `ExceptionalReturn` edge.\n4. **No model route for methods on external types.** `exact_rust_external_call` needs a scoped path with two or more owner segments. `client.execute(..)` gave `dispatch_outcome=unproven`, `target_count=0`.\n5. **Zero-argument external calls could not be selected.** `std::env::args()` has only the benign terminal row, which `resolved-call :proof declared` and the policy binder rejected.\n6. **Review-gated packs are dormant.** With `review_required: true`, activation produced zero shards until the workspace enabled the pack by id. This is a probe pitfall, not a defect.\n\nStill open and named in the matrix:\n- `let x = call(..)` and `let _ = call(..)` publish implicit-`Drop` gaps, the retained limitation from #2607. No model can discharge them.\n- Std string methods and `+` have no receiver typing.\n\n## 2. Changes and reasons\n\nBase: `0722dea6bcb52ef5335695a701631d157c31cbf4`. Final: `3a249bbb1918f81053c390c0c672ee862214d9cc`. There are three commits on the detached HEAD: `86216080a1`, `f100e491cd` and `3a249bbb19`. Together they change 34 files.\n\n- **Lowering and IR** (`rust/semantic.rs`, `ir/model.rs`, `ir/validation.rs`): new `SemanticGapDischarge::ReceiverAdjustment`, and a point-scoped gap that a complete proven resolution of the call discharges. Borrowed self is non-dropping. The receiver abort edge states `NonRejoiningExceptionalExit`. A generic call keeps the gap undischarged. `ADAPTER_VERSION` is now `rust-value-semantics-v15`.\n- **Oracle, ICFG, flow-state** (`workspace_oracle/{value_flow,dispatch}.rs`, `icfg.rs`, `flow_state.rs`): the discharge is honored by the oracle and the call-transfer provider. Flow-state still treats the gap as an obstacle, which a test requires. `dispatch.rs` gains a Rust analogue of the Go external-dispatch discharge.\n- **External method identity** (`rust/external_calls.rs`, `get_definition/mod.rs`): the rec\n[... 4296 bytes omitted from the middle of this message ...]\now` with a closure callback: the SQL sink is selected, but the run is `inconclusive` because closure literals are unlowered callables.\n- A receiver written as `&postgres::Client` with no `use` is not typed.\n- Not modeled: SQLx, Diesel, tokio-postgres, Axum and Actix extractors, `?`, std string methods and operators, async, trait objects.\n\n**Separately actionable:**\n- A vacuous run (no sink endpoint selected) reports `Complete` with only a diagnostic. It should be a distinct state.\n- The `workspace-model-inert` warning is noisy for external-API summaries.\n- The `TaintFinding::proven` change above.\n\n## 6. Draft approach comment\n\nI could not confirm the \"likely\" cause. A reviewed summary on a path call does close its caller, which ends `proven_by_summary`. Method calls were the real problem: each one published a receiver-adjustment gap that nothing could answer, borrowed-self methods counted as owned parameters, and a receiver abort edge had no stated proof. A method call on an external type also had no way to reach a model, and a zero-argument call such as `std::env::args()` could not be selected. I added a `ReceiverAdjustment` discharge that a complete proven resolution satisfies, and I gave external method calls an identity from the resolver's import claim. I also let the selector bind a call that names no operand. I added reviewed `std::env`, `std::io`, `postgres` and `rusqlite` packs and a policy. Each driver summary has one `escape` effect on the SQL text and none on the bound values. Over a modeled driver, the three cases give one finding and two proven negatives in a decided run, but the finding reads `possible`/`partial` until the finding proof flag honors the same abort discharge as run completion. The sample as written is still `inconclusive` because of `let _ = call(..)`, string methods and `+`, and a unit-struct binding, and I did not model those. A support matrix on the docs page names every incomplete row and the capability it lacks. The two Go and root-user test failures also fail at the base commit."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "contract: missing models stay visibly incomplete, with a diagnostic that names the missing model or capability. An empty result from incomplete discovery is never a clean result.\n\n## Acceptance criteria\n\n- A documented support matrix: the supported Rust sources, SQL sinks, sanitizers, and propagation shapes, and which remain incomplete.\n- Positive fixtures: a proven source-to-SQL-text path with a complete run.\n- Negative fixtures (parameterized, non-reaching, sanitized): proven no-flow with a complete run.\n- The three-case sample above passes as a regression test, plus independent cases for each supported API family.\n- The rerun CodeQL comparison on the sample gives matching complete results. Stretch goal: a real Rust web service with SQL.\n\n## Related\n\n- #3412: declared-storage Rust endpoint contracts (direct overlap on the store-based slice)\n- #3678: Rust sysroot summary binding\n- #1877: external-code activation and completeness\n- #2705: Rust container/std summaries\n- Background: #1871, #2596, #2519, #1951\n\n",
+    "assistant_text_tail": "ow` with a closure callback: the SQL sink is selected, but the run is `inconclusive` because closure literals are unlowered callables.\n- A receiver written as `&postgres::Client` with no `use` is not typed.\n- Not modeled: SQLx, Diesel, tokio-postgres, Axum and Actix extractors, `?`, std string methods and operators, async, trait objects.\n\n**Separately actionable:**\n- A vacuous run (no sink endpoint selected) reports `Complete` with only a diagnostic. It should be a distinct state.\n- The `workspace-model-inert` warning is noisy for external-API summaries.\n- The `TaintFinding::proven` change above.\n\n## 6. Draft approach comment\n\nI could not confirm the \"likely\" cause. A reviewed summary on a path call does close its caller, which ends `proven_by_summary`. Method calls were the real problem: each one published a receiver-adjustment gap that nothing could answer, borrowed-self methods counted as owned parameters, and a receiver abort edge had no stated proof. A method call on an external type also had no way to reach a model, and a zero-argument call such as `std::env::args()` could not be selected. I added a `ReceiverAdjustment` discharge that a complete proven resolution satisfies, and I gave external method calls an identity from the resolver's import claim. I also let the selector bind a call that names no operand. I added reviewed `std::env`, `std::io`, `postgres` and `rusqlite` packs and a policy. Each driver summary has one `escape` effect on the SQL text and none on the bound values. Over a modeled driver, the three cases give one finding and two proven negatives in a decided run, but the finding reads `possible`/`partial` until the finding proof flag honors the same abort discharge as run completion. The sample as written is still `inconclusive` because of `let _ = call(..)`, string methods and `+`, and a unit-struct binding, and I did not model those. A support matrix on the docs page names every incomplete row and the capability it lacks. The two Go and root-user test failures also fail at the base commit.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "Final eval report with work committed, tests run and a draft comment. The still-open items are documented limitations and the agent's own follow-ups; no question or request is directed at the judge.",
+    "label": "none",
+    "triggers": [
+      "Still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-08T17:54:37.524Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

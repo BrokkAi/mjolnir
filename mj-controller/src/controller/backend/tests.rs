@@ -330,6 +330,7 @@ fn github_token_is_inherited_only_by_managed_containers() {
             url: Some("git@github.com:example/app.git".into()),
             push_urls: vec![
                 "git@github.com:fork/app.git".into(),
+                "git://github.com/legacy/app.git".into(),
                 "ssh://git@example.test/app.git".into(),
             ],
             destination: "app".into(),
@@ -347,6 +348,7 @@ fn github_token_is_inherited_only_by_managed_containers() {
         bundle.repositories[0].push_urls,
         [
             "https://github.com/fork/app.git",
+            "https://github.com/legacy/app.git",
             "ssh://git@example.test/app.git"
         ]
     );
@@ -421,6 +423,18 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
             container: container_target("ghcr.io/example/dev:1.2.3", ImagePullPolicy::Auto),
         },
     );
+    config.targets.insert(
+        "ssh-apple".into(),
+        TargetTemplate::SshAppleContainer {
+            ssh: SshConnection {
+                host: "mac.example.test".into(),
+                user: Some("dev".into()),
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            container: container_target("ghcr.io/example/dev:latest", ImagePullPolicy::Auto),
+        },
+    );
     // An explicit `never` is the one way to keep an image out of the plan.
     config.targets.insert(
         "never".into(),
@@ -446,7 +460,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
     let plan = image_refresh_plan(&config);
     assert_eq!(
         plan.len(),
-        6,
+        7,
         "expected one refresh per host, image and platform: {plan:?}"
     );
 
@@ -460,10 +474,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
     assert_eq!(local.when, RefreshWhen::Always);
     assert_eq!(local.pull.program, "podman");
     assert_eq!(local.pull.args, ["pull", "ghcr.io/example/dev:latest"]);
-    assert_eq!(
-        local.prune.as_ref().expect("podman prunes").args,
-        ["image", "prune", "-f"]
-    );
+    assert_eq!(local.prune.args, ["image", "prune", "-f"]);
     assert_eq!(
         local.image_id.args,
         [
@@ -479,10 +490,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
     assert_eq!(docker.when, RefreshWhen::Always);
     assert_eq!(docker.pull.program, "docker");
     assert_eq!(docker.pull.args, ["pull", "ghcr.io/example/dev:1.2.3"]);
-    assert_eq!(
-        docker.prune.as_ref().expect("docker prunes").args,
-        ["image", "prune", "-f"]
-    );
+    assert_eq!(docker.prune.args, ["image", "prune", "-f"]);
 
     // A versioned tag and a digest pin only need the host to have a copy.
     let apple = entry(&ImageHost::AppleContainer, "ghcr.io/example/dev:1.2.3");
@@ -491,6 +499,27 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
     assert_eq!(
         apple.pull.args,
         ["image", "pull", "ghcr.io/example/dev:1.2.3"]
+    );
+    assert_eq!(apple.prune.program, "container");
+    assert_eq!(apple.prune.args, ["image", "prune"]);
+    let remote_apple = plan
+        .iter()
+        .find(|refresh| matches!(refresh.host, ImageHost::SshAppleContainer(_)))
+        .expect("the remote Apple host is refreshed over SSH");
+    assert_eq!(remote_apple.prune.program, "ssh");
+    assert!(
+        remote_apple
+            .prune
+            .args
+            .contains(&"dev@mac.example.test".to_owned())
+    );
+    assert_eq!(
+        remote_apple
+            .prune
+            .args
+            .last()
+            .map(|arg| unwrapped_remote_line(arg)),
+        Some("'container' 'image' 'prune'")
     );
     let pinned = plan
         .iter()
@@ -529,12 +558,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
         Some("'podman' 'pull' '--platform=linux/amd64' 'ghcr.io/example/dev:latest'")
     );
     assert_eq!(
-        ssh.prune
-            .as_ref()
-            .expect("podman prunes")
-            .args
-            .last()
-            .map(|arg| unwrapped_remote_line(arg)),
+        ssh.prune.args.last().map(|arg| unwrapped_remote_line(arg)),
         Some("'podman' 'image' 'prune' '-f'")
     );
 }
@@ -587,8 +611,6 @@ fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
     assert_eq!(
         refresh
             .prune
-            .as_ref()
-            .expect("docker prunes")
             .args
             .last()
             .map(|arg| unwrapped_remote_line(arg)),
@@ -926,6 +948,63 @@ fn local_engine_readiness_tells_a_missing_engine_from_one_that_did_not_answer() 
         local_engine_readiness("ssh-docker", &NoDockerExecutor),
         None
     );
+}
+
+/// An executor that records every command and answers `container system
+/// status` as a stopped or a running service would.
+struct RecordingAppleExecutor {
+    status: i32,
+    commands: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingAppleExecutor {
+    fn new(status: i32) -> Self {
+        Self {
+            status,
+            commands: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn commands(&self) -> Vec<String> {
+        self.commands.lock().unwrap().clone()
+    }
+}
+
+impl CommandExecutor for RecordingAppleExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands.lock().unwrap().push(format!(
+            "{} {}",
+            command.program,
+            command.args.join(" ")
+        ));
+        Ok(CommandOutput {
+            status: self.status,
+            stdout: Vec::new(),
+            stderr: if self.status == 0 {
+                Vec::new()
+            } else {
+                b"service is stopped".to_vec()
+            },
+        })
+    }
+}
+
+// Hard-won: #1357: the launch options readiness probe started a stopped Apple container service
+#[test]
+fn apple_container_readiness_observes_the_service_and_never_starts_it() {
+    let stopped = RecordingAppleExecutor::new(1);
+    assert_eq!(
+        local_engine_readiness("apple-container", &stopped),
+        Some(LocalEngineReadiness::NotReady)
+    );
+    assert_eq!(stopped.commands(), ["container system status"]);
+
+    let running = RecordingAppleExecutor::new(0);
+    assert_eq!(
+        local_engine_readiness("apple-container", &running),
+        Some(LocalEngineReadiness::Ready)
+    );
+    assert_eq!(running.commands(), ["container system status"]);
 }
 
 /// Launch finding R5-3: the session wizard said "local Docker is not ready.

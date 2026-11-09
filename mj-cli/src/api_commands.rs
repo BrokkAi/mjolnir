@@ -191,6 +191,9 @@ pub(crate) struct NewArgs {
     /// Sub-agents inherit the choice.
     #[arg(long)]
     no_github_events: bool,
+    /// Withhold GitHub credentials from this session and its children.
+    #[arg(long)]
+    no_github_credentials: bool,
     /// Container CPU limit. Omitted takes the target's default size: the
     /// size last chosen for that host, else 4 CPUs, capped at the host's.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -1248,6 +1251,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         review: new_session_review(&args)?,
         no_project_memory: args.no_project_memory,
         no_github_events: args.no_github_events,
+        no_github_credentials: args.no_github_credentials,
         create_managed_worktree: None,
         at: args.at.clone(),
         branch: args.branch.clone(),
@@ -1738,7 +1742,7 @@ pub(crate) async fn transcript(args: TranscriptArgs) -> Result<()> {
     for item in &page.items {
         println!("[{}] {}", item.seq, item.role);
         if !item.text.trim().is_empty() {
-            println!("{}", item.text.trim_end());
+            println!("{}", sanitize_terminal_text(item.text.trim_end()));
         }
         println!();
     }
@@ -1761,7 +1765,13 @@ pub(crate) async fn diff(args: DiffArgs) -> Result<()> {
     if args.json {
         return print_json(&details);
     }
-    print!("{}", details.diff);
+    // A redirected patch keeps its exact bytes (CRLF, control characters) so
+    // it still applies; only a terminal gets the inert rendering.
+    if std::io::stdout().is_terminal() {
+        print!("{}", sanitize_terminal_text(&details.diff));
+    } else {
+        print!("{}", details.diff);
+    }
     std::io::stdout()
         .flush()
         .context("write the session diff")?;
@@ -3052,17 +3062,22 @@ mod tests {
             let mut argv = vec!["mj", "new", "--bundle", "product"];
             argv.extend_from_slice(extra);
             match Cli::try_parse_from(argv).unwrap().command {
-                Some(Command::New(args)) => (args.no_project_memory, args.no_github_events),
+                Some(Command::New(args)) => (
+                    args.no_project_memory,
+                    args.no_github_events,
+                    args.no_github_credentials,
+                ),
                 _ => panic!("expected the new command"),
             }
         };
         assert!(Cli::try_parse_from(["mj", "new", "--bundle", "product", "--no-mailbox"]).is_err());
-        assert_eq!(parse(&[]), (false, false));
-        assert_eq!(parse(&["--no-project-memory"]), (true, false));
-        assert_eq!(parse(&["--no-github-events"]), (false, true));
+        assert_eq!(parse(&[]), (false, false, false));
+        assert_eq!(parse(&["--no-project-memory"]), (true, false, false));
+        assert_eq!(parse(&["--no-github-events"]), (false, true, false));
+        assert_eq!(parse(&["--no-github-credentials"]), (false, false, true));
         assert_eq!(
             parse(&["--no-github-events", "--no-project-memory"]),
-            (true, true)
+            (true, true, false)
         );
     }
 

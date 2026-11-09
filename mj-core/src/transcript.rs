@@ -29,9 +29,6 @@ pub const HARNESS_TURN_TEXT: &str = "Agent continued on its own";
 pub const HARNESS_TURN_ITEM_PREFIX: &str = "harness-turn:";
 /// User replies within an existing turn, rather than prompts that start one.
 pub const ELICITATION_REPLY_ITEM_PREFIX: &str = "elicitation-reply:";
-/// Command ID prefix for another session's message delivered as a prompt,
-/// which the controller does for workers too old to take mailbox messages.
-pub const SESSION_MESSAGE_TURN_COMMAND_PREFIX: &str = "session-message-turn-";
 
 /// Where a tool's compact presentation source came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,26 +517,18 @@ impl ChatEntry {
     }
 
     /// Whether this entry is a message the user wrote, including an answer
-    /// to an agent's question. Prompts that Hel submits on the user's behalf
-    /// are excluded: retries, automatic continuations, forwarded review
-    /// feedback, sub-agent notices, and another session's message delivered
-    /// as a turn. The rules match the ones authorization evidence uses to
-    /// leave out generated prompts.
+    /// to an agent's question. Prompts that Mjolnir submits on the user's
+    /// behalf are excluded: every [`crate::continuation::GeneratedPrompt`]
+    /// and text marked as generated. Authorization evidence asks the same
+    /// two predicates, so the two cannot disagree.
     pub fn is_user_authored(&self) -> bool {
-        if self.role != ChatRole::User || crate::continuation::is_generated_prompt_text(&self.text)
-        {
-            return false;
-        }
         // An entry without a source is a prompt submitted from this client
         // that the controller has not yet projected.
-        self.source.0.as_ref().is_none_or(|item| {
-            let command_id = item
-                .stable_id
-                .strip_prefix("user:")
-                .unwrap_or(&item.stable_id);
-            !crate::continuation::is_generated_prompt(command_id)
-                && !command_id.starts_with(SESSION_MESSAGE_TURN_COMMAND_PREFIX)
-        })
+        self.role == ChatRole::User
+            && crate::continuation::is_user_authored_message(
+                self.source.0.as_ref().map(|item| item.stable_id.as_str()),
+                &self.text,
+            )
     }
 
     pub fn plan(seq: u64, plan: Vec<PlanLine>) -> Self {
@@ -976,6 +965,8 @@ mod tests {
             ("user:quota-retry-4", "Continue."),
             ("user:server-retry-5", "Continue."),
             ("user:review-forward-2", "Review findings"),
+            // Hard-won: 8b08e8bc1: handback reminders and peer-session messages counted as user authorization
+            ("user:handback-reminder-36", "Please also update the docs"),
             ("user:subagent-input-3", "A sub-agent finished."),
             (
                 "user:session-message-turn-8",

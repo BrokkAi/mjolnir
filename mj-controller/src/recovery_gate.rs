@@ -22,6 +22,14 @@ pub(crate) fn current_background_session(
     }))
 }
 
+/// Resolves once an admission's cancellation flag is set. Admitted work that
+/// cannot be cancelled by being dropped polls this instead.
+pub(crate) async fn wait_until_cancelled(flag: &AtomicBool) {
+    while !flag.load(Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
 /// Reports session activity to the recovery coordinator.
 ///
 /// Reporting retains only the newest observation per session. Completed-turn
@@ -99,16 +107,27 @@ impl RecoveryGate {
         session_id: &str,
         work: impl std::future::Future<Output = T>,
     ) -> Option<T> {
+        self.run_background_owned(session_id, |_| work).await
+    }
+
+    /// `run_background` for work that outlives the future awaiting it, such as
+    /// a job queued on a session actor: `work` receives the admission and may
+    /// hand it to that job, which then holds the slot until it has finished or
+    /// been dropped, whether or not the awaiting future is still there.
+    pub async fn run_background_owned<T, F: std::future::Future<Output = T>>(
+        self: &Arc<Self>,
+        session_id: &str,
+        work: impl FnOnce(RecoveryAttempt) -> F,
+    ) -> Option<T> {
         let admission = self.try_start(session_id)?;
         let cancelled = admission.cancellation();
-        let cancellation = async {
-            while !cancelled.load(Ordering::Acquire) {
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-        };
+        // Held here as well, so work that ignores the admission still runs
+        // under it for as long as this future lives.
+        let _admission = admission.clone();
+        let work = work(admission);
         tokio::select! {
             biased;
-            _ = cancellation => None,
+            () = wait_until_cancelled(&cancelled) => None,
             result = work => Some(result),
         }
     }

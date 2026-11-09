@@ -159,6 +159,7 @@ fn runtime_state_update(
         workspace_names: metadata.workspace_names,
         revision: snapshot.revision,
         records: snapshot.records,
+        sessions: snapshot.sessions,
         lifecycles: metadata.lifecycles,
         moves: snapshot.moves,
         subagents: snapshot.subagents,

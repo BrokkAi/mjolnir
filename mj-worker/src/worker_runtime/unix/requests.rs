@@ -13,8 +13,9 @@ use super::*;
 /// agent's turn stalls with it. So attach captures a plan under the lock
 /// and does its reading on a blocking thread with the lock released.
 pub(crate) async fn handle_request(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     envelope: RelayRequestEnvelope,
+    harness_preparation: Option<mj_core::relay::HarnessPreparation>,
 ) -> Result<RelayResponseEnvelope> {
     // Sealing and garbage collection can move the segments a plan named
     // while it is being read. That is not the controller's fault and not
@@ -31,6 +32,7 @@ pub(crate) async fn handle_request(
         }
     };
     for _ in 0..REPLAN_ATTEMPTS {
+        deferred.set_harness_preparation(harness_preparation.clone());
         let generation = deferred.journal_generation();
         let response = tokio::task::spawn_blocking(move || deferred.finish())
             .await
@@ -153,7 +155,7 @@ pub(crate) async fn elicitation_response(
 pub(crate) async fn background_task_stop_response(
     envelope: RelayRequestEnvelope,
     commands: Option<&mpsc::Sender<CommandRequest>>,
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
 ) -> RelayResponseEnvelope {
     let protocol_version = envelope.protocol_version;
     let request_id = envelope.request_id;
@@ -427,6 +429,13 @@ pub(crate) fn apply_credential_request_at(
         RelayRequest::AwsCredentialsState => Ok(credential_state_payload(
             &mj_core::aws_credentials::state(&endpoint.home)?,
         )),
+        RelayRequest::AwsCredentialsScope => Ok(RelayResponsePayload::AwsCredentialsScope {
+            scope: mj_core::aws_credentials::scope(&endpoint.home)?,
+            profile: mj_core::aws_credentials::staged_profile(&endpoint.home)?,
+        }),
+        RelayRequest::RemoveAwsCredentials => Ok(credential_state_payload(
+            &mj_core::aws_credentials::remove(&endpoint.home)?,
+        )),
         RelayRequest::SlopcopLoginState => Ok(credential_state_payload(
             &mj_core::slopcop::read_login(&slopcop_login_path)?.0,
         )),
@@ -451,14 +460,15 @@ pub(crate) fn apply_credential_request_at(
                 &mj_core::credentials::CredentialSnapshot::absent(),
             ))
         }
-        RelayRequest::InstallAwsCredentials { data } => {
+        RelayRequest::InstallAwsCredentials { data, scope } => {
             if data.len() > MAX_CREDENTIAL_BYTES * 2 {
                 bail!("AWS credential payload is above the {MAX_CREDENTIAL_BYTES} byte limit");
             }
             let bytes = BASE64
                 .decode(data.as_bytes())
                 .context("decode AWS credential payload")?;
-            let credentials = mj_core::aws_credentials::AwsCredentials::decode(&bytes)?;
+            let credentials =
+                mj_core::aws_credentials::AwsCredentials::decode(&bytes)?.with_scope(scope.clone());
             Ok(credential_state_payload(
                 &credentials.install(&endpoint.home, &endpoint.home)?,
             ))
@@ -512,6 +522,10 @@ pub(crate) fn apply_credential_request_at(
             Ok(github_token_state_payload(&snapshot))
         }
         RelayRequest::InstallGithubToken { data } => {
+            anyhow::ensure!(
+                !endpoint.no_github_credentials,
+                "GitHub credentials are disabled for this session"
+            );
             if data.len() > MAX_GITHUB_TOKEN_BYTES * 2 {
                 bail!("GitHub token is above the {MAX_GITHUB_TOKEN_BYTES} byte limit");
             }

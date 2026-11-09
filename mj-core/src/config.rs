@@ -16,6 +16,7 @@
 //! * `loading` -- instance names, directories, and atomic file writes.
 //! * `secrets` -- environment entries that name a secret held elsewhere.
 
+mod aws;
 mod daemon;
 mod document;
 mod dsh_credentials;
@@ -28,6 +29,7 @@ mod secrets;
 mod targets;
 mod ui;
 
+pub use aws::*;
 pub use daemon::*;
 pub use github::*;
 pub use harness::*;
@@ -952,9 +954,10 @@ impl Config {
     }
 }
 
-// Version 20 adds daemon placement; 21 adds review counts. Older strict
+// Version 20 adds daemon placement; 21 adds review counts; 22 adds the session
+// GitHub credential default. Older strict
 // configuration readers reject the new fields instead of dropping them.
-pub const CONFIG_VERSION: u32 = 21;
+pub const CONFIG_VERSION: u32 = 22;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
@@ -1378,8 +1381,9 @@ impl TryFrom<StoredConfig> for Config {
             // 16 adds native tool cache storage; 17 replaces per-profile
             // delegation selectors with global task choices, without migrating them;
             // 18 moves the GitHub event switch to github.watch.enabled; 19 adds
-            // `enabled` to runtimes; 20 adds `[daemon]`; 21 adds review counts.
-            version: if matches!(version, 1..=20) {
+            // `enabled` to runtimes; 20 adds `[daemon]`; 21 adds review counts;
+            // 22 adds the session GitHub credential default.
+            version: if matches!(version, 1..=21) {
                 CONFIG_VERSION
             } else {
                 version

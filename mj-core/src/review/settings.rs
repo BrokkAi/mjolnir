@@ -3,45 +3,53 @@
 use serde::{Deserialize, Serialize};
 
 /// Model families used by reviewer autoconfiguration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReviewModelFamily {
     Terra,
     Sol,
-    Haiku,
-    Flash,
+    Sonnet,
+    DeepSeek,
     Grok,
     Kimi,
+    Other(String),
 }
 impl ReviewModelFamily {
     pub fn for_model(model: &str) -> Option<Self> {
         let model = crate::usage::pricing::normalize_model(model);
+        // Kimi Code qualifies its version as `kimi-code/k3`, so the
+        // provider segment is part of the family identity.
+        if model.rsplit('/').nth(1) == Some("kimi-code") {
+            return Some(Self::Kimi);
+        }
         let model = model.rsplit('/').next().unwrap_or(&model);
+        if model.trim().is_empty() {
+            return None;
+        }
         if model.starts_with("gpt-") && model_matches_family(model, "terra") {
             Some(Self::Terra)
         } else if model.starts_with("gpt-") && model_matches_family(model, "sol") {
             Some(Self::Sol)
-        } else if model.starts_with("claude-") && model.contains("haiku") {
-            Some(Self::Haiku)
-        } else if (model.starts_with("deepseek-") && model_matches_family(model, "flash"))
-            || matches!(model, "dsf" | "dsfmax")
-        {
-            Some(Self::Flash)
+        } else if model.starts_with("claude-") && model_matches_family(model, "sonnet") {
+            Some(Self::Sonnet)
+        } else if model.starts_with("deepseek-") && model_matches_family(model, "pro") {
+            Some(Self::DeepSeek)
         } else if model.starts_with("grok-")
             && !["non-reasoning", "multi-agent", "build"]
                 .iter()
                 .any(|part| model.contains(part))
         {
             Some(Self::Grok)
-        } else if model.starts_with("kimi-k3.")
-            && model[8..]
-                .split(|c: char| !c.is_ascii_digit())
-                .next()
-                .and_then(|n| n.parse::<u32>().ok())
-                .is_some_and(|n| n >= 1)
-        {
+        } else if model.starts_with("kimi-") {
             Some(Self::Kimi)
         } else {
-            None
+            // Keep versions and reduced variants in one advertised family,
+            // including names such as gemini-3-pro, glm-5.3 and qwen3-235b.
+            let family = model
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .next()
+                .filter(|family| !family.is_empty())
+                .unwrap_or(model);
+            Some(Self::Other(family.to_owned()))
         }
     }
 }
@@ -93,7 +101,17 @@ pub fn model_version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
         )
     };
     let numbers = |id: &str| {
-        id.split(|c: char| !c.is_ascii_digit())
+        // A context capacity such as K3's `-256k` is not a release version.
+        id.split(['-', '_', '.', '/'])
+            .filter(|part| {
+                !part
+                    .strip_suffix('k')
+                    .or_else(|| part.strip_suffix('m'))
+                    .is_some_and(|size| {
+                        !size.is_empty() && size.bytes().all(|b| b.is_ascii_digit())
+                    })
+            })
+            .flat_map(|part| part.split(|c: char| !c.is_ascii_digit()))
             .filter(|p| !p.is_empty())
             .filter_map(|p| p.parse::<u64>().ok())
             .collect::<Vec<_>>()
@@ -101,6 +119,12 @@ pub fn model_version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
     alias(left)
         .cmp(&alias(right))
         .then_with(|| numbers(left).cmp(&numbers(right)))
+        // Highspeed is a same-version speed variant, not a newer model.
+        .then_with(|| {
+            right
+                .ends_with("-highspeed")
+                .cmp(&left.ends_with("-highspeed"))
+        })
         .then_with(|| left.cmp(right))
 }
 

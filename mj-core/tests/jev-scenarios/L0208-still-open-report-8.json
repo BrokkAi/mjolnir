@@ -1,0 +1,361 @@
+{
+  "id": "L0208",
+  "title": "Still open report 8",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "94d50e51871309db0decf51cd86f0f33",
+    "session_title": "eval22 3535 opus55",
+    "reply_position": 4718,
+    "captured_at": "2026-09-24T22:14:21.708Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3535: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 971393a3af610f82db95fb8e031da15b0c66bf72\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitati\n[... 2702 bytes omitted from the middle of this message ...]\na_c_call_to_header_connect_does_not_bind_a_reviewed_network_effect`.\n\nPutting the same header inside the workspace is a different route: `connect` then resolves `workspace_local` to that project file. That is ordinary source, the same shape #3493 already keys, not a system header.\n\n## Why a summary cannot paper over it\n\n`canonical_external_callee` returns nothing for an unqualified name. C/C++ does not publish single-segment external owners (#2606). The bare-call arm records no reference text and no `ExactExternalCallProof`, so `synthetic_unmaterialized_external` mints no target. `procedure-effects` treats the site as an armless residual (#2579). No target-keyed summary can address it.\n\nA follow-up also has to choose one pack label. `modeled_procedure_key_for_unit` labels a `.c` workspace function `cpp`. A `.c` semantic artifact is dialect `cpp-c`. No external key exists yet, so the split is not visible on a bound call, and the fix has to publish one label on purpose.\n\n## Work\n\nPublish a resolver-owned procedure key for the one file-scope function a compile-database-scoped header closure declares: declaring header, name, and written arity. Do not match the effect from the spelling. Until that key exists, #3457 stays open and ships no C specialization.\n\n\n---\nComment by jbellis:\n#3642 independently reproduces this same capability gap at the same base, with plain C external headers for `connect/3`, `send/4`, and `curl_easy_perform/1`. Extraction and include discovery succeed, but every global callable has `owner: None` and pack production reports `cpp.member_owner_unavailable`.\n\nIts additional evidence includes a complete workspace-helper call census, a local same-name negative control, recursion, unresolved helpers, and CLI/MCP inconclusive results. That supports this existing issue rather than a separate capability. Preserve #3642 as linked reproduction evidence and track implementation here. #3535 and #3457 remain open until declaration-backed external C identity and the reviewed-model acceptance actually work.\n\n"
+        },
+        {
+          "id": "user:1421",
+          "role": "user",
+          "text": "Infrastructure note from the judge: your session was moved to a different credential profile at 2026-09-24T00:01Z, which interrupted your turn. Nothing about the task changed. Your container, your checkout and your conversation are intact. Continue the brief from where you left off and finish with the FINAL REPORT as specified.\n"
+        },
+        {
+          "id": "user:2898",
+          "role": "user",
+          "text": "Series 22 #3535 landing. The lead accepted your frozen solution `cf51bdbd74d801fc426a246d22e5252e39c53cc1` (base `971393a3af610f82db95fb8e031da15b0c66bf72`) as the overall winner at 4.7. The judge's acceptance record is `judge-review/lead-acceptance-review.json` for this ticket. The source review found the identity form, the generated-pack cache version and the workspace-name guard correct, and credited you for keeping declined calls out of name-based indexing; it deducted for the missing inventory row, for limiting the route to `.c` units (the `extern \"C\"` call from a C++ unit does not bind), and for the absent header-not-reached, C++-unit and conditional-macro controls. The inventory row and a decision on C++ units are required corrections below. Land it in this same session, with the reconciliation and corrections below. Your initial score, report, bundle and usage stay frozen; everything below is a separate landing continuation and earns no initial credit. The session now runs on a different model and effort for the landing; that is expected.\n\nWork without subagents. Read the repository AGENTS.md and its routed architecture, testing and publication guidance again before changing anything. Do not write to any memory directory or MEMORY.md. The harness fails a turn after 10 minutes without activity: never block on one command for more than 5 minutes; run long builds and suites in the background or with a timeout of at most 300000 ms and poll them to completion. Do not end the turn while a gate is still running.\n\n## Merge\n\nConfirm the tree is clean and `HEAD` is `cf51bdbd74d801fc426a246d22e5252e39c53cc1`. Fetch origin and record the full hashes of `origin/master` and of the frozen solution. The lead last saw `origin/master` at `216b4b826352fabcfd376dde85ff38b18bb615b0` (the lead's local reading in a judge clone after a fetch at 2026-09-24T12:54:08Z, not a fresh fetch); use what you fetch. Master changes since the base that touch the same area: In the lead's reading, master has gained the #3528 abort-route landing (`d4bbca7c81097490ae986913fe0002b94208c3bd` through `43dc1a87d60533fb4b18f3da3872229722e21751`: C#, JavaScript, TypeScript and Python semantics, `tests/suite_bench_policy` modules, a `tests%2Fsuite_bench_policy.tsv` inventory change, one CHANGELOG entry and two `tests/suite_semantic` files), Java lint A5 work (`cec25e718` through `1fd08d41f`), the #3648 landing (merged at `32ded2f634b41d66a950534dd48e2c8a7968376b`, then `216b4b826352fabcfd376dde85ff38b18bb615b0`: Scala adaptation files, the Scala `ADAPTER_VERSION`, `tests/suite_semantic` and a `tests%2Fsuite_semantic.tsv` row) and the #3518 landing (merged at `0bdd62a66bd30968fdb58f1701a95dfea856ce9f`, then `50fb4a0dad7a325d56b64e1bba4ccd1cbb7ec4dd` and `0bb21b85b8864bdb22b7cfa75d169e194a0cc05a` for the inventory: `get_definition/scala.rs`, one `mod` line in `tests/suite_issues/main.rs` and one row in `tests%2Fsuite_issues.tsv`). Of the files your solution changes, only `tests/suite_issues/main.rs` has moved on master (the #3518 line, added in a later block of that file, not next to yours). None of it touches `crates/bifrost-cpp`, `analyzer/cpp`, `get_definition/cpp.rs`, `get_definition/mod.rs`, `workspace_oracle`, `semantic_model/catalog`, `store/epoch.rs` or the network-effect matrix note; `GENERATED_PRODUCTION_CACHE_VERSION` is still 29 there, and the C/C++ salt still ends at `cpp-source-member-prototype-units-2026-09`. The #3507 landing was dispatched at 2026-09-24T12:47Z and may push before you do. It changes `crates/bifrost-analysis/src/analyzer/semantic/workspace_oracle/dispatch.rs`, `tests/suite_issues/main.rs` and `.open-core/public-paths.d/tests%2Fsuite_issues.tsv`, which this landing also changes, and it adds the C/C++ salt token `cpp-member-dispatch-extensibility-2026-09` in `crates/bifrost-analysis/src/analyzer/store/epoch.rs`; it also changes `analyzer/cpp/mod.rs`, `crates/bifrost-cpp/src/declarations.rs` and `tests/suite_issues/issue_3493_c_cpp_callable_modifiers.rs`. Reconciliation rule 5 says how to merge it. Other landings may have pushed sinc\n[... 27487 bytes omitted from the middle of this message ...]\n proposed as separate issues; #3510 (structured C++ override modifiers and member-family support); and the load-sensitive held-lock timing test (#3476).\n\n## Report\n\nReply with LANDING REPORT on the first line, followed by these sections:\n\n1. Hashes: base, frozen solution, fetched `origin/master` (each fetch), every merge, every correction, the fully gated tree and the final pushed head, all in full.\n2. Merge: each conflict and inspected automatic merge, how you resolved it and why; identity and version reconciliation against merged master; epoch decision.\n3. Corrections: each required correction, its commit, what changed in production code, and the regression that proves it.\n4. Gates: exact commands, exit codes, test counts and log paths; any pre-existing failure with its same-tree reproduction; any isolated rerun with both outcomes.\n5. Judge probe: the unchanged SHA-256, each test's outcome and printed observations, and proof that probe files were restored or committed as instructed.\n6. Push: push output for every attempt, each re-merge with the gates rerun or credited and why, remote ancestry proof, and clean `git status --short`.\n7. Limitations and findings left open.\n8. A draft public approach comment of 5 to 12 plain-language sentences: first line names the landed hash and the preserved fix commit, then the cause, the change, the identity decision, and the measured evidence with its limits. Do not name any model, lane, harness, series or evaluation.\n\nJudge probe source, `judge_s22_3535.rs`:\n\nThe probe source is not inline (the prompt would exceed the transport's size limit). It is uploaded into your checkout at `judge/judge_s22_3535.rs`. Before installing it, run `sha256sum judge/judge_s22_3535.rs` and confirm `cd5eb78331c53a74ff2ca36aff97408831fd5a4961e72f5b65c81636206dd686`; if the hash differs, stop and report. Copy the file byte for byte to its suite path for the probe run, and delete the `judge/` directory before any commit so that `git status --short` shows nothing from it; it must never be committed.\n"
+        },
+        {
+          "id": "agent:2901",
+          "role": "assistant",
+          "text": "Starting the landing. First, re-reading the repository guidance, including the release/open-core guidance that covers the inventory work."
+        },
+        {
+          "id": "agent:2944",
+          "role": "assistant",
+          "text": "Reading the rest of the open-core guidance for the inventory workflow:"
+        },
+        {
+          "id": "agent:2982",
+          "role": "assistant",
+          "text": "Fetched `origin/master` = `6d3d5b31676132360fe105ed2ba712f9eb7f9351`, 57 commits past the base, and it is the #3507 landing merge, so rule 5 applies. Checking which of my files moved on master:"
+        },
+        {
+          "id": "agent:3002",
+          "role": "assistant",
+          "text": "Only the two predicted files overlap. Checking master's current values for every identity this change could touch:"
+        },
+        {
+          "id": "agent:3043",
+          "role": "assistant",
+          "text": "Guidance is unchanged. Checking out `origin/master` detached and merging the frozen solution:"
+        },
+        {
+          "id": "agent:3054",
+          "role": "assistant",
+          "text": "No conflicts; both overlapping files merged automatically. Inspecting each automatic merge, starting with `tests/suite_issues/main.rs`:"
+        },
+        {
+          "id": "agent:3067",
+          "role": "assistant",
+          "text": "`main.rs` is master plus my one line; #3507, #3518, #3641 and #3628 registrations are all kept. Now `workspace_oracle/dispatch.rs`:"
+        },
+        {
+          "id": "agent:3083",
+          "role": "assistant",
+          "text": "The textual comparison differs only if hunk headers moved; comparing the added/removed lines alone:"
+        },
+        {
+          "id": "agent:3112",
+          "role": "assistant",
+          "text": "All seven are byte-identical to the frozen solution. Committing the merge (no trailer, per the landing instructions):"
+        },
+        {
+          "id": "agent:3126",
+          "role": "assistant",
+          "text": "Merge commit: `d50dbdc46505e5059e511d97c5340299d2efb99d`. Starting a background build of the merged tree while I do correction 1:"
+        },
+        {
+          "id": "agent:3147",
+          "role": "assistant",
+          "text": "Exactly the one path is missing, and policy already classifies it. Running pass 1 of the baseline-preserving workflow into a temporary directory and reviewing the diff before replacing anything:"
+        },
+        {
+          "id": "agent:3277",
+          "role": "assistant",
+          "text": "Still compiling (a useful early check that the merge builds). Meanwhile, making the C-only decision explicit at the gate in `c_header_function_call`:"
+        },
+        {
+          "id": "agent:3332",
+          "role": "assistant",
+          "text": "Waiting for the merged build, then running the #3535 tests including the new control:"
+        },
+        {
+          "id": "agent:3346",
+          "role": "assistant",
+          "text": "The merged tree builds. Running the #3535 suite with the new control (this rebuilds for the comment edit):"
+        },
+        {
+          "id": "agent:3400",
+          "role": "assistant",
+          "text": "With the gate removed the `.cpp` call binds the reviewed effect and the control fails at its first assertion, so the control really tests the decision. Restoring the file byte-for-byte:"
+        },
+        {
+          "id": "agent:3419",
+          "role": "assistant",
+          "text": "Restored (hash matches the pre-mutation copy). Committing correction 2:"
+        },
+        {
+          "id": "agent:3453",
+          "role": "assistant",
+          "text": "All pass. Committing the controls separately:"
+        },
+        {
+          "id": "agent:3504",
+          "role": "assistant",
+          "text": "Gates are running on `61e9ff39f`; I will not touch the checkout until they finish. Meanwhile, reading the judge probe from its evidence copy (not installed yet) so I know what each probe asserts:"
+        },
+        {
+          "id": "agent:3528",
+          "role": "assistant",
+          "text": "The probe activates only the reviewed session pack, as the judge described. Polling the gates:"
+        },
+        {
+          "id": "agent:3554",
+          "role": "assistant",
+          "text": "`cargo fmt --all -- --check` passes. The rest will take a while; polling at intervals."
+        },
+        {
+          "id": "agent:3619",
+          "role": "assistant",
+          "text": "The analysis lib gate failed. Looking at which tests:"
+        },
+        {
+          "id": "agent:3736",
+          "role": "assistant",
+          "text": "Gates 1–12 are done; all pass except the #3476 flake in gate 5. Three remain (MCP server, persistence, focused #3535). Still polling:"
+        },
+        {
+          "id": "agent:3761",
+          "role": "assistant",
+          "text": "Every gate finished. Collecting the test counts from each log:"
+        },
+        {
+          "id": "agent:3771",
+          "role": "assistant",
+          "text": "All 15 gates pass except the one #3476 flake in gate 5 (3134/3135). Doing the single permitted isolated rerun of that test, unchanged, and keeping both outcomes:"
+        },
+        {
+          "id": "agent:3816",
+          "role": "assistant",
+          "text": "Probe installed (hash `cd5eb783…` verified). Running the exact probe command:"
+        },
+        {
+          "id": "agent:3831",
+          "role": "assistant",
+          "text": "The same seven pass and the same four fail. Now checking that each failure is at the same assertion as on the frozen solution, and collecting every `JUDGE3535 OBS` line:"
+        },
+        {
+          "id": "agent:3868",
+          "role": "assistant",
+          "text": "Those lines are truncated for display. Saving the full lines and checking the fields the lead cited for P0, P1, P2 and P9 (trace row, CLI exit):"
+        },
+        {
+          "id": "agent:3904",
+          "role": "assistant",
+          "text": "The tree is clean again at `61e9ff39f`. Before pushing, confirming the four landing commits carry no trailers:"
+        },
+        {
+          "id": "agent:3920",
+          "role": "assistant",
+          "text": "No trailers on the landing commits. All required gates have run on `61e9ff39f`. Pushing:"
+        },
+        {
+          "id": "agent:3934",
+          "role": "assistant",
+          "text": "The push was rejected because master advanced. Fetching to see what landed:"
+        },
+        {
+          "id": "agent:3945",
+          "role": "assistant",
+          "text": "Master advanced to `f3611aaeab3a9f40c24f111439c1891b002fe654` with the #3631 landing (C++ `::` spellings through exact-name lookup). Listing all eight changed files to see which gate inputs moved:"
+        },
+        {
+          "id": "agent:3995",
+          "role": "assistant",
+          "text": "Both sides added one `mod` line at the same spot. Resolving by keeping both, in numeric order (3535, then 3631):"
+        },
+        {
+          "id": "agent:4015",
+          "role": "assistant",
+          "text": "Both overlapping files are now new master plus my one line/row; the #3507, #3518 and #3631 rows are all present. Confirming the other files came through unaltered from their respective sides:"
+        },
+        {
+          "id": "agent:4035",
+          "role": "assistant",
+          "text": "Every file came through as expected. Committing the re-merge:"
+        },
+        {
+          "id": "agent:4047",
+          "role": "assistant",
+          "text": "Merge commit `2dead7e0ea8fc6fe7fd0663a3a837c74c7a93f79`. Rechecking identities on the merged tree and looking at the CHANGELOG, which the #3631 landing just extended:"
+        },
+        {
+          "id": "agent:4068",
+          "role": "assistant",
+          "text": "The top section is the dated 0.12.0 release. Checking where the #3631 landing placed its entry, to follow the current convention:"
+        },
+        {
+          "id": "agent:4082",
+          "role": "assistant",
+          "text": "Landings are adding entries to the 0.12.0 section (the #3631 entry sits at line 197). Finding that subsection:"
+        },
+        {
+          "id": "agent:4096",
+          "role": "assistant",
+          "text": "The #3631 entry is under Fixed. Mine is a new capability, so it belongs under Added. Viewing the end of that subsection:"
+        },
+        {
+          "id": "agent:4109",
+          "role": "assistant",
+          "text": "I'll add the entry right after the related C/C++ callable-modifier entry (#3493):"
+        },
+        {
+          "id": "agent:4128",
+          "role": "assistant",
+          "text": "Before starting the full gate rerun, checking whether master moved again, so I don't gate a stale tree:"
+        },
+        {
+          "id": "agent:4141",
+          "role": "assistant",
+          "text": "Master is unchanged, so `9ee902339` contains it. Starting the full gate rerun on this tree:"
+        },
+        {
+          "id": "agent:4189",
+          "role": "assistant",
+          "text": "Fmt, open-core, clippy and the cpp lib pass on the new tree; the analysis lib is running. Continuing to poll:"
+        },
+        {
+          "id": "agent:4232",
+          "role": "assistant",
+          "text": "Gate 5 again fails only on the #3476 held-lock test; I'll give it the isolated rerun once the runner finishes. Checking its message and the count:"
+        },
+        {
+          "id": "agent:4322",
+          "role": "assistant",
+          "text": "All gates finished on `9ee902339`. Doing the isolated #3476 rerun, then collecting counts:"
+        },
+        {
+          "id": "agent:4385",
+          "role": "assistant",
+          "text": "Master moved again, to `90f6e4f2da7bcaf54916486e2c15f68aead1d5dc`. Inspecting what landed and whether it touches any tested input:"
+        },
+        {
+          "id": "agent:4402",
+          "role": "assistant",
+          "text": "The #3633 landing changes the C++ graph resolver and extractor, the store, and the C/C++ epoch salt. Those are inputs to every compiled gate, so after merging I'll rerun them all. Merging:"
+        },
+        {
+          "id": "agent:4420",
+          "role": "assistant",
+          "text": "Everything merged automatically. Inspecting the three overlapping automatic merges (`main.rs`, the inventory shard, `CHANGELOG.md`) against the new master:"
+        },
+        {
+          "id": "agent:4470",
+          "role": "assistant",
+          "text": "Third merge: `ac4f88b730915d32ec5afb82e7fe341b4d023192`; the open-core check passes. Since #3633 changed inputs to every compiled gate, starting the full gate run again:"
+        },
+        {
+          "id": "agent:4510",
+          "role": "assistant",
+          "text": "Fmt, open-core, clippy and the cpp lib pass. Meanwhile, a read-only fetch to see whether master is moving again:"
+        },
+        {
+          "id": "agent:4559",
+          "role": "assistant",
+          "text": "Again only the #3476 held-lock test. Confirming the count and continuing:"
+        },
+        {
+          "id": "agent:4627",
+          "role": "assistant",
+          "text": "All gates finished on `ac4f88b73`. Isolated #3476 rerun, then the counts:"
+        },
+        {
+          "id": "agent:4639",
+          "role": "assistant",
+          "text": "All gates pass on `ac4f88b73` except the #3476 flake, which again passes alone. Running the judge probe on this tree (install, run, restore):"
+        },
+        {
+          "id": "agent:4674",
+          "role": "assistant",
+          "text": "The push succeeded (`90f6e4f2d..ac4f88b73`). Verifying remote ancestry and a clean tree:"
+        },
+        {
+          "id": "agent:4704",
+          "role": "assistant",
+          "text": "Everything is landed and verified. Pulling the final probe observation lines verbatim for the report:"
+        },
+        {
+          "id": "agent:4718",
+          "role": "assistant",
+          "text": "LANDING REPORT\n\nLanded. `origin/master` is `ac4f88b730915d32ec5afb82e7fe341b4d023192`: the frozen #3535 solution plus the two required corrections, three extra controls and a changelog entry. It took three merges with master because master moved twice during gating.\n\n## 1. Hashes\n\n| Item | Hash |\n|---|---|\n| Base | `971393a3af610f82db95fb8e031da15b0c66bf72` |\n| Frozen solution | `cf51bdbd74d801fc426a246d22e5252e39c53cc1` |\n| Fetch 1 (`origin/master`, includes #3507) | `6d3d5b31676132360fe105ed2ba712f9eb7f9351` |\n| Fetch 2 (after push 1 rejected, #3631) | `f3611aaeab3a9f40c24f111439c1891b002fe654` |\n| Fetch 3 (after push 2 rejected, #3633) | `90f6e4f2da7bcaf54916486e2c15f68aead1d5dc` |\n| Merge 1 (frozen into fetch 1) | `d50dbdc46505e5059e511d97c5340299d2efb99d` |\n| Correction 1 (inventory row) | `bda5c7aa995124f096cb87395a74d0c443b40468` |\n| Correction 2 (C++ unit decision) | `4b63014750fcc88ad0fc43c8771d62f6f3a96a35` |\n| Extra controls (header reach, arity) | `61e9ff39f1f581dd7414bb0b288345289f278c5f` |\n| Merge 2 (fetch 2) | `2dead7e0ea8fc6fe7fd0663a3a837c74c7a93f79` |\n| Changelog entry | `9ee9023392c531a9e7a95d912ea3b84c0eb23ce3` |\n| Merge 3 (fetch 3) | `ac4f88b730915d32ec5afb82e7fe341b4d023192` |\n\n- **Fully gated trees:** `61e9ff39f`, `9ee902339` and `ac4f88b73`, each with all gates.\n- **Final pushed head:** `ac4f88b730915d32ec5afb82e7fe341b4d023192`.\n- **Trailers:** none of the landing commits carries a trailer. The frozen commit keeps its original message, since rebasing was not allowed.\n\n## 2. Merge\n\n**Merge 1** (`d50dbdc46`) had no conflicts; two files merged automatically, and I inspected both.\n- `tests/suite_issues/main.rs` = master plus my one `mod` line. The #3507, #3518, #3628 and #3641 lines are all kept.\n- `workspace_oracle/dispatch.rs` = master plus my one hunk (the declaring-language label in `synthetic_unmaterialized_external`). All 137 lines #3507 added are intact; I checked this by comparing the added and removed lines, ignoring hunk headers.\n- My other seven files are byte-identical to the frozen solution.\n\n**Merge 2** (`2dead7e0e`):\n- `main.rs` conflicted because both sides added one line in the same place. I kept both, in numeric order (3535, then 3631).\n- The inventory shard merged automatically and keeps both private rows.\n- Every other #3631 file is master's version.\n\n**Merge 3** (`ac4f88b73`) merged automatically.\n- `main.rs`, the shard and `CHANGELOG.md` each come out as master plus exactly my line, row or entry, with the #3633 additions kept.\n- Every #3633 file, including `store/epoch.rs`, is master's version.\n\n**Identities:**\n- `GENERATED_PRODUCTION_CACHE_VERSION` goes from 29 to **30**. Master is still at 29, so 30 is the next unused value. It covers the producer change; correction 2 changes no generated bytes.\n- The C/C++ extraction epoch salt is master's exactly, now ending `…;cpp-member-dispatch-extensibility-2026-09;namespace-recovery-ancestry-authority-2026-09`. I added no token, because this change persists no workspace language fact.\n- `SEMANTIC_MODEL_RUNTIME_REPRESENTATION_VERSION` (6), `SEMANTIC_IR_SCHEMA_VERSION` (33), the adapter version and the pack labels are unchanged.\n\n## 3. Corrections\n\n**Correction 1** (`bda5c7aa9`). I ran the baseline-preserving pass (`snapshot.mjs inventory --baseline-inventory`) after committing the merge. It added exactly one row, `100644\tprivate\ttests/suite_issues/issue_3535_c_header_function_identity.rs`, and changed no other row. `check-open-core-classification.mjs` now exits 0.\n\n**Correction 2** (`4b6301475`). **Decision: not extended.** The route stays C only; a `.cpp` unit reaching an `extern \"C\"` declaration stays open.\n- **Case I could not exclude.** In a `.cpp` unit, `connect(s, a, b)` can reach, through argument-dependent lookup, another `connect` declared in the namespace of an argument's type, or as a friend of that type.\n- **Missing structured facts:**\n  - `cpp_expression_type` resolves an argument type to a `CodeUnit` only inside the workspace (`cpp_resolve_type_unit`). An external type such as `struct sockaddr` is only a spelling with no \n[... 9566 bytes omitted from the middle of this message ...]\nuoted includes** inside external headers are not followed.\n- **Still open:** #3457, #3458, #3640, #3676, the parse-recovery certificate and quoted-include findings, #3510, and #3476.\n\n## 8. Draft approach comment\n\nLanded as `ac4f88b730915d32ec5afb82e7fe341b4d023192`, which preserves the fix commit `cf51bdbd74d801fc426a246d22e5252e39c53cc1`. A C call to a function that a system or library header declares at file scope, such as POSIX `connect`, published no callee identity. The generated header pack dropped such declarations because nothing owned them, so a reviewed summary could never attach and every caller stayed open. The header pack now publishes each file-scope declaration under a module owner for its declaring header. A bare call in a `.c` file binds the one such function its compile-database header closure declares, at the written arity, and only when no workspace function of that name exists. The identity is the declaring header's include path without its extension, the name, the written arity and no receiver, labelled `cpp`, so a reviewed summary names it as `path: sys/socket.h`, `symbol: connect`. The generated-pack cache version moved from 29 to 30; no extraction epoch changed. With a reviewed network summary active, the issue's fixture and the plain-C POSIX and libcurl reproduction report a declared effect with exhaustive coverage, and eleven negative controls stay open with no effect. The route is C only: a C++ file calling the same `extern \"C\"` function stays open, because argument-dependent lookup could add another function the analyzer cannot rule out, and the C++ row depends on #3458. A call with an unprovable written arity, for example through a conditional macro, stays open pending #3676, and a name declared by two reached headers stays ambiguous. A same-named workspace function anywhere keeps the call open. Real glibc and libcurl headers still need parse recovery around unexpanded declaration macros, and quoted includes inside external headers are not followed, so those calls stay open for now."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": " every attempt, each re-merge with the gates rerun or credited and why, remote ancestry proof, and clean `git status --short`.\n7. Limitations and findings left open.\n8. A draft public approach comment of 5 to 12 plain-language sentences: first line names the landed hash and the preserved fix commit, then the cause, the change, the identity decision, and the measured evidence with its limits. Do not name any model, lane, harness, series or evaluation.\n\nJudge probe source, `judge_s22_3535.rs`:\n\nThe probe source is not inline (the prompt would exceed the transport's size limit). It is uploaded into your checkout at `judge/judge_s22_3535.rs`. Before installing it, run `sha256sum judge/judge_s22_3535.rs` and confirm `cd5eb78331c53a74ff2ca36aff97408831fd5a4961e72f5b65c81636206dd686`; if the hash differs, stop and report. Copy the file byte for byte to its suite path for the probe run, and delete the `judge/` directory before any commit so that `git status --short` shows nothing from it; it must never be committed.\n",
+    "assistant_text_tail": "uoted includes** inside external headers are not followed.\n- **Still open:** #3457, #3458, #3640, #3676, the parse-recovery certificate and quoted-include findings, #3510, and #3476.\n\n## 8. Draft approach comment\n\nLanded as `ac4f88b730915d32ec5afb82e7fe341b4d023192`, which preserves the fix commit `cf51bdbd74d801fc426a246d22e5252e39c53cc1`. A C call to a function that a system or library header declares at file scope, such as POSIX `connect`, published no callee identity. The generated header pack dropped such declarations because nothing owned them, so a reviewed summary could never attach and every caller stayed open. The header pack now publishes each file-scope declaration under a module owner for its declaring header. A bare call in a `.c` file binds the one such function its compile-database header closure declares, at the written arity, and only when no workspace function of that name exists. The identity is the declaring header's include path without its extension, the name, the written arity and no receiver, labelled `cpp`, so a reviewed summary names it as `path: sys/socket.h`, `symbol: connect`. The generated-pack cache version moved from 29 to 30; no extraction epoch changed. With a reviewed network summary active, the issue's fixture and the plain-C POSIX and libcurl reproduction report a declared effect with exhaustive coverage, and eleven negative controls stay open with no effect. The route is C only: a C++ file calling the same `extern \"C\"` function stays open, because argument-dependent lookup could add another function the analyzer cannot rule out, and the C++ row depends on #3458. A call with an unprovable written arity, for example through a conditional macro, stays open pending #3676, and a name declared by two reached headers stays ambiguous. A same-named workspace function anywhere keeps the call open. Real glibc and libcurl headers still need parse recovery around unexpanded declaration macros, and quoted includes inside external headers are not followed, so those calls stay open for now.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 2898,
+    "input_rationale": "LANDING REPORT: the solution is on origin/master after three merges. The listed tickets and findings are other issues and limitations recorded for follow-up; nothing is asked of the judge.",
+    "label": "none",
+    "trigger": "Still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": []
+  }
+}

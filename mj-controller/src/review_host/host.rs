@@ -199,6 +199,49 @@ impl TurnReviewHost {
         self.begin_push(session_id, None).await.map(|_| ())
     }
 
+    /// Whether `session_id` has a review open. The host's own slots answer, so
+    /// callers never infer this from a copy of the review views. A session
+    /// with an open review is waiting for its verdict.
+    pub(crate) async fn has_open_review(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, OpenReviewUnknown> {
+        let (reply, answer) = oneshot::channel();
+        self.events
+            .send(HostEvent::HasOpenReview {
+                session_id: session_id.to_owned(),
+                reply,
+            })
+            .map_err(|_| OpenReviewUnknown::HostStopped)?;
+        answer.await.map_err(|_| OpenReviewUnknown::HostStopped)?
+    }
+
+    /// Puts the host in the state a failed startup recovery leaves it in.
+    #[cfg(test)]
+    pub(crate) fn fail_startup_recovery(&self, error: &str) {
+        let _ = self
+            .events
+            .send(HostEvent::StartupRecoveryFailed(error.to_owned()));
+    }
+
+    /// Hands a finished reviewer child to the host's closer. The host retries
+    /// the close with backoff until it succeeds; callers must not close the
+    /// child again themselves.
+    pub(crate) fn close_child(&self, child_session_id: String) {
+        let _ = self.events.send(HostEvent::CloseChild { child_session_id });
+    }
+
+    /// Reports that a reviewer child's session ended (stopped, destroyed or
+    /// failed). The daemon's record owner calls this once per such transition.
+    /// A role that already has an outcome, and a child no open group tracks,
+    /// are left alone.
+    pub(crate) fn child_ended(&self, child_session_id: String, reason: String) {
+        let _ = self.events.send(HostEvent::ChildEnded {
+            child_session_id,
+            reason,
+        });
+    }
+
     pub(crate) async fn reviewer_finished(
         &self,
         session_id: String,
@@ -210,7 +253,12 @@ impl TurnReviewHost {
             .send(HostEvent::ReviewerFinished {
                 session_id,
                 child_session_id,
-                answer,
+                report: match answer {
+                    Some(answer) => ReviewerReport::Answer(answer),
+                    None => ReviewerReport::Failed(
+                        "the reviewer finished without calling handback".into(),
+                    ),
+                },
                 reply,
             })
             .map_err(|_| "review host stopped".to_owned())?;
@@ -292,4 +340,15 @@ impl TurnReviewHost {
             .ok()?;
         result.await.ok().flatten()
     }
+}
+
+/// Why the host could not say whether a session has an open review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OpenReviewUnknown {
+    /// Its startup recovery failed and it did not restore this session.
+    RecoveryFailed(String),
+    /// Its startup sweep has not finished restoring reviews yet.
+    NotReady,
+    /// The host task is gone.
+    HostStopped,
 }

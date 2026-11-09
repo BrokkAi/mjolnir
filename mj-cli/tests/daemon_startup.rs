@@ -246,11 +246,23 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Hard-won: 803c9fe1: rewound upgrade fixtures retained the later mailbox failure column.
     // Hard-won: #1302: the old-store fixture must also remove the notification epoch.
     // Hard-won: 5f5e74082: kept current GitHub watch tables, so migration 85 found no v84 columns to drop.
+    // Hard-won: a58ad7eb8: kept migration 116's prompt_history triggers, which name sessions, so migration 68's table rebuild failed.
     // Restore the singleton preference table used before schema 101.
     // Restore the review table before migrations 104 and 106 add these columns.
+    // Restore prompt_history before migration 116 adds its triggers, search table and command column.
     connection
         .execute_batch(
-            "ALTER TABLE turn_review_state DROP COLUMN active_group;
+            "DROP TRIGGER prompt_history_top_level_only;
+         DROP TRIGGER prompt_history_child_registered;
+         DROP TRIGGER prompt_history_session_destroyed;
+         DROP TRIGGER prompt_history_text_insert;
+         DROP TRIGGER prompt_history_text_delete;
+         DROP TRIGGER prompt_history_text_update;
+         DROP TABLE prompt_history_text;
+         DROP INDEX prompt_history_command;
+         ALTER TABLE sessions DROP COLUMN no_github_credentials;
+         ALTER TABLE prompt_history DROP COLUMN command_id;
+         ALTER TABLE turn_review_state DROP COLUMN active_group;
          ALTER TABLE turn_review_state DROP COLUMN push_findings;
          ALTER TABLE turn_review_state DROP COLUMN pending_followup;
          ALTER TABLE turn_review_state DROP COLUMN forward_attempts;
@@ -425,8 +437,9 @@ fn a_daemon_reports_a_fresh_identity_for_each_start() {
 
 #[cfg(target_os = "linux")]
 // Hard-won: 92b39c9da: suspending the launcher's session deleted the daemon's working directory.
+// Hard-won: a97c0e7bc: node inherited a deleted checkout and every npm startup probe exited with status 7.
 #[test]
-fn daemon_working_directory_survives_removal_of_the_launching_checkout() {
+fn daemon_and_node_working_directories_survive_removal_of_the_launching_checkout() {
     let storage = upgrade_storage();
     let home = storage.path().join("home");
     let checkout = storage.path().join("checkout");
@@ -448,22 +461,57 @@ fn daemon_working_directory_survives_removal_of_the_launching_checkout() {
     let metadata: mj_client::daemon::DaemonMetadata =
         serde_json::from_slice(&fs::read(storage.path().join("data/daemon.json")).unwrap())
             .unwrap();
-    fs::remove_dir(&checkout).unwrap();
     let daemon_cwd = std::path::PathBuf::from(format!("/proc/{}/cwd", metadata.pid));
-    let output = mj_core::subprocess::run_with_input(
-        Command::new("git")
-            .args(["config", "--global", "--includes", "--null", "--list"])
-            .env("HOME", &home)
-            .current_dir(&daemon_cwd),
-        &[],
-    )
-    .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fs::read_link(daemon_cwd).unwrap(), home);
+    // The node is a detached sibling, so identify this fixture's node by its
+    // instance data directory rather than relying on process parentage.
+    let data_environment = format!("MJ_DATA_DIR={}", storage.path().join("data").display());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let node_cwd = loop {
+        let node = fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                let Ok(command) = fs::read(entry.path().join("cmdline")) else {
+                    return false;
+                };
+                command.split(|byte| *byte == 0).nth(1) == Some(b"node".as_slice())
+                    && fs::read(entry.path().join("environ")).is_ok_and(|environment| {
+                        environment
+                            .split(|byte| *byte == 0)
+                            .any(|entry| entry == data_environment.as_bytes())
+                    })
+            });
+        if let Some(node) = node {
+            let cwd = node.path().join("cwd");
+            // exec happens before main changes directory.
+            if fs::read_link(&cwd).unwrap() == home {
+                break cwd;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "node never entered the stable home directory"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    fs::remove_dir(&checkout).unwrap();
+    for cwd in [daemon_cwd, node_cwd] {
+        let output = mj_core::subprocess::run_with_input(
+            Command::new("git")
+                .args(["config", "--global", "--includes", "--null", "--list"])
+                .env("HOME", &home)
+                .current_dir(&cwd),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read_link(cwd).unwrap(), home);
+    }
 }
 
 #[test]
@@ -696,6 +744,178 @@ fn automatic_upgrade_waits_for_work_then_migrates_without_another_invocation() {
     });
     assert!(old.0.wait().unwrap().success());
     assert_upgraded(&path);
+}
+
+// Hard-won: #1457: a `daemon.json` left by a daemon that died with its host made the client wait forever for a handoff nothing could accept.
+#[test]
+fn a_record_whose_daemon_died_does_not_block_the_upgrade() {
+    let current = mj_client::daemon::PROTOCOL_VERSION;
+    // An older release, an older protocol, and a protocol this client cannot
+    // speak: none of them has a process behind it.
+    for (version, protocol) in [
+        ("2.21.0", current),
+        ("2.21.0", current - 1),
+        ("999.0.0", current + 1),
+    ] {
+        let storage = upgrade_storage();
+        let path = current_store(&storage);
+        // An address that refused connections a moment ago, and the id of a
+        // process that has exited.
+        let address = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut gone = Command::new(env!("CARGO_BIN_EXE_mj"))
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        gone.wait().unwrap();
+        let stale = mj_client::daemon::DaemonMetadata {
+            protocol_version: protocol,
+            pid: gone.id(),
+            address,
+            token: "died-with-the-host".into(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            build_version: version.into(),
+            instance_id: String::new(),
+            placement: mj_client::daemon::DaemonPlacement::Host,
+        };
+        let metadata_path = storage.path().join("data/daemon.json");
+        fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        let log = storage.path().join("client.log");
+        let (status, output) = run_client_with_deadline(&mut upgrade_command(&storage), &log);
+        assert!(status.success(), "{version}/{protocol}: {output}");
+        let started: mj_client::daemon::DaemonMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        assert_ne!(started.token, stale.token, "{version}/{protocol}");
+        assert!(
+            started
+                .build_version
+                .starts_with(mj_core::worker_build::BUILD_ID),
+            "{}",
+            started.build_version
+        );
+        assert!(path.exists());
+    }
+}
+
+// Hard-won: #1457: a daemon that died while the client waited for it to accept the handoff left the client waiting for ever.
+#[test]
+fn a_daemon_that_dies_during_the_handoff_wait_is_replaced() {
+    use std::time::{Duration, Instant};
+    let storage = upgrade_storage();
+    current_store(&storage);
+    let busy = storage.path().join("work-in-flight");
+    fs::write(&busy, "accepted work").unwrap();
+    let old = OldDaemon(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "old_daemon_fixture", "--nocapture"])
+            .env("MJ_TEST_OLD_DAEMON_VERSION", "2.21.0")
+            .env(
+                "MJ_TEST_OLD_PROTOCOL",
+                mj_client::daemon::PROTOCOL_VERSION.to_string(),
+            )
+            .env("MJ_TEST_UPGRADE_BUSY_FILE", &busy)
+            .env("MJ_INSTANCE", "upgrade-test")
+            .env("MJ_DATA_DIR", storage.path().join("data"))
+            .env("MJ_CONFIG_DIR", storage.path().join("config"))
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let metadata_path = storage.path().join("data/daemon.json");
+    while !metadata_path.exists() {
+        assert!(Instant::now() < deadline, "fixture did not become ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let stale: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    let log = storage.path().join("client.log");
+    let (status, output) = std::thread::scope(|scope| {
+        let mut command = upgrade_command(&storage);
+        let log = &log;
+        let client = scope.spawn(move || run_client_with_deadline(&mut command, log));
+        while !busy.with_extension("observed").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "client did not ask for safe handoff"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Killed, not stopped: the record stays and the store guard is
+        // released by the operating system.
+        drop(old);
+        client.join().unwrap()
+    });
+    assert!(status.success(), "{output}");
+    let started: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    assert_ne!(started.token, stale.token);
+}
+
+// Hard-won: #1457: a container daemon's store guard is in its volume, so a free host guard and an unanswered ping made a live, busy container daemon look gone.
+#[test]
+fn a_container_daemon_that_does_not_answer_is_not_replaced() {
+    use std::time::{Duration, Instant};
+    let storage = upgrade_storage();
+    current_store(&storage);
+    // A busy container daemon: its endpoint takes connections and answers none.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let connections = connections.clone();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                connections.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                held.push(stream);
+            }
+        });
+    }
+    // A container daemon's record: PID 0, an older build, and no host store
+    // guard, which lives in the container's volume.
+    let stale = mj_client::daemon::DaemonMetadata {
+        protocol_version: mj_client::daemon::PROTOCOL_VERSION,
+        pid: 0,
+        address,
+        token: "busy-in-its-container".into(),
+        started_at: chrono::Utc::now().to_rfc3339(),
+        build_version: "2.21.0".into(),
+        instance_id: String::new(),
+        placement: mj_client::daemon::DaemonPlacement::Host,
+    };
+    let metadata_path = storage.path().join("data/daemon.json");
+    fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+    let log = storage.path().join("client.log");
+    let mut command = upgrade_command(&storage);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(fs::File::create(&log).unwrap())
+        .stderr(fs::File::create(&log).unwrap());
+    let mut client = command.spawn().unwrap();
+    // The handoff asks again each round; several asks with the record in place
+    // show that the client waits for the daemon instead of replacing it.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while connections.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+        assert!(
+            client.try_wait().unwrap().is_none(),
+            "the client gave up: {}",
+            fs::read_to_string(&log).unwrap_or_default()
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the client did not ask the daemon"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let kept: mj_client::daemon::DaemonMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    assert_eq!(kept.token, stale.token, "the record was replaced");
+    client.kill().unwrap();
+    client.wait().unwrap();
 }
 
 #[test]

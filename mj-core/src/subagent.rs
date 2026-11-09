@@ -1,7 +1,9 @@
 //! Durable contracts for Mjolnir-managed child-agent sessions.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
+use crate::continuation::GeneratedPrompt;
 use serde::{Deserialize, Serialize};
 
 /// A session's delegation policy, optionally overriding global task choices.
@@ -343,6 +345,32 @@ pub enum SubagentFinishIdentity {
     },
 }
 
+impl SubagentFinishIdentity {
+    /// Whether a report with this identity was made after the turn that
+    /// completed at `ordinal`, or for a later one: the parent has been told of
+    /// that turn's ending.
+    pub fn covers(&self, ordinal: u64) -> bool {
+        self.completed_ordinal()
+            .is_some_and(|completed| completed >= ordinal)
+    }
+
+    /// The ordinal of the turn this finish completed, whatever the kind of
+    /// identity: a terminal one carries the last completed turn, and has none
+    /// for a child that never completed a turn. The one place that says which
+    /// turn a finish's recorded facts belong to.
+    pub fn completed_ordinal(&self) -> Option<u64> {
+        match self {
+            Self::Turn {
+                completed_ordinal, ..
+            } => Some(*completed_ordinal),
+            Self::Terminal {
+                last_completed_ordinal,
+                ..
+            } => *last_completed_ordinal,
+        }
+    }
+}
+
 fn deserialize_terminal_last_completed_ordinal<'de, D>(
     deserializer: D,
 ) -> Result<Option<u64>, D::Error>
@@ -432,6 +460,8 @@ pub enum SubagentToolAction {
         path: Option<String>,
     },
     Spawn {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_github_credentials: bool,
         task_name: String,
         instructions: String,
         #[serde(default)]
@@ -516,6 +546,8 @@ enum SubagentToolActionWire {
         path: Option<String>,
     },
     Spawn {
+        #[serde(default)]
+        no_github_credentials: bool,
         task_name: String,
         instructions: String,
         #[serde(default)]
@@ -641,6 +673,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 Self::SetReviewBaseline { commit, path }
             }
             SubagentToolActionWire::Spawn {
+                no_github_credentials,
                 task_name,
                 instructions,
                 task_type,
@@ -651,6 +684,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 context,
                 files,
             } => Self::Spawn {
+                no_github_credentials,
                 task_name,
                 instructions,
                 task_type,
@@ -791,6 +825,15 @@ pub enum SubagentKind {
 }
 
 impl SubagentKind {
+    /// Maximum report length, counted in Unicode characters.
+    #[must_use]
+    pub fn max_handback_chars(self) -> usize {
+        match self {
+            Self::Worker => MAX_HANDBACK_CHARS,
+            Self::Reviewer | Self::Oracle => MAX_ADVISOR_HANDBACK_CHARS,
+        }
+    }
+
     /// Key in the request index; the record keeps the caller's original id.
     #[must_use]
     pub fn request_key(self, key: &str) -> String {
@@ -972,17 +1015,26 @@ pub enum SubagentMcpRole {
 }
 
 impl SubagentMcpRole {
-    /// Only top-level sessions enforce the automatic push-review gate.
+    /// The arguments that start the `mj-review` server. Only a managed child
+    /// names its role, which selects its instructions; a top-level session's
+    /// arguments stay as earlier builds wrote them.
     #[must_use]
-    pub fn supports_push_gate(self) -> bool {
-        matches!(self, Self::Parent | Self::MessageOnly)
-    }
-
-    /// Whether a session in this role is offered the `mj-review` server: the
-    /// role enforces the push gate and the launch turned the gate on.
-    #[must_use]
-    pub fn offers_review_server(self, review_gate: bool) -> bool {
-        review_gate && self.supports_push_gate()
+    pub fn review_server_args(self, socket: &Path, harness: &str) -> Vec<String> {
+        let mut args: Vec<String> = [
+            "worker",
+            "subagent-mcp",
+            "--socket",
+            &socket.to_string_lossy(),
+            "--harness",
+            harness,
+            "--review-server",
+        ]
+        .map(str::to_owned)
+        .into();
+        if matches!(self, Self::Child | Self::FetchOnly) {
+            args.extend(["--role".to_owned(), self.id().to_owned()]);
+        }
+        args
     }
 
     #[must_use]
@@ -1036,11 +1088,6 @@ impl std::str::FromStr for SubagentMcpRole {
     }
 }
 
-/// Command id prefix of the one prompt that reminds a child to hand back its
-/// report. A turn whose command id carries it is that reminder, which is how
-/// [`report_state`] tells it from the task it follows up.
-pub const HANDBACK_REMINDER_PREFIX: &str = "handback-reminder";
-
 /// The reminder itself, sent as an ordinary prompt so the child's transcript
 /// shows it. A turn can end before the task is done (a harness failure, a
 /// question in plain text), so the reminder must not order a child that has
@@ -1051,7 +1098,13 @@ pub const HANDBACK_REMINDER_TEXT: &str = "[handback reminder] Your turn ended wi
 /// A child's delegated authority and reporting requirements. Shared
 /// by the first-prompt note, the child's server instructions and the handback
 /// tool description, so the three cannot drift apart.
-pub const HANDBACK_REPORT_RULES: &str = "Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.";
+pub static HANDBACK_REPORT_RULES: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Your parent reads your report, at most {} characters for workers or {} for oracles and reviewers: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.",
+        SubagentKind::Worker.max_handback_chars(),
+        SubagentKind::Oracle.max_handback_chars(),
+    )
+});
 
 /// What a child's first prompt opens with when it has the tool. It leads the
 /// prompt rather than trailing a parent's long instructions, where live runs
@@ -1060,7 +1113,8 @@ pub const HANDBACK_REPORT_RULES: &str = "Your report is what the parent reads, a
 #[must_use]
 pub fn handback_prompt_note(report_dir: &str) -> String {
     format!(
-        "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is {report_dir}. {HANDBACK_REPORT_RULES}"
+        "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is {report_dir}. {}",
+        HANDBACK_REPORT_RULES.as_str()
     )
 }
 
@@ -1069,12 +1123,12 @@ pub fn handback_prompt_note(report_dir: &str) -> String {
 /// or it never reached the child; either way it is not coming.
 pub const HANDBACK_REMINDER_GRACE_MS: i64 = 30_000;
 
-/// The longest report a child can hand back or a notification includes.
+/// The longest ordinary worker report a handback or notification includes.
 /// Details belong in files in the child's report directory.
 pub const MAX_HANDBACK_CHARS: usize = 4_000;
 
-/// Reviewers return their complete structured findings in one handback.
-pub const MAX_REVIEWER_HANDBACK_CHARS: usize = 128 * 1024;
+/// Oracles and reviewers return complete advice and findings in one handback.
+pub const MAX_ADVISOR_HANDBACK_CHARS: usize = 64 * 1024;
 
 /// Directory under a parent's workspace root that holds its children's report
 /// directories, outside every repository.
@@ -1110,6 +1164,7 @@ pub fn max_child_report_bytes(max_concurrent_children: usize) -> u64 {
 pub fn bounded_report(text: &str) -> (String, bool) {
     bounded_report_with_recovery(
         text,
+        SubagentKind::Worker.max_handback_chars(),
         "use send_message to ask the child to write the details to files in its report directory and send you the paths",
     )
 }
@@ -1119,31 +1174,33 @@ pub fn bounded_report(text: &str) -> (String, bool) {
 pub fn bounded_oracle_report(text: &str) -> (String, bool) {
     bounded_report_with_recovery(
         text,
+        SubagentKind::Oracle.max_handback_chars(),
         "use ask_oracle to ask for the rest; the oracle keeps its context",
     )
 }
 
-fn bounded_report_with_recovery(text: &str, recovery: &str) -> (String, bool) {
+fn bounded_report_with_recovery(text: &str, maximum: usize, recovery: &str) -> (String, bool) {
     let total = text.chars().count();
-    if total <= MAX_HANDBACK_CHARS {
+    if total <= maximum {
         return (text.to_owned(), false);
     }
-    let kept: String = text.chars().take(MAX_HANDBACK_CHARS).collect();
+    let kept: String = text.chars().take(maximum).collect();
     (
         format!(
             "{kept}\n[truncated: {} more characters; {recovery}]",
-            total - MAX_HANDBACK_CHARS
+            total - maximum
         ),
         true,
     )
 }
 
-/// Whether a command id names a handback reminder.
+/// Whether a command id names the prompt that reminds a child to hand back its
+/// report, which is how [`report_state`] tells it from the task it follows up.
 #[must_use]
 pub fn is_handback_reminder(command_id: &str) -> bool {
-    command_id
-        .strip_prefix(HANDBACK_REMINDER_PREFIX)
-        .is_some_and(|rest| rest.starts_with('-'))
+    GeneratedPrompt::HandbackReminder
+        .suffix(command_id)
+        .is_some()
 }
 
 /// The command id of the handback reminder for the turn that finished at
@@ -1151,16 +1208,15 @@ pub fn is_handback_reminder(command_id: &str) -> bool {
 /// once per turn, and [`reminded_turn_ordinal`] reads it back.
 #[must_use]
 pub fn handback_reminder_command_id(completed_ordinal: u64) -> String {
-    format!("{HANDBACK_REMINDER_PREFIX}-{completed_ordinal}")
+    GeneratedPrompt::HandbackReminder.command_id(completed_ordinal)
 }
 
 /// The ordinal at which the reminded turn finished, when `command_id` names a
 /// handback reminder.
 #[must_use]
 pub fn reminded_turn_ordinal(command_id: &str) -> Option<u64> {
-    command_id
-        .strip_prefix(HANDBACK_REMINDER_PREFIX)?
-        .strip_prefix('-')?
+    GeneratedPrompt::HandbackReminder
+        .suffix(command_id)?
         .parse()
         .ok()
 }
@@ -1171,6 +1227,15 @@ pub struct SubagentHandback {
     pub command_id: String,
     pub message: String,
     pub recorded_at_ms: i64,
+}
+
+impl SubagentHandback {
+    /// Whether this report answers the turn `command_id` names. A report from
+    /// an earlier or later task of the same child answers none of the others.
+    #[must_use]
+    pub fn answers(&self, command_id: &str) -> bool {
+        self.command_id == command_id
+    }
 }
 
 /// The reminder Mjolnir sent after the turn `for_command_id` ended without a
@@ -1775,6 +1840,7 @@ mod tests {
     fn only_child_mutations_hold_an_in_place_move_drain() {
         let mutations = [
             SubagentToolAction::Spawn {
+                no_github_credentials: false,
                 task_type: SubagentTaskType::Straightforward,
                 task_name: "task".into(),
                 instructions: "work".into(),
@@ -1937,6 +2003,7 @@ mod tests {
             crate::config::HarnessKind::Claude,
             crate::config::HarnessKind::Codex,
             crate::config::HarnessKind::Dsh,
+            crate::config::HarnessKind::OpenCode,
         ] {
             for policy in [
                 SubagentPolicy::Native,
@@ -1963,6 +2030,7 @@ mod tests {
 
     fn finished(command_id: &str, stop_reason: &str) -> crate::state::MaterializedTurnOutcome {
         crate::state::MaterializedTurnOutcome {
+            work_facts: None,
             answered_through: None,
             diagnostic: None,
             usage: None,
@@ -2274,7 +2342,7 @@ mod tests {
     }
 
     #[test]
-    fn review_tools_belong_to_the_review_server_for_gated_top_level_roles() {
+    fn review_tools_belong_to_the_review_server_and_no_mj_agents_role() {
         assert_eq!(REVIEW_MCP_SERVER, "mj-review");
         assert_eq!(
             REVIEW_MCP_TOOLS,
@@ -2289,11 +2357,6 @@ mod tests {
             for tool in REVIEW_MCP_TOOLS {
                 assert!(!role.tool_names().contains(tool), "{role} lists {tool}");
             }
-            assert!(!role.offers_review_server(false));
-            assert_eq!(
-                role.offers_review_server(true),
-                matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly)
-            );
         }
     }
 

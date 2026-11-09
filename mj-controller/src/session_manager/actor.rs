@@ -7,7 +7,7 @@ const DEFERRED_SUBMIT_CAPACITY: usize = 32;
 /// `Closing` and `Destroying` are still in flight and their owners need the
 /// actor. The rest have ended: nothing will ever answer on this session's
 /// control socket again.
-fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
+pub(crate) fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
     use mj_core::state::SessionState;
     matches!(
         state,
@@ -18,6 +18,18 @@ fn terminal_for_reconnect(state: mj_core::state::SessionState) -> bool {
             | SessionState::Parked
             | SessionState::DestroyedWithDataLoss
     )
+}
+
+/// Whether a session's durable state means it has really ended, as opposed
+/// to passing through a state on the way to running again.
+///
+/// This is [`terminal_for_reconnect`] without `StartupCleanup`: provisioning
+/// enters that state before retrying a worker start that failed before it
+/// published its socket, and the retry can end in `Running`. The relay actor
+/// may stop on `StartupCleanup` (nothing answers on the socket meanwhile), but
+/// whoever waits on the session's outcome must not treat it as ended.
+pub(crate) fn session_has_ended(state: mj_core::state::SessionState) -> bool {
+    state != mj_core::state::SessionState::StartupCleanup && terminal_for_reconnect(state)
 }
 
 /// This session's durable state and stored cause, read off the actor's task.
@@ -83,6 +95,7 @@ pub(super) async fn run_session_actor(
         Returned(Option<Box<ReturnedConnection>>),
         Reviewer(Option<std::result::Result<(), tokio::task::JoinError>>),
         Tick,
+        RelayChanged,
         Policy,
         Command(Option<Box<ActorCommand>>),
         Retirement(std::result::Result<(), watch::error::RecvError>),
@@ -112,6 +125,12 @@ pub(super) async fn run_session_actor(
                     // daemon owns persistence; a changed desired target
                     // retires this actor and starts a fresh one.
                     () = tokio::time::sleep_until(schedule.deadline), if !matches!(view_tx.borrow().error.as_ref(), Some(ViewError::TargetMissing(_))) => Event::Tick,
+                    () = async {
+                        match connection.as_mut() {
+                            Some(connection) => connection.relay_changed().await,
+                            None => std::future::pending().await,
+                        }
+                    } => Event::RelayChanged,
                     _ = policies.changed() => Event::Policy,
                     command = commands.recv() => Event::Command(command.map(Box::new)),
                     changed = retirement.changed() => Event::Retirement(changed),
@@ -120,6 +139,16 @@ pub(super) async fn run_session_actor(
             } => event,
         };
         match event {
+            // A busy session is followed on the fast cadence already; a quiet
+            // one syncs now instead of waiting for its slow timer.
+            Event::RelayChanged => {
+                if connection
+                    .as_ref()
+                    .is_some_and(|connection| !connection.follows_closely())
+                {
+                    schedule.no_later_than(Duration::ZERO);
+                }
+            }
             Event::Policy => {
                 policies.borrow_and_update();
                 if let Some(connection) = &connection {
@@ -1478,18 +1507,23 @@ impl SyncSchedule {
 
 /// How long until the next sync of this connection.
 ///
-/// The relay protocol has no push, so the actor must ask. While the worker
-/// has work under way, its events stream in and the actor follows them
-/// closely. A quiet worker changes only on the daemon's own commands, which
-/// bring the sync forward, or on rare events of its own (a harness exit), which
-/// the slow sweep catches. Without the distinction an idle daemon made four
-/// relay round trips per session every 150 ms, over SSH for remote sessions
-/// (T-5). A missing connection reconnects at the fast cadence; the tick's
-/// failure handling owns any backoff.
+/// While the worker has work under way, its events stream in and the actor
+/// follows them closely; daemon-side work such as history queries is also
+/// delivered on these syncs. A quiet worker changes only on the daemon's own
+/// commands, which bring the sync forward, or on events of its own (a harness
+/// exit). A worker that answers change waits (protocol 58) reports those as
+/// they happen (see [`Event::RelayChanged`]), so its quiet sessions sync only
+/// as often as the worker's CPU is read; an older worker is swept on the quiet
+/// cadence. Without the distinction an idle daemon made four relay round trips
+/// per session every 150 ms, over SSH for remote sessions (T-5). A missing
+/// connection reconnects at the fast cadence; the tick's failure handling owns
+/// any backoff.
 fn sync_delay(connection: Option<&StandaloneSession>) -> Duration {
     match connection {
-        Some(connection) if !connection.follows_closely() => QUIET_SESSION_SYNC_INTERVAL,
-        _ => SESSION_SYNC_INTERVAL,
+        Some(connection) if connection.follows_closely() => SESSION_SYNC_INTERVAL,
+        Some(connection) if connection.waits_for_changes() => CHANGE_WAIT_SYNC_INTERVAL,
+        Some(_) => QUIET_SESSION_SYNC_INTERVAL,
+        None => SESSION_SYNC_INTERVAL,
     }
 }
 

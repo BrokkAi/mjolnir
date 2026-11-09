@@ -133,6 +133,23 @@ fn new_session_titles(
     (title, typed)
 }
 
+/// Record a prompt a person is sending through the web viewer or the HTTP
+/// API, before it is submitted; see `crate::database::record_user_prompt`.
+/// A failure to record does not stop the prompt, so it is logged.
+pub(super) async fn record_user_prompt(session_id: String, command_id: String, text: String) {
+    let recorded = tokio::task::spawn_blocking({
+        let session_id = session_id.clone();
+        move || crate::database::record_user_prompt(&session_id, &command_id, &text)
+    })
+    .await;
+    let error = match recorded {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => format!("{error:#}"),
+        Err(error) => format!("the history task failed: {error}"),
+    };
+    tracing::warn!(%error, %session_id, "prompt history could not be stored");
+}
+
 pub(super) async fn apply_phone_action(
     controller: &mut Controller,
     services: PhoneActionServices<'_>,
@@ -172,6 +189,7 @@ pub(super) async fn apply_phone_action(
             review,
             no_project_memory,
             no_github_events,
+            no_github_credentials,
             dirty_ack: _dirty_ack,
         } => {
             let workspace_id = if workspace_id.is_empty() {
@@ -214,6 +232,7 @@ pub(super) async fn apply_phone_action(
                         review,
                         no_project_memory,
                         no_github_events,
+                        no_github_credentials,
                         initial_prompt: None,
                         workspace_id,
                         profile_id,
@@ -253,12 +272,15 @@ pub(super) async fn apply_phone_action(
             images,
             command_id,
         } => {
-            services
+            let session = services
                 .sessions
                 .wait_for_session(&session_id, Duration::from_secs(5))
-                .await?
+                .await?;
+            let command_id = command_id.map_or_else(|| new_command_id("phone-prompt"), Ok)?;
+            record_user_prompt(session_id, command_id.clone(), text.clone()).await;
+            session
                 .submit(
-                    command_id.map_or_else(|| new_command_id("phone-prompt"), Ok)?,
+                    command_id,
                     RelayCommand::Prompt {
                         prompt: phone_prompt_blocks(text, images),
                     },

@@ -231,7 +231,9 @@ impl ViewerSnapshot {
                     })
                     .unwrap_or_default();
                 let start = session.start_selection();
-                let review = config.review.for_session(session.review.as_ref());
+                let review = config
+                    .review
+                    .for_session(state.effective_review_or_off(&session.id));
                 ViewerSession {
                     oracle: session.oracle,
                     oracle_choice: session.oracle_choice.clone(),
@@ -340,6 +342,8 @@ impl ViewerSnapshot {
                     is_idle: false,
                     activity_state: None,
                     question_message: None,
+                    execution_enforcement: session.execution_enforcement(config),
+                    policy_config_keys: Vec::new(),
                     config_options: Vec::new(),
                     plan_mode_active: None,
                     turn_review: None,
@@ -730,6 +734,10 @@ pub struct ViewerSession {
     /// The settings the harness advertised, with the values it accepts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_options: Vec<ViewerConfigOption>,
+    #[serde(skip)]
+    pub execution_enforcement: Option<mj_core::config::ExecutionEnforcement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_config_keys: Vec<String>,
     /// Whether plan mode is on, or `None` when this harness has no plan mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_mode_active: Option<bool>,
@@ -752,6 +760,9 @@ fn oracle_default_enabled() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerMoveRecovery {
+    /// Public diagnostic owned by this Move, without the raw error chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_notice: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -791,12 +802,26 @@ pub struct ViewerMoveRecovery {
 }
 
 impl ViewerMoveRecovery {
+    /// Join only this Move's current public diagnostic. Resume and a new turn
+    /// retire that diagnostic; a later lifecycle error must not replace it.
+    pub(crate) fn with_public_failure(mut self, public_error: Option<&str>) -> Self {
+        self.failure_notice = public_error
+            .filter(|message| {
+                matches!(self.phase.as_str(), "failed" | "cancelled")
+                    && message.starts_with(mj_core::state::MOVE_FAILURE_PREFIX)
+                    && message.ends_with(&format!("reference {}", self.operation_id))
+            })
+            .map(str::to_owned);
+        self
+    }
+
     #[must_use]
     pub fn from_operation(operation: &MoveOperation) -> Option<Self> {
         if matches!(operation.phase, MovePhase::Completed) {
             return None;
         }
         Some(Self {
+            failure_notice: None,
             oracle: operation.selection.oracle,
             oracle_choice: operation.selection.oracle_choice.clone(),
             operation_id: operation.operation_id.clone(),

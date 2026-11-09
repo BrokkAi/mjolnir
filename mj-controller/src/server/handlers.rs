@@ -615,6 +615,7 @@ pub(super) async fn preflight_new(
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         create_managed_worktree: None,
         at: None,
         branch: None,

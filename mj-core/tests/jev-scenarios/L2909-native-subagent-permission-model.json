@@ -1,0 +1,236 @@
+{
+  "id": "L2909",
+  "title": "native subagent permission model",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "1e93fe2a764cc9f4234acd2a71795ba9",
+    "session_title": "mjolnir via claude3",
+    "reply_position": 2204,
+    "captured_at": "2026-11-06T14:45:45.150Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:15",
+          "role": "user",
+          "text": "how should we fix #1451?"
+        },
+        {
+          "id": "user:445",
+          "role": "user",
+          "text": "potentially relevant: when i clicked through to the subagent it was still waiting in elicitation mode"
+        },
+        {
+          "id": "user:474",
+          "role": "user",
+          "text": "with its multiple choice options"
+        },
+        {
+          "id": "user:870",
+          "role": "user",
+          "text": "yes. and read AGENTS.md first, its directives are binding"
+        },
+        {
+          "id": "agent:928",
+          "role": "assistant",
+          "text": "Now a regression test that goes through the real launch path. I'm looking for the existing worker-level harnesses."
+        },
+        {
+          "id": "agent:1013",
+          "role": "assistant",
+          "text": "First I'll run it against the unfixed code, to confirm the test catches the bug."
+        },
+        {
+          "id": "agent:1028",
+          "role": "assistant",
+          "text": "The test fails without the fix. Now the same test with the fix:"
+        },
+        {
+          "id": "agent:1040",
+          "role": "assistant",
+          "text": "Next, formatting, clippy on the touched crate, and the existing tests that cover this code."
+        },
+        {
+          "id": "agent:1057",
+          "role": "assistant",
+          "text": "Clippy is clean. I'll apply rustfmt, then run the related tests with filters after `--`, since libtest takes several filters."
+        },
+        {
+          "id": "agent:1076",
+          "role": "assistant",
+          "text": "All checks pass. I'll commit only my two files, then request the pre-push review."
+        },
+        {
+          "id": "agent:1093",
+          "role": "assistant",
+          "text": "The fix is committed locally as `91c433d7f` and not pushed yet. The pre-push review is running, and the verdict will arrive as a Mjolnir message.\n\n**What changed**\n- `mj-worker/src/worker_runtime/unix.rs` now reads `is_managed_subagent()` once, at the start of `prepare_and_start_harness`. It passes that value through `AcpPreparationSetup.managed_subagent` to the ACP launch spec.\n- The review-trigger reset and the review-gate check used to ask the same question of the launch config. Those two checks now use the same value, so one place decides it.\n- The marker stays out of the harness environment, as before.\n\n**Test**\n- `mj-worker/tests/managed_child_questions.rs` starts a real `mj-worker` process from a launch file with the marker. A scripted bridge requests permission, and the test checks that the bridge receives a `cancelled` answer.\n- It fails on the unfixed code, with the message \"the permission request stayed open\", and passes with the fix.\n- It carries a `Hard-won: #1451` comment, as AGENTS.md requires.\n\n**Validation**\n- `cargo fmt --all --check` passes.\n- `cargo clippy -p brokk-mj-worker --all-targets -- -D warnings` passes.\n- The filtered lib tests (`managed`, `review_gate`, `subagent`) pass: 65 tests.\n- I have not run the full workspace clippy or the full suites. That follows your preference for targeted tests. Say so if you want them before the push.\n\n**Still open**\n- Children already running an affected worker, such as any started before this build, keep the old behavior until their workers are replaced. This build's existing `reconcile_pending_subagent_questions` sweep (the older-worker recovery path from the original design) forwards their pending questions to the parent. The forwarded text still says \"Its question form is already closed\", which is false for those forms. I did not change the wording.\n- After the push, I'll comment on #1451, close it, and remove the `agent-in-progress` label.\n\n`★ Insight ─────────────────────────────────────`\n- The earlier unit test (`managed_children_cancel_questions_and_permissions_at_the_original_responder`) set `LaunchSpec.managed_subagent = true` by hand. It tested the ACP responder and skipped the step where the value was lost. The new test starts from the launch file, so it covers that step.\n- The two predicate sites differed in effect. The review-trigger reset (line 1440) ran before the overwrite and worked. The review-gate check (line 1797) ran after it and read `false` for children. It was masked by `handback_tool` and the earlier trigger reset, so it did no visible harm.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "agent:1291",
+          "role": "assistant",
+          "text": "The finding is correct, and it points at a design problem in the shipped feature that my fix would expose. I can't settle it without you."
+        },
+        {
+          "id": "user:1308",
+          "role": "user",
+          "text": "With #1451 fixed, a child's tool-permission request is cancelled at once and the parent can only reply with a plain message. That message cannot grant the permission, so a retry is cancelled again and the child is stuck. How should a parent grant a child's tool permission?\n\nPermissions: i want to leave open, answer w send_message, but can we make it less fragile than trying to parse a string?"
+        },
+        {
+          "id": "agent:1311",
+          "role": "assistant",
+          "text": "You want the form kept open, answered through `send_message`, but without string parsing. I'm looking at how `send_message` is defined and how a parent's message reaches a child's worker."
+        },
+        {
+          "id": "agent:1344",
+          "role": "assistant",
+          "text": "Yes. An optional structured argument on `send_message` avoids parsing text. I have not changed any code yet, because this adds a field to the worker-to-daemon message format. The fix commit `91c433d7f` is still local and unpushed, and the P1 finding is still open.\n\n**Proposed design**\n\n1. **Worker (`mj-worker/src/acp/drive.rs`).** For a managed child, a tool-permission request stays open, registered the same way as for a top-level session. Only elicitation questions keep the cancel-and-forward path, because a plain message does answer those. The daemon already forwards the `input_required` event to the parent (`forward_subagent_question_with`), so the parent still hears about the request without any change there.\n2. **Message to the parent.** It names the request id and the exact choices the form offers. The worker alone decides these, as today in `permission_choices`.\n3. **Structured answer.** `send_message` gets an optional `answer` object. It carries the request id and a `choice`, which must be one of the option ids listed in the message to the parent. The text `message` still reaches the child as an ordinary message. Nothing parses the text.\n4. **Daemon.** It checks the choice against the form's offered options. An unknown choice or a stale request id returns an error that lists the valid options. It does not fall back or guess. A valid choice goes to the child's worker through the existing `ElicitationResponse::Accept` relay command, the same command the TUI uses for a person.\n5. **No dead end.** The form stays open, so a person can still approve it in the child's session if the parent never answers or ends.\n\n**Cost and risks**\n- The wire change needs care: `SubagentToolAction::SendMessage` (`mj-core/src/subagent.rs`, with its separate `SubagentToolActionWire`) is shared between worker and daemon versions. The new field must be optional and default to absent, so older workers and daemons keep working. AGENTS.md requires that.\n- The `send_message` tool description grows a little. It is inside a size budget (the 1,800-byte limit from the earlier plan, if it applies here). I would check that.\n- My new test changes. The bridge would see no answer until the daemon-side answer arrives, so the test has to cover both stages. I would add a controller test for the choice check.\n- This reverses part of the \"form closed immediately\" design from 8421a0695 (for permissions only), so I'll update the file-based memory note when it lands.\n\nDo you want me to build this? I would then fix the P1 finding with it, commit, and call `request_review` again."
+        },
+        {
+          "id": "user:1551",
+          "role": "user",
+          "text": "ugh no\n\nwhat else could we do"
+        },
+        {
+          "id": "agent:1554",
+          "role": "assistant",
+          "text": "Here are four other ways to fix it. Each one avoids the new `send_message` field.\n\n1. **Permissions go to the person, questions go to the parent.** This is my recommendation.\n   - In `drive.rs`, a managed child cancels only elicitation questions, which a plain message can answer.\n   - Tool-permission and plan-review forms stay open for a person, as for a top-level session.\n   - It is the smallest change, since I would remove two `if managed_subagent` blocks. It cannot leave the child stuck, and it fixes the P1 finding.\n   - It breaks your earlier \"no human exceptions\" rule for permissions. The reason is that a parent has no tool that can grant a permission.\n   - The \"!\" marker on the parent's row is gone, so the child's own row would be the only sign that it needs approval. I would check that the child row shows it.\n\n2. **Cancel, and tell the parent it is a denial.**\n   - The parent's message says the child cannot get this permission. The parent can then do the action itself, or end the child and start a new one with a more permissive policy.\n   - Nothing blocks, but the child still cannot do the work.\n   - I would also look at the cancel outcome. A comment in `drive.rs` says ACP uses `Cancelled` for a cancelled turn. If so, a `Cancelled` permission may cancel the child's whole turn, while \"reject once\" refuses only that tool call. I have not checked how Claude handles it.\n\n3. **Decide permissions when the child is started.**\n   - A child that must work unattended would run with an execution policy that does not ask. For example, it could inherit the parent's policy.\n   - Then permission requests would be rare, and the cancel path would only be a safety net.\n   - I have not checked how a child's policy is chosen at spawn. This is a larger change, and it changes how much a parent trusts its children.\n\n4. **Ship the fix as it is and track the permission problem separately.**\n   - I would override the P1 finding and file a follow-up issue.\n   - The finding is about the design from 8421a0695, not about this commit. But before my fix, a child's permission prompt reached a person by accident, because of this bug. After it, the child is denied. So this makes the permission case worse in practice, and I advise against it.\n\nIf you pick option 1, I'll make that change, adjust my test (it currently expects a cancelled permission), and call `request_review` again."
+        },
+        {
+          "id": "user:1742",
+          "role": "user",
+          "text": "> it could inherit the parent's policy\n\ni thought that's what we're doing, how does it actually work today"
+        },
+        {
+          "id": "agent:1773",
+          "role": "assistant",
+          "text": "`launch.rs:957` takes the policy from `target.execution_policy`. I'll trace where a child's target comes from."
+        },
+        {
+          "id": "agent:1791",
+          "role": "assistant",
+          "text": "So `execution_policy` is a property of the target template. Now I'll check which target a spawned child gets."
+        },
+        {
+          "id": "agent:1823",
+          "role": "assistant",
+          "text": "You are right, children already inherit the parent's policy. I misread the code earlier. The inheritance is a copy made at spawn, which is why I missed it.\n\n**How it works today**\n- A session's approval mode (`execution_policy`) is stored in its `TargetRuntimeSettings` (`mj-core/src/state/target_runtime.rs:16`), which comes from the target template in `config.toml`.\n- When a parent spawns a child, `mj-controller/src/controller/subagents.rs:454` sets `target_runtime: Some(parent.target_runtime_settings(&self.config)?.into_owned())`. Line 484 also copies the parent's `target_template_id`.\n- The child therefore starts with the parent's policy. Nothing lets the parent or the model choose a different one for the child.\n- The launch file of the live child `c80939cb…` shows `execution_policy: configured_approvals`.\n\n**What that means for #1451**\n- A child asks for permission only when its parent is also in a mode that asks. The parent in this incident was in `configured_approvals`, so the child asked too.\n- With full access, `drive.rs` approves tool permissions automatically, in the YOLO branch above the managed-child checks, so no form is ever created.\n- So option 3 from my earlier list is already how Mjolnir works. It gives no way out of this case. The only unattended setup is a parent in full access, and a parent that has chosen to be asked has chosen not to be unattended.\n\nThis also strengthens the case for option 1. If the parent asks, and a person is the one who approves things for the parent, then a person is the one who should approve them for the child. A child's permission form should go to that person, not to the parent agent, which has no way to grant it.\n\nI have not changed any code yet. Do you want me to go with option 1?"
+        },
+        {
+          "id": "user:1983",
+          "role": "user",
+          "text": "hi fable, tagging you in\n\nis there a way we can let parents approve subagents' permissions requests without fragile string shit? \"always cancel\" and \"always approve\" both suck"
+        },
+        {
+          "id": "agent:1986",
+          "role": "assistant",
+          "text": "Yes. The only structured channel out of a model is a tool call, so the answer has to be a tool argument. That leaves two shapes, and I recommend the first:\n\n**1. A dedicated `answer` tool on mj-agents for parents (recommended).**\n- Arguments: `session_id`, `request_id` (the form id, e.g. `tool-permission-1`), `choice` (an option id).\n- The child's worker keeps permission forms open for managed children. Only questions (`elicitation/create`) keep the cancel-and-forward path, because a plain message does answer those.\n- The forwarded message lists the request id and each option as `id: title`, and says to answer with `answer`. No text is parsed anywhere.\n- The daemon checks `choice` against the options recorded in the child's `input_required` event. A wrong choice, or a request that is already answered or gone, returns an error naming the valid options. It never guesses.\n- A valid choice goes to the child through the same elicitation-response path the TUI uses for a person (`ElicitationResponse::Accept { choice }`). No new worker-side answer code.\n- The form stays open, so a person can still approve it in the child's session if the parent never answers. That removes the dead end the reviewer flagged. If both answer, the first wins and the second gets the \"already answered\" error.\n\n**2. An optional `answer` object on `send_message`.** Same validation, but a message and an answer in one call can half-apply (message delivered, answer refused), and `send_message`'s description is already near its size budget. I'd avoid it.\n\nTwo things to be clear about:\n\n- This reverses the Oct 23 decision \"no parent-facing tools for answering.\" That rule was a consequence of the cancel-the-form design, and it is what makes permissions a dead end now. The cost is one new `SubagentToolAction` variant on the worker–daemon queue, added the same way `request_review` and `fetch` were, with a protocol-version gate so an older daemon refuses it cleanly.\n- Form ids reset when the child's ACP bridge restarts, so a late answer to `tool-permission-1` could land on a newer form with the same id. The human TUI path has the same exposure today. If you want it closed, the daemon can key the answer on the API event sequence it already uses for the mailbox key (`subagent-question-<child>-<seq>`) and refuse when the live form's seq differs.\n\nPlan reviews (`plan-review-N`, ExitPlanMode) are approve/reject forms too; I'd keep them open and answerable by the same tool, and keep the automatic allow rules for full-access parents unchanged.\n\nIf you agree, I'll build it on top of `91c433d7f`, make the new test expect the open form and a tool answer, and request review again."
+        },
+        {
+          "id": "user:2180",
+          "role": "user",
+          "text": "i forgot to ask the obvious question: how do claude code and codex handle this w their native subagents?"
+        },
+        {
+          "id": "agent:2204",
+          "role": "assistant",
+          "text": "Neither one lets the parent model approve. Both send a subagent's permission request to the person, and say which subagent is asking.\n\n**Claude Code** (official docs, likely current): a background subagent's permission prompt appears in the main session and names the subagent. Esc denies that one tool call without stopping the subagent. Third-party posts say that before about v2.1.186 (June 2026), background subagents denied anything not approved before launch, and sometimes looped on it. I could not confirm that version boundary from the release notes.\n\n**Codex** (official docs): subagents inherit the parent's sandbox and approval policy, including changes made during the session such as `/permissions` or `--yolo`. In the CLI, the approval prompt can come from a thread you are not viewing. The overlay names the thread, and you can open it before answering. When no prompt can be shown, as in non-interactive runs, the action fails and the error goes back to the parent agent. An open GitHub issue (#23324) reports a child's escalation blocking because the parent gets nothing it can act on. It proposes routing child requests through the parent. It is a feature request, and I found nothing showing it has shipped.\n\n**Mjolnir already follows that model for native children.** `mj-worker/src/acp/drive.rs:549–572` shows a native child's permission request to the person as a form, prefixed `Native agent <id>:`. Only Mjolnir's own managed children were routed to the parent.\n\nSo both harness vendors made the same choice as option 1. The person approves, the request says which agent is asking, and denying it refuses that one call without killing the agent. Codex's fallback, failing visibly when no person can answer, is close to option 2. Nobody has shipped approval by the parent agent, and the one public request for it is still open.\n\nI recommend option 1. It matches both harnesses, matches how Mjolnir already treats native children, and avoids a new tool. The UI needs to work the way theirs does: the request appears where the person is looking, and names the child.\n\nI have not changed any code. If you choose option 1, I'll remove the cancel for permission and plan-review forms and keep it for questions. I'll check that the parent's row shows the child's pending request, since the \"!\" rule was removed, and update the test. Then I'll ask for review again.\n\nSources:\n- [Claude Code tools reference](https://code.claude.com/docs/en/tools-reference)\n- [Claude Code background agents permission prompts (v2.1.186)](https://blog.vibecoder.me/claude-code-background-agents-permission-prompts-v2-1-186)\n- [DEV: knowing when a Claude Code agent needs approval](https://dev.to/pederaa/how-to-know-when-a-claude-code-agent-needs-your-approval-without-watching-the-terminal-5ekf)\n- [Codex subagents docs](https://developers.openai.com/codex/subagents)\n- [Codex multi-agent docs](https://developers.openai.com/codex/multi-agent)\n- [openai/codex#23324](https://github.com/openai/codex/issues/23324)"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "i forgot to ask the obvious question: how do claude code and codex handle this w their native subagents?",
+    "assistant_text_tail": "k to the parent agent. An open GitHub issue (#23324) reports a child's escalation blocking because the parent gets nothing it can act on. It proposes routing child requests through the parent. It is a feature request, and I found nothing showing it has shipped.\n\n**Mjolnir already follows that model for native children.** `mj-worker/src/acp/drive.rs:549–572` shows a native child's permission request to the person as a form, prefixed `Native agent <id>:`. Only Mjolnir's own managed children were routed to the parent.\n\nSo both harness vendors made the same choice as option 1. The person approves, the request says which agent is asking, and denying it refuses that one call without killing the agent. Codex's fallback, failing visibly when no person can answer, is close to option 2. Nobody has shipped approval by the parent agent, and the one public request for it is still open.\n\nI recommend option 1. It matches both harnesses, matches how Mjolnir already treats native children, and avoids a new tool. The UI needs to work the way theirs does: the request appears where the person is looking, and names the child.\n\nI have not changed any code. If you choose option 1, I'll remove the cancel for permission and plan-review forms and keep it for questions. I'll check that the parent's row shows the child's pending request, since the \"!\" rule was removed, and update the test. Then I'll ask for review again.\n\nSources:\n- [Claude Code tools reference](https://code.claude.com/docs/en/tools-reference)\n- [Claude Code background agents permission prompts (v2.1.186)](https://blog.vibecoder.me/claude-code-background-agents-permission-prompts-v2-1-186)\n- [DEV: knowing when a Claude Code agent needs approval](https://dev.to/pederaa/how-to-know-when-a-claude-code-agent-needs-your-approval-without-watching-the-terminal-5ekf)\n- [Codex subagents docs](https://developers.openai.com/codex/subagents)\n- [Codex multi-agent docs](https://developers.openai.com/codex/multi-agent)\n- [openai/codex#23324](https://github.com/openai/codex/issues/23324)",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      2204
+    ],
+    "user_position": 2180,
+    "input_rationale": "The user's question was answered, but the agent still waits for the user to choose among the options from earlier turns before changing code. The user chose option 1 next.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "blocking_decision",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:2204"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T14:48:44.770Z",
+        "kind": "user",
+        "text": "very well, option 1 it is"
+      },
+      {
+        "at": "2026-11-06T14:49:20.216Z",
+        "kind": "agent",
+        "text": "I'll implement option 1. First, the pieces it touches."
+      },
+      {
+        "at": "2026-11-06T14:49:51.572Z",
+        "kind": "agent",
+        "text": "That plan is about MCP pre-approval, not forms. Next, what 8421a0695 removed from the TUI, so a child's open approval is visible where you are looking."
+      },
+      {
+        "at": "2026-11-06T14:50:10.966Z",
+        "kind": "agent",
+        "text": "The TUI rule that marked the parent as waiting on its child's form needs to come back. A child has no row outside the Sub-agents view. Checking whether that part of the commit still reverts cleanly."
+      },
+      {
+        "at": "2026-11-06T14:50:37.482Z",
+        "kind": "agent",
+        "text": "Child history now loads on demand. I need to know whether the dashboard still gets a child's pending forms without opening the child."
+      },
+      {
+        "at": "2026-11-06T14:51:09.214Z",
+        "kind": "agent",
+        "text": "I'm checking whether the dashboard receives a child's pending forms when the child isn't open, so the restored \"parent waits on child\" marker works live."
+      }
+    ]
+  }
+}

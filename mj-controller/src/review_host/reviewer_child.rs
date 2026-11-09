@@ -2,6 +2,84 @@ use super::*;
 
 const HANDBACK_INSTRUCTION: &str = "\n\nReturn your plain-text findings, or exactly `No findings.` when there are none, as the complete text of a single handback call. Do not edit files or push. After calling handback, stop.";
 
+/// First retry delay after a reviewer child close fails.
+const CLOSE_RETRY_BASE: std::time::Duration = std::time::Duration::from_secs(1);
+/// A close that keeps failing is retried this rarely. Every attempt can queue a
+/// worker restart behind the target's other lifecycle work (#1456), so a dead
+/// child must not be resubmitted every few seconds.
+const CLOSE_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// What the closer has learned about one child's close: how many attempts in a
+/// row failed and the last failure it reported.
+#[derive(Default)]
+pub(super) struct CloseAttempts {
+    failures: u32,
+    last_failure: Option<String>,
+}
+
+impl CloseAttempts {
+    /// Records one failed attempt. Returns the wait before the next attempt and
+    /// whether the failure is news (the first one, or a different cause), so a
+    /// persistent failure is warned about once rather than at every retry.
+    fn failed(&mut self, failure: String) -> (std::time::Duration, bool) {
+        self.failures = self.failures.saturating_add(1);
+        let report = self.last_failure.as_ref() != Some(&failure);
+        self.last_failure = Some(failure);
+        (
+            crate::recovery::backoff_delay(CLOSE_RETRY_BASE, CLOSE_RETRY_CAP, self.failures),
+            report,
+        )
+    }
+}
+
+/// Reads one reviewer child's standing off the host's task.
+async fn reviewer_standing(
+    environment: &Arc<dyn ReviewEnvironment>,
+    child: &str,
+) -> Result<ChildStanding, String> {
+    let environment = environment.clone();
+    let child = child.to_owned();
+    tokio::task::spawn_blocking(move || environment.reviewer_child_standing(&child))
+        .await
+        .map_err(|error| format!("reviewer standing lookup stopped: {error}"))?
+}
+
+/// The one rule for a reviewer child whose session has ended: a handback it
+/// recorded is its outcome, and only without one does its role fail. Both go
+/// to the host as a report, the way a finished turn's does, so the host
+/// decides them one at a time. Both are idempotent in the host.
+fn settle_ended_reviewer(
+    events: &mpsc::UnboundedSender<HostEvent>,
+    session_id: String,
+    child: String,
+    reason: String,
+    handback: Option<String>,
+) {
+    let report = match handback {
+        Some(answer) => ReviewerReport::Answer(answer),
+        None => ReviewerReport::Failed(reason.clone()),
+    };
+    // No delegation caller waits for this report, so nobody would retry a
+    // save that failed: the host does, through `ReviewerEndNotSaved`.
+    let (reply, saved) = oneshot::channel();
+    let _ = events.send(HostEvent::ReviewerFinished {
+        session_id,
+        child_session_id: child.clone(),
+        report,
+        reply,
+    });
+    let events = events.clone();
+    tokio::spawn(async move {
+        if let Ok(Err(error)) = saved.await {
+            let _ = events.send(HostEvent::ReviewerEndNotSaved {
+                child_session_id: child,
+                reason,
+                error,
+            });
+        }
+    });
+}
+
 impl HostState {
     pub(super) fn register_reviewer_child(
         &mut self,
@@ -126,23 +204,56 @@ impl HostState {
         else {
             return;
         };
-        if !slot
+        let Some(command_id) = slot
             .driver
             .awaited_commands()
-            .iter()
-            .any(|(name, _)| name == role)
-        {
+            .into_iter()
+            .find_map(|(name, command_id)| (name == role).then_some(command_id))
+        else {
             return;
-        }
+        };
         let epoch = slot.epoch;
         let role = role.to_owned();
         let environment = self.environment.clone();
         let events = self.events.clone();
         let session_id = session_id.to_owned();
         tokio::spawn(async move {
+            if !fresh {
+                // A restored child may still be running its worker turn, and
+                // a start error after a restart can be transient, so only the
+                // store's record that its session ended settles the role.
+                match reviewer_standing(&environment, &child).await {
+                    Ok(standing) => {
+                        if let Some(state) = standing.ended.clone() {
+                            settle_ended_reviewer(
+                                &events,
+                                session_id,
+                                child,
+                                format!(
+                                    "the reviewer's session ended before the review was restored ({state})"
+                                ),
+                                standing.answer_to(&command_id),
+                            );
+                            return;
+                        }
+                    }
+                    // Starting a child that may have ended, or failing one that
+                    // may be live, would each be a guess. The role stays
+                    // pending and the read is repeated.
+                    Err(error) => {
+                        tracing::warn!(child, %error, "could not read a restored reviewer's standing");
+                        let _ = events.send(HostEvent::ReviewerStandingUnread {
+                            session_id,
+                            epoch,
+                            role,
+                            origin: StandingRead::Restored,
+                            error,
+                        });
+                        return;
+                    }
+                }
+            }
             if let Err(error) = environment.start_child(&child).await {
-                // A restored child may already be running its worker turn.
-                // Startup readiness timing cannot turn that work into a failed review.
                 if fresh {
                     tracing::warn!(child, %error, "reviewer child failed to start");
                     let _ = events.send(HostEvent::RoleFailed {
@@ -156,6 +267,64 @@ impl HostState {
                     tracing::warn!(child, %error, "reviewer child startup reconciliation did not finish");
                 }
             }
+        });
+    }
+
+    /// Reads a reviewer's standing again after the delay the review uses for
+    /// its other retries, until a read answers. The role is not settled in
+    /// between: a failed read says nothing about whether it saved a handback.
+    pub(super) fn reviewer_standing_unread(
+        &mut self,
+        session_id: &str,
+        epoch: u64,
+        role: String,
+        origin: StandingRead,
+        error: String,
+    ) {
+        let Some(slot) = self
+            .reviews
+            .get_mut(session_id)
+            .filter(|slot| slot.epoch == epoch)
+        else {
+            return;
+        };
+        let delay = slot.take_retry_delay();
+        tracing::warn!(%session_id, role, ?origin, %error, retry_in_seconds = delay.as_secs(), "reviewer's standing will be read again");
+        let events = self.events.clone();
+        let session_id = session_id.to_owned();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = events.send(HostEvent::RetryReviewerStanding {
+                session_id,
+                epoch,
+                role,
+                origin,
+            });
+        });
+    }
+
+    /// An ended reviewer's report did not save. Report it again after the
+    /// review's retry delay; the host holds no other record that it ended.
+    pub(super) fn reviewer_end_not_saved(&mut self, child: String, reason: String, error: String) {
+        let Some(slot) = self.reviews.values_mut().find(|slot| {
+            slot.state.active_group.as_ref().is_some_and(|group| {
+                group
+                    .registrations
+                    .iter()
+                    .any(|item| item.child_session_id.as_deref() == Some(&child))
+            })
+        }) else {
+            return;
+        };
+        let delay = slot.take_retry_delay();
+        tracing::warn!(child, %error, retry_in_seconds = delay.as_secs(), "an ended reviewer's report did not save; it will be reported again");
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = events.send(HostEvent::ChildEnded {
+                child_session_id: child,
+                reason,
+            });
         });
     }
 
@@ -193,17 +362,23 @@ impl HostState {
         {
             return;
         }
-        self.spawn_child_close(child, std::time::Duration::ZERO);
+        self.spawn_child_close(child, std::time::Duration::ZERO, CloseAttempts::default());
     }
 
-    fn spawn_child_close(&mut self, child: String, delay: std::time::Duration) {
+    fn spawn_child_close(
+        &mut self,
+        child: String,
+        delay: std::time::Duration,
+        attempts: CloseAttempts,
+    ) {
         let environment = self.environment.clone();
         let closing = child.clone();
         let task = self.child_closures.spawn(async move {
             tokio::time::sleep(delay).await;
             environment.close_child(&closing).await
         });
-        self.child_closure_owners.insert(task.id(), (child, delay));
+        self.child_closure_owners
+            .insert(task.id(), (child, attempts));
     }
 
     pub(super) fn child_closed(
@@ -214,21 +389,29 @@ impl HostState {
             Ok((id, _)) => *id,
             Err(error) => error.id(),
         };
-        let (child, delay) = self
+        let (child, mut attempts) = self
             .child_closure_owners
             .remove(&id)
             .expect("a supervised child close has an owner");
         let failure = match result {
-            Ok((_, Ok(()))) => return,
+            Ok((_, Ok(()))) => {
+                if attempts.failures > 0 {
+                    tracing::info!(%child, failed_attempts = attempts.failures, "reviewer child closed after earlier failures");
+                }
+                return;
+            }
             Ok((_, Err(error))) => error,
             Err(error) => format!("reviewer cleanup task stopped: {error}"),
         };
-        let delay = (delay * 2)
-            .max(std::time::Duration::from_secs(1))
-            .min(std::time::Duration::from_secs(30));
-        tracing::warn!(%child, error = %failure, retry_in_seconds = delay.as_secs(),
-            "could not close reviewer child; its borrowed target remains owned and cleanup will retry");
-        self.spawn_child_close(child, delay);
+        let (delay, report) = attempts.failed(failure.clone());
+        if report {
+            tracing::warn!(%child, error = %failure, retry_in_seconds = delay.as_secs(),
+                "could not close reviewer child; its borrowed target remains owned and cleanup will keep retrying with backoff");
+        } else {
+            tracing::debug!(%child, error = %failure, retry_in_seconds = delay.as_secs(),
+                "reviewer child close failed again");
+        }
+        self.spawn_child_close(child, delay, attempts);
     }
 
     pub(super) fn role_failed(
@@ -246,7 +429,13 @@ impl HostState {
         else {
             return;
         };
+        let prior = slot.driver.snapshot();
         let requests = slot.driver.role_failed(role, child, reason);
+        // A role that already has an outcome, or a review already finished,
+        // is not failed again, and a repeated failure persists nothing.
+        if slot.driver.snapshot() == prior {
+            return;
+        }
         if let Some(group) = slot.state.active_group.as_mut() {
             group.driver = slot.driver.snapshot();
         }
@@ -266,11 +455,81 @@ impl HostState {
         self.run(session_id, requests);
     }
 
+    /// A reviewer child's session ended. A handback it recorded is its
+    /// outcome; without one its role fails, through [`Self::reviewer_finished`]
+    /// like every other reviewer outcome, so the group resolves like any other
+    /// reviewer failure.
+    pub(super) fn child_ended(&mut self, child: &str, reason: String) {
+        let Some((session_id, epoch, role, command_id)) =
+            self.reviews.iter().find_map(|(session_id, slot)| {
+                let group = slot.state.active_group.as_ref()?;
+                let registration = group
+                    .registrations
+                    .iter()
+                    .find(|item| item.child_session_id.as_deref() == Some(child))?;
+                let command_id = group
+                    .driver
+                    .roles
+                    .iter()
+                    .find(|item| item.role == registration.role)?
+                    .command_id
+                    .clone();
+                Some((
+                    session_id.clone(),
+                    slot.epoch,
+                    registration.role.clone(),
+                    command_id,
+                ))
+            })
+        else {
+            return;
+        };
+        // A handback that is waiting behind a saving outcome settles the
+        // role, unless its save fails: the end is noted so that save's
+        // failure reports it again.
+        if let Some(slot) = self.reviews.get_mut(&session_id)
+            && slot
+                .queued_outcomes
+                .iter()
+                .any(|queued| queued.child_session_id == child)
+        {
+            slot.ended_while_queued.insert(child.to_owned(), reason);
+            return;
+        }
+        let environment = self.environment.clone();
+        let events = self.events.clone();
+        let child = child.to_owned();
+        tokio::spawn(async move {
+            // A handback the child recorded before it ended is its outcome.
+            let handback = match reviewer_standing(&environment, &child).await {
+                Ok(standing) => standing.answer_to(&command_id),
+                // Failing the role now could discard a handback the child
+                // saved, so the role stays pending and the read is repeated.
+                Err(error) => {
+                    tracing::warn!(child, %error, "could not check an ended reviewer for a handback");
+                    let _ = events.send(HostEvent::ReviewerStandingUnread {
+                        session_id,
+                        epoch,
+                        role,
+                        origin: StandingRead::Ended {
+                            child_session_id: child,
+                            reason,
+                        },
+                        error,
+                    });
+                    return;
+                }
+            };
+            tracing::info!(child, session_id, role, %reason, found_handback = handback.is_some(), "reviewer child ended");
+            settle_ended_reviewer(&events, session_id, child, reason, handback);
+        });
+    }
+
     pub(super) fn reviewer_finished(
         &mut self,
         session_id: String,
         child_session_id: String,
-        answer: Option<String>,
+        report: ReviewerReport,
         reply: oneshot::Sender<Result<(), String>>,
     ) {
         let Some(slot) = self.reviews.get_mut(&session_id) else {
@@ -292,12 +551,16 @@ impl HostState {
         if slot.pending_outcome.is_some() {
             slot.queued_outcomes.push(ReviewerHandback {
                 child_session_id,
-                answer,
+                report,
                 reply,
             });
             return;
         }
         let role = registration.role.clone();
+        let ended = slot
+            .ended_while_queued
+            .remove(&child_session_id)
+            .map(|reason| (child_session_id.clone(), reason));
         let command_id = group
             .driver
             .roles
@@ -310,16 +573,15 @@ impl HostState {
         };
         let prior = slot.state.clone();
         let prior_driver = slot.driver.snapshot();
-        let requests = match answer {
-            Some(answer) => {
+        let requests = match report {
+            ReviewerReport::Answer(answer) => {
                 slot.driver
                     .role_turn_completed(&command_id, &child_session_id, &answer)
             }
-            None => slot.driver.role_failed(
-                &role,
-                Some(&child_session_id),
-                "the reviewer finished without calling handback",
-            ),
+            ReviewerReport::Failed(reason) => {
+                slot.driver
+                    .role_failed(&role, Some(&child_session_id), reason)
+            }
         };
         if prior_driver == slot.driver.snapshot() {
             let _ = reply.send(Ok(()));
@@ -328,13 +590,11 @@ impl HostState {
         if let Some(group) = slot.state.active_group.as_mut() {
             group.driver = slot.driver.snapshot();
         }
-        if matches!(
-            slot.driver.last_verdict(),
-            Some(ReviewVerdict::Failed { .. })
-        ) {
+        if let Some(ReviewVerdict::Failed { reason }) = slot.driver.last_verdict() {
+            answer(slot.start_reply.take(), Err(StartRefusal(reason.clone())));
             slot.state.active = None;
         }
-        slot.pending_outcome = Some(prior);
+        slot.pending_outcome = Some(PendingOutcome { prior, ended });
         let state = slot.state.clone();
         let epoch = slot.epoch;
         let request = PersistenceRequest::SaveReviewerOutcome {
@@ -374,17 +634,31 @@ impl HostState {
             .get_mut(&session_id)
             .filter(|slot| slot.epoch == epoch)
         {
-            let prior = slot.pending_outcome.take();
-            if result.is_err()
-                && let Some(prior) = prior
-                && let Some(group) = prior.active_group.as_ref()
-                && let Ok(driver) = TurnReviewDriver::restore(group.driver.clone())
+            let pending = slot.pending_outcome.take();
+            let mut ended = None;
+            if let Some(PendingOutcome { prior, ended: end }) = pending
+                && let Err(error) = &result
             {
-                slot.driver = driver;
-                slot.state = prior;
+                if let Some(group) = prior.active_group.as_ref()
+                    && let Ok(driver) = TurnReviewDriver::restore(group.driver.clone())
+                {
+                    slot.driver = driver;
+                    slot.state = prior;
+                }
+                ended = end.map(|(child, reason)| (child, reason, error.clone()));
             }
             if result.is_ok() {
                 self.run(&session_id, requests);
+            } else {
+                // The delegation that handed this reviewer's report in may be
+                // gone with its session, and the end it superseded is on no
+                // other record: settle the role from the standing again.
+                if let Some((child, reason, error)) = ended {
+                    self.reviewer_end_not_saved(child, reason, error);
+                }
+                // A destroyed requester can never save this outcome, and no
+                // retry would change that.
+                self.drop_review_if_owner_gone(&session_id, epoch, None);
             }
             let queued = self
                 .reviews
@@ -395,7 +669,7 @@ impl HostState {
                 self.reviewer_finished(
                     session_id.clone(),
                     handback.child_session_id,
-                    handback.answer,
+                    handback.report,
                     handback.reply,
                 );
             }

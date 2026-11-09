@@ -127,15 +127,13 @@ impl MaterializedTurnOutcome {
         if assessment.is_some_and(|a| a.matches_completion(self) && a.question_dismissed()) {
             return false;
         }
-        match self.result().kind {
-            TurnResultKind::InputRequired => true,
-            TurnResultKind::Completed => assessment
-                .filter(|assessment| assessment.applies_to(self))
-                .is_some_and(|assessment| {
-                    assessment.action == Some(crate::assessment::Action::AwaitInput)
-                }),
-            _ => false,
-        }
+        // A failed or interrupted turn can also need a person's intervention.
+        assessment
+            .filter(|assessment| assessment.applies_to(self))
+            .is_some_and(|assessment| {
+                assessment.action == Some(crate::assessment::Action::AwaitInput)
+            })
+            || self.result().kind == TurnResultKind::InputRequired
     }
 
     pub fn result(&self) -> TurnResult {
@@ -281,6 +279,7 @@ mod tests {
     #[test]
     fn provider_failure_and_unknown_stop_retain_different_evidence() {
         let mut turn = MaterializedTurnOutcome {
+            work_facts: None,
             answered_through: None,
             command_id: "opaque".into(),
             accepted_ordinal: Some(1),

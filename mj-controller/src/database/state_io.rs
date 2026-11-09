@@ -555,8 +555,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              container_cpus, container_memory, archived, draft_input, create_managed_worktree,
              subagents, container_workspace, build_cache_json, launch_base,
              target_runtime_json, launch_branch, publication_json, checkout_json, project_json,
-             review_json, no_project_memory, no_mailbox, oracle, oracle_choice
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)
+             review_json, no_project_memory, no_mailbox, oracle, oracle_choice, no_github_credentials
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -593,7 +593,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              no_project_memory = excluded.no_project_memory,
              no_mailbox = excluded.no_mailbox,
              oracle = excluded.oracle,
-             oracle_choice = excluded.oracle_choice",
+             oracle_choice = excluded.oracle_choice,
+             no_github_credentials = excluded.no_github_credentials",
         params![
             session.id,
             session.title,
@@ -648,6 +649,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
             session.no_github_events,
             session.oracle,
             session.oracle_choice.as_ref().map(serde_json::to_string).transpose()?,
+            session.no_github_credentials,
         ],
     )?;
     tx.execute(
@@ -702,6 +704,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         review: _,
         no_project_memory: _,
         no_github_events: _,
+        no_github_credentials: _,
         // A Move can change it along with the profile the session runs on.
         subagents,
         oracle,
@@ -1235,7 +1238,8 @@ const SESSION_QUERY: &str =
                 , c.workspace_id, s.create_managed_worktree, s.subagents,
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
                 s.launch_branch, s.publication_json, s.checkout_json, s.project_json,
-                s.review_json, s.no_project_memory, s.no_mailbox, s.oracle, s.oracle_choice
+                s.review_json, s.no_project_memory, s.no_mailbox, s.oracle, s.oracle_choice,
+                s.no_github_credentials
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
 fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
@@ -1352,6 +1356,7 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
         no_project_memory: row.get(34)?,
         // Keep the shipped no_mailbox column for the GitHub target opt-out.
         no_github_events: row.get(35)?,
+        no_github_credentials: row.get(38)?,
         target_template_id: row.get(5)?,
         resource_allocation: row
             .get::<_, Option<String>>(14)?

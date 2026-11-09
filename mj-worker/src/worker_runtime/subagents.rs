@@ -26,6 +26,32 @@ use crate::subagent_mcp::DaemonContact;
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
 
+/// Register a worker-owned OpenCode 2 plugin without editing the user's home.
+pub(super) fn configure_opencode_mailbox_hook(
+    root: &Path,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let directory = root.join("opencode-mailbox");
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("create OpenCode plugin directory {}", directory.display()))?;
+    let worker = std::env::current_exe().context("locate worker for OpenCode mailbox transport")?;
+    let script = include_str!("../../assets/opencode-mailbox.js")
+        .replace("__MJ_WORKER__", &serde_json::to_string(&worker)?)
+        .replace(
+            "__MJ_SOCKET__",
+            &serde_json::to_string(&root.join("control.sock"))?,
+        );
+    let path = directory.join("index.js");
+    std::fs::write(&path, script)
+        .with_context(|| format!("write OpenCode mailbox hook {}", path.display()))?;
+    std::fs::write(
+        directory.join("package.json"),
+        r#"{"name":"mjolnir-mailbox","type":"module","main":"index.js"}"#,
+    )
+    .context("write OpenCode mailbox plugin manifest")?;
+    super::json_gh_rules::configure_opencode_plugin(&directory, environment)
+}
+
 const CODEX_CONFIG_ENV: &str = "CODEX_CONFIG";
 const CODEX_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
 const CLAUDE_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
@@ -57,7 +83,7 @@ pub(super) fn configure_claude_subagent_mcp(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     agent_mailboxes_enabled: bool,
     subtle_subagents: bool,
-    review_gate: bool,
+    review_tools: bool,
 ) -> Result<()> {
     use mj_core::subagent::{
         REVIEW_MCP_SERVER, REVIEW_MCP_TOOLS, SUBAGENT_MCP_SERVER, SubagentMcpRole,
@@ -137,7 +163,7 @@ pub(super) fn configure_claude_subagent_mcp(
                 "args": args,
             }),
         );
-        if role.offers_review_server(review_gate) {
+        if review_tools {
             servers.insert(
                 REVIEW_MCP_SERVER.into(),
                 serde_json::json!({
@@ -145,15 +171,10 @@ pub(super) fn configure_claude_subagent_mcp(
                     // No `alwaysLoad`: the tools are needed only before a push,
                     // so Claude loads them on demand.
                     "command": root.join("hel"),
-                    "args": [
-                        "worker",
-                        "subagent-mcp",
-                        "--socket",
-                        root.join(SUBAGENT_SOCKET).to_string_lossy(),
-                        "--harness",
+                    "args": role.review_server_args(
+                        &root.join(SUBAGENT_SOCKET),
                         mj_core::config::HarnessKind::Claude.id(),
-                        "--review-server",
-                    ],
+                    ),
                 }),
             );
         } else {
@@ -191,8 +212,7 @@ pub(super) fn configure_claude_subagent_mcp(
             .tool_names()
             .iter()
             .map(|tool| format!("mcp__{SUBAGENT_MCP_SERVER}__{tool}"));
-        let review = role
-            .offers_review_server(review_gate)
+        let review = review_tools
             .then(|| {
                 REVIEW_MCP_TOOLS
                     .iter()
@@ -483,7 +503,7 @@ fn configure_codex_mcp_with_mailboxes(
     policy: mj_core::config::ExecutionPolicy,
     mailboxes_enabled: bool,
     subtle_subagents: bool,
-    review_gate: bool,
+    review_tools: bool,
 ) -> Result<bool> {
     if !private_staged_home(root, session_id, home) {
         return Ok(false);
@@ -563,21 +583,13 @@ fn configure_codex_mcp_with_mailboxes(
             server["default_tools_approval_mode"] = serde_json::json!("approve");
         }
         servers.insert(name.into(), toml::Value::try_from(server)?);
-        if role.offers_review_server(review_gate) {
+        if review_tools {
             // Unlike `mj-agents`, no `omit_tools_from`: Codex may defer these
             // tools until a search finds them, which suits tools needed only
             // before a push.
             let mut review = serde_json::json!({
                 "command": worker,
-                "args": [
-                    "worker",
-                    "subagent-mcp",
-                    "--socket",
-                    root.join(SUBAGENT_SOCKET).to_string_lossy(),
-                    "--harness",
-                    "codex",
-                    "--review-server",
-                ],
+                "args": role.review_server_args(&root.join(SUBAGENT_SOCKET), "codex"),
             });
             if policy == mj_core::config::ExecutionPolicy::ConfiguredApprovals {
                 review["default_tools_approval_mode"] = serde_json::json!("approve");
@@ -640,7 +652,7 @@ pub(super) fn configure_codex_profile(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
     options: crate::subagent_mcp::ParentTools,
-    review_gate: bool,
+    review_tools: bool,
 ) -> Result<bool> {
     configure_codex_mailbox_hook(root, environment)?;
     configure_codex_mcp_with_mailboxes(
@@ -651,7 +663,7 @@ pub(super) fn configure_codex_profile(
         policy,
         options.agent_mailboxes_enabled,
         options.subtle_subagents,
-        review_gate,
+        review_tools,
     )
 }
 
@@ -878,11 +890,14 @@ struct Collections {
 pub struct SubagentEndpoint {
     path: PathBuf,
     admission: Arc<SocketAdmission>,
-    relay: Option<Arc<Mutex<crate::relay::DurableRelay>>>,
+    relay: Option<Arc<crate::relay::RelayCell>>,
     state: Arc<Mutex<QueueState>>,
     /// Woken whenever a result lands, so a socket call awaiting its own request
     /// returns the moment the daemon completes it.
     completed: Arc<Notify>,
+    /// The queue's generation, published by every write so a connection
+    /// waiting for a change (`WaitForChange`) wakes.
+    generations: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl SubagentEndpoint {
@@ -903,6 +918,7 @@ impl SubagentEndpoint {
             relay: None,
             state: Arc::new(Mutex::new(state)),
             completed: Arc::new(Notify::new()),
+            generations: Arc::new(tokio::sync::watch::Sender::new(0)),
         };
         endpoint.import_legacy_results()?;
         Ok(endpoint)
@@ -1097,7 +1113,15 @@ impl SubagentEndpoint {
         mj_core::config::atomic_write(&self.path, &body)
             .with_context(|| format!("write sub-agent queue {}", self.path.display()))?;
         state.generation = state.generation.wrapping_add(1);
+        // The writer still holds the queue lock, so a woken waiter reads the
+        // queue after this write is committed.
+        self.generations.send_replace(state.generation);
         Ok(())
+    }
+
+    /// Changes after every write to the queue.
+    pub(in crate::worker_runtime) fn generations(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.generations.subscribe()
     }
 }
 
@@ -1151,6 +1175,157 @@ impl Drop for LiveWaiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: #1473: OpenCode must retain each message before acknowledging the relay lease.
+    #[test]
+    fn opencode_mailbox_plugin_retains_before_ack_and_deduplicates_retries() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let mut environment = BTreeMap::from([(
+            "OPENCODE_CONFIG_CONTENT".into(),
+            "{ // keep user plugins\n\"plugins\": [\"user-plugin\"], \"permissions\": [] }".into(),
+        )]);
+        configure_opencode_mailbox_hook(root.path(), &mut environment).unwrap();
+        let once = environment.clone();
+        configure_opencode_mailbox_hook(root.path(), &mut environment).unwrap();
+        assert_eq!(environment, once);
+        assert!(environment["OPENCODE_CONFIG_CONTENT"].contains("user-plugin"));
+        let transport = root.path().join("transport.mjs");
+        std::fs::write(
+            &transport,
+            r##"#!/usr/bin/env node
+import { createConnection } from "node:net";
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => input += chunk);
+process.stdin.on("end", () => {
+  const connection = createConnection(process.argv.at(-1));
+  let reply = "";
+  connection.setEncoding("utf8");
+  connection.on("connect", () => connection.write(JSON.stringify({
+    request_id: "test", protocol_version: 1, request: JSON.parse(input),
+  }) + "\n"));
+  connection.on("data", chunk => reply += chunk);
+  connection.on("end", () => {
+    if (reply) process.stdout.write(JSON.stringify(JSON.parse(reply).payload));
+    else process.exitCode = 1;
+  });
+});
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&transport, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let plugin_path = root.path().join("opencode-mailbox/index.js");
+        let script = std::fs::read_to_string(&plugin_path).unwrap().replace(
+            &serde_json::to_string(&std::env::current_exe().unwrap()).unwrap(),
+            &serde_json::to_string(&transport).unwrap(),
+        );
+        std::fs::write(&plugin_path, script).unwrap();
+        let mut command = std::process::Command::new("node");
+        command
+            .args(["--input-type=module", "-"])
+            .env("MJ_HOOK_PLUGIN", plugin_path)
+            .env("MJ_HOOK_SOCKET", root.path().join("control.sock"));
+        let output = mj_core::subprocess::run_with_input(
+            &mut command,
+            br#"
+import assert from "node:assert/strict";
+import { createServer } from "node:net";
+import { pathToFileURL } from "node:url";
+const plugin = (await import(pathToFileURL(process.env.MJ_HOOK_PLUGIN))).default;
+const retained = new Map();
+const first = {key: "oracle", text: "mailbox:" + "\u754c\u{1f680}".repeat(20 * 1024)};
+const second = {key: "child", text: "second message"};
+let contexts = [first];
+let drains = 0;
+let acknowledgements = 0;
+let rejectRetention = true;
+let loseAcknowledgement = true;
+const server = createServer(connection => {
+  let input = "";
+  connection.setEncoding("utf8");
+  connection.on("data", chunk => {
+    input += chunk;
+    if (!input.includes("\n")) return;
+    const request = JSON.parse(input.slice(0, input.indexOf("\n")));
+    let payload;
+    if (request.request.method === "drain_mailbox") {
+      drains++;
+      payload = {type: "mailbox_drained", data: {lease_id: "lease-" + drains, contexts}};
+    } else {
+      assert.equal(request.request.method, "ack_mailbox");
+      assert.ok(contexts.every(context => [...retained.values()].includes(context.text)),
+        "every message must already be retained when the relay is acknowledged");
+      acknowledgements++;
+      if (loseAcknowledgement) {
+        loseAcknowledgement = false;
+        connection.end();
+        return;
+      }
+      payload = {type: "mailbox_acknowledged", data: {acknowledged: true}};
+    }
+    connection.end(JSON.stringify({request_id: request.request_id,
+      protocol_version: request.protocol_version, result: "ok", payload}) + "\n");
+  });
+});
+await new Promise(resolve => server.listen(process.env.MJ_HOOK_SOCKET, resolve));
+let hook;
+let disposed = false;
+try {
+  const cleanup = await plugin.setup({
+    session: {
+      get: async ({sessionID}) => ({parentID: sessionID === "native-child" ? "lead" : undefined}),
+      synthetic: async ({id, text, delivery, resume}) => {
+        assert.equal(delivery, "steer");
+        assert.equal(resume, false);
+        if (rejectRetention) {
+          rejectRetention = false;
+          throw new Error("retention failed");
+        }
+        if (retained.has(id)) assert.equal(retained.get(id), text);
+        retained.set(id, text);
+      },
+    },
+    tool: {hook: async (name, callback) => {
+      assert.equal(name, "execute.after");
+      hook = callback;
+      return {dispose: () => {disposed = true}};
+    }},
+  });
+  const event = {sessionID: "lead", status: "completed", result: {content: "tool output", output: {ok: true}}};
+  await assert.rejects(hook(event), /retention failed/);
+  assert.equal(acknowledgements, 0);
+  await assert.rejects(hook(event), /mailbox request exited/);
+  assert.equal(retained.size, 1);
+  // An expired unacknowledged lease can include newer events on retry.
+  contexts = [first, second];
+  await hook(event);
+  assert.equal(retained.size, 2);
+  assert.deepEqual(event.result, {content: "tool output", output: {ok: true}});
+  const child = {sessionID: "native-child", status: "completed", result: {content: "child output"}};
+  await hook(child);
+  assert.equal(drains, 3);
+  assert.equal(acknowledgements, 2);
+  await cleanup();
+  assert.ok(disposed);
+} finally {
+  await new Promise(resolve => server.close(resolve));
+}
+console.log("OpenCode durable mailbox bridge passed");
+"#,
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "OpenCode durable mailbox bridge passed"
+        );
+    }
 
     #[test]
     fn a_kimi_reviewer_registers_handback_in_its_private_runtime_profile() {
@@ -2292,6 +2467,7 @@ enabled = false
 
         let mutations = [
             SubagentToolAction::Spawn {
+                no_github_credentials: false,
                 task_type: mj_core::subagent::SubagentTaskType::Straightforward,
                 task_name: "task".into(),
                 instructions: "work".into(),
@@ -2374,7 +2550,7 @@ enabled = false
     fn admission_stamps_worker_turn_and_replay_cannot_retarget_it() {
         use crate::relay::test_support::{prompt, submit_relay};
         let root = tempfile::tempdir().unwrap();
-        let relay = Arc::new(Mutex::new(
+        let relay = Arc::new(crate::relay::RelayCell::new(
             crate::relay::DurableRelay::open(root.path(), "session-123", "test").unwrap(),
         ));
         {
@@ -2401,6 +2577,7 @@ enabled = false
                 .record_command_completed(
                     "original-turn",
                     mj_core::relay::RelayCommandOutcome::Prompt {
+                        work_facts: None,
                         stop_reason: "end_turn".into(),
                         usage: None,
                         diagnostic: None,
@@ -2424,7 +2601,7 @@ enabled = false
     fn handback_admission_owns_the_harness_turn_in_either_order() {
         for opened in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let relay = Arc::new(Mutex::new(
+            let relay = Arc::new(crate::relay::RelayCell::new(
                 crate::relay::DurableRelay::open(root.path(), "session-123", "test").unwrap(),
             ));
             {
@@ -2737,7 +2914,7 @@ struct SocketReply {
 pub(super) fn serve(
     runtime: &tokio::runtime::Handle,
     root: &Path,
-    relay: Arc<Mutex<crate::relay::DurableRelay>>,
+    relay: Arc<crate::relay::RelayCell>,
     _harness: mj_core::config::HarnessKind,
 ) -> Result<(SubagentEndpoint, SubagentSocketGuard)> {
     let mut endpoint = SubagentEndpoint::open(root)?;
@@ -2988,16 +3165,15 @@ mod review_gate_tests {
 
     // Hard-won: 32d96d199: review registration required granting the delegation role.
     #[test]
-    fn the_review_server_is_registered_only_for_gated_top_level_sessions() {
+    fn the_review_server_is_registered_for_every_role_when_the_launch_offers_review_tools() {
         for role in [
             SubagentMcpRole::Parent,
             SubagentMcpRole::Child,
             SubagentMcpRole::MessageOnly,
             SubagentMcpRole::FetchOnly,
         ] {
-            for gate in [false, true] {
-                let expected =
-                    gate && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
+            for tools in [false, true] {
+                let expected = tools;
                 let (root, home) = staged_profile();
                 configure_claude_subagent_mcp(
                     root.path(),
@@ -3006,7 +3182,7 @@ mod review_gate_tests {
                     Some(role),
                     true,
                     true,
-                    gate,
+                    tools,
                 )
                 .unwrap();
                 let (config, allow) = claude_files(&home);
@@ -3021,7 +3197,7 @@ mod review_gate_tests {
                 assert_eq!(
                     servers.get("mj-review").is_some(),
                     expected,
-                    "{role} {gate}"
+                    "{role} {tools}"
                 );
                 for rule in REVIEW_RULES {
                     assert_eq!(allow.iter().any(|allowed| allowed == rule), expected);
@@ -3035,18 +3211,21 @@ mod review_gate_tests {
                         review["command"],
                         serde_json::json!(root.path().join("hel"))
                     );
-                    assert_eq!(
-                        string_args(review),
-                        [
-                            "worker",
-                            "subagent-mcp",
-                            "--socket",
-                            root.path().join(SUBAGENT_SOCKET).to_str().unwrap(),
-                            "--harness",
-                            "claude",
-                            "--review-server",
-                        ]
-                    );
+                    let socket_path = root.path().join(SUBAGENT_SOCKET);
+                    let mut expected_args = vec![
+                        "worker",
+                        "subagent-mcp",
+                        "--socket",
+                        socket_path.to_str().unwrap(),
+                        "--harness",
+                        "claude",
+                        "--review-server",
+                    ];
+                    // Only a managed child names its role, for its instructions.
+                    if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::FetchOnly) {
+                        expected_args.extend(["--role", role.id()]);
+                    }
+                    assert_eq!(string_args(review), expected_args);
                 }
 
                 for policy in [
@@ -3061,7 +3240,7 @@ mod review_gate_tests {
                         policy,
                         true,
                         true,
-                        gate,
+                        tools,
                     )
                     .unwrap();
                     let servers = codex_servers(&home);
@@ -3073,7 +3252,11 @@ mod review_gate_tests {
                         .collect();
                     assert!(!agents.contains(&"--review-gate"));
                     assert!(!agents.contains(&"--review-server"));
-                    assert_eq!(servers.contains_key("mj-review"), expected, "{role} {gate}");
+                    assert_eq!(
+                        servers.contains_key("mj-review"),
+                        expected,
+                        "{role} {tools}"
+                    );
                     if expected {
                         let review = &servers["mj-review"];
                         let args: Vec<_> = review["args"]
@@ -3082,18 +3265,20 @@ mod review_gate_tests {
                             .iter()
                             .map(|arg| arg.as_str().unwrap())
                             .collect();
-                        assert_eq!(
-                            args,
-                            [
-                                "worker",
-                                "subagent-mcp",
-                                "--socket",
-                                root.path().join(SUBAGENT_SOCKET).to_str().unwrap(),
-                                "--harness",
-                                "codex",
-                                "--review-server",
-                            ]
-                        );
+                        let socket_path = root.path().join(SUBAGENT_SOCKET);
+                        let mut expected_args = vec![
+                            "worker",
+                            "subagent-mcp",
+                            "--socket",
+                            socket_path.to_str().unwrap(),
+                            "--harness",
+                            "codex",
+                            "--review-server",
+                        ];
+                        if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::FetchOnly) {
+                            expected_args.extend(["--role", role.id()]);
+                        }
+                        assert_eq!(args, expected_args);
                         // Codex may defer these tools; mj-agents opts out of that.
                         assert!(review.get("omit_tools_from").is_none());
                         assert!(servers["mj-agents"].get("omit_tools_from").is_some());

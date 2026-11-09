@@ -5,6 +5,7 @@ use crate::controller::checkpoint::{
     BarrierBusyPolicy, CHECKPOINT_BARRIER_TIMEOUT, adopt_restarted_checkpoint_relay,
     connect_checkpoint_relay, wait_for_checkpoint_barrier,
 };
+use crate::controller::worker_binary::{WorkerRecovery, worker_recovery};
 
 impl Controller {
     /// Persist the child's final relay events before removing its private
@@ -57,10 +58,13 @@ impl Controller {
                     .into_iter()
                     .next()
                     .context("reconnect plan is empty")?;
+                // A reachable relay always has its conversation synchronized,
+                // whatever its root looks like. Only a worker proven dead is
+                // judged by its root.
                 let connected =
                     connect_checkpoint_relay(session_id, manager, &reconnect, None).await;
-                Some(match connected {
-                    Ok(relay) => relay,
+                match connected {
+                    Ok(relay) => Some(relay),
                     Err(error) if crate::session_manager::worker_connect_needs_restart(&error) => {
                         let (backend, worker_root) = self.worker_placement(session_id)?;
                         let liveness = executor.execute(
@@ -74,20 +78,43 @@ impl Controller {
                                 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead",
                             "child relay is unreachable, but its worker is not confirmed dead; preserving its private journal: {error:#}"
                         );
-                        let connection = self
-                            .restart_worker_for_checkpoint_only(
+                        // A Create cancelled before its worker reached its
+                        // durable relay leaves no worker root, or a root without
+                        // relay state. There is no journal to synchronize, and a
+                        // checkpoint-only worker would refuse the root, so go
+                        // straight to cleanup. When the probe cannot tell, keep
+                        // the recovery path.
+                        if worker_recovery(executor, &backend, &worker_root)
+                            == WorkerRecovery::NothingToRecover
+                        {
+                            tracing::info!(
                                 session_id,
-                                executor,
-                                &backend,
-                                &worker_root,
-                                &reconnect,
+                                target = ?previous.target,
+                                worker_root,
+                                "closing a sub-agent whose dead worker left no relay state, without checkpoint recovery"
+                            );
+                            None
+                        } else {
+                            let connection = self
+                                .restart_worker_for_checkpoint_only(
+                                    session_id,
+                                    executor,
+                                    &backend,
+                                    &worker_root,
+                                    &reconnect,
+                                )
+                                .await
+                                .context(
+                                    "recover dead child worker without starting its harness",
+                                )?;
+                            Some(
+                                adopt_restarted_checkpoint_relay(session_id, manager, connection)
+                                    .await?,
                             )
-                            .await
-                            .context("recover dead child worker without starting its harness")?;
-                        adopt_restarted_checkpoint_relay(session_id, manager, connection).await?
+                        }
                     }
                     Err(error) => return Err(error),
-                })
+                }
             } else {
                 None
             };

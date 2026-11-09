@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::controller::test_support::{IsolatedTest, test_name};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use mj_core::config::{
     Config, ContainerTemplate as ConfigContainer, HarnessKind, HarnessProfile, ProjectBundle,
@@ -304,6 +305,48 @@ fn podman_session_runs_as_root_without_image_user_probing_or_keep_id() {
     );
 }
 
+#[test]
+fn credential_free_container_creation_omits_runtime_token_environment() {
+    let environment = BTreeMap::<String, String>::from([
+        ("GH_TOKEN".into(), "runtime-secret".into()),
+        ("GITHUB_TOKEN".into(), "runtime-secret".into()),
+        ("GH_ENTERPRISE_TOKEN".into(), "runtime-secret".into()),
+        ("NON_SECRET_SETTING".into(), "keep".into()),
+    ]);
+    let template: mj_core::config::TargetTemplate = serde_json::from_value(serde_json::json!({
+        "kind":"local-podman", "image":"test-image", "environment":environment,
+    }))
+    .unwrap();
+    let mut session = crate::controller::test_support::checkpoint_test_session(
+        "0123456789abcdef0123456789abcdef",
+    );
+    session.no_github_credentials = true;
+    let target =
+        backend_target(&template, None, ContainerOverrides::for_session(&session)).unwrap();
+    let plan = targets::provision_plan_named(
+        &target,
+        &session.id,
+        &probe_bundle(),
+        &[],
+        None,
+        &targets::resource_name(&session.id).unwrap(),
+        Some("checkout-secret"),
+    )
+    .unwrap();
+    let run_args = &plan.commands[0].args;
+    assert!(run_args.iter().all(|arg| !arg.contains("runtime-secret")));
+    assert!(run_args.iter().any(|arg| arg == "NON_SECRET_SETTING=keep"));
+    for command in &plan.commands {
+        let input = command.to_node_run(false).sensitive_stdin;
+        if command.purpose.starts_with("clone ") {
+            assert_eq!(input.as_deref(), Some(b"checkout-secret\n".as_slice()));
+        } else {
+            assert!(input.is_none());
+        }
+    }
+    assert!(!format!("{plan:?}").contains("checkout-secret"));
+}
+
 const SSH_DOCKER_FAILURE_CHILD: &str = "MJ_TEST_SSH_DOCKER_FAILURE_CHILD";
 
 #[test]
@@ -345,6 +388,7 @@ fn stale_worker_fails_before_any_container_is_created() {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 create_managed_worktree: None,
                 at: None,
@@ -416,6 +460,7 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -507,6 +552,7 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -810,6 +856,7 @@ fn failed_node_preflight_retains_error_before_provisioning() {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -896,6 +943,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "remote".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -1026,6 +1074,7 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -1731,11 +1780,68 @@ impl CommandExecutor for RawRegistrationExecutor {
     }
 }
 
+/// A child that has to queue for a container start slot shows the wait as its
+/// own stage, from the first moment it waits until it is admitted; a child
+/// that finds a free slot reports nothing.
+#[tokio::test]
+async fn waiting_for_a_container_start_slot_is_its_own_stage_until_admission() {
+    #[derive(Default)]
+    struct StageRecorder {
+        events: Mutex<Vec<(bool, targets::ProvisionStage)>>,
+    }
+
+    impl CommandExecutor for StageRecorder {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            unreachable!("waiting for a start slot runs no commands: {command:?}");
+        }
+
+        fn stage_started(&self, stage: targets::ProvisionStage) {
+            self.events.lock().unwrap().push((true, stage));
+        }
+
+        fn stage_finished(&self, stage: targets::ProvisionStage) {
+            self.events.lock().unwrap().push((false, stage));
+        }
+    }
+
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let free = StageRecorder::default();
+    let permit = admit_container_start(&gate, &free)
+        .await
+        .expect("a free slot");
+    assert!(free.events.lock().unwrap().is_empty());
+
+    let queued = std::sync::Arc::new(StageRecorder::default());
+    let waiter = {
+        let (gate, queued) = (gate.clone(), queued.clone());
+        tokio::spawn(async move { admit_container_start(&gate, &*queued).await.is_some() })
+    };
+    while queued.events.lock().unwrap().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        *queued.events.lock().unwrap(),
+        vec![(true, targets::ProvisionStage::WaitingForStartSlot)],
+        "the stage is open while the child waits"
+    );
+    drop(permit);
+    assert!(waiter.await.unwrap(), "admitted once the slot is free");
+    assert_eq!(
+        *queued.events.lock().unwrap(),
+        vec![
+            (true, targets::ProvisionStage::WaitingForStartSlot),
+            (false, targets::ProvisionStage::WaitingForStartSlot)
+        ],
+        "the stage closes on admission"
+    );
+}
+
 #[test]
-fn provisioning_reports_the_pull_stage_only_while_waiting() {
+fn provisioning_reports_the_pull_stage_from_the_wait_until_the_pull_work_returns() {
     #[derive(Default)]
     struct StageRecorder {
         stages: Mutex<Vec<targets::ProvisionStage>>,
+        finished: Mutex<Vec<targets::ProvisionStage>>,
         notices: Mutex<Vec<String>>,
     }
 
@@ -1746,6 +1852,10 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
 
         fn stage_started(&self, stage: targets::ProvisionStage) {
             self.stages.lock().unwrap().push(stage);
+        }
+
+        fn stage_finished(&self, stage: targets::ProvisionStage) {
+            self.finished.lock().unwrap().push(stage);
         }
 
         fn notify_notice(&self, notice: &str) {
@@ -1763,15 +1873,28 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
         workspace_storage: Default::default(),
     });
 
+    // Hard-won: 9c928ddc2: the pull stage closed before the work that pulls
+    // the image ran, so a long first pull counted as a stalled Create.
     let quiet = StageRecorder::default();
-    crate::image_pull_gate::with_image_ready(&target, &quiet, || Ok(()))
-        .expect("nothing is downloading, so the work runs straight away");
-    assert!(
-        quiet.stages.lock().unwrap().is_empty(),
-        "a launch with nothing to wait for reported {:?}",
-        quiet.stages.lock().unwrap()
+    crate::image_pull_gate::with_image_ready(&target, &quiet, || {
+        assert_eq!(
+            *quiet.stages.lock().unwrap(),
+            vec![targets::ProvisionStage::PullingImage],
+            "the stage is open while the work that pulls runs"
+        );
+        assert!(quiet.finished.lock().unwrap().is_empty());
+        Ok(())
+    })
+    .expect("nothing is downloading, so the work runs straight away");
+    assert_eq!(
+        *quiet.finished.lock().unwrap(),
+        vec![targets::ProvisionStage::PullingImage]
     );
-    assert!(quiet.notices.lock().unwrap().is_empty());
+    assert!(
+        quiet.notices.lock().unwrap().is_empty(),
+        "a launch with nothing to wait for said {:?}",
+        quiet.notices.lock().unwrap()
+    );
 
     let lock = crate::image_pull_gate::image_pull_mutex(&targets::ImageHost::LocalPodman, image);
     let started = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -1788,11 +1911,21 @@ fn provisioning_reports_the_pull_stage_only_while_waiting() {
     started.wait();
 
     let waiting = StageRecorder::default();
-    crate::image_pull_gate::with_image_ready(&target, &waiting, || Ok(()))
-        .expect("the launch proceeds once the download finishes");
+    crate::image_pull_gate::with_image_ready(&target, &waiting, || {
+        assert_eq!(
+            *waiting.finished.lock().unwrap(),
+            vec![targets::ProvisionStage::WaitingForImagePull],
+            "the queue stage closes before pull work starts"
+        );
+        Ok(())
+    })
+    .expect("the launch proceeds once the download finishes");
     assert_eq!(
         *waiting.stages.lock().unwrap(),
-        vec![targets::ProvisionStage::PullingImage]
+        vec![
+            targets::ProvisionStage::WaitingForImagePull,
+            targets::ProvisionStage::PullingImage
+        ]
     );
     let notices = waiting.notices.lock().unwrap();
     assert!(
@@ -1878,4 +2011,543 @@ fn limits_a_rootless_podman_host_cannot_enforce_are_dropped_and_reported() {
     let args = container_run_args(&target);
     assert!(args.contains(&"--cpus=4".to_owned()), "{args:?}");
     assert!(args.contains(&"--memory=8589934592".to_owned()), "{args:?}");
+}
+
+/// A held real Git checkout overlaps file staging. Harness preflight waits for
+/// the published checkout, and a preflight failure rolls back after both lanes.
+#[cfg(unix)]
+// Hard-won: 8a928a08b: harness preflight inspected an unfinished checkout.
+#[tokio::test]
+async fn managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cleanup() {
+    const NAME: &str =
+        "managed_checkout_overlaps_payload_and_finishes_before_failed_launch_cleanup";
+    const CHILD: &str = "MJ_TEST_CHECKOUT_PAYLOAD_OVERLAP";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), NAME))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "checkout-payload-overlap")
+            .env(
+                "MJ_WORKER_BINARY",
+                mj_core::test_hooks::fake_worker_dispatcher(),
+            )
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let source = crate::controller::test_support::committed_repository();
+    let root = source.path().canonicalize().unwrap();
+    let home = mj_core::config::data_dir().join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile::new(HarnessKind::Codex, home),
+    );
+    config.save().unwrap();
+    let mut record =
+        crate::controller::test_support::raw_session_on("localhost", root.to_str().unwrap());
+    record.state = SessionState::Provisioning;
+    record.target = None;
+    record.native_session_id = None;
+    record.create_managed_worktree = Some(true);
+    record.no_project_memory = true;
+    record.oracle = false;
+    crate::database::save_session(&record).unwrap();
+    let mut controller = Controller::load().unwrap();
+
+    struct OverlapExecutor {
+        checkout_started: std::sync::mpsc::Sender<()>,
+        await_checkout: Mutex<std::sync::mpsc::Receiver<()>>,
+        preparation_started: std::sync::mpsc::Sender<()>,
+        await_preparation: Mutex<std::sync::mpsc::Receiver<()>>,
+        checkout_finished: std::sync::atomic::AtomicBool,
+        checkout: PathBuf,
+    }
+    impl CommandExecutor for OverlapExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let bound = std::time::Duration::from_secs(20);
+            match command.purpose.as_str() {
+                "select managed clone starting branch" => {
+                    self.checkout_started.send(())?;
+                    self.await_preparation
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(bound)
+                        .context("worker file staging did not overlap checkout")?;
+                    let result = targets::ProcessExecutor.execute(command);
+                    self.checkout_finished
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    result
+                }
+                "install local worker ownership marker" => {
+                    self.await_checkout
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(bound)
+                        .context("checkout did not overlap worker file staging")?;
+                    self.preparation_started.send(())?;
+                    targets::ProcessExecutor.execute(command)
+                }
+                "prepare exact managed harness before worker startup" => {
+                    assert!(
+                        self.checkout.is_dir(),
+                        "harness preflight needs the published checkout"
+                    );
+                    assert!(
+                        self.checkout_finished
+                            .load(std::sync::atomic::Ordering::Acquire)
+                    );
+                    bail!("injected harness preflight failure")
+                }
+                "start detached Mjolnir worker" => panic!("a failed setup must not start a worker"),
+                _ => targets::ProcessExecutor.execute(command),
+            }
+        }
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            targets::ProcessExecutor.execute_with_stdin(command, input)
+        }
+    }
+    let (checkout_started, await_checkout) = std::sync::mpsc::channel();
+    let (preparation_started, await_preparation) = std::sync::mpsc::channel();
+    let executor = OverlapExecutor {
+        checkout_started,
+        await_checkout: Mutex::new(await_checkout),
+        preparation_started,
+        await_preparation: Mutex::new(await_preparation),
+        checkout_finished: std::sync::atomic::AtomicBool::new(false),
+        checkout: root.join(".mj/clones").join(&record.id),
+    };
+    let error = controller
+        .provision_session_controlled_with_commit(
+            &record.id,
+            &executor,
+            || panic!("failed setup cannot commit"),
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("injected harness preflight failure"),
+        "{error:#}"
+    );
+    assert!(
+        executor
+            .checkout_finished
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert_eq!(
+        Controller::load().unwrap().state.sessions[&record.id].state,
+        SessionState::Error
+    );
+    let checkout = root.join(".mj/clones").join(&record.id);
+    assert!(
+        !checkout.exists(),
+        "rollback must remove the completed checkout"
+    );
+    assert!(!checkout.with_extension("provisioning").exists());
+    assert!(
+        root.join("nested/file.txt").is_file(),
+        "source remains intact"
+    );
+}
+
+/// Plays EC2 for the IMDS checks: the instance allows IMDSv1 until
+/// `modify-instance-metadata-options` succeeds, and every command is recorded.
+struct Imds {
+    optional: std::sync::atomic::AtomicBool,
+    modify_fails: bool,
+    modify_has_no_effect: bool,
+    /// How many checks still report the change as `pending` (the state EC2
+    /// reports right after a launch or a change, before it is applied).
+    pending_checks: std::sync::atomic::AtomicUsize,
+    /// Report this state instead of `applied` or `pending`.
+    state: Option<&'static str>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    commands: Mutex<Vec<Vec<String>>>,
+}
+
+impl Imds {
+    fn new(optional: bool) -> Self {
+        Self {
+            optional: std::sync::atomic::AtomicBool::new(optional),
+            modify_fails: false,
+            modify_has_no_effect: false,
+            pending_checks: std::sync::atomic::AtomicUsize::new(0),
+            state: None,
+            cancelled: Default::default(),
+            commands: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn pending_for(self, checks: usize) -> Self {
+        self.pending_checks
+            .store(checks, std::sync::atomic::Ordering::SeqCst);
+        self
+    }
+
+    fn purposes_run(&self) -> Vec<String> {
+        self.commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|argv| {
+                [
+                    "describe-instances",
+                    "modify-instance-metadata-options",
+                    "terminate-instances",
+                ]
+                .into_iter()
+                .find(|verb| argv.iter().any(|arg| arg == verb))
+                .map(str::to_owned)
+            })
+            .collect()
+    }
+}
+
+impl CommandExecutor for Imds {
+    fn cancellation_requested(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let mut argv = vec![command.program.clone()];
+        argv.extend(command.args.clone());
+        self.commands.lock().unwrap().push(argv);
+        let ok = |stdout: Vec<u8>| CommandOutput {
+            status: 0,
+            stdout,
+            stderr: Vec::new(),
+        };
+        Ok(match command.purpose.as_str() {
+            "check EC2 instance metadata options" => {
+                // The MetadataOptions object of the recorded describe/run output.
+                let mut recorded: serde_json::Value = serde_json::from_str(include_str!(
+                    "../../../tests/fixtures/aws-run-instances-imdsv2.json"
+                ))
+                .unwrap();
+                let mut options = recorded["Instances"][0]["MetadataOptions"].take();
+                if self.optional.load(SeqCst) {
+                    options["HttpTokens"] = "optional".into();
+                }
+                // The recording was taken right after launch, while pending.
+                let pending = self
+                    .pending_checks
+                    .try_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+                    .is_ok();
+                options["State"] = match (pending, self.state) {
+                    (_, Some(state)) => state,
+                    (true, None) => "pending",
+                    (false, None) => "applied",
+                }
+                .into();
+                ok(serde_json::to_vec(&options).unwrap())
+            }
+            "require IMDSv2 on EC2 instance" if self.modify_fails => CommandOutput {
+                status: 254,
+                stdout: Vec::new(),
+                stderr: b"UnauthorizedOperation".to_vec(),
+            },
+            "require IMDSv2 on EC2 instance" => {
+                if !self.modify_has_no_effect {
+                    self.optional.store(false, SeqCst);
+                }
+                // Expected shape from the AWS CLI reference; not live-verified.
+                ok(include_bytes!(
+                    "../../../tests/fixtures/aws-modify-instance-metadata-options.json"
+                )
+                .to_vec())
+            }
+            "launch EC2 session instance" => {
+                ok(br#"{"Instances":[{"InstanceId":"i-0123456789abcdef0"}]}"#.to_vec())
+            }
+            _ => ok(Vec::new()),
+        })
+    }
+}
+
+#[test]
+fn an_instance_that_allows_imdsv1_is_changed_in_place_and_verified_again() {
+    let executor = Imds::new(true);
+    crate::controller::backend::ensure_imdsv2(
+        "default",
+        "us-east-1",
+        "i-0123456789abcdef0",
+        &executor,
+    )
+    .unwrap();
+    assert_eq!(
+        executor.purposes_run(),
+        [
+            "describe-instances",
+            "modify-instance-metadata-options",
+            "describe-instances"
+        ]
+    );
+    let commands = executor.commands.lock().unwrap();
+    assert!(
+        commands[1]
+            .windows(2)
+            .any(|a| a == ["--http-tokens", "required"])
+    );
+    assert!(
+        commands[1]
+            .windows(2)
+            .any(|a| a == ["--instance-id", "i-0123456789abcdef0"])
+    );
+    drop(commands);
+
+    // One that already requires IMDSv2 is left alone.
+    let compliant = Imds::new(false);
+    crate::controller::backend::ensure_imdsv2(
+        "default",
+        "us-east-1",
+        "i-0123456789abcdef0",
+        &compliant,
+    )
+    .unwrap();
+    assert_eq!(compliant.purposes_run(), ["describe-instances"]);
+}
+
+#[test]
+fn an_instance_that_cannot_be_made_to_require_imdsv2_is_an_error() {
+    let mut refused = Imds::new(true);
+    refused.modify_fails = true;
+    let error = crate::controller::backend::ensure_imdsv2(
+        "default",
+        "us-east-1",
+        "i-0123456789abcdef0",
+        &refused,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("could not require IMDSv2"),
+        "{error:#}"
+    );
+
+    // A change AWS accepted but the instance does not show is not trusted.
+    let mut ineffective = Imds::new(true);
+    ineffective.modify_has_no_effect = true;
+    let error = crate::controller::backend::ensure_imdsv2(
+        "default",
+        "us-east-1",
+        "i-0123456789abcdef0",
+        &ineffective,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("reports HttpTokens optional after Mjolnir required IMDSv2"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn a_launch_whose_instance_cannot_require_imdsv2_is_terminated() {
+    let ssh = SshTarget {
+        destination: "ubuntu@example.test".into(),
+        ssh_args: Vec::new(),
+    };
+    let target = targets::TargetTemplate::AwsEc2(targets::AwsTemplate {
+        profile: "default".into(),
+        region: "us-east-1".into(),
+        launch_template: "lt-0123456789abcdef0".into(),
+        launch_template_version: None,
+        instance_type: None,
+        ssh,
+    });
+    let canonical = mj_core::config::TargetTemplate::AwsEc2 {
+        aws_profile: None,
+        region: "us-east-1".into(),
+        launch_template: "lt-0123456789abcdef0".into(),
+        launch_template_version: None,
+        ssh_user: "ubuntu".into(),
+        address_source: mj_core::config::AwsAddressSource::PublicIp,
+        identity_file: None,
+        ssh_args: Vec::new(),
+    };
+    let plan =
+        targets::provision_plan(&target, PROVISIONED_SESSION, &probe_bundle(), &[], None).unwrap();
+    let mut executor = Imds::new(true);
+    executor.modify_fails = true;
+    let name = targets::resource_name(PROVISIONED_SESSION).unwrap();
+
+    let error = provision_target_creation_named(
+        &plan,
+        &target,
+        PROVISIONED_SESSION,
+        &executor,
+        &name,
+        |outputs| {
+            crate::controller::backend::locator_after_provision_named(
+                &canonical,
+                &target,
+                PROVISIONED_SESSION,
+                outputs.first(),
+                &executor,
+                &name,
+            )
+        },
+    )
+    .map(|_| ())
+    .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("could not require IMDSv2"),
+        "{error:#}"
+    );
+    let launch = executor.commands.lock().unwrap();
+    assert!(
+        launch.iter().any(|argv| argv
+            .windows(2)
+            .any(|a| a == ["--metadata-options", "HttpTokens=required"])),
+        "the launch asks for IMDSv2 itself"
+    );
+    drop(launch);
+    assert!(
+        executor
+            .purposes_run()
+            .contains(&"terminate-instances".to_owned())
+    );
+}
+
+/// A clock the test drives: `sleep` advances it, and nothing waits.
+struct VirtualClock {
+    start: std::time::Instant,
+    elapsed: std::cell::Cell<Duration>,
+    sleeps: std::cell::RefCell<Vec<Duration>>,
+}
+
+impl VirtualClock {
+    fn new() -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            elapsed: Default::default(),
+            sleeps: Default::default(),
+        }
+    }
+
+    fn ensure(&self, executor: &Imds, timeout: Duration) -> Result<()> {
+        crate::controller::backend::ensure_imdsv2_until(
+            "default",
+            "us-east-1",
+            "i-0123456789abcdef0",
+            executor,
+            timeout,
+            || self.start + self.elapsed.get(),
+            |pause| {
+                self.sleeps.borrow_mut().push(pause);
+                self.elapsed.set(self.elapsed.get() + pause);
+            },
+        )
+    }
+}
+
+#[test]
+fn a_pending_imdsv2_change_is_adopted_only_once_it_is_applied() {
+    // Required by the request but not yet applied, as right after a launch.
+    let launched = Imds::new(false).pending_for(1);
+    let clock = VirtualClock::new();
+    clock.ensure(&launched, Duration::from_secs(300)).unwrap();
+    assert_eq!(
+        launched.purposes_run(),
+        ["describe-instances", "describe-instances"]
+    );
+    assert_eq!(*clock.sleeps.borrow(), [Duration::from_secs(3)]);
+
+    // Changed in place: pending twice after the change, with growing pauses,
+    // and returned only after the check that reports applied.
+    let executor = Imds::new(true);
+    // The first check (before the change) is consumed as pending too.
+    executor
+        .pending_checks
+        .store(3, std::sync::atomic::Ordering::SeqCst);
+    let clock = VirtualClock::new();
+    clock.ensure(&executor, Duration::from_secs(300)).unwrap();
+    assert_eq!(
+        executor.purposes_run(),
+        [
+            "describe-instances",
+            "modify-instance-metadata-options",
+            "describe-instances",
+            "describe-instances",
+            "describe-instances",
+        ]
+    );
+    assert_eq!(
+        *clock.sleeps.borrow(),
+        [Duration::from_secs(3), Duration::from_secs(6)]
+    );
+}
+
+#[test]
+fn an_imdsv2_change_that_never_applies_fails_at_the_deadline() {
+    let executor = Imds::new(false).pending_for(usize::MAX);
+    let clock = VirtualClock::new();
+    let error = clock
+        .ensure(&executor, Duration::from_secs(20))
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("still pending"), "{error:#}");
+    // 3 + 6 + 11: the last pause is cut to what the deadline leaves.
+    assert_eq!(
+        *clock.sleeps.borrow(),
+        [
+            Duration::from_secs(3),
+            Duration::from_secs(6),
+            Duration::from_secs(11)
+        ]
+    );
+
+    // Any other state is a visible failure at once, with no waiting.
+    let mut failed = Imds::new(false);
+    failed.state = Some("failed");
+    let clock = VirtualClock::new();
+    let error = clock.ensure(&failed, Duration::from_secs(300)).unwrap_err();
+    assert!(format!("{error:#}").contains("state failed"), "{error:#}");
+    assert!(clock.sleeps.borrow().is_empty());
+
+    // So does cancelling the operation.
+    let cancelled = Imds::new(false).pending_for(usize::MAX);
+    cancelled
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let clock = VirtualClock::new();
+    let error = clock
+        .ensure(&cancelled, Duration::from_secs(300))
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+}
+
+#[test]
+fn cancelling_during_the_imdsv2_wait_ends_it_promptly() {
+    let executor = Imds::new(false).pending_for(usize::MAX);
+    let cancelled = executor.cancelled.clone();
+    // The first pause is three seconds; the cancellation arrives in the middle.
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let started = std::time::Instant::now();
+    let error = crate::controller::backend::ensure_imdsv2(
+        "default",
+        "us-east-1",
+        "i-0123456789abcdef0",
+        &executor,
+    )
+    .unwrap_err();
+    canceller.join().unwrap();
+    assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the wait ran on for {:?}",
+        started.elapsed()
+    );
 }

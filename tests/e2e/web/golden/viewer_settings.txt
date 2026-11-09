@@ -69,6 +69,11 @@ Context budget (bytes)
 
 Optional positive byte limit for transcript compaction. Leave blank for the default.
 
+Offered models
+0 entries
+
+Optional. Offer only these models from this profile, one exact model name per entry. Leave empty to offer everything the profile advertises. The profile's current model is always offered.
+
 Remove
 control Enabled: checked
 control Type: Claude Code

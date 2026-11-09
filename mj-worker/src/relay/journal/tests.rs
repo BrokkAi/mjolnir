@@ -496,6 +496,7 @@ fn command_idempotency_survives_ack_until_checkpoint_covers_terminal_event() {
         .record_command_completed(
             "checkpointed-command",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -528,6 +529,7 @@ fn complete_prompt(relay: &mut DurableRelay, command_id: &str) -> u64 {
         .record_command_completed(
             command_id,
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
@@ -569,6 +571,7 @@ fn only_the_newest_terminal_command_ids_survive_collection() {
             .record_command_completed(
                 &command_id,
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
@@ -1463,6 +1466,7 @@ fn large_relay_history_stays_disk_backed_and_replays_across_segments() {
             RelayRequest::Attach {
                 after_ordinal: cursor.ordinal,
                 after_digest: cursor.digest.clone(),
+                known_state_digest: None,
             },
         ));
         let RelayResponseBody::Ok {
@@ -1528,6 +1532,7 @@ fn reopening_does_not_decompress_historical_sealed_segments() {
         RelayRequest::Attach {
             after_ordinal: 0,
             after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            known_state_digest: None,
         },
     ));
     let RelayResponseBody::Error { error } = response.body else {
@@ -1746,6 +1751,7 @@ fn oversized_legacy_terminal_ledger_opens_and_persists_compactly() {
                 accepted_ordinal: index * 2 + 1,
                 terminal_ordinal: Some(index * 2 + 2),
                 outcome: Some(RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,

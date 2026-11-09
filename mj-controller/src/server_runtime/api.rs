@@ -77,6 +77,12 @@ pub trait ExportRuntime: Send + Sync {
         Default::default()
     }
 
+    /// Whether a child that can request review is still waiting for its
+    /// verdict. A child's handback or ended turn is not final until it is not.
+    fn child_awaits_review(&self, _child_session_id: String) -> BoxFuture<'_, bool> {
+        Box::pin(async { false })
+    }
+
     fn queue_startup(
         self: Arc<Self>,
         _session_id: String,
@@ -280,6 +286,10 @@ impl ExportRuntime for RuntimeState {
         self.with_config(|config| config.subagents.clone())
     }
 
+    fn child_awaits_review(&self, child_session_id: String) -> BoxFuture<'_, bool> {
+        Box::pin(async move { RuntimeState::child_awaits_review(self, &child_session_id).await })
+    }
+
     fn queue_startup(
         self: Arc<Self>,
         session_id: String,
@@ -457,6 +467,22 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// How long a restarted sub-agent's session actor has to connect to the
 /// worker the restart already proved ready.
 const UNPARK_ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The daemon accepted a parked child's wake, so its record is `Running` with
+/// a durable boot intent, but the session was not ready for a prompt within
+/// [`UNPARK_ATTACH_TIMEOUT`]. The child is still starting; the wake did not
+/// fail. A caller with a delivery deadline keeps waiting for readiness
+/// instead of reporting the delivery as failed (#1395).
+#[derive(Debug)]
+struct WakeNotReady(String);
+
+impl std::fmt::Display for WakeNotReady {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for WakeNotReady {}
 /// Clap's exit code for a usage failure, which is what a worker binary too old
 /// to know the export subcommands answers.
 const CLAP_USAGE_EXIT_CODE: i32 = 2;
@@ -966,6 +992,7 @@ impl ApiBackend {
                 anyhow::bail!("list_profiles is no longer available")
             }
             SubagentToolAction::Spawn {
+                no_github_credentials,
                 task_name,
                 instructions,
                 task_type,
@@ -1034,6 +1061,7 @@ impl ApiBackend {
                 };
                 let relation = self
                     .start_subagent(crate::controller::RegisterSubagentRequest {
+                        no_github_credentials: *no_github_credentials,
                         kind: mj_core::subagent::SubagentKind::Worker,
                         reviewer_launch: None,
                         parent_session_id: parent_session_id.to_owned(),
@@ -1087,6 +1115,7 @@ impl ApiBackend {
                     .into_iter()
                     .map(|(id, summary, progress)| (id, (summary, progress)))
                     .collect::<BTreeMap<_, _>>();
+                let now_ms = u64::try_from(mj_core::clock::epoch_millis()).unwrap_or(0);
                 let agents = relations
                     .into_iter()
                     .map(|relation| {
@@ -1111,6 +1140,7 @@ impl ApiBackend {
                             });
                         let (state, _, _) = inputs.status(
                             &relation.child_session_id,
+                            record.as_ref(),
                             subagent_status(
                                 record.as_ref(),
                                 summary,
@@ -1131,6 +1161,14 @@ impl ApiBackend {
                         });
                         inputs.annotate(&relation.child_session_id, &mut entry);
                         mark_parked(&mut entry, record.as_ref());
+                        mark_promptable(&mut entry, &state, progress, record.as_ref());
+                        if let Some(facts) = progress
+                            .answer
+                            .as_ref()
+                            .and_then(|turn| turn.work_facts.as_ref())
+                        {
+                            entry["facts"] = work_facts_entry(facts, now_ms);
+                        }
                         entry
                     })
                     .collect::<Vec<_>>();
@@ -1247,15 +1285,14 @@ impl ApiBackend {
                 .await?
                 .filter(|record| record.handback_tool)
                 .context("handback is only for a Mjolnir sub-agent that was given the tool")?;
-                let maximum = match record.kind {
-                    mj_core::subagent::SubagentKind::Worker
-                    | mj_core::subagent::SubagentKind::Oracle => {
-                        mj_core::subagent::MAX_HANDBACK_CHARS
-                    }
-                    mj_core::subagent::SubagentKind::Reviewer => {
-                        mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS
-                    }
-                };
+                // Refusing here means no report exists to release before the
+                // child has read and addressed its verdict.
+                ensure!(
+                    record.kind != mj_core::subagent::SubagentKind::Worker
+                        || !self.exports.child_awaits_review(child_id.clone()).await,
+                    "your review has no verdict yet; wait for it, address it, then hand back"
+                );
+                let maximum = record.kind.max_handback_chars();
                 let characters = message.chars().count();
                 ensure!(
                     characters <= maximum,
@@ -1368,7 +1405,11 @@ impl ApiBackend {
             .sessions
             .wait_for_session(child_id, UNPARK_ATTACH_TIMEOUT)
             .await
-            .context("the restarted sub-agent did not reattach")?;
+            .map_err(|error| {
+                anyhow::Error::new(WakeNotReady(format!(
+                    "the restarted sub-agent did not reattach: {error:#}"
+                )))
+            })?;
         loop {
             let view = handle.view();
             if view.connected
@@ -1379,11 +1420,12 @@ impl ApiBackend {
             {
                 return Ok(true);
             }
-            ensure!(
-                tokio::time::Instant::now() < deadline,
-                "the restarted sub-agent was not ready for a prompt within {} seconds",
-                UNPARK_ATTACH_TIMEOUT.as_secs()
-            );
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow::Error::new(WakeNotReady(format!(
+                    "the restarted sub-agent was not ready for a prompt within {} seconds",
+                    UNPARK_ATTACH_TIMEOUT.as_secs()
+                ))));
+            }
             let _ = tokio::time::timeout(START_POLL, handle.changed()).await;
         }
     }
@@ -1574,8 +1616,11 @@ impl ApiBackend {
         Ok(())
     }
 
-    /// Resolve every child and the existing finished predicate from one
-    /// current observation for a parent notification.
+    /// Resolve every child that can still be reported, and the existing
+    /// finished predicate, from one current observation for a parent
+    /// notification. A cleanly stopped child is never news (see
+    /// [`subagent_status`]), so its record is not read; a parent can hold
+    /// thousands of them.
     async fn notification_children(
         &self,
         parent_id: &str,
@@ -1584,7 +1629,24 @@ impl ApiBackend {
         Vec<NotificationChildSnapshot>,
     )> {
         let inputs = self.subagent_input_progress(parent_id).await?;
-        let relations = self.list_subagents(parent_id.to_owned()).await?;
+        let parent = parent_id.to_owned();
+        let ids = blocking("list the parent's children", move || {
+            crate::database::list_subagent_ids(&parent)
+        })
+        .await?
+        .into_iter()
+        .filter(|id| {
+            !self
+                .exports
+                .session_record(id)
+                .is_some_and(|record| record.is_cleanly_stopped())
+        })
+        .collect::<Vec<_>>();
+        let parent = parent_id.to_owned();
+        let relations = blocking("load the parent's reportable children", move || {
+            crate::database::list_subagents_among(&parent, &ids)
+        })
+        .await?;
         let ids = relations
             .iter()
             .map(|relation| relation.child_session_id.clone())
@@ -1604,6 +1666,7 @@ impl ApiBackend {
                 let record = self.exports.session_record(&id);
                 let (state, output, finished) = inputs.status(
                     &id,
+                    record.as_ref(),
                     subagent_status(
                         record.as_ref(),
                         summary.as_ref(),
@@ -1613,8 +1676,14 @@ impl ApiBackend {
                         &progress,
                     ),
                 );
-                let identity =
-                    finished.then(|| finish_identity(&state, output.as_deref(), &progress));
+                let identity = report_identity(
+                    &state,
+                    output.as_deref(),
+                    finished,
+                    inputs.last_failed_delivery(&id),
+                    &progress,
+                    relation.reported_finish.as_ref(),
+                );
                 NotificationChildSnapshot {
                     relation,
                     progress,
@@ -1631,25 +1700,83 @@ impl ApiBackend {
 
     /// Commit each new finish and its durable mailbox event together.
     pub(crate) async fn reconcile_parent_reports(&self, parent_id: &str) -> Result<()> {
+        self.reconcile_children(parent_id).await.map(|_| ())
+    }
+
+    /// Reconcile the parent's reports and say, for one child's finish at
+    /// `ordinal`, whether the parent has been told. The report and the
+    /// `reported_finish` marker it moves are written in one transaction, so that
+    /// marker is the fact: it is read from the store after the reconcile, not
+    /// from the committed snapshot, which refreshes after the write returns.
+    pub(crate) async fn reconcile_child_report(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+        ordinal: u64,
+    ) -> Result<ChildReport> {
+        let reconciled = self.reconcile_children(parent_id).await?;
+        if reconciled.parent_closing {
+            return Ok(ChildReport::NotNews("the parent is closing"));
+        }
+        match reconciled.children.get(child_id) {
+            None => self.unreconciled_child_report(parent_id, child_id).await,
+            Some(ChildDisposition::NotNews(why)) => Ok(ChildReport::NotNews(why)),
+            Some(ChildDisposition::NotFinished) => Ok(ChildReport::NotFinished),
+            Some(ChildDisposition::Reported) => {
+                let child = child_id.to_owned();
+                let marker = blocking("read the child's reported finish", move || {
+                    crate::database::load_subagent(&child)
+                })
+                .await?
+                .and_then(|relation| relation.reported_finish);
+                Ok(if marker.is_some_and(|marker| marker.covers(ordinal)) {
+                    ChildReport::Told
+                } else {
+                    ChildReport::Awaiting
+                })
+            }
+        }
+    }
+
+    async fn reconcile_children(&self, parent_id: &str) -> Result<Reconciled> {
+        let mut reconciled = Reconciled::default();
         if self.exports.close_is_requested(parent_id) {
-            return Ok(());
+            reconciled.parent_closing = true;
+            return Ok(reconciled);
         }
         let (inputs, children) = self.notification_children(parent_id).await?;
-        let ready = children
-            .into_iter()
-            .filter(|child| {
-                child.relation.kind != mj_core::subagent::SubagentKind::Reviewer
-                    && !self
-                        .exports
-                        .close_is_requested(&child.relation.child_session_id)
-                    && !matches!(child.state.as_str(), "stopping" | "stopped")
-                    && child.identity.as_ref().is_some_and(|identity| {
-                        child.relation.reported_finish.as_ref() != Some(identity)
-                    })
-            })
-            .collect::<Vec<_>>();
+        // Each child has one of a few ends here: not news (and why), not seen as
+        // finished, held for its facts, or its finish is reported (by an earlier
+        // reconcile or by this one).
+        let mut ready = Vec::new();
+        for child in children {
+            let id = child.relation.child_session_id.clone();
+            let disposition = if child.relation.kind == mj_core::subagent::SubagentKind::Reviewer {
+                ChildDisposition::NotNews("a reviewer is reported by its review")
+            } else if self.exports.close_is_requested(&id) {
+                ChildDisposition::NotNews("a close of the child was requested")
+            } else if matches!(child.state.as_str(), "stopping" | "stopped") {
+                ChildDisposition::NotNews("the child is stopping or stopped")
+            } else if self.exports.child_awaits_review(id.clone()).await {
+                // A child whose review is open is still pending: it may end
+                // turns while it waits, and handback refuses until the verdict.
+                ChildDisposition::NotNews("the child awaits its review's verdict")
+            } else {
+                match &child.identity {
+                    None => ChildDisposition::NotFinished,
+                    Some(identity) if child.relation.reported_finish.as_ref() == Some(identity) => {
+                        ChildDisposition::Reported
+                    }
+                    Some(_) => {
+                        ready.push(child);
+                        continue;
+                    }
+                }
+            };
+            reconciled.children.insert(id, disposition);
+        }
         if ready.is_empty() {
-            return Ok(());
+            return Ok(reconciled);
         }
         let spans = ready
             .iter()
@@ -1665,8 +1792,10 @@ impl ApiBackend {
         })
         .await?;
         let mut notifications = Vec::with_capacity(ready.len());
+        let mut enqueued = Vec::with_capacity(ready.len());
         for child in ready {
             let id = &child.relation.child_session_id;
+            enqueued.push(id.clone());
             let output = if child.state == "completed" {
                 match &child.progress.report {
                     ReportState::Delivered(message) => Some(message.clone()),
@@ -1689,7 +1818,21 @@ impl ApiBackend {
             entry["task_name"] = child.relation.task_name.into();
             inputs.annotate(id, &mut entry);
             mark_parked(&mut entry, child.record.as_ref());
-            let report = serde_json::from_value::<mj_core::mailbox::SubagentFinishedReport>(entry)?;
+            mark_promptable(
+                &mut entry,
+                &child.state,
+                &child.progress,
+                child.record.as_ref(),
+            );
+            let report_has_facts = child.finished && !oracle;
+            let mut report =
+                serde_json::from_value::<mj_core::mailbox::SubagentFinishedReport>(entry)?;
+            // What the child's worker observed when the turn ended is part of the
+            // outcome that ended it, so the report reads it from the same snapshot
+            // as the finish, and nothing waits on it.
+            if report_has_facts {
+                report.facts = Some(finish_facts(&child.progress));
+            }
             notifications.push((
                 child.identity.expect("ready report has a finish identity"),
                 report,
@@ -1700,16 +1843,52 @@ impl ApiBackend {
             crate::database::enqueue_subagent_reports(parent, notifications)
         })
         .await?;
-        Ok(())
+        for id in enqueued {
+            reconciled.children.insert(id, ChildDisposition::Reported);
+        }
+        Ok(reconciled)
+    }
+
+    /// What `reconcile_children` would have said about a child it skipped:
+    /// one that is cleanly stopped, or that is not this parent's child at all.
+    /// The checks keep `reconcile_children`'s order.
+    async fn unreconciled_child_report(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+    ) -> Result<ChildReport> {
+        let relation = self.owned_relation(parent_id, child_id).await?;
+        Ok(ChildReport::NotNews(match relation {
+            None => "the child is not a worker of this parent",
+            Some(relation) if relation.kind == mj_core::subagent::SubagentKind::Reviewer => {
+                "a reviewer is reported by its review"
+            }
+            Some(_) if self.exports.close_is_requested(child_id) => {
+                "a close of the child was requested"
+            }
+            Some(_) => "the child is stopping or stopped",
+        }))
+    }
+
+    /// The child's relation when it belongs to this parent.
+    async fn owned_relation(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+    ) -> Result<Option<mj_core::subagent::SubagentRecord>> {
+        let child = child_id.to_owned();
+        Ok(blocking("read the child's relation", move || {
+            crate::database::load_subagent(&child)
+        })
+        .await?
+        .filter(|relation| relation.parent_session_id == parent_id))
     }
 
     async fn require_owned_child(&self, parent_id: &str, child_id: &str) -> Result<()> {
         anyhow::ensure!(
-            self.list_subagents(parent_id.to_owned())
+            self.owned_relation(parent_id, child_id)
                 .await?
-                .iter()
-                .any(|child| child.child_session_id == child_id
-                    && child.kind == mj_core::subagent::SubagentKind::Worker),
+                .is_some_and(|child| child.kind == mj_core::subagent::SubagentKind::Worker),
             "session {child_id} does not belong to parent {parent_id}"
         );
         Ok(())
@@ -1875,6 +2054,48 @@ impl ApiBackend {
     }
 }
 
+/// What makes a child's report new for its parent: its finish, or a message
+/// delivery to it that failed. The failed delivery keeps the child's own
+/// state (#1381); the parent still hears of it, once per failed request, in
+/// a report that carries the state and the `Message <id> failed` line. A
+/// finish that is still unreported travels in the same report.
+///
+/// Whether a failed delivery is news is decided against what the parent was
+/// last told (`reported`). A finished child's identity carries its state, so
+/// every finish after the failure reaches the parent, including one that
+/// settles without a new turn. A child that is not finished has news only if
+/// this failure was never reported: a message queued after it turns a
+/// finished child "running" with nothing new to say.
+fn report_identity(
+    state: &str,
+    output: Option<&str>,
+    finished: bool,
+    failed_delivery: Option<(&str, &str)>,
+    progress: &ChildProgress,
+    reported: Option<&mj_core::subagent::SubagentFinishIdentity>,
+) -> Option<mj_core::subagent::SubagentFinishIdentity> {
+    let Some((request_id, error)) = failed_delivery else {
+        return finished.then(|| finish_identity(state, output, progress));
+    };
+    let detail = format!("Message {request_id}: {error}");
+    if !finished
+        && let Some(
+            reported @ mj_core::subagent::SubagentFinishIdentity::Terminal {
+                detail: Some(reported_detail),
+                ..
+            },
+        ) = reported
+        && *reported_detail == detail
+    {
+        return Some(reported.clone());
+    }
+    Some(mj_core::subagent::SubagentFinishIdentity::Terminal {
+        state: if finished { state } else { "message-failed" }.to_owned(),
+        detail: Some(detail),
+        last_completed_ordinal: progress.last_completed_ordinal,
+    })
+}
+
 fn finish_identity(
     state: &str,
     output: Option<&str>,
@@ -2034,6 +2255,51 @@ fn subagent_status(
             None => ("preparing".into(), None, false),
         },
     }
+}
+
+/// A child's turns as the readers see them (the committed snapshot, or the
+/// store in a process without the writer): the completion ordinal of its last
+/// finished turn, and whether a turn is running now.
+pub(crate) fn load_child_turns(child_id: &str) -> Result<(Option<u64>, bool)> {
+    let state = match crate::database::committed_state()? {
+        Some(committed) => committed.turns.get(child_id).map(|turn| turn.state.clone()),
+        None => crate::database::load_materialized_turn_outcome(child_id)?,
+    };
+    Ok(state.map_or((None, false), |(_, active, last)| {
+        (last.map(|turn| turn.completed_ordinal), active.is_some())
+    }))
+}
+
+/// What a reconcile found for each of a parent's children.
+#[derive(Default)]
+struct Reconciled {
+    parent_closing: bool,
+    children: BTreeMap<String, ChildDisposition>,
+}
+
+enum ChildDisposition {
+    /// The child's finish is reported, now or earlier.
+    Reported,
+    /// There is no report to make, and why.
+    NotNews(&'static str),
+    /// The reconcile's view of the child is that it has not finished. That is not
+    /// "not news": it can be a child that did finish seen through a view that is
+    /// behind, or one that went on to a newer turn; the caller, which holds the
+    /// ending it asks about, tells which.
+    NotFinished,
+}
+
+/// Whether the parent has been told of one child's finish.
+pub(crate) enum ChildReport {
+    /// The report is enqueued and the child's marker covers the finish.
+    Told,
+    /// There is nothing to tell, for the reason given: the finish is not news.
+    NotNews(&'static str),
+    /// The reconcile does not see the child as finished.
+    NotFinished,
+    /// News, but not reported yet: the readers' snapshot has not caught up with
+    /// the finish, or the enqueue skipped it. Ask again.
+    Awaiting,
 }
 
 /// What the store says about a child's answer to its parent's newest prompt.
@@ -2254,6 +2520,38 @@ fn wait_agent_entry(
     agent
 }
 
+/// The `facts` object of a `list_agents` entry: the lines of what the child's
+/// worker observed when its last turn ended, rendered by the same code as the
+/// mailbox report.
+fn work_facts_entry(facts: &mj_core::work_facts::WorkFacts, now_ms: u64) -> serde_json::Value {
+    serde_json::json!({
+        "finish": {
+            "observed_secs_ago": now_ms.saturating_sub(facts.observed_at_ms) / 1000,
+            "lines": facts.render_lines(),
+        }
+    })
+}
+
+/// The facts a finished child's report carries: what its worker recorded in the
+/// outcome that ended its last turn, or why there are none. A prompt outcome
+/// without them is from a worker that predates the capture; an ending that was
+/// not a completed prompt took no observation.
+fn finish_facts(progress: &ChildProgress) -> mj_core::work_facts::WorkFacts {
+    let Some(turn) = &progress.answer else {
+        return mj_core::work_facts::WorkFacts::unavailable(
+            "the child ended without a completed turn, so its worker did not observe it",
+        );
+    };
+    turn.work_facts.clone().unwrap_or_else(|| {
+        mj_core::work_facts::WorkFacts::unavailable(match turn.outcome {
+            mj_core::state::TurnOutcomeKind::Completed { .. } => {
+                "the child's worker predates this version"
+            }
+            _ => "the turn ended without completing, so its worker took no observation",
+        })
+    })
+}
+
 /// What the session list calls a child now, bounded to one line, or the task
 /// name it was spawned with when the daemon holds no record. A person may
 /// have renamed the child since it was spawned.
@@ -2271,6 +2569,27 @@ fn live_child_name(record: Option<&mj_core::state::SessionRecord>, task_name: &s
 fn mark_parked(entry: &mut serde_json::Value, record: Option<&mj_core::state::SessionRecord>) {
     if record.is_some_and(|record| record.state == SessionState::Parked) {
         entry["parked"] = serde_json::Value::Bool(true);
+    }
+}
+
+/// Say in a notification or `list_agents` entry that a child whose last turn
+/// failed or was interrupted can still be given work: `send_message` runs it
+/// again. [`SessionState::can_receive_child_work`] decides this for every
+/// delivery, so this statement and a later `send_message` cannot disagree. A
+/// child whose login the provider refused is repaired first, so it is not
+/// marked.
+fn mark_promptable(
+    entry: &mut serde_json::Value,
+    state: &str,
+    progress: &ChildProgress,
+    record: Option<&mj_core::state::SessionRecord>,
+) {
+    if matches!(state, "failed" | "interrupted")
+        && progress.failed_turn.is_some()
+        && progress.login_failure.is_none()
+        && record.is_some_and(|record| record.state.can_receive_child_work())
+    {
+        entry["promptable"] = serde_json::Value::Bool(true);
     }
 }
 
@@ -3218,6 +3537,17 @@ impl SubagentBackend for ApiBackend {
                 .await?;
             Ok(turn)
         })
+    }
+
+    fn record_user_prompt(
+        &self,
+        session_id: String,
+        command_id: String,
+        text: String,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(super::actions::record_user_prompt(
+            session_id, command_id, text,
+        ))
     }
 
     fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, Result<String>> {

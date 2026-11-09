@@ -10,6 +10,7 @@ use mj_core::config::{
     CONFIG_VERSION, Config, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository,
     TargetTemplate,
 };
+use mj_core::remote_git::Shorthand;
 use mj_core::state::SessionState;
 
 #[test]
@@ -1179,6 +1180,7 @@ fn golden_phone_session_snapshot() {
             tool_ended_at_ms: None,
             lines: vec!["line".into()],
             mailbox_events: Vec::new(),
+            generated: false,
             glyph: "●",
             tone: "agent",
             tool_status: None,
@@ -1623,7 +1625,7 @@ async fn phone_projects_resolve_origins_and_discard_results_after_location_chang
         cancelled: previous.cancelled.clone(),
         session_id: "first-checkout".into(),
         key: previous.key.clone(),
-        result: Ok(ProjectSourceIdentity::git_remote("old/wrong").unwrap()),
+        result: Ok(ProjectSourceIdentity::git_remote("old/wrong", Shorthand::Allowed).unwrap()),
     };
     controller
         .state
@@ -1843,6 +1845,7 @@ fn new_action() -> ControllerAction {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         at: None,
         branch: None,
         base: None,
@@ -1889,6 +1892,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

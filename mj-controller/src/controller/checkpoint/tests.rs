@@ -659,21 +659,19 @@ fn a_legacy_export_worker_is_replaced_before_it_runs_obsolete_behavior() {
                 .unwrap(),
             spec
         );
+        // The store's collection runs once per interval for the whole process,
+        // so whether this install happened to claim it is not part of the test.
+        let purposes: Vec<_> = executor
+            .purposes
+            .into_inner()
+            .into_iter()
+            .filter(|purpose| purpose != "collect unused Mjolnir worker binaries")
+            .collect();
         assert_eq!(
-            executor.purposes.into_inner(),
+            purposes,
             vec![
                 "export target checkpoint".to_owned(),
                 "remove stale private worker staging".to_owned(),
-                "collect unused Mjolnir worker binaries".to_owned(),
-                "verify shared Mjolnir worker".to_owned(),
-                "create private worker store upload".to_owned(),
-                "stage replacement Mjolnir worker".to_owned(),
-                "match replacement worker to the worker directory owner".to_owned(),
-                "replace installed Mjolnir worker".to_owned(),
-                "make replaced Mjolnir worker executable".to_owned(),
-                "verify uploaded Mjolnir worker".to_owned(),
-                "publish shared Mjolnir worker".to_owned(),
-                "discard private worker store upload".to_owned(),
                 "link shared Mjolnir worker into session".to_owned(),
                 "export target checkpoint".to_owned(),
             ]
@@ -1069,6 +1067,7 @@ fn latch_relay_child_serves_stdio() {
                 })
             }
             mj_core::relay::RelayRequest::PollSubagentQueue { .. }
+            | mj_core::relay::RelayRequest::WaitForChange { .. }
             | mj_core::relay::RelayRequest::SubagentRequests => {
                 subagent_connection_response(&request).map(|response| match response.body {
                     mj_core::relay::RelayResponseBody::Ok { payload } => payload,
@@ -1320,6 +1319,7 @@ fn latch_relay_child_serves_stdio() {
                         .record_command_completed(
                             &claimed.command_id,
                             RelayCommandOutcome::Prompt {
+                                work_facts: None,
                                 diagnostic: None,
                                 stop_reason: "end_turn".into(),
                                 usage: None,
@@ -1351,6 +1351,7 @@ fn latch_relay_child_serves_stdio() {
                         .record_command_completed(
                             &prompt_id,
                             RelayCommandOutcome::Prompt {
+                                work_facts: None,
                                 diagnostic: None,
                                 stop_reason: "cancelled".into(),
                                 usage: None,
@@ -1442,6 +1443,19 @@ fn subagent_connection_response(
         }
         mj_core::relay::RelayRequest::SetSubagentAdmission { open } => {
             mj_core::relay::RelayResponsePayload::SubagentAdmissionChanged { open: *open }
+        }
+        // This fake's queue never changes and its relay is served elsewhere:
+        // hold briefly, as the worker would, and report nothing new.
+        mj_core::relay::RelayRequest::WaitForChange {
+            after_ordinal,
+            state_digest,
+        } => {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            mj_core::relay::RelayResponsePayload::ChangeObserved {
+                latest_ordinal: *after_ordinal,
+                state_digest: state_digest.clone().unwrap_or_default(),
+                subagent_queue_changed: false,
+            }
         }
         _ => return None,
     };

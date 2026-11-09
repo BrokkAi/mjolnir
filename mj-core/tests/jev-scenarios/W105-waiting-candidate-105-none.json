@@ -25,11 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:27",
-          "role": "user",
-          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /workspace/1f6151a026ac26c7efba8a06f21d48e1/.mj-agents/501c6bb5647114f8b3419e801eb469be. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nRead-only investigation: user screenshot project settings list selects mjolnir -> ~/Projects/mjolnir2 (unavailable); detail says directory /home/jonathan/Projects/mjolnir2 does not exist, only Add and Remove buttons. User says fix this pls; awaiting clarification whether path-edit recovery or incorrect detection. Locate map of project/repository settings, availability ownership, existing path update mechanisms in TUI/API/store/web. Starting mj-tui/src/wizards/render.rs:500-710 and tests.rs:601. Return concise decisive references and feasible recovery-flow changes, existing test coverage. Do not edit. Avoid broad unrelated reading."
-        },
-        {
           "id": "agent:33",
           "role": "assistant",
           "text": "I’ll trace the project settings view, the code that decides whether a project path is available, and existing path-edit flows and tests. I’ll keep this read-only and send the parent a concise report with file and line references."
@@ -43,11 +38,6 @@
           "id": "agent:173",
           "role": "assistant",
           "text": "Investigation report delivered to the parent. No files changed."
-        },
-        {
-          "id": "user:214",
-          "role": "user",
-          "text": "User clarification: screenshot was taken just after clicking Remove. Bug is removal doesn't remove selected saved project / stale UI. Drop path edit recovery design. Diagnose Remove action, persistence/runtime feed refresh, missing local dir handling. Read-only: find likely cause evidence. Return concise references. I will inspect TUI activation snippets already read, do not duplicate that narrow work; follow action into client/controller/config."
         },
         {
           "id": "agent:220",
@@ -65,11 +55,6 @@
           "text": "Read-only findings delivered to the parent. Removal has no missing-directory check; its refusal gate is session usage. I also found a separate stale-config path that can leave a successfully removed project visible. No files changed."
         },
         {
-          "id": "user:487",
-          "role": "user",
-          "text": "Implement concrete stale-config bug you identified. Ownership mj-cli dashboard removal completion plumbing + relevant regression test there (or controller integration fixture if needed; tell me before shared ownership overlap). Preserve returned Config through spawn_remove_bundle and completion event, apply controller config and dashboard from actual updated config. Use established ConfigLoaded/create flows as guide, no broad refactor. Regression must reproduce removing bundle with absent local dir through actual async completion flow and verify gone in dashboard + controller config; preserve session guard. Tests allowed golden/integration/tricky stale-data bug, comment // Hard-won: <short commit SHA or short defect ref>: ... use current HEAD if no issue. Run focused tests only initially via existing cargo/mbx storage, no target redirection; named isolated instance/config/data for any binary/daemon tests. No commits. Return diff references + tests results."
-        },
-        {
           "id": "agent:495",
           "role": "assistant",
           "text": "I’ll keep the change within `mj-cli` removal completion plumbing and a focused regression test. First I’m checking the working tree and the existing `ConfigLoaded`/create completion patterns so the fix carries the controller’s returned config through the same async update flow."
@@ -83,11 +68,6 @@
           "id": "agent:717",
           "role": "assistant",
           "text": "No edits made. I found that removal runs directly in the CLI, bypassing the daemon’s config mutation coordinator, while the runtime feed is the authoritative config owner. A proper fix appears to need a new daemon remove-project action; I sent the parent the references and asked whether to expand scope."
-        },
-        {
-          "id": "user:803",
-          "role": "user",
-          "text": "Do not expand API yet: compatibility polling DOES reload/install Config periodically (daemon/process.rs:1212). Need failing reproduction before fixing candidate rather than user defect. Please extend existing missing-directory TUI regression locally to click Remove (use draw and click_project_text helper), verify expected action is emitted, and trace failure if not. If it passes then run actual isolated removal with missing path and capture exact behavior/notice. Test focus owns mj-tui tests only; no product edits until decisive evidence. Existing user async question pending exact notice."
         },
         {
           "id": "agent:814",
@@ -160,11 +140,6 @@
           "text": "Handed the test results and isolated repro to the parent. Focused TUI tests and formatting passed. The real Remove attempt removed the bundle from config but reported `database writer is not available for operation hide_catalog_project`. No product edits or commit from me."
         },
         {
-          "id": "user:2805",
-          "role": "user",
-          "text": "Great actual reproduction decisive. Implement daemon-owned remove-project RPC now authorized. Own mj-client daemon action/client wrapper + mj-controller daemon action dispatch/runtime state + mj-cli spawn_remove_bundle only. Use existing config_mutation serialized owner and background blocking helper, proper admission label if action work async and supervised (existing CreateProject pattern). Keep CLI completion Result<()> awaiting authoritative runtime feed; don't install CLI snapshots. Config write then hide_catalog_project now within daemon writer available. Need think atomic failure catalog vs config; preserve visible errors and report remaining partial failure ordering if cannot fix scope. Protocol compatibility bump only established rules require it; check conventions and test wire contract if needed. Add focused integration regression for actual remove helper via daemon RPC with missing dir persisted & runtime feed published, using existing isolated test patterns. Do not edit TUI tests/product except fixes required. No commit. Focused checks only, full suites once final. Parent will inspect decisive code. Report exact touched files early for test ownership."
-        },
-        {
           "id": "agent:2811",
           "role": "assistant",
           "text": "I’ll trace the existing CreateProject/config-mutation path and the current removal completion flow, then add the daemon action and focused RPC regression within the ownership you set. I’ll first identify the precise files I need to touch and avoid the TUI-owned files."
@@ -210,11 +185,6 @@
           "text": "Implemented the daemon-owned removal flow and handed the diff and focused validation results to the parent. The isolated RPC regression and protocol transcript test passed; the CLI check, formatting check, and diff check passed. No commit or full suite was run."
         },
         {
-          "id": "user:3812",
-          "role": "user",
-          "text": "Focused results accepted. Full validation/build CLI running child6b... now; no competing cargo. Once it reports rebuilt binary path, I'll ask you repeat exact isolated tmux repro post-fix. For now park, retain context and old repro details."
-        },
-        {
           "id": "agent:3819",
           "role": "assistant",
           "text": "Parked. I’ve retained the pre-fix repro details and will wait for the rebuilt binary path and your request to repeat it."
@@ -232,7 +202,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Focused results accepted. Full validation/build CLI running child6b... now; no competing cargo. Once it reports rebuilt binary path, I'll ask you repeat exact isolated tmux repro post-fix. For now park, retain context and old repro details.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Parked. I’ve retained the pre-fix repro details and will wait for the rebuilt binary path and your request to repeat it.",
     "completion": {
       "stop_reason": "EndTurn",

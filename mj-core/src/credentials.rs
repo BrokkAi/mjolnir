@@ -695,10 +695,38 @@ pub enum CredentialSyncAction {
     GithubTokenPushed,
     /// A stale session token was removed because the controller has none.
     GithubTokenRemoved,
+    /// The session's AWS credentials were withdrawn, because the profile
+    /// requires role-scoped credentials and none could be issued.
+    AwsCredentialsRemoved,
     /// The host's slopcop login replaced the session copy.
     SlopcopLoginPushed,
     /// The session copy was removed because the host is signed out.
     SlopcopLoginRemoved,
+}
+
+/// The independent steps of one session's sync. Each fails on its own, and a
+/// result can say that a step is fine again only if it checked that step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SyncStep {
+    /// Not a step: the session's whole sync failed (its connection, say)
+    /// before any step ran. Reported without a step.
+    Session,
+    /// The role-scoped AWS credentials, renewed by the session's own task.
+    Aws,
+    /// The profile's one AWS export, reconciled with its login pass.
+    AwsExport,
+    HarnessLogin,
+    Skills,
+    GithubToken,
+    Slopcop,
+}
+
+/// One step that failed while the others ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepFailure {
+    pub step: SyncStep,
+    /// What failed, beginning with the step's name.
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -707,6 +735,23 @@ pub struct CredentialSyncOutcome {
     /// Every action taken for the session, or why the reconcile failed. An
     /// empty action list means the copies already agreed.
     pub outcome: std::result::Result<Vec<CredentialSyncAction>, String>,
+    /// Steps of the sync that failed while the others ran, such as the AWS
+    /// credentials. `outcome` then still lists what the other steps did, so
+    /// their work is counted and reported.
+    pub step_failures: Vec<StepFailure>,
+}
+
+impl CredentialSyncOutcome {
+    /// The step failures as one line, for a log or a test.
+    pub fn failure_text(&self) -> Option<String> {
+        (!self.step_failures.is_empty()).then(|| {
+            self.step_failures
+                .iter()
+                .map(|failure| failure.detail.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    }
 }
 
 /// Reported to the UI loops only when something happened: an action was taken,
@@ -719,6 +764,10 @@ pub struct CredentialSyncResult {
     /// The whole reconcile stopped before it could report per-session
     /// outcomes. Kept separate so the failure is reported, never dropped.
     pub failure: Option<String>,
+    /// The result covers only the sessions in `outcomes` (one session's AWS
+    /// renewal), not the whole profile: a failure it does not mention is not
+    /// thereby over.
+    pub partial: bool,
     pub outcomes: Vec<CredentialSyncOutcome>,
 }
 
@@ -733,13 +782,24 @@ impl CredentialSyncResult {
         })
     }
 
-    pub fn failures(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.outcomes
-            .iter()
-            .filter_map(|outcome| match &outcome.outcome {
-                Err(detail) => Some((outcome.session_id.as_str(), detail.as_str())),
-                Ok(_) => None,
-            })
+    /// Every failure, with the step it belongs to (`None` for a session whose
+    /// whole sync failed).
+    pub fn failures(&self) -> impl Iterator<Item = (&str, Option<SyncStep>, &str)> {
+        self.outcomes.iter().flat_map(|outcome| {
+            let whole = outcome
+                .outcome
+                .as_ref()
+                .err()
+                .map(|detail| (outcome.session_id.as_str(), None, detail.as_str()));
+            let steps = outcome.step_failures.iter().map(|failure| {
+                (
+                    outcome.session_id.as_str(),
+                    (failure.step != SyncStep::Session).then_some(failure.step),
+                    failure.detail.as_str(),
+                )
+            });
+            whole.into_iter().chain(steps)
+        })
     }
 
     /// Sessions that took at least one action of any kind.
@@ -826,12 +886,26 @@ impl RejectedLogins {
         {
             return;
         }
-        let reached = result.outcomes.iter().find_map(|outcome| {
-            (outcome.session_id == cause.session_id).then_some(&outcome.outcome)
-        });
-        let Some(Ok(actions)) = reached else {
+        let reached = result
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.session_id == cause.session_id);
+        // A step that failed (the harness login among them) is not a clean
+        // check that the profile's own login is the one the provider refused.
+        let Some(CredentialSyncOutcome {
+            outcome: Ok(actions),
+            step_failures,
+            ..
+        }) = reached
+        else {
             return;
         };
+        if step_failures
+            .iter()
+            .any(|failure| matches!(failure.step, SyncStep::HarnessLogin | SyncStep::Session))
+        {
+            return;
+        }
         if actions.iter().any(|action| {
             matches!(
                 action,
@@ -919,6 +993,23 @@ pub fn enqueue(queue: &mut VecDeque<SyncTrigger>, trigger: SyncTrigger) {
         return;
     }
     queue.push_back(trigger);
+}
+
+/// Authentication variables understood by GitHub CLI on github.com and enterprise hosts.
+pub const GITHUB_AUTHENTICATION_ENVIRONMENT: [&str; 4] = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+/// A credential-free launch removes these after environment composition.
+pub fn remove_github_authentication_environment(
+    environment: &mut std::collections::BTreeMap<String, String>,
+) {
+    for name in GITHUB_AUTHENTICATION_ENVIRONMENT {
+        environment.remove(name);
+    }
 }
 
 #[cfg(test)]

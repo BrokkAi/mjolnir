@@ -157,7 +157,7 @@ async fn completed_turn_response(
         assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
     };
     submit(&mut durable, "prompt-1");
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(crate::relay::RelayCell::new(durable));
     let (events_tx, events_rx) = mpsc::channel(16);
     let (wakes_tx, wakes_rx) = mpsc::channel(1);
     let (commands_tx, mut commands_rx) = mpsc::channel(4);
@@ -188,6 +188,7 @@ async fn completed_turn_response(
             user_shells,
             None,
             Some(client),
+            None,
         )
         .with_subscriber(subscriber),
     );

@@ -1803,6 +1803,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
     fs::create_dir_all(&memory_root).unwrap();
     fs::write(memory_root.join("MEMORY.md"), "remember this").unwrap();
     mj_core::worker_launch::WorkerLaunchConfig {
+        no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
@@ -2754,9 +2755,11 @@ fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
         git(&source, &["update-ref", "-d", name]);
     }
     restore_into(temp.path(), &spec, false);
-    for (name, object) in [(baseline, &point), (&start, &head), (&reviewed, &head)] {
+    for (name, object) in [(&start, &head), (&reviewed, &head)] {
         assert_eq!(git(&source, &["rev-parse", name]), *object);
     }
+    // The old pin was not archived, so no restore brings it back.
+    assert_eq!(git(&source, &["for-each-ref", baseline]), "");
     let foreign = crate::archive::record_review_point(
         &SystemGit,
         &source,

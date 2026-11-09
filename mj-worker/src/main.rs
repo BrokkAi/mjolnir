@@ -115,6 +115,11 @@ enum WorkerCommand {
         #[arg(long, value_parser = ["PostToolUse", "PostToolBatch"])]
         event: String,
     },
+    /// Exchange one mailbox lease request for a durable harness inbox.
+    MailboxRequest {
+        #[arg(long)]
+        socket: PathBuf,
+    },
     /// Serve Mjolnir-owned delegation tools over MCP stdio.
     SubagentMcp {
         #[arg(long)]
@@ -330,22 +335,29 @@ fn bootstrap_login_environment(
                     &mut environment,
                     std::env::vars(),
                 );
-                if let WorkerCommand::Run { root, .. } = &args.command {
+                if let WorkerCommand::Run { root, .. } = &args.command
+                    && !launch.no_github_credentials
+                {
                     mj_worker::worker_runtime::seed_container_github_token(root, std::env::vars())?;
                 }
             }
             environment.extend(launch.target_environment);
+            if launch.no_github_credentials {
+                mj_core::credentials::remove_github_authentication_environment(&mut environment);
+            }
         }
         if let WorkerCommand::PushBranch { root, .. } = &args.command {
-            environment.extend(
-                WorkerLaunchConfig::read(&root.join("launch.json"))
-                    .with_context(|| {
-                        let guidance = mj_worker::worker_runtime::SESSION_SETUP_GUIDANCE;
-                        format!("load branch export target settings; {guidance}")
-                    })?
-                    .target_environment,
-            );
-            mj_worker::worker_runtime::attach_session_git_environment(root, &mut environment)?;
+            let launch =
+                WorkerLaunchConfig::read(&root.join("launch.json")).with_context(|| {
+                    let guidance = mj_worker::worker_runtime::SESSION_SETUP_GUIDANCE;
+                    format!("load branch export target settings; {guidance}")
+                })?;
+            environment.extend(launch.target_environment);
+            mj_worker::worker_runtime::attach_session_git_environment(
+                root,
+                &mut environment,
+                launch.no_github_credentials,
+            )?;
         }
         environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
         // The reliability lab's crash hooks run inside the worker after this
@@ -552,6 +564,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         WorkerCommand::MailboxHook { socket, event } => {
             mj_worker::mailbox_hook::run(&socket, &event)
         }
+        WorkerCommand::MailboxRequest { socket } => mj_worker::mailbox_hook::request(&socket),
 
         WorkerCommand::SubagentMcp {
             socket,
@@ -563,7 +576,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             review_server,
         } => {
             if review_server {
-                mj_worker::subagent_mcp::run_review_mcp_stdio(&socket, harness)
+                mj_worker::subagent_mcp::run_review_mcp_stdio(&socket, harness, role)
             } else {
                 mj_worker::subagent_mcp::run_mcp_stdio(
                     &socket,

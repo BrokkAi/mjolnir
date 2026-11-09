@@ -6,15 +6,6 @@ ARG NODE_IMAGE=docker.io/library/node:24-trixie
 # installs can corrupt components).
 ARG RUST_IMAGE=docker.io/library/rust:1.99.1-trixie
 ARG MJ_RUST_TOOLCHAIN=1.99.1
-# Bifrost is the semantic-analysis tool every turn review depends on: the
-# review's `analyze_diff` pre-pass and the analyzer/navigation MCP servers the
-# reviewing agents call are both this one binary. Baking a pinned crates.io
-# release into the image means a review never fetches anything at review time,
-# and the version moves only when someone edits this line. Build in a separate
-# stage so the installed binary does not carry its build dependencies.
-# Keep REQUIRED_BIFROST_VERSION in mj-review/src/bifrost.rs equal to this value.
-ARG BIFROST_VERSION=0.12.0
-ARG BIFROST_BUILDER_IMAGE=docker.io/library/rust:1.97.1-trixie
 # Go installs below from go.dev's official tarball, not apt: Debian's golang
 # package trails upstream by months. GO_VERSION plays the role
 # rust-toolchain.toml plays for Rust; the build checks a per-arch sha256 and
@@ -22,11 +13,6 @@ ARG BIFROST_BUILDER_IMAGE=docker.io/library/rust:1.97.1-trixie
 ARG GO_VERSION=1.27.3
 
 FROM ${NODE_IMAGE} AS node
-
-FROM ${BIFROST_BUILDER_IMAGE} AS bifrost
-ARG BIFROST_VERSION
-RUN cargo install brokk-bifrost@${BIFROST_VERSION} --locked --bin bifrost --root /opt/bifrost \
-    && /opt/bifrost/bin/bifrost --version
 
 # The session worker, compiled from the same commit as the image, so a release's
 # `mj` and its image agree on the worker by construction. Git is not in the build
@@ -112,10 +98,13 @@ COPY --from=node /usr/local/ /usr/local/
 # the `libasound2-dev` install in the voice-worker CI job and the Linux
 # release builds. `eatmydata` lets sessions run build and test commands with
 # fsync turned into a no-op (LD_PRELOAD=libeatmydata.so), the way CI jobs that
-# commit many small SQLite transactions do. `python3-dev` supplies Python.h,
+# commit many small SQLite transactions do. `awscli` is Debian's AWS CLI v2.
+# `time` provides GNU `/usr/bin/time` (`-v` reports peak memory), which the
+# shell builtin lacks. `python3-dev` supplies Python.h,
 # python3-config, and libpython for native/PyO3 builds that embed Python.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        awscli \
         bash \
         build-essential \
         ca-certificates \
@@ -149,11 +138,14 @@ RUN apt-get update \
         ripgrep \
         rsync \
         sudo \
+        time \
         tmux \
         unzip \
         zip \
     && rm -rf /var/lib/apt/lists/* \
-    && ln -s /usr/bin/podman-remote /usr/local/bin/podman
+    && ln -s /usr/bin/podman-remote /usr/local/bin/podman \
+    && aws --version \
+    && /usr/bin/time --version
 
 # `docker-cli` and `podman-remote` (as `podman`) are clients only. A daemon run
 # in this image with `[daemon] runtime = "docker"` or `"podman"` reaches the
@@ -202,7 +194,7 @@ RUN npm install --global --no-audit --no-fund \
         @brokkai/muse-acp@0.21.0 \
         @moonshot-ai/kimi-code@2.4.0 \
         @openai/codex@0.165.0 \
-        @opencode/cli@2.2.1 \
+        @opencode/cli@2.2.6 \
         @xai-official/grok@1.0.70 \
     && npm cache clean --force \
     && codex --version \
@@ -211,7 +203,7 @@ RUN npm install --global --no-audit --no-fund \
     && [ "$(dsh-acp --version)" = "dsh-acp 0.5.0" ] \
     && kimi --version | grep -qF 2.4.0 \
     && grok --version | grep -qF 1.0.70 \
-    && OPENCODE_DISABLE_AUTOUPDATE=1 opencode --version | grep -qF 2.2.1 \
+    && OPENCODE_DISABLE_AUTOUPDATE=1 opencode --version | grep -qF 2.2.6 \
     && [ "$(node -p "require('/usr/local/lib/node_modules/@brokkai/muse-acp/package.json').version")" = "0.21.0" ]
 
 # The bridge prefers CODEX_PATH over its bundled Codex binary. Select the
@@ -331,10 +323,6 @@ RUN cargo install --locked flamegraph@${FLAMEGRAPH_VERSION} \
     && samply --version \
     && cargo llvm-cov --version \
     && genhtml --version
-
-# The turn-review feature requires this binary; a review whose worker cannot
-# run it fails loudly and names an image rebuild as the fix.
-COPY --from=bifrost /opt/bifrost/bin/bifrost /usr/local/bin/bifrost
 
 # Debian's /etc/profile overwrites PATH, so a login shell drops the Rust image's
 # cargo bin directory and everything installed into it (cargo itself,
