@@ -539,7 +539,7 @@ pub fn read_verified_checkpoint_payload(
     Ok(bytes)
 }
 
-fn read_checkpoint_manifest_from(archive: &mut zip::ZipArchive<File>) -> Result<ArchiveManifest> {
+fn read_checkpoint_manifest_from(archive: &mut Archive) -> Result<ArchiveManifest> {
     let manifest_bytes = {
         let mut entry = archive
             .by_name(MANIFEST_PATH)
@@ -559,7 +559,7 @@ fn read_checkpoint_manifest_from(archive: &mut zip::ZipArchive<File>) -> Result<
 }
 
 fn read_checkpoint_payload(
-    archive: &mut zip::ZipArchive<File>,
+    archive: &mut Archive,
     descriptor: &PayloadDescriptor,
 ) -> Result<Vec<u8>> {
     if descriptor.parts.is_empty() {
@@ -588,7 +588,7 @@ fn read_checkpoint_payload(
 }
 
 fn read_checkpoint_entry(
-    archive: &mut zip::ZipArchive<File>,
+    archive: &mut Archive,
     path: &str,
     expected_size: u64,
     expected_mode: u32,
@@ -1113,11 +1113,63 @@ enum EntryExpectation<'a> {
     },
 }
 
-/// Each parallel reader owns one of these: ZIP entries can only be read one at
-/// a time through a single handle, and the deflate decoder already buffers.
-fn open_archive(path: &Path) -> Result<zip::ZipArchive<File>> {
+type Archive = zip::ZipArchive<ArchiveFile>;
+
+/// Opening parses the ZIP's whole central directory. A parallel reader needs
+/// its own read position, not its own parse: clone the opened [`Archive`],
+/// which shares the parsed directory and this file.
+fn open_archive(path: &Path) -> Result<Archive> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    zip::ZipArchive::new(file).context("open Mjolnir archive ZIP")
+    let len = file
+        .metadata()
+        .with_context(|| format!("read the size of {}", path.display()))?
+        .len();
+    zip::ZipArchive::new(ArchiveFile {
+        file: std::sync::Arc::new(file),
+        len,
+        position: 0,
+    })
+    .context("open Mjolnir archive ZIP")
+}
+
+/// A file read at explicit offsets, so clones share one open file and each
+/// keeps its own position. A duplicated handle would share the position.
+#[derive(Clone)]
+struct ArchiveFile {
+    file: std::sync::Arc<File>,
+    len: u64,
+    position: u64,
+}
+
+impl Read for ArchiveFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        #[cfg(unix)]
+        let read = std::os::unix::fs::FileExt::read_at(&*self.file, buf, self.position)?;
+        #[cfg(windows)]
+        let read = std::os::windows::fs::FileExt::seek_read(&*self.file, buf, self.position)?;
+        self.position += read as u64;
+        Ok(read)
+    }
+}
+
+impl std::io::Seek for ArchiveFile {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        let (base, offset) = match to {
+            std::io::SeekFrom::Start(position) => {
+                self.position = position;
+                return Ok(position);
+            }
+            std::io::SeekFrom::End(offset) => (self.len, offset),
+            std::io::SeekFrom::Current(offset) => (self.position, offset),
+        };
+        self.position = base.checked_add_signed(offset).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before the start of the archive",
+            )
+        })?;
+        Ok(self.position)
+    }
 }
 
 /// Payload bodies the caller keeps.
@@ -1198,7 +1250,6 @@ fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<Verifie
             .context("read archive manifest")?;
         bytes
     };
-    drop(archive);
     let manifest = parse_archive_manifest(&manifest_bytes)?;
 
     let mut expectations = BTreeMap::<&str, EntryExpectation<'_>>::new();
@@ -1243,17 +1294,14 @@ fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<Verifie
     );
 
     // DEFLATE cannot be inflated in parallel inside one stream, so read
-    // parallelism comes from entries: each worker owns its own archive handle
-    // and verifies whole entries end to end.
+    // parallelism comes from entries: each worker reads through its own clone
+    // of the archive, sharing the directory parsed above, and verifies whole
+    // entries end to end.
     let outcomes = payload_entries
         .par_iter()
         .map_init(
-            || open_archive(path).map_err(|error| format!("{error:#}")),
+            || archive.clone(),
             |archive, (meta, expectation)| {
-                let archive = match archive {
-                    Ok(archive) => archive,
-                    Err(error) => bail!("{error}"),
-                };
                 read_verified_entry(archive, meta, *expectation, retention)
             },
         )
@@ -1316,7 +1364,7 @@ fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<Verifie
 /// Reads one ZIP entry, verifies it against the manifest, and returns its body
 /// when the caller needs it.
 fn read_verified_entry(
-    archive: &mut zip::ZipArchive<File>,
+    archive: &mut Archive,
     meta: &ZipEntryMeta,
     expectation: EntryExpectation<'_>,
     retention: PayloadRetention,
