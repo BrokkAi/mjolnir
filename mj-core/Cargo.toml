@@ -11,14 +11,14 @@ readme.workspace = true
 include = [
     "build.rs",
     "src/**/*.rs",
-    "tests/fixtures/fake-command.sh",
+    "tests/fixtures/*.sh",
     "tests/jev-gates.json",
     # Turn-classifier questions shared with the hosted proxy.
     "src/activity/verdict_questions.json",
     "src/activity/question_locator.json",
     "src/help_search/question.json",
     "src/continuation/questions.json",
-    "src/github_item/questions.json",
+    "src/github_item/questions_v2.json",
     # Recorded ACP bridge traffic the step-clock tests replay.
     "src/**/testdata/**/*.jsonl",
     # Mjolnir-authored skills embedded with `include_str!`.
