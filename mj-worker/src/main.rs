@@ -485,7 +485,7 @@ const WORKER_RUNTIME_THREADS: usize = 4;
 
 fn run_worker(cli: Cli, exit_root: Option<&Path>, owner: Option<&WorkerRootOwner>) -> Result<()> {
     if let Some(root) = exit_root {
-        record_startup_step(root, "login-environment");
+        record_startup_step(root, mj_core::relay::WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT);
     }
     bootstrap_login_environment(&cli, owner).context("initialize worker environment")?;
     if let Some(root) = exit_root {

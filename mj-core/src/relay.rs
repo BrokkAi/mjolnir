@@ -185,6 +185,12 @@ pub const WORKER_PID_FILE: &str = "worker.pid";
 /// control socket, so a controller waiting for that socket can tell a worker
 /// that is still making progress from one that died without a word.
 pub const WORKER_STARTUP_FILE: &str = "worker-startup.json";
+/// The startup step a worker records while it reads the account's login-shell
+/// environment. That probe carries its own deadline
+/// ([`crate::login_environment::LOGIN_ENVIRONMENT_PROBE_TIMEOUT`]), so the
+/// controller watching a starting worker defers to the probe's deadline for
+/// this step instead of applying its stall detection to it.
+pub const WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT: &str = "login-environment";
 /// File a dying worker daemon writes with the reason it stopped.
 pub const WORKER_EXIT_FILE: &str = "worker-exit.json";
 /// File in which a worker records which untracked paths each repository held
