@@ -4501,10 +4501,13 @@ async fn a_review_verdict_for_a_parked_sub_agent_starts_it_and_reaches_its_relay
     let RelayCommand::DeliverMailboxEvent { event } = command else {
         panic!("the verdict arrives as a mailbox event")
     };
-    assert!(matches!(
+    assert_eq!(event.key, "push-review:child");
+    assert_eq!(
         event.body,
-        mj_core::mailbox::MailboxEventBody::ReviewVerdict { .. }
-    ));
+        mj_core::mailbox::MailboxEventBody::PlainText {
+            text: "Review clean for commits aaaaaaa..bbbbbbb in /workspace/app. Tree ccccccc is recorded as reviewed.\nReview finished; this is the final result. No reviewers are still running.".into(),
+        }
+    );
     reply.send(Ok(3)).unwrap();
     assert_eq!(
         delivery.await.unwrap().unwrap(),

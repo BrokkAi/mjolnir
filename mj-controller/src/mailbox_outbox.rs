@@ -433,7 +433,7 @@ pub(crate) async fn deliver_mailbox_event(
         }
         Some(_) => {}
     }
-    downgrade_review_or_report(&mut event, protocol.expect("worker protocol was checked"));
+    prepare_review_or_report(&mut event, protocol.expect("worker protocol was checked"));
     match tokio::time::timeout(DELIVERY_TIMEOUT, handle.deliver_mailbox_event(event)).await {
         Ok(result) => result,
         Err(_) => anyhow::bail!("mailbox command acknowledgement timed out"),
@@ -455,13 +455,18 @@ pub(crate) fn mailbox_command_id(event_key: &str) -> String {
     command_id
 }
 
-fn downgrade_review_or_report(event: &mut mj_core::mailbox::MailboxEvent, protocol: u32) {
-    if matches!(
-        event.body,
-        mj_core::mailbox::MailboxEventBody::SubagentFinished { .. }
-            | mj_core::mailbox::MailboxEventBody::ReviewVerdict { .. }
-    ) && protocol < event.body.minimum_relay_protocol()
-    {
+fn prepare_review_or_report(event: &mut mj_core::mailbox::MailboxEvent, protocol: u32) {
+    let render = match event.body {
+        // Active workers can predate this daemon without a protocol change.
+        // Render here so their final result includes this daemon's closeout;
+        // keep the structured durable row and its retry identity unchanged.
+        mj_core::mailbox::MailboxEventBody::ReviewVerdict { .. } => true,
+        mj_core::mailbox::MailboxEventBody::SubagentFinished { .. } => {
+            protocol < event.body.minimum_relay_protocol()
+        }
+        _ => false,
+    };
+    if render {
         event.body = mj_core::mailbox::MailboxEventBody::PlainText {
             text: mj_core::mailbox::render_mailbox_event(event),
         };
@@ -505,8 +510,9 @@ mod tests {
         assert_eq!(next_wake(&notify, &mut sweep, &stop).await, None);
     }
 
+    // Hard-won: fdc559be0: older workers rendered final verdicts without the daemon's closeout.
     #[test]
-    fn review_verdict_wire_body_downgrades_for_protocol_42() {
+    fn review_verdict_reaches_existing_workers_with_the_daemon_closeout() {
         let event = mj_core::mailbox::MailboxEvent {
             key: "review-1".into(),
             source: "review".into(),
@@ -521,24 +527,15 @@ mod tests {
                 verdict: mj_core::review::verdict::ReviewVerdict::Clean,
             },
         };
-        for protocol in [33, 42, 43] {
+        for protocol in [33, 42, 43, mj_core::relay::RELAY_PROTOCOL_VERSION] {
             let mut delivered = event.clone();
-            super::downgrade_review_or_report(&mut delivered, protocol);
+            super::prepare_review_or_report(&mut delivered, protocol);
             let wire = serde_json::to_value(&delivered).unwrap();
+            assert_eq!(wire["body"]["type"], "plain_text");
             assert_eq!(
-                wire["body"]["type"],
-                if protocol < 43 {
-                    "plain_text"
-                } else {
-                    "review_verdict"
-                }
+                wire["body"]["text"],
+                "Review clean for commits aaaaaaa..bbbbbbb in /repo. Tree ccccccc is recorded as reviewed.\nReview finished; this is the final result. No reviewers are still running."
             );
-            if protocol < 43 {
-                assert_eq!(
-                    wire["body"]["text"],
-                    "Review clean for commits aaaaaaa..bbbbbbb in /repo. Tree ccccccc is recorded as reviewed."
-                );
-            }
             assert_eq!(
                 serde_json::from_value::<mj_core::mailbox::MailboxEvent>(wire).unwrap(),
                 delivered
@@ -574,7 +571,7 @@ mod tests {
         };
         for protocol in [53, 54] {
             let mut delivered = event.clone();
-            super::downgrade_review_or_report(&mut delivered, protocol);
+            super::prepare_review_or_report(&mut delivered, protocol);
             let wire = serde_json::to_value(&delivered).unwrap();
             if protocol < 54 {
                 assert_eq!(wire["body"]["type"], "plain_text");
@@ -630,7 +627,7 @@ mod tests {
         let current = mj_core::relay::RELAY_FINISH_FACTS_PROTOCOL;
         for protocol in [current - 1, current] {
             let mut delivered = event.clone();
-            super::downgrade_review_or_report(&mut delivered, protocol);
+            super::prepare_review_or_report(&mut delivered, protocol);
             let wire = serde_json::to_value(&delivered).unwrap();
             if protocol < current {
                 // An older worker cannot read `facts`, so it receives what the
