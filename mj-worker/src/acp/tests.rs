@@ -1078,7 +1078,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         };
         let expected = match harness {
             HarnessKind::Claude => {
-                serde_json::json!(["Agent", "Task"])
+                serde_json::json!(["Agent", "Task", "ListAgents", "SendMessage", "Workflow"])
             }
             _ => serde_json::json!(["spawn_agent"]),
         };
@@ -1255,7 +1255,7 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
         let (pointer, expected) = match harness {
             HarnessKind::Claude => (
                 "/claudeCode/options/disallowedTools",
-                serde_json::json!(["Agent", "Task"]),
+                serde_json::json!(["Agent", "Task", "ListAgents", "SendMessage", "Workflow"]),
             ),
             _ => (
                 "/codex/options/disallowedTools",

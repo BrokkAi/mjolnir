@@ -199,11 +199,12 @@ pub(super) fn session_request_meta(
             serde_json::json!({ "enabled": enabled }),
         );
     }
-    // TaskStop and TaskOutput stay: they also manage background shell commands.
+    // Hide native discovery, messaging/resumption and workflow orchestration too.
+    // TaskStop stays because it also manages background shell commands.
     if spec.subagent_policy.suppresses_native() {
         options.insert(
             "disallowedTools".to_owned(),
-            serde_json::json!(["Agent", "Task"]),
+            serde_json::json!(["Agent", "Task", "ListAgents", "SendMessage", "Workflow"]),
         );
     }
     if spec.execution_policy == ExecutionPolicy::ConfiguredApprovals {
