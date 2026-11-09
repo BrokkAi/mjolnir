@@ -7,6 +7,30 @@ fn prefix(text: &str, bytes: usize) -> String {
     text[..text.floor_char_boundary(bytes.min(text.len()))].to_owned()
 }
 
+const MENTION_ELISION: &str = "…";
+/// Bytes kept before the reference, so the subject that relates the session
+/// to it ("reviewing", "blocked on") usually survives.
+const MENTION_LEAD_BYTES: usize = 96;
+
+/// The part of `line` around `reference`, at most [`MENTION_BYTES`]. Agent
+/// paragraphs are often one long line, so a plain prefix would drop the
+/// reference the mention was chosen for.
+fn mention_window(line: &str, reference: &str) -> String {
+    if line.len() <= MENTION_BYTES {
+        return line.to_owned();
+    }
+    let at = line.find(reference).unwrap_or(0);
+    let start = line.floor_char_boundary(at.saturating_sub(MENTION_LEAD_BYTES));
+    let lead = if start > 0 { MENTION_ELISION } else { "" };
+    let rest = &line[start..];
+    let room = MENTION_BYTES - lead.len();
+    if rest.len() <= room {
+        return format!("{lead}{rest}");
+    }
+    let end = rest.floor_char_boundary(room - MENTION_ELISION.len());
+    format!("{lead}{}{MENTION_ELISION}", &rest[..end])
+}
+
 const MESSAGE_TRUNCATION_MARKER: &str = "\n[Message truncated.]";
 
 fn distinct(values: impl Iterator<Item = String>, count: usize) -> Vec<String> {
@@ -57,8 +81,11 @@ pub fn session_digest(session: &MaterializedSession) -> SessionContext {
                 if event.message_text().is_some() {
                     messages.push(("User: ", mj_core::mailbox::render_mailbox_event(event)));
                 }
-                // Preserve the existing reference sources independently of conversation.
-                String::new()
+                if event.message_text().is_some() {
+                    mj_core::mailbox::render_mailbox_event(event)
+                } else {
+                    String::new()
+                }
             }
             TranscriptBody::Agent { chunks, .. } => {
                 let text = materialized_chunks_text(chunks);
@@ -84,6 +111,13 @@ pub fn session_digest(session: &MaterializedSession) -> SessionContext {
             }
             _ => String::new(),
         };
+        // Index full lines before conversation truncation or the reference-list cap.
+        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            for reference in mj_core::github_reference::github_references(line) {
+                let window = mention_window(line, &reference.text);
+                digest.mention_candidates.push((reference, window));
+            }
+        }
         refs.extend(
             mj_core::github_reference::github_references(&text)
                 .into_iter()
@@ -123,6 +157,48 @@ mod tests {
     use mj_core::state::TranscriptItem;
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn mentions_survive_reference_and_conversation_truncation_with_utf8() {
+        let mut session = MaterializedSession::empty("mention-index");
+        let text = format!(
+            "pending #1\n{}\n{}",
+            "é".repeat(MESSAGE_BYTES),
+            (2..50)
+                .map(|n| format!("pending #{n}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        session.transcript.push(Arc::new(TranscriptItem {
+            stable_id: "user:1".into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 0,
+            last_changed_at_ms: 0,
+            body: TranscriptBody::User {
+                content: vec![json!({"type":"text","text":text})],
+            },
+        }));
+        let digest = session_digest(&session);
+        assert!(!digest.references.contains(&"#1".to_owned()));
+        let item = GithubItem {
+            repo: "owner/repo".into(),
+            kind: GithubItemKind::Issue,
+            number: 49,
+            title: "Fix #1".into(),
+            body: String::new(),
+            author: String::new(),
+            url: "https://github.com/owner/repo/issues/49".into(),
+        };
+        assert_eq!(
+            digest.for_item(&item).mentions,
+            ["pending #49", "pending #1"]
+        );
+        let long = format!("{} reviewing #7 next {}", "é".repeat(200), "x".repeat(400));
+        let window = mention_window(&long, "#7");
+        assert!(window.len() <= MENTION_BYTES && window.contains("reviewing #7"));
+        assert!(window.starts_with(MENTION_ELISION) && window.ends_with(MENTION_ELISION));
+    }
 
     #[test]
     fn digest_preserves_recency_and_utf8_across_turn_boundaries() {

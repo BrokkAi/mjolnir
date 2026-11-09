@@ -68,7 +68,7 @@ def main():
                 probability = value["noul"]
                 assert not isinstance(probability, bool) and 0 <= probability <= 1
                 scores[axis] = probability
-            actual = {axis: score >= .5 for axis, score in scores.items()}
+            actual = {axis: score >= (.4 if args.contract == "v2" else .5) for axis, score in scores.items()}
             result = {"id": case["id"], "repeat": repeat, "scores": scores,
                       "actual": actual, "passed": actual == case["expected"], "response": answer}
             results.append(result)

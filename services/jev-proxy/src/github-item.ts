@@ -19,7 +19,7 @@ export interface GithubItemEvidence {
 
 export interface GithubItemEvidenceV2 {
   item: GithubItemEvidence["item"];
-  session: { conversation: string; files: string[]; references: string[] };
+  session: { conversation: string; files: string[]; references: string[]; mentions?: string[] };
 }
 
 const encoder = new TextEncoder();
@@ -61,7 +61,7 @@ export function githubItemAnswers(value: unknown): Record<string, unknown> | und
 export function githubItemRequestV2(value: unknown): value is GithubItemEvidenceV2 {
   if (!object(value) || !fields(value, ["item", "session"])
     || !object(value.item) || !fields(value.item, ["repo", "kind", "number", "title", "body", "author", "url"])
-    || !object(value.session) || !fields(value.session, ["conversation", "files", "references"])) return false;
+    || !object(value.session) || !fields(value.session, "mentions" in value.session ? ["conversation", "files", "references", "mentions"] : ["conversation", "files", "references"])) return false;
   const item = value.item;
   const session = value.session;
   const strings = (values: unknown, count: number, limit: number, nonempty = true) => Array.isArray(values)
@@ -71,7 +71,8 @@ export function githubItemRequestV2(value: unknown): value is GithubItemEvidence
     && text(item.title, 1024) && text(item.body, 4096 + 128, false)
     && text(item.author, 256, false) && text(item.url, 2048)
     && text(session.conversation, 8 * 1024, false)
-    && strings(session.files, 32, 256) && strings(session.references, 32, 128);
+    && strings(session.files, 32, 256) && strings(session.references, 32, 128)
+    && (!("mentions" in session) || strings(session.mentions, 16, 256));
 }
 
 export function githubItemAnswersV2(value: unknown): Record<string, unknown> | undefined {

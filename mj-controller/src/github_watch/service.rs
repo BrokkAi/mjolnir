@@ -563,7 +563,7 @@ async fn classify_for_session(
     let own_account = credential_login.is_none_or(|login| login.eq_ignore_ascii_case(&item.author));
     let created = own_account
         && opened_by_session(&session.id, &item.created_at, item.number as u64, &item.url).await?;
-    let evidence = GithubItemEvidence {
+    let mut evidence = GithubItemEvidence {
         item: GithubItem {
             repo: repo_label.clone(),
             kind,
@@ -575,6 +575,7 @@ async fn classify_for_session(
         },
         session: digest,
     };
+    evidence.session = evidence.session.for_item(&evidence.item);
     // The creator already knows its item, so it is never told about it and
     // Jev is not asked; its stored interest is false.
     let interested = if created {
