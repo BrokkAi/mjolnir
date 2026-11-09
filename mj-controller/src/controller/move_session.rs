@@ -1102,8 +1102,7 @@ impl Controller {
             );
         }
         let retry = previous.as_ref().is_some_and(|op| {
-            !matches!(op.phase, MovePhase::Completed)
-                && (op.restore_artifact().is_some() || source.checkpoint.is_some())
+            !op.is_resolved() && (op.restore_artifact().is_some() || source.checkpoint.is_some())
         });
         ensure!(
             matches!(
@@ -1261,9 +1260,7 @@ impl Controller {
         );
         let source_record = previous
             .as_ref()
-            .filter(|operation| {
-                !operation.queue_admission_started && operation.phase != MovePhase::Completed
-            })
+            .filter(|operation| !operation.queue_admission_started && !operation.is_resolved())
             .and_then(|operation| operation.recovery_session.as_ref())
             .unwrap_or(source);
         let cross_harness = !self.config.native_continuity(
@@ -1311,7 +1308,7 @@ impl Controller {
             .as_ref()
             .filter(|operation| {
                 operation.selection == selection
-                    && operation.phase != MovePhase::Completed
+                    && !operation.is_resolved()
                     && operation.restore_artifact().is_some()
             })
             .map(|operation| operation.operation_id.clone())
@@ -1441,7 +1438,7 @@ impl Controller {
         let old_operation = crate::database::load_move_operation(&id)?;
         let retry = old_operation.filter(|op| {
             op.selection == prepared.selection
-                && op.phase != MovePhase::Completed
+                && !op.is_resolved()
                 && op.restore_artifact().is_some()
         });
         if retry.is_none() && move_changes_nothing(&source, &checked.selection) {
@@ -2833,7 +2830,7 @@ pub(crate) fn move_in_place_for_record(
     previous: Option<&MoveOperation>,
 ) -> bool {
     let retry = previous.is_some_and(|operation| {
-        !matches!(operation.phase, MovePhase::Completed)
+        !operation.is_resolved()
             && (operation.restore_artifact().is_some() || source.checkpoint.is_some())
     });
     previous

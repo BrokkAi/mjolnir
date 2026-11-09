@@ -3020,6 +3020,79 @@ fn bare_move_preparation_normalizes_an_empty_resource_reset() {
 }
 
 #[cfg(unix)]
+// Hard-won: #1479: an explicitly resumed Move forced later profile changes into a blocked transfer.
+#[test]
+fn profile_move_after_explicit_resume_starts_fresh_without_transferring_files() {
+    let name =
+        test_name("profile_move_after_explicit_resume_starts_fresh_without_transferring_files");
+    if !isolated_test_child(&name, "MJ_MOVE_AFTER_RESUME_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.phase = MovePhase::Cancelled;
+    operation.handoff = Some(fixture.checkpoint.clone());
+    operation.checkpoint = Some(fixture.checkpoint.clone());
+    // These are the durable fields written after an explicit Resume succeeds.
+    operation.queue_admission_finished = true;
+    operation.error = Some("Recovered through an explicit Resume operation".into());
+    crate::database::save_move_operation(&operation).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // Both retrying the old destination and choosing a different profile must
+    // start from the live worker, never from the historical handoff archive.
+    for profile in [IN_PLACE_DESTINATION_PROFILE, IN_PLACE_SOURCE_PROFILE] {
+        let mut selection = operation.selection.clone();
+        selection.profile_id = Some(profile.into());
+        let prepared = runtime
+            .block_on(fixture.controller.prepare_move_session_controlled(
+                selection,
+                &RefusingExecutor("a profile-only Move must not scan or provision storage"),
+            ))
+            .unwrap();
+        assert!(prepared.in_place);
+        assert!(prepared.workspace.is_none());
+        assert!(!prepared.stops_subagents);
+        assert_ne!(prepared.operation_id, operation.operation_id);
+        assert!(super::move_in_place_for_record(
+            &fixture.controller.state.sessions[LATCH_RELAY_SESSION],
+            &prepared.selection,
+            &fixture.controller.config.targets,
+            false,
+            Some(&operation),
+        ));
+    }
+    let stored = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert!(!stored.offers_retry());
+    assert!(!stored.checkpoint_retained());
+    assert!(!stored.holds_source_environment());
+    assert!(crate::server::ViewerMoveRecovery::from_operation(&stored).is_none());
+    assert!(!stored.retains_checkpoint());
+    assert_eq!(stored.retained_archives().count(), 0);
+    assert!(fixture.checkpoint.archive_path.exists());
+
+    // A cancellation before Resume, or after destination queue admission,
+    // still owns recovery. Loading it must preserve the retry and its archive.
+    for (started, finished) in [(false, false), (true, false), (true, true)] {
+        operation.queue_admission_started = started;
+        operation.queue_admission_finished = finished;
+        crate::database::save_move_operation(&operation).unwrap();
+        let stored = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        assert!(stored.offers_retry());
+        let api = crate::server::ViewerMoveRecovery::from_operation(&stored).unwrap();
+        assert!(api.checkpoint_retained);
+        assert!(stored.retains_checkpoint());
+    }
+}
+
+#[cfg(unix)]
 // Hard-won: #1470: native delegation without managed children blocked automatic quota Moves.
 #[test]
 fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {

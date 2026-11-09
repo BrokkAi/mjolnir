@@ -817,7 +817,7 @@ impl ViewerMoveRecovery {
 
     #[must_use]
     pub fn from_operation(operation: &MoveOperation) -> Option<Self> {
-        if matches!(operation.phase, MovePhase::Completed) {
+        if operation.is_resolved() {
             return None;
         }
         Some(Self {

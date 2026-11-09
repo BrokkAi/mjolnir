@@ -342,6 +342,16 @@ pub struct MoveOperation {
 }
 
 impl MoveOperation {
+    /// Explicit Resume resolves a cancelled Move by finishing its queue
+    /// without ever admitting it. Its archives are then historical, just as
+    /// for a completed Move, and cannot make a later Move a retry.
+    pub fn is_resolved(&self) -> bool {
+        self.phase == MovePhase::Completed
+            || (self.phase == MovePhase::Cancelled
+                && !self.queue_admission_started
+                && self.queue_admission_finished)
+    }
+
     pub fn retains_source_environment(&self) -> bool {
         self.in_place || self.workspace_transfer.is_some()
     }
@@ -350,8 +360,7 @@ impl MoveOperation {
     }
 
     pub fn retains_checkpoint(&self) -> bool {
-        (self.handoff.is_some() && self.phase == MovePhase::Cancelled)
-            || !matches!(self.phase, MovePhase::Completed | MovePhase::Cancelled)
+        (!self.is_resolved() && (self.handoff.is_some() || self.phase != MovePhase::Cancelled))
             || (self.queue_admission_started && !self.queue_admission_finished)
     }
 
@@ -373,7 +382,7 @@ impl MoveOperation {
     /// reference is removed from the record, so the recovery guidance, the API
     /// and the retry admission all read the loss from here.
     pub fn checkpoint_retained(&self) -> bool {
-        self.phase != MovePhase::Completed && self.restore_artifact().is_some()
+        !self.is_resolved() && self.restore_artifact().is_some()
     }
 
     /// Whether a surface should offer to retry this failed or cancelled Move:
@@ -390,9 +399,7 @@ impl MoveOperation {
     /// Resume would recreate what the Move promised to keep, so only a retried
     /// Move or Destroy may act on the session.
     pub fn holds_source_environment(&self) -> bool {
-        self.retains_source_environment()
-            && self.phase != MovePhase::Completed
-            && self.recovery_session.is_some()
+        self.retains_source_environment() && !self.is_resolved() && self.recovery_session.is_some()
     }
 
     pub fn is_active(&self) -> bool {
