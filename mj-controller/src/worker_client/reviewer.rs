@@ -149,6 +149,38 @@ impl RelayClient {
         }
     }
 
+    /// Wait until the worker's latest event or state digest differs from
+    /// these, or this connection's sub-agent queue has unpolled changes, or
+    /// [`mj_core::relay::RELAY_CHANGE_WAIT_BOUND`] passes. Protocol 58. The
+    /// timeout adds the ordinary request time to the worker's hold.
+    pub async fn wait_for_change(
+        &mut self,
+        after_ordinal: u64,
+        state_digest: Option<String>,
+    ) -> Result<ObservedChange> {
+        match self
+            .call_with_timeout(
+                RelayRequest::WaitForChange {
+                    after_ordinal,
+                    state_digest,
+                },
+                mj_core::relay::RELAY_CHANGE_WAIT_BOUND + self.request_timeout,
+            )
+            .await?
+        {
+            RelayResponsePayload::ChangeObserved {
+                latest_ordinal,
+                state_digest,
+                subagent_queue_changed,
+            } => Ok(ObservedChange {
+                latest_ordinal,
+                state_digest,
+                subagent_queue_changed,
+            }),
+            _ => bail!("relay returned an unexpected change-wait response"),
+        }
+    }
+
     pub async fn subagent_requests(&mut self) -> Result<SubagentQueueSnapshot> {
         if self.protocol_version >= mj_core::relay::RELAY_SUBAGENT_FEED_PROTOCOL {
             use mj_core::subagent::SubagentQueueChange;
@@ -360,4 +392,12 @@ mod tests {
             .unwrap()
         );
     }
+}
+
+/// What a worker reported from [`RelayClient::wait_for_change`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedChange {
+    pub latest_ordinal: u64,
+    pub state_digest: String,
+    pub subagent_queue_changed: bool,
 }

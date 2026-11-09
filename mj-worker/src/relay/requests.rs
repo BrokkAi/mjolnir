@@ -174,6 +174,7 @@ impl DurableRelay {
             | RelayRequest::ReplaceProjectMemoryTree { .. }
             | RelayRequest::CompleteSubagentRequest { .. }
             | RelayRequest::PollSubagentQueue { .. }
+            | RelayRequest::WaitForChange { .. }
             | RelayRequest::SetSubagentAdmission { .. }
             | RelayRequest::SetOperatorAway { .. } => {
                 return Ok(relay_error(

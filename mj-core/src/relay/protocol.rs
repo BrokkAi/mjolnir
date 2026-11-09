@@ -229,6 +229,14 @@ pub enum RelayRequest {
     PollSubagentQueue {
         acknowledged: Option<u64>,
     },
+    /// Answer once the worker's latest event ordinal or operational state
+    /// digest differs from these, or this connection's sub-agent queue has
+    /// changes it has not polled, or after [`RELAY_CHANGE_WAIT_BOUND`] with
+    /// none of them. Connection-only. Protocol 58.
+    WaitForChange {
+        after_ordinal: u64,
+        state_digest: Option<String>,
+    },
     /// Connection-only operator-away control; never journaled as a command.
     SetOperatorAway {
         away: bool,
@@ -417,6 +425,7 @@ impl RelayRequest {
             Self::StopBackgroundTask { .. } => "stop_background_task",
             Self::SubagentRequests => "subagent_requests",
             Self::PollSubagentQueue { .. } => "poll_subagent_queue",
+            Self::WaitForChange { .. } => "wait_for_change",
             Self::SetSubagentAdmission { .. } => "set_subagent_admission",
             Self::SetOperatorAway { .. } => "set_operator_away",
             Self::HistoryQuery { .. } => "history_query",
@@ -455,6 +464,7 @@ impl RelayRequest {
             Self::StopBackgroundTask { .. } => 9,
             Self::SubagentRequests | Self::CompleteSubagentRequest { .. } => 12,
             Self::PollSubagentQueue { .. } => super::RELAY_SUBAGENT_FEED_PROTOCOL,
+            Self::WaitForChange { .. } => super::RELAY_CHANGE_WAIT_PROTOCOL,
             Self::SetSubagentAdmission { .. } => 32,
             Self::SetOperatorAway { .. } => super::RELAY_OPERATOR_AWAY_PROTOCOL,
             Self::RespondElicitation { .. } => 2,
@@ -580,6 +590,11 @@ fn rewrite_protocol_33_event(value: &mut serde_json::Value) -> serde_json::Resul
     *value = serde_json::to_value(event.legacy_representation())?;
     Ok(())
 }
+
+/// How long a worker holds [`RelayRequest::WaitForChange`] when nothing
+/// changes. It matches the controller's 10 s worker CPU reading, so a quiet
+/// session's waiting connection is proven alive as often as its main one.
+pub const RELAY_CHANGE_WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RelayResponseEnvelope {
@@ -717,6 +732,14 @@ pub enum RelayResponsePayload {
         /// negotiated protocol 57 to name in its next attach.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         state_digest: Option<String>,
+    },
+    /// The answer to [`RelayRequest::WaitForChange`]: the worker's latest event
+    /// ordinal and state digest now, and whether this connection's sub-agent
+    /// queue has changes to poll. Equal values mean the wait ran out.
+    ChangeObserved {
+        latest_ordinal: u64,
+        state_digest: String,
+        subagent_queue_changed: bool,
     },
     /// An attach whose `known_state_digest` still matches: the state is the
     /// one the controller holds, so only the events are sent. Protocol 57.

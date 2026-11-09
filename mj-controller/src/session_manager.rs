@@ -35,6 +35,9 @@ pub use mj_client::session::{
 const SESSION_SYNC_INTERVAL: Duration = Duration::from_millis(150);
 /// Sync cadence while the worker is quiet. See `actor::sync_delay`.
 const QUIET_SESSION_SYNC_INTERVAL: Duration = Duration::from_secs(2);
+/// A quiet session whose worker reports changes as they happen is synced as
+/// often as its worker CPU is read, which the change wait's bound matches.
+const CHANGE_WAIT_SYNC_INTERVAL: Duration = mj_core::relay::RELAY_CHANGE_WAIT_BOUND;
 /// Release SQLite's single writer between bounded pieces of a large relay
 /// catch-up. One transport page can contain thousands of terminal events and
 /// must not prevent every other session actor from publishing its view.

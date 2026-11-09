@@ -2,7 +2,7 @@ use super::*;
 use tracing::instrument::WithSubscriber;
 
 pub(crate) async fn run_relay_coordinator_with_shells(
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     events: mpsc::Receiver<RuntimeEvent>,
     dispatch_wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
@@ -28,7 +28,7 @@ pub(crate) async fn run_relay_coordinator_with_shells(
 // would only rename the arguments.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_relay_coordinator_with_verdict(
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     mut events: mpsc::Receiver<RuntimeEvent>,
     mut dispatch_wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
@@ -394,7 +394,7 @@ pub(crate) struct Capture<'a> {
 /// pending commands once the outcome is recorded.
 async fn capture_while_open(
     capture: &mut Capture<'_>,
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     events: &mut mpsc::Receiver<RuntimeEvent>,
     deferred: &mut std::collections::VecDeque<RuntimeEvent>,
 ) -> mj_core::work_facts::WorkFacts {
@@ -455,7 +455,7 @@ async fn capture_while_open(
 /// event, then the events that arrived while it was observed.
 #[allow(clippy::too_many_arguments)]
 async fn record_one_runtime_event(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
     mut event: RuntimeEvent,
     events: &mut mpsc::Receiver<RuntimeEvent>,
@@ -514,7 +514,7 @@ async fn record_one_runtime_event(
 /// the cut ahead of any waiting barrier.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_runtime_event_batch(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
     first: RuntimeEvent,
     events: &mut mpsc::Receiver<RuntimeEvent>,
@@ -553,7 +553,7 @@ pub(crate) async fn record_runtime_event_batch(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_queued_runtime_events(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
     events: &mut mpsc::Receiver<RuntimeEvent>,
     session_configured: &mut bool,
@@ -607,7 +607,7 @@ pub(crate) fn track_user_shell_completion(
 }
 
 pub(crate) fn record_runtime_event_and_track_configuration(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
     event: RuntimeEvent,
     session_configured: &mut bool,
@@ -628,7 +628,7 @@ pub(crate) fn record_runtime_event_and_track_configuration(
 
 #[cfg(test)]
 pub(crate) fn record_runtime_event(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
     event: RuntimeEvent,
 ) -> Result<bool> {
@@ -638,7 +638,7 @@ pub(crate) fn record_runtime_event(
 /// Record one runtime event. `work_facts` is what the worker observed of its
 /// agent's work for a finishing prompt, published with that prompt's outcome.
 pub(crate) fn record_runtime_event_with_facts(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
     event: RuntimeEvent,
     work_facts: Option<mj_core::work_facts::WorkFacts>,
@@ -989,7 +989,7 @@ pub(crate) fn record_runtime_event_with_facts(
 }
 
 pub(crate) fn interrupt_in_flight(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
     message: &str,
 ) -> Result<()> {
@@ -1022,7 +1022,7 @@ pub(crate) fn interrupt_in_flight(
 /// the send leaves the command in flight for restart interruption, exactly
 /// as before.
 pub(crate) fn dispatch_pending(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     commands: &mpsc::Sender<CommandRequest>,
     in_flight: &mut BTreeMap<String, RelayCommand>,
     session_configured: bool,
@@ -1128,7 +1128,7 @@ pub(crate) fn dispatch_pending(
 }
 
 pub(crate) fn dispatch_user_shells(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     user_shells: &mut crate::user_shell::UserShellRegistry,
 ) -> Result<()> {
     let claimed = relay
@@ -1356,7 +1356,7 @@ pub(crate) fn report_fatal(
 }
 
 pub(crate) fn release_checkpoint_barriers(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     dispatch_wake: &mpsc::Sender<()>,
     checkpoint_barriers: BTreeSet<String>,
 ) -> Result<()> {
@@ -1378,7 +1378,7 @@ pub(crate) fn release_checkpoint_barriers(
 }
 
 pub(crate) fn wake_dispatch(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     dispatch_wake: &mpsc::Sender<()>,
 ) -> Result<()> {
     {

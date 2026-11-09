@@ -1067,6 +1067,7 @@ fn latch_relay_child_serves_stdio() {
                 })
             }
             mj_core::relay::RelayRequest::PollSubagentQueue { .. }
+            | mj_core::relay::RelayRequest::WaitForChange { .. }
             | mj_core::relay::RelayRequest::SubagentRequests => {
                 subagent_connection_response(&request).map(|response| match response.body {
                     mj_core::relay::RelayResponseBody::Ok { payload } => payload,
@@ -1442,6 +1443,19 @@ fn subagent_connection_response(
         }
         mj_core::relay::RelayRequest::SetSubagentAdmission { open } => {
             mj_core::relay::RelayResponsePayload::SubagentAdmissionChanged { open: *open }
+        }
+        // This fake's queue never changes and its relay is served elsewhere:
+        // hold briefly, as the worker would, and report nothing new.
+        mj_core::relay::RelayRequest::WaitForChange {
+            after_ordinal,
+            state_digest,
+        } => {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            mj_core::relay::RelayResponsePayload::ChangeObserved {
+                latest_ordinal: *after_ordinal,
+                state_digest: state_digest.clone().unwrap_or_default(),
+                subagent_queue_changed: false,
+            }
         }
         _ => return None,
     };

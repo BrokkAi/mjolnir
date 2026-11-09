@@ -128,7 +128,12 @@ pub const RELAY_FINISH_FACTS_PROTOCOL: u32 = 56;
 /// state it does send. Older workers reject the unknown field, so controllers
 /// send it only to workers that negotiated 57.
 pub const RELAY_STATE_DIGEST_PROTOCOL: u32 = 57;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_STATE_DIGEST_PROTOCOL;
+/// 58 adds `WaitForChange`: the worker holds the request until its events,
+/// its operational state, or this connection's sub-agent queue differ from
+/// what the controller names, so the controller syncs on change instead of on
+/// a timer.
+pub const RELAY_CHANGE_WAIT_PROTOCOL: u32 = 58;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHANGE_WAIT_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

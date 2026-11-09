@@ -1361,6 +1361,8 @@ fn leased_relay_child_serves_stdio() {
         let mut input = std::io::stdin().lock();
         let mut output = std::io::stdout().lock();
         let mut subagent_known_ids = std::collections::BTreeSet::new();
+        // The queue files this connection last reported to a change wait.
+        let mut reported_queue: Option<[Option<Vec<u8>>; 2]> = None;
         while let Some(request) = mj_core::relay::read_relay_frame(&mut input).unwrap() {
             use mj_core::relay::{
                 RelayRequest, RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload,
@@ -1401,6 +1403,48 @@ fn leased_relay_child_serves_stdio() {
                                 false,
                                 None,
                             ),
+                        },
+                    },
+                )
+                .unwrap();
+                continue;
+            }
+            if let RelayRequest::WaitForChange {
+                after_ordinal,
+                state_digest,
+            } = &request.request
+            {
+                // Each connection to this fake is its own process, and only the
+                // session's own connection may open the relay journal. So this
+                // wait reports the relay as the controller named it and holds,
+                // like the real worker, until the queue files it rereads change.
+                let queue_files = || {
+                    ["subagent-request.json", "subagent-result.json"]
+                        .map(|name| std::fs::read(PathBuf::from(&root).join(name)).ok())
+                };
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                let queue_changed = loop {
+                    let queue = queue_files();
+                    if reported_queue.as_ref() != Some(&queue) {
+                        reported_queue = Some(queue);
+                        break true;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                };
+                mj_core::relay::write_relay_frame(
+                    &mut output,
+                    &RelayResponseEnvelope {
+                        request_id: request.request_id,
+                        protocol_version: request.protocol_version,
+                        body: RelayResponseBody::Ok {
+                            payload: RelayResponsePayload::ChangeObserved {
+                                latest_ordinal: *after_ordinal,
+                                state_digest: state_digest.clone().unwrap_or_default(),
+                                subagent_queue_changed: queue_changed,
+                            },
                         },
                     },
                 )
@@ -3352,6 +3396,9 @@ async fn a_quiet_session_stops_polling_its_worker_until_work_is_in_flight() {
         quiet.reason()
     );
 
+    // The delegation connection reads the queue and acknowledges that read
+    // as it connects; count what the quiet session costs after that.
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let before = relay_requests_logged(relay_root.path());
     tokio::time::sleep(Duration::from_secs(3)).await;
     let idle = relay_requests_logged(relay_root.path()) - before;

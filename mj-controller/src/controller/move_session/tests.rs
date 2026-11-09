@@ -140,6 +140,19 @@ fn move_queue_relay_child() {
                     },
                 })
             }
+            // The queue never changes here: hold briefly, as the worker
+            // would, and report nothing new.
+            RelayRequest::WaitForChange {
+                after_ordinal,
+                state_digest,
+            } => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                Some(RelayResponsePayload::ChangeObserved {
+                    latest_ordinal: *after_ordinal,
+                    state_digest: state_digest.clone().unwrap_or_default(),
+                    subagent_queue_changed: false,
+                })
+            }
             _ => None,
         };
         if let Some(payload) = payload {

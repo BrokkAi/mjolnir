@@ -71,6 +71,11 @@ impl RelayClient {
         self.protocol_version
     }
 
+    /// The digest of the operational state this connection last received.
+    pub fn known_state_digest(&self) -> Option<&str> {
+        self.known_state.as_ref().map(|(digest, _)| digest.as_str())
+    }
+
     pub fn latest_ordinal(&self) -> u64 {
         self.latest_ordinal
     }

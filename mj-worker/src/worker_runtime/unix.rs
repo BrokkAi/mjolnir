@@ -30,8 +30,8 @@ use super::{
 use crate::acp::{self, CommandRequest, LaunchSpec, RuntimeEvent};
 use crate::relay::{
     ClaimedRelayCommand, DeferredRelayAttach, DurableRelay, RELAY_STATE_FILE,
-    RESTORED_RELAY_SEED_FILE, RelayCommand, RelayCommandOutcome, RelayErrorCode, RelayObservation,
-    RelayProtocolError, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
+    RESTORED_RELAY_SEED_FILE, RelayCell, RelayCommand, RelayCommandOutcome, RelayErrorCode,
+    RelayObservation, RelayProtocolError, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
     RelayResponseEnvelope, RelayResponsePayload, invalid_relay_request_response,
     unsupported_relay_method_response,
 };
@@ -94,7 +94,7 @@ struct HarnessPreparationCompletion {
 struct HarnessPreparationSetup {
     root: PathBuf,
     config: WorkerLaunchConfig,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     session_git_config_include: Option<PathBuf>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
@@ -139,7 +139,7 @@ struct AcpPreparationSetup {
     config: WorkerLaunchConfig,
     session_environment: BTreeMap<String, String>,
     supervisor_spec: AcpSupervisorSpec,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     resume_session: Option<String>,
     native_session_may_have_history: bool,
     profile_registration: bool,
@@ -393,7 +393,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
 
 fn start_bridge(
     setup: PreparedAcpSetup,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     dispatch_wakes: mpsc::Receiver<()>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
     capture: Option<crate::work_facts::WorkObserver>,
@@ -512,6 +512,91 @@ fn preparation_error(snapshot: &PreparationSnapshot, operation: &str) -> Option<
     }
 }
 
+/// Hold a `WaitForChange` until the relay's latest event or operational state,
+/// or this connection's sub-agent queue, differs from what the controller
+/// names, or until [`mj_core::relay::RELAY_CHANGE_WAIT_BOUND`] passes. The
+/// state is built as an attach builds it, preparation included, so its digest
+/// is the one the controller holds.
+pub(crate) async fn wait_for_change(
+    relay: &Arc<RelayCell>,
+    preparation: Option<&watch::Receiver<PreparationSnapshot>>,
+    subagents: Option<&super::subagents::SubagentEndpoint>,
+    feed: &super::subagents::SubagentFeed,
+    after_ordinal: u64,
+    state_digest: Option<&str>,
+) -> Result<RelayResponseBody> {
+    let mut releases = Some(relay.releases());
+    let mut preparation = preparation.cloned();
+    // A finished preparation closes its channel but keeps its last value,
+    // which an attach still reads; keep reading it, stop awaiting it.
+    let mut preparation_open = preparation.is_some();
+    let mut generations = subagents.map(super::subagents::SubagentEndpoint::generations);
+    let deadline = tokio::time::Instant::now() + mj_core::relay::RELAY_CHANGE_WAIT_BOUND;
+    loop {
+        // Mark each signal seen before looking, so a change while looking
+        // still wakes the wait below.
+        if let Some(generations) = &mut generations {
+            generations.borrow_and_update();
+        }
+        let harness_preparation = preparation
+            .as_mut()
+            .and_then(|receiver| receiver.borrow_and_update().state.clone());
+        // Looking takes the relay lock, and releasing it counts as a change.
+        // Nothing else can release while this holds the lock, so after this
+        // look the count is exactly one more than now; only a count past that
+        // is someone else's change.
+        let (mut state, looked) = {
+            let relay = relay.lock().expect("relay state lock poisoned");
+            let looked = releases
+                .as_ref()
+                .map(|releases| releases.borrow().wrapping_add(1));
+            (relay.operational_state(), looked)
+        };
+        state.harness_preparation = harness_preparation;
+        let latest_ordinal = state.latest_ordinal;
+        let digest = mj_core::relay::relay_state_digest(&state)?;
+        let subagent_queue_changed = subagents.is_some_and(|endpoint| feed.has_unpolled(endpoint));
+        let changed = latest_ordinal != after_ordinal
+            || state_digest != Some(digest.as_str())
+            || subagent_queue_changed;
+        let observed = RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ChangeObserved {
+                latest_ordinal,
+                state_digest: digest,
+                subagent_queue_changed,
+            },
+        };
+        if changed {
+            return Ok(observed);
+        }
+        // A signal whose sender is gone can never change again; stop
+        // watching it instead of waking on its closure forever.
+        tokio::select! {
+            changed = async {
+                match (&mut releases, looked) {
+                    (Some(receiver), Some(looked)) => {
+                        receiver.wait_for(|count| *count != looked).await.is_ok()
+                    }
+                    _ => std::future::pending().await,
+                }
+            } => if !changed { releases = None },
+            changed = async {
+                match &mut generations {
+                    Some(receiver) => receiver.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            } => if !changed { generations = None },
+            changed = async {
+                match preparation.as_mut().filter(|_| preparation_open) {
+                    Some(receiver) => receiver.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            } => if !changed { preparation_open = false },
+            () = tokio::time::sleep_until(deadline) => return Ok(observed),
+        }
+    }
+}
+
 /// Attach replies carry the preparation already; see [`handle_request`].
 fn overlay_preparation_state(response: &mut RelayResponseEnvelope, snapshot: &PreparationSnapshot) {
     if let RelayResponseBody::Ok {
@@ -547,7 +632,7 @@ mod history_tests {
     #[tokio::test]
     async fn history_round_trips_large_replies_without_delegation_or_durable_events() {
         let temp = tempfile::tempdir().unwrap();
-        let relay = Arc::new(Mutex::new(
+        let relay = Arc::new(RelayCell::new(
             DurableRelay::open(temp.path(), "history-test", "1.0.0").unwrap(),
         ));
         let memory = ProjectMemoryEndpoint::new(Some(super::super::ProjectMemoryLaunchConfig {
@@ -868,7 +953,7 @@ pub async fn run_daemon_owned(
             children: Default::default(),
         }
     });
-    let relay = Arc::new(Mutex::new(durable_relay));
+    let relay = Arc::new(RelayCell::new(durable_relay));
     // Client tasks are detached, so a durable failure they cannot recover
     // from has to travel back here to stop the daemon.
     let (fatal_tx, mut fatal_rx) = mpsc::channel(1);
@@ -1233,7 +1318,7 @@ pub async fn run_daemon_owned(
 async fn accept_worker_clients(
     listener: UnixListener,
     _socket_guard: SocketGuard,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     dispatch_wake: mpsc::Sender<()>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     runtime: ConnectionRuntime,
@@ -1932,7 +2017,7 @@ pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<(
 
 pub(super) async fn serve_terminal_relay(
     listener: UnixListener,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     dispatch_wake: mpsc::Sender<()>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     runtime: ConnectionRuntime,
@@ -1994,7 +2079,7 @@ pub(super) struct ConnectionRuntime {
 #[cfg(test)]
 pub(super) async fn serve_client(
     stream: UnixStream,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     dispatch_wake: mpsc::Sender<()>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     commands: Option<mpsc::Sender<CommandRequest>>,
@@ -2016,7 +2101,7 @@ pub(super) async fn serve_client(
 
 pub(super) async fn serve_client_with_memory(
     stream: UnixStream,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     dispatch_wake: mpsc::Sender<()>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     runtime: ConnectionRuntime,
@@ -2102,6 +2187,36 @@ pub(super) async fn serve_client_with_memory(
                 .as_ref()
                 .and_then(|services| services.subagents.clone())
                 .or_else(|| subagents.clone());
+            if let RelayRequest::WaitForChange {
+                after_ordinal,
+                state_digest,
+            } = &envelope.request
+            {
+                let body = match wait_for_change(
+                    &relay,
+                    preparation.as_ref(),
+                    request_subagents.as_ref(),
+                    &subagent_feed,
+                    *after_ordinal,
+                    state_digest.as_deref(),
+                )
+                .await
+                {
+                    Ok(body) => body,
+                    Err(error) => compaction_error(
+                        RelayErrorCode::Internal,
+                        &format!("wait for a relay change: {error:#}"),
+                    ),
+                };
+                let response = RelayResponseEnvelope {
+                    request_id: envelope.request_id,
+                    protocol_version: envelope.protocol_version,
+                    body,
+                };
+                write_logged_response(&mut writer, &response, &session_id, "wait_for_change")
+                    .await?;
+                continue;
+            }
             if let RelayRequest::SetOperatorAway { away, revision } = &envelope.request {
                 let state = {
                     let relay = relay.lock().expect("relay state lock poisoned");
@@ -2526,15 +2641,15 @@ mod preparation_tests {
 
     type TestReader = BufReader<OwnedReadHalf>;
 
-    fn test_relay(root: &std::path::Path) -> Arc<Mutex<DurableRelay>> {
-        Arc::new(Mutex::new(
+    fn test_relay(root: &std::path::Path) -> Arc<RelayCell> {
+        Arc::new(RelayCell::new(
             DurableRelay::open(root, "preparation-test", "1.0.0").unwrap(),
         ))
     }
 
     async fn start_control_server(
         root: &std::path::Path,
-        relay: Arc<Mutex<DurableRelay>>,
+        relay: Arc<RelayCell>,
         dispatch_wake: mpsc::Sender<()>,
         preparation: watch::Receiver<PreparationSnapshot>,
         preparation_cancel: CancellationToken,

@@ -17,7 +17,8 @@ After this work, orphan rows cannot exist, so the sweep is gone; a worker omits 
 - [x] (2026-11-09) Milestone 1: migration 121 adds triggers that make orphan mailbox and GitHub rows impossible; the five-second sweep and `prune_mailbox_events_for_missing_sessions` are removed. Test `rows_of_a_gone_session_cannot_outlive_it`; 629 + 913 controller tests and clippy pass. Historical fixtures drop the triggers (`drop_session_row_triggers`), and two fixtures now save the session their GitHub rows name.
 - [x] (2026-11-09) Review of milestone 1: an enqueue for a gone target now returns `Enqueued::TargetGone`, which user and agent messages report as an error; migration 121 raises the compatibility floor to 121 (older builds' read-back after insert would fail). Pushed f4c920a50 and installed; the daemon handoff waits for an ordinary `mj` command.
 - [x] (2026-11-09) Milestone 2: relay protocol 57. `Attach` names `known_state_digest`; the worker answers `AttachedWithKnownState` when it matches and otherwise `Attached` with `state_digest`. `RelayClient` keeps the last state with its digest. The worker's harness preparation now joins the state before the digest (it used to be overlaid on the reply afterwards). Tests `an_attach_skips_a_state_the_controller_already_holds` and `a_changed_preparation_is_never_taken_for_a_known_state`.
-- [ ] Milestone 3: relay protocol 58 `WaitForChange` on a dedicated connection; session actors stop timer polling for workers that support it.
+- [x] (2026-11-09) Milestone 2 pushed (73759df3e) and installed; the daemon handoff waits for an ordinary `mj` command.
+- [x] (2026-11-09) Milestone 3: relay protocol 58 `WaitForChange`, served on the existing delegation (sub-agent queue) connection. The worker wraps its relay in `RelayCell`, whose lock release wakes waits, and publishes the sub-agent queue's generation. The queue observer waits instead of polling, reads the queue only when the wait reports queue changes, and tells the actor about relay changes; quiet sessions on protocol-58 workers sync on change or every 10 s. Tests `a_change_wait_answers_on_a_relay_change_or_at_its_bound`; three test fakes answer `WaitForChange`.
 - [ ] Measure after installation and record the outcome.
 
 
@@ -30,6 +31,12 @@ After this work, orphan rows cannot exist, so the sweep is gone; a worker omits 
 - Observation: every change to the worker's relay state takes the lock on `Arc<Mutex<DurableRelay>>` (117 lock sites in 7 files). Notifying on every lock release is therefore a complete change signal without listing mutation points.
 
 - Observation: a worker speaks only the current relay protocol (`envelope_rejection` negotiates exactly `RELAY_PROTOCOL_VERSION`), so a worker never serves an older controller. Only the controller needs version checks, because it talks to older workers until they are replaced.
+
+- Observation: each session already has a second relay connection, the delegation queue observer (`mj-controller/src/session_manager/subagent_queue.rs`), which itself polled every 150 ms or 2 s. Serving `WaitForChange` there replaces both pollers' idle work without a third connection or proxy per session.
+
+- Observation: a busy session's syncs also deliver daemon-side work that no worker digest covers, notably history queries (`StandaloneSession::sync_history` asks for pending queries and delivers finished ones on each sync). Busy sessions therefore keep the 150 ms cadence; only quiet sessions became event-driven.
+
+- Observation: the first `wait_for_change` woke itself forever: it reads state under the relay lock, and its own lock release counted as a change. It now reads the release count while holding the lock and waits for a count past the one its own release produces. The paused-clock test caught it (it hung instead of finishing in 0.02 s).
 
 - Observation: the worker's connection loop overlaid `harness_preparation` onto attach replies after the relay built them (`overlay_preparation_state`). With digests that would hide a preparation change; the preparation now joins the state before the digest (`DeferredRelayAttach::set_harness_preparation`). A session-manager test fake had the same pattern and now clears digests when it edits state.
 
@@ -59,7 +66,7 @@ After this work, orphan rows cannot exist, so the sweep is gone; a worker omits 
 
 ## Outcomes & Retrospective
 
-(To be written as milestones complete.)
+Milestones 1 and 2 are installed; milestone 3 is committed. Measured outcome is pending installation of all three. Busy sessions still poll every 150 ms (attach plus history-request check); making those event-driven needs history requests and daemon-side job completions to signal the actor, which this plan does not do.
 
 
 ## Context and Orientation

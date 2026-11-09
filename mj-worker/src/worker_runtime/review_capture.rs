@@ -1,14 +1,16 @@
 //! Worker-owned capture operations for child-session reviews.
-use crate::relay::{DurableRelay, RelayResponseBody, RelayResponsePayload, ReviewerAdmission};
+#[cfg(test)]
+use crate::relay::DurableRelay;
+use crate::relay::{RelayCell, RelayResponseBody, RelayResponsePayload, ReviewerAdmission};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub(super) struct ReviewCapture {
     pub session_id: String,
     pub cwd: PathBuf,
     pub additional_directories: Vec<PathBuf>,
-    pub primary_relay: Arc<Mutex<DurableRelay>>,
+    pub primary_relay: Arc<RelayCell>,
     pub operation: tokio::sync::Mutex<()>,
 }
 
@@ -268,7 +270,7 @@ mod tests {
             session_id: "scoped-test".into(),
             cwd: root.clone(),
             additional_directories: Vec::new(),
-            primary_relay: Arc::new(Mutex::new(
+            primary_relay: Arc::new(RelayCell::new(
                 DurableRelay::open(&relay_dir, "scoped-test", "1.0.0").unwrap(),
             )),
             operation: tokio::sync::Mutex::new(()),
@@ -394,7 +396,7 @@ mod tests {
             session_id: "fork-test".into(),
             cwd: root.clone(),
             additional_directories: Vec::new(),
-            primary_relay: Arc::new(Mutex::new(
+            primary_relay: Arc::new(RelayCell::new(
                 DurableRelay::open(&relay_dir, "fork-test", "1.0.0").unwrap(),
             )),
             operation: tokio::sync::Mutex::new(()),
@@ -475,7 +477,7 @@ mod tests {
             session_id: "orphan-test".into(),
             cwd: root.clone(),
             additional_directories: Vec::new(),
-            primary_relay: Arc::new(Mutex::new(
+            primary_relay: Arc::new(RelayCell::new(
                 DurableRelay::open(&relay_dir, "orphan-test", "1.0.0").unwrap(),
             )),
             operation: tokio::sync::Mutex::new(()),
@@ -539,7 +541,7 @@ mod tests {
             session_id: "override-test".into(),
             cwd: repository.clone(),
             additional_directories: Vec::new(),
-            primary_relay: Arc::new(Mutex::new(
+            primary_relay: Arc::new(RelayCell::new(
                 DurableRelay::open(&worker, "override-test", "1.0.0").unwrap(),
             )),
             operation: tokio::sync::Mutex::new(()),
@@ -666,7 +668,7 @@ mod tests {
             session_id: "push-test".into(),
             cwd: repository.clone(),
             additional_directories: Vec::new(),
-            primary_relay: Arc::new(Mutex::new(
+            primary_relay: Arc::new(RelayCell::new(
                 DurableRelay::open(&worker, "push-test", "1.0.0").unwrap(),
             )),
             operation: tokio::sync::Mutex::new(()),
