@@ -267,8 +267,13 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
         fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
             if command.purpose == "stage replacement Mjolnir worker" {
                 self.reached.send(()).unwrap();
-                // Only the waiter finishing (or unwinding) releases the owner.
-                let _ = self.release.lock().unwrap().recv();
+                // Keep the original deadlock watchdog, but fail on expiry:
+                // never release the gate as though the waiter had finished.
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("deadline test waiter did not finish before the deadlock watchdog");
             }
             targets::ProcessExecutor.execute(command)
         }
