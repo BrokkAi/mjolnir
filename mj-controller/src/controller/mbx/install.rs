@@ -1032,10 +1032,9 @@ mod tests {
     }
 
     #[cfg(unix)]
+    // Hard-won: 7f871fd03: inherited fixture writers made the shell probe silently select the wrong profile.
     #[test]
     fn profile_block_selects_and_updates_the_login_shell_file_idempotently() {
-        use std::os::unix::fs::PermissionsExt;
-
         struct Case {
             name: &'static str,
             login_shell: &'static str,
@@ -1099,20 +1098,27 @@ mod tests {
             let binary_dir = home.join(".local/bin");
             std::fs::create_dir_all(&home).unwrap();
             std::fs::create_dir_all(&tools).unwrap();
-            std::fs::write(
-                tools.join("id"),
+            mj_core::test_hooks::install_fake_command(
+                &tools,
+                "id",
                 "#!/bin/sh\nprintf 'profile-test-user\\n'\n",
-            )
-            .unwrap();
-            std::fs::write(
-                tools.join("getent"),
+            );
+            mj_core::test_hooks::install_fake_command(
+                &tools,
+                "getent",
                 "#!/bin/sh\nprintf 'profile-test-user:x:1000:1000::/tmp:%s\\n' \"$PROFILE_TEST_LOGIN_SHELL\"\n",
-            )
-            .unwrap();
-            for name in ["id", "getent"] {
-                std::fs::set_permissions(tools.join(name), std::fs::Permissions::from_mode(0o755))
-                    .unwrap();
-            }
+            );
+            // A concurrent fork can keep fixture writers open past setup.
+            // Only the dispatcher is executed; these files are read by sh.
+            let _writers: Vec<_> = ["id", "getent"]
+                .into_iter()
+                .map(|name| {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(tools.join(format!("{name}.script")))
+                        .unwrap()
+                })
+                .collect();
             for name in case.existing {
                 std::fs::write(home.join(name), "export EXISTING_PROFILE=yes").unwrap();
             }

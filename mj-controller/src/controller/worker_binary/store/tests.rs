@@ -255,6 +255,7 @@ fn a_filesystem_without_hard_links_still_installs_verified_private_copies() {
     );
 }
 
+// Hard-won: 7f871fd03: the wait deadline expired during setup before the installer reached the held store gate.
 #[test]
 fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner() {
     use std::sync::mpsc;
@@ -266,13 +267,33 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
         fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
             if command.purpose == "stage replacement Mjolnir worker" {
                 self.reached.send(()).unwrap();
-                let _ = self
-                    .release
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(10));
+                // Only the waiter finishing (or unwinding) releases the owner.
+                let _ = self.release.lock().unwrap().recv();
             }
             targets::ProcessExecutor.execute(command)
+        }
+    }
+    #[derive(Default)]
+    struct DeadlineAtWait(OnceLock<targets::CancellableProcessExecutor>);
+    impl CommandExecutor for DeadlineAtWait {
+        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+            match self.0.get() {
+                Some(executor) => executor.execute(command),
+                None => targets::ProcessExecutor.execute(command),
+            }
+        }
+
+        fn cancellation_requested(&self) -> bool {
+            self.0.get().is_some_and(|executor| executor.is_cancelled())
+        }
+
+        fn stage_started(&self, stage: targets::ProvisionStage) {
+            if stage == targets::ProvisionStage::WaitingForWorkerStore {
+                // Expire only once queued, without racing setup or a clock.
+                self.0.get_or_init(|| {
+                    targets::CancellableProcessExecutor::with_timeout(Duration::ZERO)
+                });
+            }
         }
     }
     let temp = tempfile::tempdir().unwrap();
@@ -288,10 +309,13 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
         release: std::sync::Mutex::new(release_rx),
     };
     std::thread::scope(|scope| {
-        let running = scope.spawn(|| install(&owner, &a, first, &bytes));
-        reached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        // The installer runs its sweep and link before it meets the upload lock.
-        let executor = targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(1));
+        // Drop the sender on a setup panic too, so scope can join the owner.
+        let release = release_tx;
+        let owner_bytes = &bytes;
+        let running = scope.spawn(move || install(&owner, &a, first, owner_bytes));
+        // If setup fails, dropping the owner's sender wakes this receive.
+        reached_rx.recv().unwrap();
+        let executor = DeadlineAtWait::default();
         let result = install_worker_binary(
             &executor,
             &b,
@@ -299,11 +323,11 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
             &WorkerInstall::Host(bytes.clone()),
             "hel",
         );
-        let _ = release_tx.send(());
+        release.send(()).unwrap();
         running.join().unwrap();
         assert_eq!(
             result.unwrap_err().to_string(),
-            "timed out after 1 s while wait for the shared Mjolnir worker binary"
+            "timed out after 0 s while wait for the shared Mjolnir worker binary"
         );
         assert!(temp.path().join(first).join("hel").exists());
         assert!(!temp.path().join(second).join("hel").exists());
