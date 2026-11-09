@@ -142,11 +142,18 @@ pub(crate) fn enqueue_mailbox_event_with(
         ],
     )?;
     let inserted = connection.changes() == 1;
-    let existing: (String, String, bool) = connection.query_row(
-        "SELECT target_session_id, event_json, wake FROM mailbox_outbox WHERE event_key=?1",
-        [event_key],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
+    let Some(existing): Option<(String, String, bool)> = connection
+        .query_row(
+            "SELECT target_session_id, event_json, wake FROM mailbox_outbox WHERE event_key=?1",
+            [event_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+    else {
+        // The store ignores an event for a session that is gone (see schema
+        // revision 121): there is no one left to deliver it to.
+        return Ok(false);
+    };
     let original: mj_core::mailbox::MailboxEvent = serde_json::from_str(&existing.1)?;
     if existing.0 != target_session_id
         || original.key != event.key
@@ -304,40 +311,6 @@ pub(crate) fn prune_pending_messages_for_stopped_children() -> Result<usize> {
     )
 }
 
-/// A destroyed session may be removed by an older compatible daemon that
-/// knows nothing about this outbox. Prune orphaned rows before delivery.
-pub(crate) fn prune_mailbox_events_for_missing_sessions() -> Result<usize> {
-    submit_database_write("prune_mailbox_events_for_missing_sessions", |connection| {
-        let mut changed = connection.execute(
-            "DELETE FROM mailbox_outbox
-             WHERE target_session_id NOT IN (
-                 SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss'
-             )",
-            [],
-        )?;
-        changed += connection.execute(
-            "DELETE FROM github_watch_items
-             WHERE creator_session_id NOT IN (
-                 SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss'
-             )",
-            [],
-        )?;
-        changed += connection.execute(
-            "DELETE FROM github_watch_classifications
-             WHERE session_id NOT IN (
-                 SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss'
-             )",
-            [],
-        )?;
-        changed += connection.execute(
-            "DELETE FROM github_watch_classification_failures WHERE session_id NOT IN (
-            SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss')",
-            [],
-        )?;
-        Ok(changed)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +374,87 @@ mod tests {
     }
 
     // Hard-won: 2b74434f9: queued daemon events survived /clear and historical resets could discard newer mail.
+    /// A session's mailbox and GitHub rows go in the transaction that removes
+    /// the session, whether it is deleted or destroyed, and a late write for a
+    /// session that is gone stores nothing. No sweep is left to race writers.
+    #[test]
+    fn rows_of_a_gone_session_cannot_outlive_it() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mj.sqlite3");
+        for id in ["deleted", "destroyed", "kept"] {
+            save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
+        }
+        let connection = open(&path).unwrap();
+        let rows = |session: &str| -> i64 {
+            connection
+                .query_row(
+                    "SELECT (SELECT count(*) FROM mailbox_outbox WHERE target_session_id = ?1)
+                          + (SELECT count(*) FROM github_watch_items WHERE creator_session_id = ?1)
+                          + (SELECT count(*) FROM github_watch_classifications WHERE session_id = ?1)",
+                    [session],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        for (number, session) in ["deleted", "destroyed", "kept"].into_iter().enumerate() {
+            enqueue(&connection, session, &format!("message-{session}"));
+            connection
+                .execute(
+                    "INSERT INTO github_watch_items(owner, repo, number, creator_session_id, kind,
+                         title, url, created_at, timeline_at, timeline_id, review_comments_at,
+                         review_comments_id, processed_at)
+                     VALUES ('acme', 'repo', ?1, ?2, 'issue', 't', 'u', 'c', 'c', 0, 'c', 0, 'c')",
+                    params![number as i64, session],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO github_watch_classifications(owner, repo, number, session_id,
+                         kind, title, url, created_at, interested, created)
+                     VALUES ('acme', 'repo', ?1, ?2, 'issue', 't', 'u', 'c', 1, 1)",
+                    params![number as i64, session],
+                )
+                .unwrap();
+            assert_eq!(rows(session), 3, "{session}");
+        }
+
+        connection
+            .execute("DELETE FROM sessions WHERE session_id = 'deleted'", [])
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE sessions SET state = 'destroyed-with-data-loss' WHERE session_id = 'destroyed'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(rows("deleted"), 0);
+        assert_eq!(rows("destroyed"), 0);
+        assert_eq!(rows("kept"), 3);
+
+        let event = mj_core::mailbox::MailboxEvent {
+            key: "late".into(),
+            source: "test".into(),
+            wake: false,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::PlainText {
+                text: "late".into(),
+            },
+        };
+        for gone in ["deleted", "destroyed", "never-existed"] {
+            let inserted = enqueue_mailbox_event_with(
+                &connection,
+                "late",
+                gone,
+                &serde_json::to_string(&event).unwrap(),
+                false,
+                false,
+            )
+            .unwrap();
+            assert!(!inserted, "{gone}");
+            assert_eq!(rows(gone), 0, "{gone}");
+        }
+    }
+
     #[test]
     fn clear_mailbox_commits_with_projection_and_replay_preserves_newer_events() {
         let root = tempfile::tempdir().unwrap();

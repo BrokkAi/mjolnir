@@ -1981,6 +1981,12 @@ mod tests {
         Json(comments).into_response()
     }
 
+    /// The store keeps GitHub rows only for a session it holds.
+    fn save_creator_session() {
+        crate::database::save_session(&crate::database::test_session("creator", "project"))
+            .unwrap();
+    }
+
     fn watch_classification(
         number: i64,
         created_at: &str,
@@ -2008,6 +2014,7 @@ mod tests {
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
+        save_creator_session();
         let initial = crate::database::github_repo_cursor("acme", "repo").unwrap();
         let parsed = DateTime::parse_from_rfc3339(&initial.watch_started_at).unwrap();
         let start = DateTime::from_timestamp(parsed.timestamp() + 1, 0).unwrap();
@@ -2408,6 +2415,7 @@ mod tests {
 
     async fn check_reconciliation_checkpoint_recovery(scenario: ReconciliationRecovery) {
         let _writer = crate::database::install_isolated_test_writer();
+        save_creator_session();
         let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
         let origin = now - chrono::Duration::hours(4);
         let at = |seconds| {
@@ -2606,6 +2614,7 @@ mod tests {
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
+        save_creator_session();
         let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
@@ -2782,6 +2791,7 @@ mod tests {
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
+        save_creator_session();
         let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
@@ -2902,6 +2912,7 @@ mod tests {
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
+        save_creator_session();
         let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
@@ -2988,6 +2999,7 @@ mod tests {
             return;
         }
         let _writer = crate::database::install_isolated_test_writer();
+        save_creator_session();
         let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
         let start = DateTime::from_timestamp(
             DateTime::parse_from_rfc3339(&cursor.updated_at)
