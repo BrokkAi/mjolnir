@@ -52,7 +52,8 @@ pub trait ReviewEnvironment: Send + Sync {
 
     /// Records how far this session has been reviewed. Blocking: the host
     /// routes it through its ordered persistence lane rather than calling it
-    /// on the Tokio task that owns review state.
+    /// on the Tokio task that owns review state. Newly settled findings and
+    /// their partial mailbox messages commit together while peers remain.
     fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String>;
 
     /// Clears the in-flight flag of every review a restart interrupted, and

@@ -51,7 +51,8 @@ pub(super) fn turn_review_state_in(path: &Path, session_id: &str) -> Result<Turn
     })
 }
 
-/// Records how far a session has been reviewed.
+/// Records review state and atomically queues newly settled findings while
+/// other reviewers are pending.
 pub fn save_turn_review_state(session_id: &str, state: &TurnReviewState) -> Result<()> {
     let session_id = session_id.to_owned();
     let state = state.clone();
@@ -65,7 +66,57 @@ pub(super) fn save_turn_review_state_in(
     session_id: &str,
     state: &TurnReviewState,
 ) -> Result<()> {
-    let connection = open(path)?;
+    let mut connection = open(path)?;
+    let transaction = connection.transaction()?;
+    let events = if let Some(current) = state.active_group.as_ref() {
+        let previous: Option<String> = transaction
+            .query_row(
+                "SELECT active_group FROM turn_review_state WHERE session_id=?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let previous: Option<ActiveReviewGroup> = previous
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .context("parse previous active review group")?;
+        crate::review_host::partial_review_events(session_id, previous.as_ref(), current)
+    } else {
+        Vec::new()
+    };
+    save_turn_review_state_with(&transaction, session_id, state)?;
+    let mut queued = false;
+    if !events.is_empty() {
+        let unpark = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)",
+            [session_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        for event in events {
+            queued |= enqueue_mailbox_event_with(
+                &transaction,
+                &event.key,
+                session_id,
+                &serde_json::to_string(&event)?,
+                event.wake,
+                unpark,
+            )?
+            .inserted();
+        }
+    }
+    transaction.commit()?;
+    if queued {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(())
+}
+
+fn save_turn_review_state_with(
+    connection: &Connection,
+    session_id: &str,
+    state: &TurnReviewState,
+) -> Result<()> {
     connection.execute(
         "INSERT INTO turn_review_state(
              session_id, baselines, reviewed_through_ordinal, active,

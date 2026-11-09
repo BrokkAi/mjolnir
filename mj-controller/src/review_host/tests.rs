@@ -632,6 +632,11 @@ impl ReviewEnvironment for FakeEnvironment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let next = state.clone();
+        if let Some(group) = next.active_group.as_ref() {
+            for event in partial_review_events(session_id, stored.active_group.as_ref(), group) {
+                self.enqueue_verdict(session_id, &event)?;
+            }
+        }
         *stored = next.clone();
         drop(stored);
         self.writes
@@ -1552,10 +1557,23 @@ async fn parallel_findings_keep_launch_order_when_children_finish_out_of_order()
         Some("second defect"),
     )
     .await;
+    let review_id = environment.state().active_group.unwrap().driver.review_id;
+    {
+        let mailbox = environment.mailbox.lock().unwrap();
+        assert_eq!(mailbox.len(), 1, "findings arrive before the slow peer");
+        let partial = mj_core::mailbox::render_mailbox_event(&mailbox[0]);
+        assert!(partial.starts_with("Review 1/2 — partial result"));
+        assert!(partial.contains("second defect") && !partial.contains("first defect"));
+    }
     assert!(
         host.view(&session).unwrap().verdict.is_none(),
         "one unfinished peer cannot complete the group"
     );
+    host.shutdown().await.unwrap();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), armed_count(2), environment.clone());
+    wait_for_group_children(&environment, &host, &session, 2).await;
+    assert_eq!(environment.mailbox.lock().unwrap().len(), 1);
     finish_child(
         &host,
         &environment,
@@ -1566,8 +1584,14 @@ async fn parallel_findings_keep_launch_order_when_children_finish_out_of_order()
     .await;
     let prompt = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(event) = environment.mailbox.lock().unwrap().first() {
-                return mj_core::mailbox::render_mailbox_event(event);
+            let prompt = environment
+                .mailbox
+                .lock()
+                .unwrap()
+                .get(1)
+                .map(mj_core::mailbox::render_mailbox_event);
+            if let Some(prompt) = prompt {
+                return prompt;
             }
             tokio::task::yield_now().await;
         }
@@ -1577,7 +1601,67 @@ async fn parallel_findings_keep_launch_order_when_children_finish_out_of_order()
     assert!(prompt.find("first defect").unwrap() < prompt.find("second defect").unwrap());
     assert!(prompt.contains(&children[0]) && prompt.contains(&children[1]));
     assert!(prompt.contains("may overlap"));
+    assert!(
+        prompt
+            .contains("Review finished; this is the final result. No reviewers are still running.")
+    );
+    let transcript = mj_core::mailbox::render_mailbox_events(&environment.mailbox.lock().unwrap())
+        .replace(&review_id, "review-id")
+        .replace(&children[0], "reviewer-one")
+        .replace(&children[1], "reviewer-two");
+    assert!(!transcript.contains("<untrusted-mailbox-events>"));
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "asynchronous-review-results",
+        &transcript,
+    );
     host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn clean_reviewers_are_silent_until_the_final_result() {
+    for (name, first, last) in [
+        ("clean-last", Some("a real defect"), "No findings."),
+        ("clean-first", Some("No findings."), "a real defect"),
+        ("clean-both", Some("No findings."), "No findings."),
+        ("null-first", None, "a real defect"),
+    ] {
+        let session = session_id(name);
+        let mut manager = FakeManager::new(&session).await;
+        let environment = FakeEnvironment::new();
+        let host =
+            TurnReviewHost::spawn_in(manager.control.clone(), armed_count(2), environment.clone());
+        open_a_review_to_its_first_poll(&mut manager, &host, &environment).await;
+        let children = wait_for_group_children(&environment, &host, &session, 2).await;
+        finish_child(&host, &environment, &session, &children[0], first).await;
+        let partial_count = usize::from(first == Some("a real defect"));
+        assert_eq!(environment.mailbox.lock().unwrap().len(), partial_count);
+        finish_child(&host, &environment, &session, &children[1], Some(last)).await;
+        if name == "clean-both" {
+            let (_, action, reply) = manager
+                .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
+                .await;
+            reply.send(answer_for(&action)).unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while host.view(&session).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mailbox = environment.mailbox.lock().unwrap().clone();
+        assert_eq!(mailbox.len(), partial_count + 1);
+        let final_result = mj_core::mailbox::render_mailbox_event(mailbox.last().unwrap());
+        assert!(final_result.contains(
+            "Review finished; this is the final result. No reviewers are still running."
+        ));
+        assert_eq!(
+            environment.state().push_findings.is_some(),
+            matches!(name, "clean-first" | "clean-last")
+        );
+        host.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1663,14 +1747,14 @@ async fn wait_for_child(
                 .and_then(|view| view.reviewer_children().next().map(str::to_owned))
                 && environment.started.lock().unwrap().contains(&child)
             {
-                assert_eq!(
+                assert!(
                     environment
                         .state()
                         .active_group
                         .as_ref()
-                        .and_then(|group| group.registrations.first())
-                        .and_then(|item| item.child_session_id.as_deref()),
-                    Some(child.as_str()),
+                        .is_some_and(|group| group.registrations.iter().any(|item| {
+                            item.child_session_id.as_deref() == Some(child.as_str())
+                        })),
                     "the child is durable before it starts"
                 );
                 return child;
@@ -2199,10 +2283,15 @@ fn delivered_findings(
     environment: &FakeEnvironment,
 ) -> (bool, Vec<mj_core::review::verdict::ReviewerFailure>) {
     let mailbox = environment.mailbox.lock().unwrap();
-    assert_eq!(mailbox.len(), 1, "exactly one verdict is delivered");
-    let mj_core::mailbox::MailboxEventBody::ReviewVerdict { verdict, .. } = &mailbox[0].body else {
-        panic!("the review delivers a verdict");
-    };
+    let mut verdicts = mailbox.iter().filter_map(|event| match &event.body {
+        mj_core::mailbox::MailboxEventBody::ReviewVerdict { verdict, .. } => Some(verdict),
+        _ => None,
+    });
+    let verdict = verdicts.next().expect("the review delivers a verdict");
+    assert!(
+        verdicts.next().is_none(),
+        "exactly one final verdict is delivered"
+    );
     let ReviewVerdict::Findings { evidence, .. } = verdict else {
         panic!("the surviving reviewer's findings are delivered: {verdict:?}");
     };
@@ -3463,8 +3552,8 @@ async fn incomplete_push_findings_clear_stale_override_without_advancing_coverag
     assert_eq!(state.declined_findings, original_declined);
     {
         let mailbox = environment.mailbox.lock().unwrap();
-        assert_eq!(mailbox.len(), 1);
-        let mj_core::mailbox::MailboxEventBody::ReviewVerdict { verdict, .. } = &mailbox[0].body
+        assert_eq!(mailbox.len(), 2);
+        let mj_core::mailbox::MailboxEventBody::ReviewVerdict { verdict, .. } = &mailbox[1].body
         else {
             panic!("push verdict is in the mailbox");
         };

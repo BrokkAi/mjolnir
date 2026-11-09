@@ -414,7 +414,7 @@ pub fn render_mailbox_events(events: &[MailboxEvent]) -> String {
     let mut blocks: Vec<_> = events
         .iter()
         .filter(|event| {
-            is_session_message(&event.body)
+            is_session_message(event)
                 || matches!(
                     event.body,
                     MailboxEventBody::OperatorAway { .. } | MailboxEventBody::OperatorBack { .. }
@@ -425,7 +425,7 @@ pub fn render_mailbox_events(events: &[MailboxEvent]) -> String {
     let untrusted = events
         .iter()
         .filter(|event| {
-            !is_session_message(&event.body)
+            !is_session_message(event)
                 && !matches!(
                     event.body,
                     MailboxEventBody::OperatorAway { .. } | MailboxEventBody::OperatorBack { .. }
@@ -510,6 +510,9 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
                     "Review of commits {range} failed: {reason}. Call request_review again."
                 ),
             };
+            let text = format!(
+                "{text}\nReview finished; this is the final result. No reviewers are still running."
+            );
             (text.clone(), None, None, text)
         }
         MailboxEventBody::SubagentFinished { report } if report.oracle => {
@@ -792,6 +795,11 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
             let transcript_line = format!("{transcript_header} {}", short_first_line(text, 96));
             (header, Some(text.clone()), None, transcript_line)
         }
+        // Review progress uses the existing text wire shape so workers can
+        // receive it without replacing their relay during an active turn.
+        MailboxEventBody::PlainText { text } if event.source == "review" => {
+            (text.clone(), None, None, short_first_line(text, 120))
+        }
         MailboxEventBody::PlainText { text } => {
             let header = "External event:".to_owned();
             let transcript_line = format!("External event: {}", short_first_line(text, 120));
@@ -829,14 +837,14 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
     }
 }
 
-fn is_session_message(body: &MailboxEventBody) -> bool {
+fn is_session_message(event: &MailboxEvent) -> bool {
     matches!(
-        body,
+        event.body,
         MailboxEventBody::ParentMessage { .. }
             | MailboxEventBody::SessionMessage { .. }
             | MailboxEventBody::SubagentFinished { .. }
             | MailboxEventBody::ReviewVerdict { .. }
-    )
+    ) || (event.source == "review" && matches!(event.body, MailboxEventBody::PlainText { .. }))
 }
 
 fn quoted_title(title: &str) -> String {

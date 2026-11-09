@@ -4779,8 +4779,122 @@ fn old_review_rows_load_without_findings_and_recovery_keeps_new_findings() {
     assert!(restored.active.is_none());
 }
 
-/// A review interrupted by a daemon restart is cancelled, not resumed, and the
-/// baseline it never advanced stays where it was.
+#[test]
+fn review_partials_commit_with_outcomes_and_are_not_repeated_after_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("review.sqlite3");
+    let owner = "async-review-owner";
+    save_session_to(&database, &session(owner, "project-1")).unwrap();
+    let (mut driver, _) = mj_review::driver::TurnReviewDriver::start(
+        mj_core::review::driver::TurnReviewSeed {
+            task: "inspect the parser".into(),
+            user_messages: Vec::new(),
+            declined: Vec::new(),
+        },
+        "async-review".into(),
+        std::num::NonZeroUsize::new(3).unwrap(),
+    );
+    driver.delta_captured(
+        ["/workspace/app", "/workspace/other"]
+            .into_iter()
+            .map(|root| mj_core::relay::RepoDelta {
+                root: root.into(),
+                base_commit: Some("basecommit".into()),
+                head_commit: Some("headcommit".into()),
+                baseline_tree: Some("before".into()),
+                current_tree: "after".into(),
+                patch: "+one".into(),
+                ..Default::default()
+            })
+            .collect(),
+    );
+    let mut state = TurnReviewState {
+        active: Some("async-review".into()),
+        active_group: Some(ActiveReviewGroup {
+            driver: driver.snapshot(),
+            reviewers: vec![Default::default(); 3],
+            registrations: (1..=3)
+                .map(|index| ReviewerRegistration {
+                    role: format!("reviewer-{index}"),
+                    request_key: format!("review-key-{index}"),
+                    child_session_id: Some(format!("review-child-{index}")),
+                })
+                .collect(),
+        }),
+        ..Default::default()
+    };
+    save_turn_review_state_in(&database, owner, &state).unwrap();
+    let command = driver.snapshot().roles[0].command_id.clone();
+    driver.role_turn_completed(&command, "review-child-1", "No findings.");
+    state.active_group.as_mut().unwrap().driver = driver.snapshot();
+    save_turn_review_state_in(&database, owner, &state).unwrap();
+    let before_findings = state.clone();
+    let connection = open(&database).unwrap();
+    let outbox = || {
+        connection
+            .prepare("SELECT event_json FROM mailbox_outbox ORDER BY event_key")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| {
+                serde_json::from_str::<mj_core::mailbox::MailboxEvent>(&row.unwrap()).unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(outbox().is_empty(), "clean outcomes do not send partials");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_second_review_partial BEFORE INSERT ON mailbox_outbox
+             WHEN (SELECT COUNT(*) FROM mailbox_outbox) > 0
+             BEGIN SELECT RAISE(ABORT, 'outbox unavailable'); END;",
+        )
+        .unwrap();
+    let command = driver.snapshot().roles[1].command_id.clone();
+    driver.role_turn_completed(&command, "review-child-2", "The parser drops queued input.");
+    state.active_group.as_mut().unwrap().driver = driver.snapshot();
+    let error = save_turn_review_state_in(&database, owner, &state).unwrap_err();
+    assert!(error.to_string().contains("outbox unavailable"));
+    assert_eq!(
+        turn_review_state_in(&database, owner).unwrap(),
+        before_findings
+    );
+    assert!(
+        outbox().is_empty(),
+        "the first repository's message rolls back too"
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_second_review_partial")
+        .unwrap();
+    save_turn_review_state_in(&database, owner, &state).unwrap();
+    let messages = outbox();
+    assert_eq!(messages.len(), 2, "one partial per reviewed repository");
+    for message in &messages {
+        let text = mj_core::mailbox::render_mailbox_event(message);
+        assert!(text.starts_with("Review 2/3 — partial result"));
+        assert!(text.contains("The parser drops queued input."));
+        assert!(text.contains("basecommit..headcommit"));
+    }
+    let mut restored = turn_review_state_in(&database, owner).unwrap();
+    save_turn_review_state_in(&database, owner, &restored).unwrap();
+    assert_eq!(
+        outbox(),
+        messages,
+        "reloading and saving sends no duplicates"
+    );
+    let mut driver = mj_review::driver::TurnReviewDriver::restore(
+        restored.active_group.as_ref().unwrap().driver.clone(),
+    )
+    .unwrap();
+    let command = driver.snapshot().roles[2].command_id.clone();
+    driver.role_turn_completed(&command, "review-child-3", "No findings.");
+    restored.active_group.as_mut().unwrap().driver = driver.snapshot();
+    save_turn_review_state_in(&database, owner, &restored).unwrap();
+    assert_eq!(
+        outbox(),
+        messages,
+        "the final result uses the existing final delivery"
+    );
+}
 
 #[test]
 fn active_review_group_survives_interrupted_sweep_with_registered_children() {
