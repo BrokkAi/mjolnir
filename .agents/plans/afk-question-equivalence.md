@@ -10,10 +10,13 @@ An absent operator should receive a notice for each new decision an agent asks a
 
 - [x] (2026-11-10) Traced the live failure: session 5992a212 received an AFK answer at 14:57 UTC, then a mixed new/repeated form at 15:09 UTC remained pending. Claimed issue #1489.
 - [x] (2026-11-10) Implemented the shared classifier contract, hosted route, worker transport, and presence-owned acceptance.
-- [x] (2026-11-10) Three isolated protocol/concurrency regressions pass, including direct/hosted envelopes and unavailable/malformed responses.
+- [x] (2026-11-10) Four isolated protocol/concurrency regressions pass, including direct/hosted envelopes and unavailable/malformed responses.
 - [x] (2026-11-10) Worker suite: 816 passed, 11 ignored. Workspace dev Clippy, rustfmt, service tests, TypeScript check, and deploy dry run pass.
-- [x] (2026-11-10) Deployed Jev version af3e57cf-9fc9-4093-8d3f-bd39dc6695ea. Five synthetic live cases pass. With explicit user approval, three live checks using the actual retained forms pass: mixed=new, identical=same, earlier subset=same.
-- [ ] Commit, obtain review, and push to origin/master.
+- [x] (2026-11-10) Deployed Jev version 9774197c-a7da-4f0f-9d8f-e45a08dbe744. Five synthetic live cases pass. With explicit user approval, three live checks using the actual retained forms pass: mixed=new, identical=same, earlier subset=same.
+- [x] (2026-11-10) Committed the initial validated implementation as 4d8034f7a; first review completed.
+- [x] (2026-11-10) Addressed form-constraint evidence finding; four focused AFK regressions, workspace Clippy, service tests (39), type check, dry run, and final live smoke pass.
+- [x] (2026-11-10) Final library run: 790 passed, 11 ignored, one unrelated work_facts failure; that test passed on its focused rerun.
+- [x] (2026-11-10) Remaining binary/integration suites pass (26 tests). Final implementation is validated and ready for commit and required before-push review; remote delivery follows that review.
 
 ## Surprises & Discoveries
 
@@ -26,6 +29,13 @@ The refusal owner lives in `mj-worker/src/acp/operator_away.rs` and survives bri
   Date/Author: 2026-11-10 / Codex.
 - Decision: let existing responder tasks own asynchronous classification and cancellation; keep all answer acceptance under the existing presence mutex. Revalidate presence revision and compared history before applying an answer.
   Rationale: no network I/O on ACP ingress or worker control loops, no detached classifier tasks, and stale results cannot answer a request after the operator returns or answers it.
+  Date/Author: 2026-11-10 / Codex.
+
+- Decision: keep the documented 64 KiB evidence-limit failure on the explicitly requested unavailable-classifier path, with a warning and the existing pending behavior.
+  Rationale: truncation or eviction loses evidence for old repeats; independent batches lose whole-form coverage across earlier questions. A new summarization/classification protocol is outside this scoped change. Recorded the review finding as declined.
+  Date/Author: 2026-11-10 / Codex.
+- Decision: send serialized normalized elicitation forms, excluding transient request IDs, rather than mailbox-rendered text.
+  Rationale: review found that requiredness, selection cardinality, and numeric/text constraints disappear from question_text(). Jev needs those constraints to recognize material changes.
   Date/Author: 2026-11-10 / Codex.
 
 ## Outcomes & Retrospective
@@ -54,7 +64,7 @@ No schema or relay changes are needed. Presence and refusal history stay process
 
 ## Artifacts and Notes
 
-Issue: https://github.com/BrokkAi/mjolnir/issues/1489. Hosted version: af3e57cf-9fc9-4093-8d3f-bd39dc6695ea at https://mj-jev-proxy.eng-admin-a63.workers.dev. Actual-form live results: mixed form different=1.0; identical form same=0.99; earlier subset same=0.76. The five synthetic cases also classify as expected. Python urllib received Cloudflare 1010; normal curl requests succeeded.
+Issue: https://github.com/BrokkAi/mjolnir/issues/1489. Hosted version: 9774197c-a7da-4f0f-9d8f-e45a08dbe744 at https://mj-jev-proxy.eng-admin-a63.workers.dev. Final actual-form live results: mixed form different=0.99; identical form same=0.97. Earlier subset same=0.76 on the first deployment. Final constraint live results: single/multi change different=1.0; requiredness-only change different=0.99; field ID and option order change same=0.99. The five synthetic cases also classify as expected. Python urllib received Cloudflare 1010; normal curl requests succeeded.
 
 ## Interfaces and Dependencies
 
@@ -63,3 +73,11 @@ Use the existing reqwest/rustls client in `acp/verdict_client.rs` and existing J
 Initial plan written 2026-11-10 after tracing the live request and existing client contracts.
 
 Updated 2026-11-10 after implementation and validation. Unified refusal evidence into one map so the fallback identity cannot diverge from the history used by Jev. The first smoke test containing internal text was blocked by automatic approval review; synthetic tests succeeded, then the user explicitly approved the actual-form smoke test and all three cases passed.
+
+Updated 2026-11-10 after first review: preserve normalized form constraints in Jev evidence; keep unsupported evidence sizes on the user-requested fallback path instead of introducing lossy history handling.
+
+Updated 2026-11-10 after final service deployment 9774197c-a7da-4f0f-9d8f-e45a08dbe744: live constraints and actual normalized forms pass; the final touched-crate suite completed as recorded above; required push review remains.
+
+Final validation note: work_facts::tests::a_subject_read_for_a_different_commit_is_unavailable failed once with "the tree was unavailable" in the full parallel run, then passed immediately by itself. No unrelated source changes were made; binary/integration suites continue separately because Cargo stopped after the library failure.
+
+Implementation checkpoint: all 817 worker tests have passed across the final run and the focused retry, with 11 existing ignores. The 39 service tests, TypeScript check, deploy dry run, rustfmt, workspace Clippy, and final deployed-service smoke checks pass. The final action is review and push; no Mjolnir installation was requested.

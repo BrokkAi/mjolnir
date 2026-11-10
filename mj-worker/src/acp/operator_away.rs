@@ -31,7 +31,7 @@ impl Default for OperatorAwayState {
 impl OperatorAwayState {
     fn answer_away(&mut self, entry: PendingElicitation) {
         let question =
-            (entry.identity.1 == AwayRequest::Question).then(|| entry.question.question_text());
+            (entry.identity.1 == AwayRequest::Question).then(|| question_evidence(&entry.question));
         if entry.answer.send(PendingAnswer::OperatorAway).is_ok() {
             let history = self.refused.entry(entry.identity).or_default();
             if let Some(question) = question {
@@ -40,6 +40,16 @@ impl OperatorAwayState {
             }
         }
     }
+}
+
+/// Retain all answer constraints, excluding the request's transient identity.
+fn question_evidence(question: &ElicitationRequest) -> String {
+    let mut evidence = serde_json::to_value(question).expect("elicitation serializes");
+    evidence
+        .as_object_mut()
+        .expect("elicitation is an object")
+        .remove("id");
+    evidence.to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -193,7 +203,7 @@ impl PendingElicitations {
                     (
                         state.presence.revision,
                         entry.identity.0.clone(),
-                        entry.question.question_text(),
+                        question_evidence(&entry.question),
                         state
                             .refused
                             .get(&entry.identity)
@@ -511,11 +521,27 @@ mod tests {
         id: &str,
         text: &str,
     ) -> tokio::task::JoinHandle<Option<PendingAnswer>> {
-        let answer = pending.register(question(id, text), String::new(), AwayRequest::Question);
+        ask_form(pending, question(id, text))
+    }
+
+    fn ask_form(
+        pending: &PendingElicitations,
+        question: ElicitationRequest,
+    ) -> tokio::task::JoinHandle<Option<PendingAnswer>> {
+        let id = question.id.clone();
+        let answer = pending.register(question, String::new(), AwayRequest::Question);
         let pending = pending.clone();
-        let id = id.to_owned();
         tokio::spawn(async move {
             await_elicitation_response(&pending, &id, answer, std::future::pending()).await
+        })
+    }
+
+    fn decoded_evidence(evidence: Value) -> Value {
+        json!({
+            "current_question": serde_json::from_str::<Value>(evidence["current_question"].as_str().unwrap()).unwrap(),
+            "previous_questions": evidence["previous_questions"].as_array().unwrap().iter().map(|question| {
+                serde_json::from_str::<Value>(question.as_str().unwrap()).unwrap()
+            }).collect::<Vec<_>>()
         })
     }
 
@@ -536,9 +562,10 @@ mod tests {
             ));
             let new = ask(&pending, "mixed", "Who owns #11482, and who owns #10941?");
             let (stream, evidence) = classifier.request().await;
+            let evidence = decoded_evidence(evidence);
             assert_eq!(
                 evidence,
-                json!({"current_question":"Who owns #11482, and who owns #10941?", "previous_questions":["Who owns #10941?"]})
+                json!({"current_question":{"message":"Who owns #11482, and who owns #10941?", "fields":[]}, "previous_questions":[{"message":"Who owns #10941?", "fields":[]}]})
             );
             classifier.respond(stream, "different").await;
             assert!(matches!(
@@ -549,8 +576,8 @@ mod tests {
             let repeated = ask(&pending, "repeat", "Please assign #10941.");
             let (stream, evidence) = classifier.request().await;
             assert_eq!(
-                evidence["previous_questions"],
-                json!(["Who owns #10941?", "Who owns #11482, and who owns #10941?"])
+                decoded_evidence(evidence)["previous_questions"],
+                json!([{"message":"Who owns #10941?", "fields":[]}, {"message":"Who owns #11482, and who owns #10941?", "fields":[]}])
             );
             classifier.respond(stream, "same").await;
             pending
@@ -581,6 +608,65 @@ mod tests {
                 ));
             }
         }
+    }
+
+    // Hard-won: #1489 review: question_text hid changed form kinds and constraints.
+    #[tokio::test]
+    async fn afk_question_evidence_preserves_changed_selection_and_required_constraints() {
+        let classifier = Classifier::new(false).await;
+        let owner = OperatorAway::default();
+        let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()));
+        owner.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        let first = ElicitationRequest::from_acp_params(
+            "first",
+            json!({
+                "mode":"form", "sessionId":"test", "message":"Choose a destination",
+                "requestedSchema":{"type":"object", "properties":{"destination":{
+                    "type":"string", "title":"Destination", "enum":["one","two"]
+                }}}
+            }),
+        )
+        .unwrap();
+        let second = ElicitationRequest::from_acp_params("second", json!({
+            "mode":"form", "sessionId":"test", "message":"Choose a destination",
+            "requestedSchema":{"type":"object", "required":["destination"], "properties":{"destination":{
+                "type":"array", "title":"Destination", "items":{"type":"string", "enum":["one","two"]}, "minItems":1
+            }}}
+        })).unwrap();
+        assert_eq!(
+            first.question_text(),
+            second.question_text(),
+            "the old evidence lost the change"
+        );
+        assert!(matches!(
+            ask_form(&pending, first).await.unwrap(),
+            Some(PendingAnswer::OperatorAway)
+        ));
+        let second = ask_form(&pending, second);
+        let (stream, evidence) = classifier.request().await;
+        let evidence = decoded_evidence(evidence);
+        assert_eq!(
+            evidence["current_question"]["fields"][0]["kind"],
+            "multi_select"
+        );
+        assert_eq!(evidence["current_question"]["fields"][0]["required"], true);
+        assert_eq!(evidence["current_question"]["fields"][0]["min_items"], 1);
+        assert_eq!(
+            evidence["previous_questions"][0]["fields"][0]["kind"],
+            "single_select"
+        );
+        assert_eq!(
+            evidence["previous_questions"][0]["fields"][0]["required"],
+            false
+        );
+        classifier.respond(stream, "different").await;
+        assert!(matches!(
+            second.await.unwrap(),
+            Some(PendingAnswer::OperatorAway)
+        ));
     }
 
     #[tokio::test]
@@ -672,8 +758,8 @@ mod tests {
         stream_two.read_to_end(&mut eof).await.unwrap();
         let (stream_two, evidence) = classifier.request().await;
         assert_eq!(
-            evidence["previous_questions"],
-            json!(["First decision?", "Who owns #11482?"])
+            decoded_evidence(evidence)["previous_questions"],
+            json!([{"message":"First decision?", "fields":[]}, {"message":"Who owns #11482?", "fields":[]}])
         );
         classifier.respond(stream_two, "same").await;
         pending
