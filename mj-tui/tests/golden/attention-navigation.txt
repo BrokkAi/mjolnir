@@ -439,13 +439,13 @@ action: SelectWorkspace { workspace_id: "default" }
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │[1] asks ───────────────────────────────────││                                                                                            │
-│  ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│› ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
 │                                            ││                                      ✦  M J O L N I R                                      │
 │[2] done ───────────────────────────────────││                                                                                            │
-│› ✓ ACP pretty name                     ◇ ⋯ ││                         Select a session to open its conversation.                         │
+│  ✓ ACP pretty name                     ◇ ⋯ ││                         Select a session to open its conversation.                         │
 │  Idle  podman  codex-1                     ││                                                                                            │
 │  │ No messages yet                         ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -473,7 +473,7 @@ action: SelectWorkspace { workspace_id: "default" }
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
-selected: Some("done")
+selected: Some("asks")
 
 === next attention wraps to the first waiting session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -563,6 +563,9 @@ attention levels: asks=Waiting, remote=Waiting, done=Waiting, quiet=Idle, missin
 action: Open { session_id: "done" }; selected: Some("done")
 after switching workspace: attention levels: asks=Waiting, remote=Waiting, done=Waiting, quiet=Idle, missing=Inactive; queue: [remote:Waiting, done:Waiting, asks:Waiting]
 higher urgency elsewhere: attention levels: asks=Waiting, remote=Failed, done=Waiting, quiet=Idle, missing=Inactive; queue: [remote:Failed, done:Waiting, asks:Waiting]; action: SelectWorkspace { workspace_id: "other" }
+three-workspace NextAttention: ["asks", "done", "remote", "asks", "done", "remote"]
+three-workspace PreviousAttention: ["done", "asks", "remote", "done", "asks", "remote"]
+manual selection resets workspace preference: SelectWorkspace { workspace_id: "other" }
 
 === project rows before folding (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮

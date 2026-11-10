@@ -2580,6 +2580,37 @@ fn golden_attention_navigation() {
     )
     .unwrap();
 
+    let mut cycling = dashboard_with_attention_mix();
+    cycling.state.sessions.get_mut("done").unwrap().workspace_id = "third".into();
+    cycling
+        .session_details
+        .get_mut("done")
+        .unwrap()
+        .pending_elicitations = vec![question("done")];
+    cycling.set_active_workspace(Some("default".into()));
+    cycling.select_active_session("quiet");
+    for command in [CommandId::NextAttention, CommandId::PreviousAttention] {
+        let mut visited = Vec::new();
+        for _ in 0..6 {
+            // Hard-won: c7d63771d: changing workspace preference during navigation stranded notifications.
+            let action = chord(&mut cycling, command);
+            if let DashboardAction::SelectWorkspace { workspace_id } = action {
+                cycling.set_active_workspace(Some(workspace_id));
+                cycling.take_navigation_session();
+            }
+            visited.push(cycling.selected_session_id().unwrap().to_owned());
+        }
+        writeln!(output, "three-workspace {command:?}: {visited:?}").unwrap();
+    }
+    cycling.set_active_workspace(Some("third".into()));
+    cycling.select_active_session("done");
+    let action = chord(&mut cycling, CommandId::PreviousAttention);
+    writeln!(
+        output,
+        "manual selection resets workspace preference: {action:?}"
+    )
+    .unwrap();
+
     let mut folded = dashboard_with_attention_mix();
     folded.set_active_workspace(Some("default".into()));
     let before_fold = append_attention_state(

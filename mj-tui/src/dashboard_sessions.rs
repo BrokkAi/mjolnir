@@ -60,6 +60,12 @@ pub struct AttentionEntry {
     pub level: AttentionLevel,
 }
 
+/// Keep workspace preference stable while attention navigation changes tabs.
+pub(crate) struct AttentionNavigation {
+    session_id: String,
+    workspace_id: Option<String>,
+}
+
 /// The attention level from the same facts the row symbol reads.
 ///
 /// `in_operation` is a launch, resume, move, or stop the daemon is running
@@ -956,6 +962,10 @@ impl DashboardState {
     /// Every top-level session in every workspace that needs a person, most
     /// urgent first, then the current workspace, then newest activity.
     pub fn attention_queue(&self) -> Vec<AttentionEntry> {
+        self.attention_queue_for_workspace(self.active_workspace_id())
+    }
+
+    fn attention_queue_for_workspace(&self, workspace_id: Option<&str>) -> Vec<AttentionEntry> {
         let mut entries = self
             .listed_session_candidates()
             .into_iter()
@@ -965,7 +975,7 @@ impl DashboardState {
                 level.needs_person().then(|| {
                     (
                         std::cmp::Reverse(level),
-                        Some(session.workspace_id.as_str()) != self.active_workspace_id(),
+                        Some(session.workspace_id.as_str()) != workspace_id,
                         std::cmp::Reverse(self.last_activity_ms(&session.id)),
                         session.id.clone(),
                         session.workspace_id.clone(),
@@ -1047,10 +1057,18 @@ impl DashboardState {
 
     /// Moves to the next (`1`) or previous (`-1`) session in the attention
     /// queue, counting from the selected session when it is in the queue and
-    /// from the top otherwise.
+    /// from the top otherwise. Consecutive steps retain their starting
+    /// workspace preference so switching tabs cannot strand notifications.
     pub(crate) fn step_attention(&mut self, delta: isize) -> DashboardAction {
-        let queue = self.attention_queue();
+        let workspace_id = self
+            .attention_navigation
+            .as_ref()
+            .filter(|navigation| self.selected_session_id() == Some(navigation.session_id.as_str()))
+            .map(|navigation| navigation.workspace_id.clone())
+            .unwrap_or_else(|| self.active_workspace_id().map(str::to_owned));
+        let queue = self.attention_queue_for_workspace(workspace_id.as_deref());
         if queue.is_empty() {
+            self.attention_navigation = None;
             self.set_notice("Nothing is waiting for you.");
             return DashboardAction::None;
         }
@@ -1067,10 +1085,18 @@ impl DashboardState {
         };
         // A parent waiting only on a child leads to the child's form, in the
         // Sub-agents or Reviewers workspace where that child is listed.
-        if let Some(child) = self.waiting_child_of(&target.session_id) {
-            return self.focus_session_from_cpu_report(&child);
-        }
-        self.focus_session_anywhere(&target.workspace_id, &target.session_id)
+        let (session_id, action) = if let Some(child) = self.waiting_child_of(&target.session_id) {
+            let action = self.focus_session_from_cpu_report(&child);
+            (child, action)
+        } else {
+            let action = self.focus_session_anywhere(&target.workspace_id, &target.session_id);
+            (target.session_id, action)
+        };
+        self.attention_navigation = Some(AttentionNavigation {
+            session_id,
+            workspace_id,
+        });
+        action
     }
 
     /// Moves the dashboard to one session, wherever it lives.

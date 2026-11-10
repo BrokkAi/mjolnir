@@ -1093,6 +1093,7 @@ pub struct DashboardState {
     /// The sessions currently needing a person and whether each has been
     /// reported, for [`DashboardState::notification_events`].
     pub(crate) attention_episodes: BTreeMap<String, crate::notify::AttentionEpisode>,
+    pub(crate) attention_navigation: Option<dashboard_sessions::AttentionNavigation>,
     pub(crate) viewed_failures: BTreeMap<String, crate::notify::ViewedFailure>,
     pub(crate) drawn_failures: BTreeMap<String, crate::notify::ViewedFailure>,
     /// The pane, row index, and time of the most recent left click on a
@@ -1353,6 +1354,7 @@ impl DashboardState {
             pane_maximize_enabled: [true; DASHBOARD_PANE_COUNT],
             collapsed_project_keys: Default::default(),
             attention_episodes: BTreeMap::new(),
+            attention_navigation: None,
             viewed_failures: BTreeMap::new(),
             drawn_failures: BTreeMap::new(),
             last_row_click: None,
