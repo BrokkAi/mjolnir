@@ -93,7 +93,9 @@ where
     let ext_step_clock = spec.step_clock.clone();
     let ext_harness = spec.harness;
     let elicitation_events = events.clone();
-    let pending_elicitations = spec.operator_away.pending_for_bridge();
+    let pending_elicitations = spec
+        .operator_away
+        .pending_for_bridge_with_source(spec.verdict.clone());
     let handler_elicitations = pending_elicitations.clone();
     let permission_elicitations = pending_elicitations.clone();
     let permission_review_ids = Arc::new(AtomicU64::new(1));

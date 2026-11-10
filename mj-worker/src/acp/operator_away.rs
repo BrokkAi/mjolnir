@@ -4,13 +4,42 @@ use super::*;
 #[derive(Debug, Clone, Default)]
 pub struct OperatorAway(Arc<Mutex<OperatorAwayState>>);
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct OperatorAwayState {
     presence: mj_core::state::OperatorPresence,
-    refused: BTreeSet<(String, AwayRequest)>,
+    // The accepted answers are both the fallback identity and Jev's evidence.
+    refused: BTreeMap<(String, AwayRequest), Vec<String>>,
     next_bridge: u64,
     bridges: BTreeSet<u64>,
     pending: Vec<PendingElicitation>,
+    changed: tokio::sync::watch::Sender<()>,
+}
+
+impl Default for OperatorAwayState {
+    fn default() -> Self {
+        Self {
+            presence: Default::default(),
+            refused: Default::default(),
+            next_bridge: 0,
+            bridges: Default::default(),
+            pending: Default::default(),
+            changed: tokio::sync::watch::channel(()).0,
+        }
+    }
+}
+
+impl OperatorAwayState {
+    fn answer_away(&mut self, entry: PendingElicitation) {
+        let question =
+            (entry.identity.1 == AwayRequest::Question).then(|| entry.question.question_text());
+        if entry.answer.send(PendingAnswer::OperatorAway).is_ok() {
+            let history = self.refused.entry(entry.identity).or_default();
+            if let Some(question) = question {
+                history.push(question);
+                self.changed.send_replace(());
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -33,20 +62,29 @@ impl OperatorAway {
                 // Vec order is registration order, including across bridge scopes.
                 let pending = std::mem::take(&mut state.pending);
                 for entry in pending {
-                    if state.refused.insert(entry.identity.clone()) {
-                        // A closed receiver no longer has a live ACP responder.
-                        if entry.answer.send(PendingAnswer::OperatorAway).is_err() {
-                            state.refused.remove(&entry.identity);
-                        }
+                    if !state.refused.contains_key(&entry.identity) {
+                        state.answer_away(entry);
                     } else {
                         state.pending.push(entry);
                     }
                 }
             }
+            state.changed.send_replace(());
         }
     }
 
+    #[cfg(test)]
     pub(super) fn pending_for_bridge(&self) -> PendingElicitations {
+        self.pending_for_bridge_with_source(Some(VerdictSource::Direct {
+            key: String::new(),
+            endpoint: String::new(),
+        }))
+    }
+
+    pub(super) fn pending_for_bridge_with_source(
+        &self,
+        source: Option<VerdictSource>,
+    ) -> PendingElicitations {
         let mut state = self.0.lock().expect("operator-away state lock poisoned");
         let id = state.next_bridge;
         state.next_bridge = id.checked_add(1).expect("ACP bridge identity exhausted");
@@ -54,6 +92,7 @@ impl OperatorAway {
         PendingElicitations(Arc::new(PendingBridge {
             owner: self.clone(),
             id,
+            source,
         }))
     }
 }
@@ -65,6 +104,7 @@ pub(super) struct PendingElicitations(Arc<PendingBridge>);
 struct PendingBridge {
     owner: OperatorAway,
     id: u64,
+    source: Option<VerdictSource>,
 }
 
 impl Drop for PendingBridge {
@@ -100,11 +140,13 @@ impl PendingElicitations {
             return received;
         }
         let identity = (agent, request);
-        if state.presence.away && state.refused.insert(identity.clone()) {
-            // The receiver is still local, so this delivery cannot fail.
-            answer
-                .send(PendingAnswer::OperatorAway)
-                .expect("new answer receiver is open");
+        if state.presence.away && !state.refused.contains_key(&identity) {
+            state.answer_away(PendingElicitation {
+                bridge: self.0.id,
+                question,
+                identity,
+                answer,
+            });
         } else {
             state.pending.push(PendingElicitation {
                 bridge: self.0.id,
@@ -114,6 +156,106 @@ impl PendingElicitations {
             });
         }
         received
+    }
+
+    /// The responder owns this future. Human answers and cancellation drop its
+    /// HTTP work; only the presence owner may accept the resulting answer.
+    pub(super) async fn refine_question(&self, id: &str) {
+        let mut changed = self
+            .0
+            .owner
+            .0
+            .lock()
+            .expect("operator-away state lock poisoned")
+            .changed
+            .subscribe();
+        let mut client = None;
+        loop {
+            changed.borrow_and_update();
+            let snapshot = {
+                let state = self
+                    .0
+                    .owner
+                    .0
+                    .lock()
+                    .expect("operator-away state lock poisoned");
+                let Some(entry) = state
+                    .pending
+                    .iter()
+                    .find(|entry| entry.bridge == self.0.id && entry.question.id == id)
+                else {
+                    return;
+                };
+                if entry.identity.1 != AwayRequest::Question {
+                    return;
+                }
+                state.presence.away.then(|| {
+                    (
+                        state.presence.revision,
+                        entry.identity.0.clone(),
+                        entry.question.question_text(),
+                        state
+                            .refused
+                            .get(&entry.identity)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                })
+            };
+            if let Some((revision, agent, question, history)) = snapshot {
+                let classify = async {
+                    if client.is_none() {
+                        client =
+                            verdict_client::VerdictClient::resolve(self.0.source.as_ref()).await;
+                    }
+                    match &client {
+                        Some(client) => client.same_afk_question(&question, &history).await,
+                        None => Err(anyhow!("Jev is disabled or unavailable")),
+                    }
+                };
+                let verdict = tokio::select! {
+                    result = classify => result,
+                    result = changed.changed() => { if result.is_err() { return; } continue; }
+                };
+                match verdict {
+                    Ok(false) => {
+                        let mut state = self
+                            .0
+                            .owner
+                            .0
+                            .lock()
+                            .expect("operator-away state lock poisoned");
+                        // Compare and consume under the same owner lock. Concurrent
+                        // new questions must reclassify against the accepted history.
+                        if state.presence.away
+                            && state.presence.revision == revision
+                            && state
+                                .refused
+                                .get(&(agent, AwayRequest::Question))
+                                .is_some_and(|current| *current == history)
+                            && let Some(index) = state.pending.iter().position(|entry| {
+                                entry.bridge == self.0.id && entry.question.id == id
+                            })
+                        {
+                            let entry = state.pending.remove(index);
+                            state.answer_away(entry);
+                            tracing::info!(target: "mj_jev", %id, revision, "Jev identified a new AFK question");
+                            return;
+                        }
+                        continue;
+                    }
+                    Ok(true) => {
+                        tracing::info!(target: "mj_jev", %id, revision, "Jev identified a repeated AFK question")
+                    }
+                    Err(error) => {
+                        tracing::warn!(target: "mj_jev", %id, %error, "AFK question classification unavailable; retaining existing behavior")
+                    }
+                }
+            }
+            if changed.changed().await.is_err() {
+                return;
+            }
+        }
     }
 
     pub(super) fn remove(&self, id: &str) -> Option<PendingElicitation> {
@@ -127,7 +269,8 @@ impl PendingElicitations {
             .pending
             .iter()
             .position(|entry| entry.bridge == self.0.id && entry.question.id == id)?;
-        Some(state.pending.remove(index))
+        let entry = state.pending.remove(index);
+        Some(entry)
     }
 
     /// Claim Cancel before stopping the turn, so a resolved form cannot stop it.
@@ -165,11 +308,13 @@ impl PendingElicitations {
     }
 
     pub(super) fn retain(&self, keep: impl Fn(&str) -> bool) {
-        self.0
+        let mut state = self
+            .0
             .owner
             .0
             .lock()
-            .expect("operator-away state lock poisoned")
+            .expect("operator-away state lock poisoned");
+        state
             .pending
             .retain(|entry| entry.bridge != self.0.id || keep(&entry.question.id));
     }
@@ -255,4 +400,285 @@ pub(super) fn away_permission_identity(
     // ACP metadata may enable serde_json's preserve_order feature elsewhere.
     identity.sort_all_objects();
     AwayRequest::Tool(identity.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
+
+    struct Classifier {
+        listener: TcpListener,
+        source: VerdictSource,
+    }
+
+    impl Classifier {
+        async fn new(direct: bool) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/v7/turn-verdict", listener.local_addr().unwrap());
+            let source = if direct {
+                VerdictSource::Direct {
+                    key: "test-key".into(),
+                    endpoint,
+                }
+            } else {
+                VerdictSource::Hosted { endpoint }
+            };
+            Self { listener, source }
+        }
+
+        async fn request(&self) -> (TcpStream, Value) {
+            let (stream, _) = self.listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut headers = String::new();
+            let mut length = None;
+            loop {
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert!(
+                    !line.is_empty(),
+                    "classifier client disconnected before headers"
+                );
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                    length = Some(value.trim().parse::<usize>().unwrap());
+                }
+                headers.push_str(&line);
+            }
+            let mut body = vec![0; length.unwrap()];
+            stream.read_exact(&mut body).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            if matches!(self.source, VerdictSource::Direct { .. }) {
+                assert!(headers.starts_with("POST /v7/turn-verdict "));
+                assert_eq!(body["model"], "jev-latest");
+                assert_eq!(
+                    body["questions"],
+                    serde_json::from_str::<Value>(include_str!("afk_question.json")).unwrap()
+                );
+            } else {
+                assert!(headers.starts_with("POST /v1/afk-question-verdict "));
+            }
+            (
+                stream.into_inner(),
+                body.get("state").unwrap_or(&body).clone(),
+            )
+        }
+
+        async fn respond(&self, mut stream: TcpStream, choice: &str) {
+            let (same, different) = if choice == "same" {
+                (0.99, 0.01)
+            } else {
+                (0.01, 0.99)
+            };
+            let answer = json!({"type":"choice", "choice":choice, "confidence":0.99,
+                "probabilities":{"same":same,"different":different}});
+            let body = if matches!(self.source, VerdictSource::Direct { .. }) {
+                json!({"answers":{"same_question":answer}})
+            } else {
+                answer
+            }
+            .to_string();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    fn question(id: &str, text: &str) -> ElicitationRequest {
+        ElicitationRequest {
+            id: id.into(),
+            message: text.into(),
+            title: None,
+            description: None,
+            fields: vec![],
+            tool_permission: None,
+        }
+    }
+
+    fn ask(
+        pending: &PendingElicitations,
+        id: &str,
+        text: &str,
+    ) -> tokio::task::JoinHandle<Option<PendingAnswer>> {
+        let answer = pending.register(question(id, text), String::new(), AwayRequest::Question);
+        let pending = pending.clone();
+        let id = id.to_owned();
+        tokio::spawn(async move {
+            await_elicitation_response(&pending, &id, answer, std::future::pending()).await
+        })
+    }
+
+    // Hard-won: #1489: new questions shared the generic Question refusal identity.
+    #[tokio::test]
+    async fn afk_question_protocol_distinguishes_mixed_forms_and_preserves_unavailable_fallback() {
+        for direct in [false, true] {
+            let classifier = Classifier::new(direct).await;
+            let owner = OperatorAway::default();
+            let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()));
+            owner.set(mj_core::state::OperatorPresence {
+                away: true,
+                revision: 1,
+            });
+            assert!(matches!(
+                ask(&pending, "first", "Who owns #10941?").await.unwrap(),
+                Some(PendingAnswer::OperatorAway)
+            ));
+            let new = ask(&pending, "mixed", "Who owns #11482, and who owns #10941?");
+            let (stream, evidence) = classifier.request().await;
+            assert_eq!(
+                evidence,
+                json!({"current_question":"Who owns #11482, and who owns #10941?", "previous_questions":["Who owns #10941?"]})
+            );
+            classifier.respond(stream, "different").await;
+            assert!(matches!(
+                new.await.unwrap(),
+                Some(PendingAnswer::OperatorAway)
+            ));
+
+            let repeated = ask(&pending, "repeat", "Please assign #10941.");
+            let (stream, evidence) = classifier.request().await;
+            assert_eq!(
+                evidence["previous_questions"],
+                json!(["Who owns #10941?", "Who owns #11482, and who owns #10941?"])
+            );
+            classifier.respond(stream, "same").await;
+            pending
+                .resolve("repeat", ElicitationResponse::Decline)
+                .unwrap();
+            assert!(matches!(
+                repeated.await.unwrap(),
+                Some(PendingAnswer::Human(_))
+            ));
+
+            for body in [
+                "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            ] {
+                let fallback = ask(&pending, "fallback", "Who owns #12000?");
+                let (mut stream, _) = classifier.request().await;
+                stream.write_all(body.as_bytes()).await.unwrap();
+                // Wait until the network attempt has consumed the response before
+                // answering, so this proves fallback rather than winning a race.
+                let mut eof = Vec::new();
+                stream.read_to_end(&mut eof).await.unwrap();
+                pending
+                    .resolve("fallback", ElicitationResponse::Decline)
+                    .unwrap();
+                assert!(matches!(
+                    fallback.await.unwrap(),
+                    Some(PendingAnswer::Human(_))
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn afk_question_classification_cannot_outlive_human_cancel_return_or_bridge_close() {
+        for action in ["human", "cancel", "return", "close"] {
+            let classifier = Classifier::new(false).await;
+            let owner = OperatorAway::default();
+            let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()));
+            owner.set(mj_core::state::OperatorPresence {
+                away: true,
+                revision: 1,
+            });
+            assert!(matches!(
+                ask(&pending, "first", "First decision?").await.unwrap(),
+                Some(PendingAnswer::OperatorAway)
+            ));
+            let answer = pending.register(
+                question("racing", "Another decision?"),
+                String::new(),
+                AwayRequest::Question,
+            );
+            let (cancel, cancelled) = oneshot::channel();
+            let response = {
+                let pending = pending.clone();
+                tokio::spawn(async move {
+                    await_elicitation_response(&pending, "racing", answer, async {
+                        let _ = cancelled.await;
+                    })
+                    .await
+                })
+            };
+            let (mut stream, _) = classifier.request().await;
+            match action {
+                "human" => pending
+                    .resolve("racing", ElicitationResponse::Decline)
+                    .unwrap(),
+                "cancel" => cancel.send(()).unwrap(),
+                "return" => owner.set(mj_core::state::OperatorPresence {
+                    away: false,
+                    revision: 2,
+                }),
+                "close" => pending.close(),
+                _ => unreachable!(),
+            }
+            // Cancellation/return drops the in-flight HTTP request, rather than
+            // waiting for Jev to release its response.
+            let mut eof = Vec::new();
+            stream.read_to_end(&mut eof).await.unwrap();
+            if action == "return" {
+                pending
+                    .resolve("racing", ElicitationResponse::Decline)
+                    .unwrap();
+            }
+            let outcome = response.await.unwrap();
+            assert!(
+                if matches!(action, "human" | "return") {
+                    matches!(outcome, Some(PendingAnswer::Human(_)))
+                } else {
+                    outcome.is_none()
+                },
+                "{action}: {outcome:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_afk_questions_reclassify_after_another_question_is_answered() {
+        let classifier = Classifier::new(false).await;
+        let owner = OperatorAway::default();
+        let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()));
+        owner.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        assert!(matches!(
+            ask(&pending, "first", "First decision?").await.unwrap(),
+            Some(PendingAnswer::OperatorAway)
+        ));
+        let one = ask(&pending, "one", "Who owns #11482?");
+        let (stream_one, _) = classifier.request().await;
+        let two = ask(&pending, "two", "Assign #11482 to someone?");
+        let (mut stream_two, _) = classifier.request().await;
+        classifier.respond(stream_one, "different").await;
+        assert!(matches!(
+            one.await.unwrap(),
+            Some(PendingAnswer::OperatorAway)
+        ));
+        let mut eof = Vec::new();
+        stream_two.read_to_end(&mut eof).await.unwrap();
+        let (stream_two, evidence) = classifier.request().await;
+        assert_eq!(
+            evidence["previous_questions"],
+            json!(["First decision?", "Who owns #11482?"])
+        );
+        classifier.respond(stream_two, "same").await;
+        pending
+            .resolve("two", ElicitationResponse::Decline)
+            .unwrap();
+        assert!(matches!(two.await.unwrap(), Some(PendingAnswer::Human(_))));
+    }
 }

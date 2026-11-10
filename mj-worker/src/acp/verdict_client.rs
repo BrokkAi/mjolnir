@@ -168,6 +168,94 @@ impl Drop for VerdictAttempt {
 
 #[cfg_attr(not(unix), allow(dead_code))]
 impl VerdictClient {
+    /// Compare complete forms; the proxy's documented body ceiling is 64 KiB.
+    pub(crate) async fn same_afk_question(
+        &self,
+        current_question: &str,
+        previous_questions: &[String],
+    ) -> Result<bool> {
+        let state = serde_json::json!({"current_question": current_question, "previous_questions": previous_questions});
+        let questions = match &self.source {
+            VerdictSource::Direct { .. } => {
+                Some(serde_json::from_str(include_str!("afk_question.json"))?)
+            }
+            VerdictSource::Hosted { .. } => None,
+        };
+        let body = serde_json::to_vec(&mj_core::jev::request_body(&state, questions))?;
+        ensure!(
+            body.len() <= 64 * 1024,
+            "AFK question evidence exceeds Jev body limit"
+        );
+        let http = match &self.source {
+            VerdictSource::Direct { key, endpoint } => self.client.post(endpoint).bearer_auth(key),
+            VerdictSource::Hosted { endpoint } => {
+                let mut url =
+                    reqwest::Url::parse(endpoint).context("parse AFK question proxy URL")?;
+                url.set_path("/v1/afk-question-verdict");
+                self.client.post(url)
+            }
+        };
+        let response = http
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .context("classify AFK question")?
+            .error_for_status()
+            .context("AFK question HTTP status")?;
+        let bytes = response
+            .bytes()
+            .await
+            .context("read AFK question verdict")?;
+        ensure!(
+            bytes.len() <= 64 * 1024,
+            "AFK question verdict exceeds Jev body limit"
+        );
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let answer = value.get("answers").map_or(&value, |v| &v["same_question"]);
+        let choice = answer["choice"]
+            .as_str()
+            .context("missing AFK question choice")?;
+        ensure!(
+            matches!(choice, "same" | "different"),
+            "invalid AFK question choice"
+        );
+        if let Some(kind) = answer.get("type") {
+            ensure!(kind == "choice", "invalid AFK question answer type");
+        }
+        let confidence = answer["confidence"]
+            .as_f64()
+            .context("missing AFK question confidence")?;
+        ensure!(
+            (0.0..=1.0).contains(&confidence),
+            "invalid AFK question confidence"
+        );
+        let scores = answer["probabilities"]
+            .as_object()
+            .context("missing AFK question distribution")?;
+        ensure!(scores.len() == 2, "invalid AFK question distribution");
+        let same = scores
+            .get("same")
+            .and_then(serde_json::Value::as_f64)
+            .context("missing same probability")?;
+        let different = scores
+            .get("different")
+            .and_then(serde_json::Value::as_f64)
+            .context("missing different probability")?;
+        ensure!(
+            (0.0..=1.0).contains(&same)
+                && (0.0..=1.0).contains(&different)
+                && (same + different - 1.0).abs() <= 0.01 + 1e-12,
+            "invalid AFK question probabilities"
+        );
+        ensure!(
+            (if choice == "same" { same } else { different }) + 1e-12 >= same.max(different),
+            "AFK question choice is not a probability winner"
+        );
+        // A tie does not establish a new decision; keep the existing behavior.
+        Ok(choice == "same" || different <= same)
+    }
+
     pub(crate) fn log_single_question(
         &self,
         session: &str,
