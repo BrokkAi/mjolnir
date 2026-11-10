@@ -23,13 +23,20 @@ fn run_hook(
     data_dir: &std::path::Path,
     config_dir: &std::path::Path,
 ) -> serde_json::Value {
-    run_hook_with_stdin(socket, data_dir, config_dir, vec![b'x'; 128 * 1024])
+    run_hook_with_stdin(
+        socket,
+        data_dir,
+        config_dir,
+        "PostToolBatch",
+        vec![b'x'; 128 * 1024],
+    )
 }
 
 fn run_hook_with_stdin(
     socket: &std::path::Path,
     data_dir: &std::path::Path,
     config_dir: &std::path::Path,
+    event: &str,
     stdin: Vec<u8>,
 ) -> serde_json::Value {
     let mut command = CommandSpec::new(
@@ -40,7 +47,7 @@ fn run_hook_with_stdin(
             "--socket",
             socket.to_str().unwrap(),
             "--event",
-            "PostToolUse",
+            event,
         ],
     )
     .with_sensitive_stdin(stdin);
@@ -155,8 +162,9 @@ fn subagent_hook_input_leaves_mailbox_for_main_agent() {
         &socket,
         &data_dir,
         &config_dir,
+        "PostToolBatch",
         serde_json::to_vec(&serde_json::json!({
-            "hook_event_name": "PostToolUse",
+            "hook_event_name": "PostToolBatch",
             "agent_id": "native-subagent-id",
             "agent_type": "general-purpose",
         }))
@@ -166,8 +174,9 @@ fn subagent_hook_input_leaves_mailbox_for_main_agent() {
         &socket,
         &data_dir,
         &config_dir,
+        "PostToolBatch",
         serde_json::to_vec(&serde_json::json!({
-            "hook_event_name": "PostToolUse",
+            "hook_event_name": "PostToolBatch",
             "session_id": "top-level-session-id",
         }))
         .unwrap(),
@@ -251,7 +260,10 @@ fn real_mailbox_hook_drains_once_over_the_control_socket_with_large_stdin() {
     let mut relay = server.join().expect("relay socket server thread");
     let unavailable = run_hook(&socket, &data_dir, &config_dir);
 
-    assert_eq!(first["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    assert_eq!(
+        first["hookSpecificOutput"]["hookEventName"],
+        "PostToolBatch"
+    );
     let additional_context = first["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .expect("first hook receives mailbox context");
@@ -296,7 +308,7 @@ fn real_mailbox_hook_drains_once_over_the_control_socket_with_large_stdin() {
             path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
             hook_event: Some(ref hook_event),
             ..
-        } if hook_event == "PostToolUse"
+        } if hook_event == "PostToolBatch"
     )));
 }
 
@@ -375,7 +387,7 @@ fn a_lost_drain_response_keeps_mailbox_events_for_a_restarted_worker() {
         request_id: "drain-during-live-lease".into(),
         protocol_version: RELAY_PROTOCOL_VERSION,
         request: RelayRequest::DrainMailbox {
-            hook_event: "PostToolUse".into(),
+            hook_event: "PostToolBatch".into(),
         },
     });
     assert!(matches!(
@@ -526,4 +538,92 @@ fn an_unacknowledged_hook_output_can_be_delivered_again_after_restart() {
                 )
             })
     );
+}
+
+// Hard-won: #1277: a PostToolUse drain leased mailbox events into Codex's
+// mid-turn hook context, which DeepSeek persists as a dangling tool call and
+// then rejects on every later request, killing the session.
+#[test]
+fn mailbox_post_tool_use_hook_stays_empty_and_turn_boundaries_deliver() {
+    let root = tempfile::tempdir().expect("isolated mailbox hook root");
+    let relay_root = root.path().join("relay");
+    let data_dir = root.path().join("data");
+    let config_dir = root.path().join("config");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let socket = root.path().join("control.sock");
+    let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
+    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let event = MailboxEvent {
+        key: "api:post-tool-use-guard".into(),
+        source: "api".into(),
+        wake: false,
+        created_at_ms: 1,
+        body: MailboxEventBody::PlainText {
+            text: "Codex must only see this at a turn boundary.".into(),
+        },
+    };
+    let accepted = relay.handle(RelayRequestEnvelope {
+        request_id: "seed-post-tool-use-event".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Submit {
+            command_id: "seed-post-tool-use-event-command".into(),
+            command: RelayCommand::DeliverMailboxEvent {
+                event: event.clone(),
+            },
+        },
+    });
+    assert!(matches!(accepted.body, RelayResponseBody::Ok { .. }));
+
+    let server = std::thread::spawn(move || {
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().expect("accept mailbox hook connection");
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            serve_relay_json_lines(&mut reader, &mut writer, &mut relay)
+                .expect("serve the actual durable relay protocol");
+        }
+        relay
+    });
+
+    let mid_turn = run_hook_with_stdin(
+        &socket,
+        &data_dir,
+        &config_dir,
+        "PostToolUse",
+        serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "top-level-session-id",
+        }))
+        .unwrap(),
+    );
+    let boundary = run_hook(&socket, &data_dir, &config_dir);
+    let mut relay = server.join().expect("relay socket server thread");
+
+    assert_eq!(mid_turn, serde_json::json!({}));
+    assert_eq!(
+        boundary["hookSpecificOutput"]["additionalContext"],
+        mj_core::mailbox::render_mailbox_events(std::slice::from_ref(&event))
+    );
+    let journal = relay_events(&mut relay, "inspect-post-tool-use-guard");
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|record| matches!(
+                record.observation,
+                RelayObservation::MailboxHookLeaseCreated { .. }
+            ))
+            .count(),
+        1,
+        "only the turn-boundary drain may lease mailbox events"
+    );
+    assert!(journal.iter().any(|record| matches!(
+        &record.observation,
+        RelayObservation::MailboxEventsDelivered {
+            event_keys,
+            path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+            hook_event: Some(hook_event),
+            ..
+        } if event_keys.as_slice() == ["api:post-tool-use-guard"] && hook_event == "PostToolBatch"
+    )));
 }
