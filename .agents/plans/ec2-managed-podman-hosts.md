@@ -1,0 +1,61 @@
+# Provision reusable EC2 Podman hosts from mj
+
+This living ExecPlan follows `.agents/PLANS.md`. Keep Progress, Surprises & Discoveries, Decision Log, and Outcomes & Retrospective current.
+
+## Purpose / Big Picture
+
+The user wants a persistent c7i.16xlarge EC2 VM with Podman, configured as an mj target, and a verified session on it. Encode that same workflow as `mj ec2 create`, `list`, and `destroy` so future hosts need no manual AWS, SSH, or TOML work. A persistent host runs multiple independent rootless containers; the existing `aws-ec2` launch-template target instead owns one VM per bare session and remains a separate feature.
+
+## Progress
+
+- [x] (2026-11-09) Inspected configuration, AWS account, available zones, image, and CLI/configuration/subprocess interfaces.
+- [x] (2026-11-09) Provisioned the requested C7i; user then requested shutdown and selected C8id.16xlarge with local NVMe, ZFS/lz4, and mold. Replacement is running and original is stopped.
+- [x] (2026-11-09) Registered ec2-c8id16, disabled discovered bare access, removed old configuration, and verified real session cfd87ded54b8f20fed978447b3089998 replied EC2_ZFS_PODMAN_OK with ZFS/mbx evidence.
+- [x] (2026-11-09) Implemented create/list/destroy, ZFS cache bootstrap, pinned mbx setup, mold in the agent image, documentation, and AWS boundary/partial-failure integration tests.
+- [ ] Complete touched-crate tests, workspace clippy, review, commit, and push.
+
+## Surprises & Discoveries
+
+AWS default credentials have no configured region. The existing account is 842609633142, with default public subnets in us-east-1. c7i.16xlarge supplies 64 vCPUs and 128 GiB RAM and is offered in zones a, b, c, d, and f. Canonical's SSM parameter resolves Ubuntu 24.04 to an official 099720109477 image. The config editor already provides `Config::update` with an interprocess lock, atomic replacement, and comment-preserving edits.
+
+## Decision Log
+
+Use a normal SSH machine with a Podman runtime for persistent VMs. Reuse the AWS CLI credential chain, avoiding a new SDK dependency and authentication mechanism. Require instance type and availability zone on create; infer region from a standard zone or accept an explicit region. Expose storage and network overrides needed for non-default VPCs. Use AWS ownership tags as cloud inventory, unique operation identifiers for resources, and a dedicated SSH key and known-hosts file under the owning mj config directory. Preserve a partially provisioned VM when an accepted launch or later bootstrap fails, reporting its identity and destroy command so accepted resources remain discoverable. Preserve unfinished pre-launch resources under the same local record and cloud operation tags, so destroy also recovers a refused or interrupted launch. Record the creating AWS account and refuse destruction under a different identity. Destroy only explicitly mj-managed instances and their matching resources; do not remove configuration until AWS termination succeeds.
+
+## Outcomes & Retrospective
+
+The replacement is usable; the real smoke confirmed the remote worker, harness, ZFS cache mount, mbx path, and linker configuration. Implementation and initial focused tests pass; final review/push remain. The full CLI suite passed all tests, workspace clippy passed with warnings denied, and an isolated new CLI listed both real AWS hosts correctly. Details and resource identities are in `.agents/docs/ec2-managed-host-2026-11-09.md`.
+
+## Context and Orientation
+
+`mj-cli/src/main.rs` declares the clap command tree, logging command names, and dispatch. Add `mj-cli/src/ec2.rs` for command arguments and the provisioning workflow. This is a one-shot CLI operation and must not block any dashboard or daemon event loop; run blocking cloud/SSH work with supervised `spawn_blocking`. `mj-core/src/config.rs` owns `Config::update`; `mj-core/src/config/machines.rs` defines SSH machines and stored targets; `mj-core/src/config/targets.rs` defines resolved SSH Podman targets. `mj-core/src/subprocess.rs` provides `run_with_input` and output draining; all child process capture uses it. Existing AWS EC2 launch-template provisioning lives in the controller and must retain its semantics.
+
+## Plan of Work
+
+First provision and test the requested real host using the installed mj. Record nonsecret resource identities under `.agents/docs/`. Add a self-contained CLI module that discovers a compatible official Ubuntu image and subnet, provisions tagged key/security-group/instance resources, waits for SSH and cloud-init, verifies rootless Podman, and atomically adds configuration. List queries tagged instances. Destroy verifies ownership, terminates the instance, waits for network teardown, deletes matching owned security groups and key pairs, and removes only the configuration that still refers to that instance. Surface partial failures and permit destroy retries. Add command help and user-facing CLI reference updates in established documentation locations only.
+
+## Concrete Steps
+
+Work in the current checkout and branch. Use elevated AWS/SSH operations and installed `mj doctor --json` before and after configuration edits. For build/test use existing Cargo and mbx storage without overrides. Start any new binary with `--instance ec2-host-test` and isolated configuration/data directories. Use a private tmux socket for a real remote-container session smoke. Run `cargo fmt --all`, focused `cargo test -p brokk-mjolnir ec2` outside the sandbox, then the full touched-crate suite and `cargo clippy --all-targets -- -D warnings`. Commit only changed task files, request the configured review, and push HEAD to origin/master, merging concurrent upstream movement if needed.
+
+## Validation and Acceptance
+
+The cloud host must report `podman info` as rootless and run a container. A session on its configured target must start a real worker/harness and return evidence from inside the container. `mj ec2 create c7i.16xlarge --zone us-east-1b --name example` should print instance, address, target, and next steps. `mj ec2 list --region us-east-1` should include managed hosts with state/type/zone/address/target. `mj ec2 destroy example --region us-east-1` must remove its VM and owned auxiliary resources and matching configuration while preserving unrelated entries. Tests exercise the AWS/SSH command contracts and failure ordering, rather than duplicating local computations.
+
+## Idempotence and Recovery
+
+Use a RunInstances client token so an uncertain launch can be identified without creating another VM. Cloud tags identify ownership, operation, and mj target, enabling discovery after a process exits. Never destroy unrelated resources. Preserve an accepted VM on bootstrap/configuration failure and print the retry/cleanup command. Destroy may be repeated after partial cleanup; absent owned resources count as already removed. Termination deliberately destroys all containers and work on that selected host, so help and command output must state that scope.
+
+## Artifacts and Notes
+
+Provisioning evidence and session results will be recorded in `.agents/docs/ec2-managed-host-2026-11-09.md`. Do not commit SSH private keys or credentials. Live doctor already reports pre-existing fixable prerequisites; compare before/after findings instead of claiming a globally clean system.
+
+## Interfaces and Dependencies
+
+Use clap Args/Subcommand, anyhow, serde_json, the existing reqwest client only if needed for public-IP discovery, `mj_core::config::{Config, Machine, TargetTemplate, SshConnection, ContainerTemplate}`, and shared subprocess helpers. No new crate or database migration is necessary. Use AWS CLI JSON request/response values rather than shell interpolation. SSH provisioning must wait for cloud-init and report its log if bootstrap fails.
+
+Revision 2026-11-09: initial plan after account and repository discovery.
+
+Revision 2026-11-09: incorporated the user's C8id/local-NVMe/ZFS/mold and Podman-only choices, completed provisioning evidence, and diagnosed the separate recursive-scp profile-sync delay. The initial full CLI suite passed 243 tests and found one missing --json help description; that description was corrected. Workspace clippy passed its initial run. Final focused and integration validation follows the last changes.
+
+Revision 2026-11-09: final CLI validation passed (all tests); workspace clippy passed. Added wrong-account refusal coverage and corrected the initial help-description failure. Review and remote publication are the remaining steps.
