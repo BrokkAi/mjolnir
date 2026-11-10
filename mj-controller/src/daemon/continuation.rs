@@ -722,7 +722,12 @@ fn spawn_with_gate(
                         .as_ref()
                         .and_then(ended_turn)
                         .is_some_and(|t| t.self_started());
-                    let previous = seen.insert(id.clone(), completed.clone());
+                    let previous = seen.get(&id).cloned();
+                    // An unfinished connected turn establishes attachment, but
+                    // an ineligible completed view must not consume its trigger.
+                    if view.connected && completed.is_none() {
+                        seen.insert(id.clone(), None);
+                    }
                     if deferred.get(&id).is_some_and(|key| Some(key) != completed.as_ref()) {
                         deferred.remove(&id);
                     }
@@ -758,7 +763,7 @@ fn spawn_with_gate(
                     // decide whether anything may be submitted.
                     let bootstrap = previous.is_none() && !driven(&view);
                     let new_completion = if let Some(a) = worker_assessment {
-                        assessed.insert(id.clone(), a.revision) != Some(a.revision)
+                        assessed.get(&id).copied() != Some(a.revision)
                     } else { (bootstrap || previous.is_some_and(|old| old != completed)) && completed.is_some() };
                     // Whatever held a deferred continuation has stopped: ask
                     // again, since the conversation may have moved on.
@@ -770,6 +775,12 @@ fn spawn_with_gate(
                             publish(&tx, &environment, id, view, false);
                             continue;
                         };
+                        // Commit the processed frontier only after this decision
+                        // can run. Disconnection and refused admission preserve it.
+                        seen.insert(id.clone(), completed.clone());
+                        if let Some(a) = worker_assessment {
+                            assessed.insert(id.clone(), a.revision);
+                        }
                         deferred.remove(&id);
                         generation = generation.wrapping_add(1);
                         let epoch = generation;

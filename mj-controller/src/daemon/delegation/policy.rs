@@ -22,6 +22,7 @@ impl Services {
 pub(super) struct Policy {
     pub services: Services,
     state: Arc<RuntimeState>,
+    pub quota_source_reader: super::QuotaSourceReader,
     catalog: Arc<ProfileCatalog>,
     reports: Arc<std::sync::Mutex<QuotaReportMap>>,
     rejected: Arc<std::sync::Mutex<mj_core::credentials::RejectedLogins>>,
@@ -30,7 +31,7 @@ pub(super) struct Policy {
     pub quota_rx: mpsc::Receiver<QuotaUpdate>,
     pub refresh_rx: mpsc::UnboundedReceiver<crate::daemon::QuotaRefreshIntent>,
     batch: QuotaRefreshBatch,
-    published: BTreeMap<String, mj_core::config::HarnessProfile>,
+    quota_sources: QuotaSourceScan,
     catalog_config: Option<mj_core::config::Config>,
     /// Profiles the poller is asking a provider about right now.
     probing: std::collections::BTreeSet<String>,
@@ -40,11 +41,121 @@ pub(super) struct Policy {
     signals: CredentialSyncSignalTracker,
     notices: CredentialSyncNotices,
 }
+
+#[derive(Default)]
+enum QuotaSourceScan {
+    #[default]
+    Idle,
+    Queued(crate::daemon::QuotaRefreshIntent),
+    Running {
+        task: Option<tokio::task::Id>,
+        config: Box<mj_core::config::Config>,
+        intent: crate::daemon::QuotaRefreshIntent,
+        successor: Option<crate::daemon::QuotaRefreshIntent>,
+    },
+}
+
+impl QuotaSourceScan {
+    fn request(&mut self, intent: crate::daemon::QuotaRefreshIntent) {
+        match self {
+            Self::Idle => *self = Self::Queued(intent),
+            Self::Queued(pending) => *pending = coalesce_intent(*pending, intent),
+            Self::Running {
+                intent: running,
+                successor,
+                ..
+            } => {
+                let pending = successor.take().unwrap_or(*running);
+                *successor = Some(coalesce_intent(pending, intent));
+            }
+        }
+    }
+
+    fn start(
+        &mut self,
+        config: mj_core::config::Config,
+    ) -> Option<crate::daemon::QuotaRefreshIntent> {
+        let Self::Queued(intent) = self else {
+            return None;
+        };
+        let intent = *intent;
+        *self = Self::Running {
+            task: None,
+            config: Box::new(config),
+            intent,
+            successor: None,
+        };
+        Some(intent)
+    }
+
+    fn task_started(&mut self, task: tokio::task::Id) {
+        if let Self::Running { task: slot, .. } = self {
+            *slot = Some(task);
+        }
+    }
+
+    fn running(&self, task: tokio::task::Id) -> bool {
+        matches!(self, Self::Running { task: Some(current), .. } if *current == task)
+    }
+
+    fn finish(
+        &mut self,
+        task: tokio::task::Id,
+        current_config: &mj_core::config::Config,
+    ) -> Option<(crate::daemon::QuotaRefreshIntent, bool)> {
+        let Self::Running {
+            task: Some(current_task),
+            config,
+            intent,
+            successor,
+        } = self
+        else {
+            return None;
+        };
+        if *current_task != task {
+            return None;
+        }
+        let running_intent = *intent;
+        let successor = *successor;
+        let stale = config.as_ref() != current_config;
+        let rerun = stale || successor.is_some();
+        let next_intent = if rerun {
+            let followup = successor.unwrap_or(running_intent);
+            if stale {
+                coalesce_intent(followup, running_intent)
+            } else {
+                followup
+            }
+        } else {
+            running_intent
+        };
+        *self = if rerun {
+            Self::Queued(next_intent)
+        } else {
+            Self::Idle
+        };
+        Some((next_intent, rerun))
+    }
+}
+
+fn coalesce_intent(
+    left: crate::daemon::QuotaRefreshIntent,
+    right: crate::daemon::QuotaRefreshIntent,
+) -> crate::daemon::QuotaRefreshIntent {
+    if left == crate::daemon::QuotaRefreshIntent::Force
+        || right == crate::daemon::QuotaRefreshIntent::Force
+    {
+        crate::daemon::QuotaRefreshIntent::Force
+    } else {
+        crate::daemon::QuotaRefreshIntent::ReconcileSources
+    }
+}
 impl Policy {
     pub fn new(
         state: Arc<RuntimeState>,
         manager: &crate::session_manager::SessionManagerControl,
         stop: &CancellationToken,
+        quota_source_reader: super::QuotaSourceReader,
     ) -> Self {
         let catalog = ProfileCatalog::new_with_config_path(
             stop.child_token(),
@@ -110,6 +221,7 @@ impl Policy {
                 refresh,
             },
             state,
+            quota_source_reader,
             catalog,
             reports,
             rejected,
@@ -118,7 +230,7 @@ impl Policy {
             quota_rx,
             refresh_rx,
             batch: QuotaRefreshBatch::default(),
-            published: BTreeMap::new(),
+            quota_sources: QuotaSourceScan::default(),
             catalog_config: None,
             probing: Default::default(),
             cycles: 0,
@@ -142,25 +254,11 @@ impl Policy {
         };
         self.catalog.sync(&controller.config);
         self.catalog_config = Some(controller.config.clone());
-        if force {
-            self.batch.generation = self.batch.generation.saturating_add(1);
-            self.batch.profiles = quota_refresh_profiles(&controller);
-            self.batch.refresh = true;
-            self.profiles_tx.send_replace(self.batch.clone());
-            // Only this request is a refresh; a later profile-set change is not.
-            self.batch.refresh = false;
-        }
-        // A changed quota setting reaches the refresher even when the profiles
-        // did not change.
-        crate::server_runtime::republish_quota_profiles(
-            &controller,
-            &mut self.batch,
-            &self.profiles_tx,
-        );
-        if force || self.published != controller.config.profiles {
-            self.published.clone_from(&controller.config.profiles);
-        }
-        self.reconcile_publications(&self.batch.profiles.clone());
+        self.quota_sources.request(if force {
+            crate::daemon::QuotaRefreshIntent::Force
+        } else {
+            crate::daemon::QuotaRefreshIntent::ReconcileSources
+        });
     }
 
     /// Consume all queued requests together; Force dominates source-only
@@ -168,8 +266,64 @@ impl Policy {
     pub fn refresh(&mut self, first: crate::daemon::QuotaRefreshIntent) {
         match coalesce_refresh_intents(first, &mut self.refresh_rx) {
             crate::daemon::QuotaRefreshIntent::Force => self.sync(true),
-            crate::daemon::QuotaRefreshIntent::ReconcileSources => self.reconcile_sources(),
+            crate::daemon::QuotaRefreshIntent::ReconcileSources => self
+                .quota_sources
+                .request(crate::daemon::QuotaRefreshIntent::ReconcileSources),
         }
+    }
+
+    pub fn start_quota_source_scan(&mut self) -> Option<mj_core::config::Config> {
+        let config = self.state.owner().controller().config.clone();
+        self.quota_sources.start(config.clone())?;
+        Some(config)
+    }
+
+    pub fn quota_source_task_started(&mut self, task: tokio::task::Id) {
+        self.quota_sources.task_started(task);
+    }
+
+    pub fn is_quota_source_task(&self, task: tokio::task::Id) -> bool {
+        self.quota_sources.running(task)
+    }
+
+    pub fn quota_sources_finished(
+        &mut self,
+        task: tokio::task::Id,
+        result: Result<Vec<crate::quota::QuotaRefreshRequest>>,
+    ) {
+        if let Err(error) = &result {
+            tracing::warn!(%error, "quota source scan task failed");
+        }
+        let current_config = self.state.owner().controller().config.clone();
+        let Some((intent, obsolete)) = self.quota_sources.finish(task, &current_config) else {
+            return;
+        };
+        if obsolete {
+            tracing::debug!(
+                "discarding obsolete quota source scan and reconciling current sources"
+            );
+            return;
+        }
+        if let Ok(requests) = result {
+            self.apply_source_scan(intent, requests);
+        }
+    }
+
+    fn apply_source_scan(
+        &mut self,
+        intent: crate::daemon::QuotaRefreshIntent,
+        requests: Vec<crate::quota::QuotaRefreshRequest>,
+    ) {
+        if intent == crate::daemon::QuotaRefreshIntent::Force {
+            self.batch.generation = self.batch.generation.saturating_add(1);
+            self.batch.profiles = requests;
+            self.batch.refresh = true;
+            self.profiles_tx.send_replace(self.batch.clone());
+            self.batch.refresh = false;
+        } else {
+            replace_source_requests(&mut self.batch, &self.profiles_tx, requests.clone());
+        }
+        self.reconcile_publications(&self.batch.profiles.clone());
     }
 
     fn reconcile_publications(&mut self, requests: &[crate::quota::QuotaRefreshRequest]) {
@@ -195,25 +349,6 @@ impl Policy {
         }
         self.probing.retain(|id| desired.contains_key(id));
         self.publish_quotas();
-    }
-
-    fn apply_reconciled_sources(&mut self, requests: Vec<crate::quota::QuotaRefreshRequest>) {
-        replace_source_requests(&mut self.batch, &self.profiles_tx, requests.clone());
-        self.reconcile_publications(&requests);
-    }
-
-    /// Re-read native profile sources even when the daemon config is unchanged.
-    /// The Codex provider and key live in the profile home, outside config.toml.
-    fn reconcile_sources(&mut self) {
-        let controller = {
-            let owner = self.state.owner();
-            crate::controller::Controller {
-                config: owner.controller().config.clone(),
-                state: Default::default(),
-            }
-        };
-        let requests = quota_refresh_profiles(&controller);
-        self.apply_reconciled_sources(requests);
     }
 
     /// Tell every attached surface what the daemon knows about quota.
@@ -402,8 +537,45 @@ fn surface_quota_reports(reports: &QuotaReportMap) -> BTreeMap<String, ProfileQu
 mod tests {
     use super::*;
 
-    #[test]
-    fn queued_force_dominates_source_reconciliation() {
+    // Hard-won: #1487: an older native-source scan could publish over edited profile inputs.
+    #[tokio::test]
+    async fn obsolete_quota_source_scan_is_discarded_and_force_carries_forward() {
+        let old = mj_core::config::Config::default();
+        let mut current = old.clone();
+        current.profiles.insert(
+            "edited".into(),
+            mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                std::path::PathBuf::from("quota-source-edited"),
+            ),
+        );
+
+        let mut scan = QuotaSourceScan::default();
+        scan.request(crate::daemon::QuotaRefreshIntent::ReconcileSources);
+        assert_eq!(
+            scan.start(old.clone()),
+            Some(crate::daemon::QuotaRefreshIntent::ReconcileSources)
+        );
+        let task = tokio::spawn(async {});
+        let task_id = task.id();
+        task.await.unwrap();
+        scan.task_started(task_id);
+        scan.request(crate::daemon::QuotaRefreshIntent::Force);
+
+        let (intent, obsolete) = scan.finish(task_id, &current).unwrap();
+        assert!(
+            obsolete,
+            "the old scan must not be applied to edited config"
+        );
+        assert_eq!(intent, crate::daemon::QuotaRefreshIntent::Force);
+        assert_eq!(
+            scan.start(current),
+            Some(crate::daemon::QuotaRefreshIntent::Force)
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_force_dominates_source_reconciliation() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         sender
             .send(crate::daemon::QuotaRefreshIntent::ReconcileSources)
@@ -423,8 +595,29 @@ mod tests {
             crate::daemon::QuotaRefreshIntent::Force
         );
         assert!(receiver.try_recv().is_err());
+
+        let config = mj_core::config::Config::default();
+        let mut scan = QuotaSourceScan::default();
+        scan.request(crate::daemon::QuotaRefreshIntent::Force);
+        assert_eq!(
+            scan.start(config.clone()),
+            Some(crate::daemon::QuotaRefreshIntent::Force)
+        );
+        let task = tokio::spawn(async {});
+        let task_id = task.id();
+        task.await.unwrap();
+        scan.task_started(task_id);
+        scan.request(crate::daemon::QuotaRefreshIntent::ReconcileSources);
+        let (intent, obsolete) = scan.finish(task_id, &config).unwrap();
+        assert!(obsolete);
+        assert_eq!(intent, crate::daemon::QuotaRefreshIntent::Force);
+        assert_eq!(
+            scan.start(config),
+            Some(crate::daemon::QuotaRefreshIntent::Force)
+        );
     }
 
+    // Hard-won: #1487: native source edits were missed when Mjolnir config was unchanged.
     #[test]
     fn native_codex_provider_edit_republishes_only_changed_source_requests() {
         let home = tempfile::tempdir().unwrap();
@@ -460,13 +653,14 @@ mod tests {
             mj_core::config::HarnessKind::Claude,
             other_home.path().to_path_buf(),
         );
-        let controller = crate::controller::Controller {
+        let mut controller = crate::controller::Controller {
             config: mj_core::config::Config {
                 profiles: BTreeMap::from([("codex".into(), codex), ("claude".into(), claude)]),
                 ..Default::default()
             },
             state: Default::default(),
         };
+        controller.config.quota.runtime = mj_core::config::QuotaRuntimeChoice::Auto;
         let before = quota_refresh_profiles(&controller);
         let (profiles_tx, profiles_rx) = watch::channel(QuotaRefreshBatch::default());
         let mut batch = QuotaRefreshBatch {
@@ -506,6 +700,59 @@ mod tests {
                 .find(|request| request.profile_id == "claude")
                 .unwrap(),
         );
+
+        let first_generation = published.generation;
+        assert!(!replace_source_requests(
+            &mut batch,
+            &profiles_tx,
+            after.clone()
+        ));
+        assert_eq!(profiles_rx.borrow().generation, first_generation);
+
+        let added_home = tempfile::tempdir().unwrap();
+        controller.config.profiles.insert(
+            "added".into(),
+            mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Claude,
+                added_home.path().to_path_buf(),
+            ),
+        );
+        let grown = quota_refresh_profiles(&controller);
+        assert!(replace_source_requests(
+            &mut batch,
+            &profiles_tx,
+            grown.clone()
+        ));
+        assert_eq!(
+            profiles_rx
+                .borrow()
+                .profiles
+                .iter()
+                .map(|request| request.profile_id.as_str())
+                .collect::<Vec<_>>(),
+            ["added", "claude", "codex"]
+        );
+
+        controller.config.quota.runtime = mj_core::config::QuotaRuntimeChoice::Host;
+        let runtime_changed = quota_refresh_profiles(&controller);
+        assert!(replace_source_requests(
+            &mut batch,
+            &profiles_tx,
+            runtime_changed.clone()
+        ));
+        let runtime_batch = profiles_rx.borrow().clone();
+        assert!(!runtime_batch.refresh);
+        assert_eq!(
+            runtime_batch.profiles[0].runtime.choice,
+            mj_core::config::QuotaRuntimeChoice::Host
+        );
+        let runtime_generation = runtime_batch.generation;
+        assert!(!replace_source_requests(
+            &mut batch,
+            &profiles_tx,
+            runtime_changed
+        ));
+        assert_eq!(profiles_rx.borrow().generation, runtime_generation);
     }
 
     // Hard-won: #1487: an old quota result repopulated an edited profile's slot.

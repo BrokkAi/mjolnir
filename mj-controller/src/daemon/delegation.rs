@@ -83,7 +83,12 @@ enum Completed {
     Executed(StoredDelegationResult, bool),
     Delivered,
     Unaccepted,
+    QuotaSources(Vec<crate::quota::QuotaRefreshRequest>),
 }
+
+type QuotaSourceReader = Arc<
+    dyn Fn(crate::controller::Controller) -> Vec<crate::quota::QuotaRefreshRequest> + Send + Sync,
+>;
 
 pub(crate) fn spawn(
     state: Arc<RuntimeState>,
@@ -91,7 +96,28 @@ pub(crate) fn spawn(
     updates: DelegationUpdates,
     cancellation: CancellationToken,
 ) -> (Services, tokio::task::JoinHandle<Result<()>>) {
-    let policy = policy::Policy::new(state.clone(), &manager, &cancellation);
+    spawn_with_quota_source_reader(
+        state,
+        manager,
+        updates,
+        cancellation,
+        Arc::new(|controller| crate::pollers::quota_refresh_profiles(&controller)),
+    )
+}
+
+fn spawn_with_quota_source_reader(
+    state: Arc<RuntimeState>,
+    manager: SessionManagerControl,
+    updates: DelegationUpdates,
+    cancellation: CancellationToken,
+    quota_source_reader: QuotaSourceReader,
+) -> (Services, tokio::task::JoinHandle<Result<()>>) {
+    let policy = policy::Policy::new(
+        state.clone(),
+        &manager,
+        &cancellation,
+        quota_source_reader.clone(),
+    );
     let services = policy.services.clone();
     let task = tokio::spawn(run(state, updates, policy, cancellation));
     (services, task)
@@ -129,6 +155,18 @@ async fn run(
     let mut quota_open = true;
     let mut refresh_open = true;
     loop {
+        if let Some(config) = policy.start_quota_source_scan() {
+            let controller = crate::controller::Controller {
+                config,
+                state: Default::default(),
+            };
+            let reader = policy.quota_source_reader.clone();
+            let task = jobs.spawn(async move {
+                let requests = quota_source_scan(move || reader(controller)).await?;
+                Ok(Completed::QuotaSources(requests))
+            });
+            policy.quota_source_task_started(task.id());
+        }
         if !crate::upgrade::is_draining() {
             for (id, job) in dispatch.ready(Instant::now()) {
                 let backend = backend.clone();
@@ -232,6 +270,21 @@ async fn run(
                     Ok((id, result)) => (id, result),
                     Err(error) => (error.id(), Err(anyhow::Error::from(error))),
                 };
+                if policy.is_quota_source_task(task_id) {
+                    match result {
+                        Ok(Completed::QuotaSources(requests)) => {
+                            policy.quota_sources_finished(task_id, Ok(requests));
+                        }
+                        Ok(_) => {
+                            policy.quota_sources_finished(
+                                task_id,
+                                Err(anyhow::anyhow!("quota source scan returned the wrong result")),
+                            );
+                        }
+                        Err(error) => policy.quota_sources_finished(task_id, Err(error)),
+                    }
+                    continue;
+                }
                 if let Some(id) = identities.remove(&task_id) {
                     match result {
                         Ok(Completed::Executed(result, delivered)) => {
@@ -245,6 +298,9 @@ async fn run(
                             dispatch.delivered(&id, true);
                         }
                         Ok(Completed::Unaccepted) => dispatch.unaccepted(&id),
+                        Ok(Completed::QuotaSources(_)) => {
+                            tracing::error!("untracked quota source scan completion");
+                        }
                         Err(error) => {
                             tracing::warn!(parent_session_id = %id.0, request_id = %id.1, %error, "delegation task failed");
                             dispatch.failed_task(&id);
@@ -314,6 +370,14 @@ async fn run(
         }
     }
     Ok(())
+}
+
+async fn quota_source_scan(
+    read: impl FnOnce() -> Vec<crate::quota::QuotaRefreshRequest> + Send + 'static,
+) -> Result<Vec<crate::quota::QuotaRefreshRequest>> {
+    tokio::task::spawn_blocking(read)
+        .await
+        .context("quota source scan blocking task failed")
 }
 
 async fn complete_child(
@@ -512,6 +576,148 @@ mod tests {
     use crate::server_runtime::api::ExportRuntime;
     use mj_client::session::BoxFuture;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Hard-won: #1487: native provider source reads blocked unrelated daemon events.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_quota_source_read_does_not_block_runtime_revision_handling() {
+        const CHILD: &str = "MJ_TEST_QUOTA_SOURCE_DISPATCH";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(
+                module_path!(),
+                "slow_quota_source_read_does_not_block_runtime_revision_handling",
+            ))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "quota-source-dispatch-1487")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let manager = crate::session_manager::spawn_session_manager().unwrap();
+        let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
+        let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+            manager.control.clone(),
+            &recovery.observer(),
+        );
+        let source_home = tempfile::tempdir().unwrap();
+        let mut initial_config = mj_core::config::Config::default();
+        initial_config.profiles.insert(
+            "claude".into(),
+            mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Claude,
+                source_home.path().to_path_buf(),
+            ),
+        );
+        let initial = crate::controller::Controller {
+            config: initial_config.clone(),
+            state: Default::default(),
+        };
+        let state = Arc::new(crate::daemon::RuntimeState::new_with_controller_loader(
+            manager.control.clone(),
+            initial,
+            recovery.observer(),
+            upgrades.observer(),
+            Vec::new(),
+            || {
+                Ok(crate::controller::Controller {
+                    config: mj_core::config::Config::default(),
+                    state: Default::default(),
+                })
+            },
+        ));
+        let (feed, updates) = crate::session_manager::delegation_channel();
+        let (first_done_tx, first_done_rx) = tokio::sync::oneshot::channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_done_tx = Arc::new(std::sync::Mutex::new(Some(first_done_tx)));
+        let started_tx = Arc::new(std::sync::Mutex::new(Some(started_tx)));
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reader_calls = calls.clone();
+        let reader_first_done = first_done_tx.clone();
+        let reader_started = started_tx.clone();
+        let reader_release = release_rx.clone();
+        let reader = Arc::new(move |_controller| {
+            let call = reader_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 1 {
+                if let Some(started_tx) = reader_started
+                    .lock()
+                    .expect("started signal poisoned")
+                    .take()
+                {
+                    let _ = started_tx.send(());
+                }
+                reader_release
+                    .lock()
+                    .expect("release receiver poisoned")
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("test releases the blocked source reader");
+            }
+            if call == 0
+                && let Some(first_done_tx) = reader_first_done
+                    .lock()
+                    .expect("first completion signal poisoned")
+                    .take()
+            {
+                let _ = first_done_tx.send(());
+            }
+            // This regression exercises dispatcher ownership, never providers
+            // or platform credential stores.
+            Vec::new()
+        });
+        let stop = CancellationToken::new();
+        let (services, task) = spawn_with_quota_source_reader(
+            state.clone(),
+            manager.control.clone(),
+            updates,
+            stop.clone(),
+            reader,
+        );
+        let _feed = feed;
+        tokio::time::timeout(Duration::from_secs(5), first_done_rx)
+            .await
+            .expect("the production dispatcher should finish its initial source scan")
+            .unwrap();
+        assert!(matches!(
+            services.backend.quota_report("claude", "old-identity"),
+            Ok(crate::server_runtime::api::QuotaRead::Pending(_))
+        ));
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .expect("source reconciliation should dispatch another source scan")
+            .unwrap();
+
+        let synced = {
+            let mut owner = state.owner();
+            let mut config = owner.controller().config.clone();
+            config.phone.enabled = !config.phone.enabled;
+            owner.install_config(config.clone());
+            let catalog = state
+                .profile_catalog
+                .get()
+                .expect("Policy installs the profile catalog")
+                .clone();
+            drop(owner);
+            state.publish_revision();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if catalog.live().is_ok_and(|live| live == config) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+        };
+        release_tx.send(()).unwrap();
+        synced.expect("the delegation loop should sync config while source I/O is blocked");
+        assert!(calls.load(Ordering::SeqCst) >= 1);
+
+        stop.cancel();
+        task.await.unwrap().unwrap();
+    }
 
     struct BusyThenParked(AtomicUsize);
     impl ExportRuntime for BusyThenParked {

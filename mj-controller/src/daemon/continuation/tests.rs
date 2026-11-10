@@ -224,8 +224,9 @@ async fn continuation_checks_run_concurrently_and_defer_review_until_each_settle
     remote.shutdown.shutdown().await.unwrap();
 }
 
+// Hard-won: #1487: disconnected first attachment consumed the same-turn recovery trigger.
 #[tokio::test]
-async fn continuation_ignores_disconnected_turns_and_new_input_cancels_a_check() {
+async fn continuation_rechecks_disconnected_attachment_once_and_new_input_cancels_it() {
     let remote = spawn_remote_session_manager().unwrap();
     remote.targets.send_replace(
         ["one", "two"]
@@ -277,12 +278,6 @@ async fn continuation_ignores_disconnected_turns_and_new_input_cancels_a_check()
     assert!(requests.try_recv().is_err());
     remote
         .publisher
-        .publish("one".into(), view("one", false))
-        .await
-        .unwrap();
-    receive(&mut updates).await;
-    remote
-        .publisher
         .publish("one".into(), view("one", true))
         .await
         .unwrap();
@@ -291,6 +286,23 @@ async fn continuation_ignores_disconnected_turns_and_new_input_cancels_a_check()
         .await
         .unwrap()
         .unwrap();
+    let mut same_turn = view("one", true);
+    same_turn
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .latest_ordinal += 1;
+    remote
+        .publisher
+        .publish("one".into(), same_turn)
+        .await
+        .unwrap();
+    receive(&mut updates).await;
+    assert!(
+        requests.try_recv().is_err(),
+        "the reconnected turn is classified once"
+    );
     let mut next = view("one", true);
     next.snapshot.as_mut().unwrap().operational.continuation = ContinuationState {
         user_command_id: Some("new-request".into()),
@@ -914,26 +926,20 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
             classifier,
         );
         let mut before = view("one", true);
-        // The prior prompted turn was cancelled; the new self-started turn
-        // alone should trigger classification, including on first attachment.
-        before
-            .snapshot
-            .as_mut()
-            .unwrap()
-            .materialized
-            .last_turn_outcome
-            .as_mut()
-            .unwrap()
-            .outcome = TurnOutcomeKind::Completed {
-            stop_reason: "cancelled".into(),
-        };
+        // Keep the preceding prompted completion cancelled in both views;
+        // only protocols that understand the new harness turn may classify it.
         let mut after = self_started("one", "You've hit your session limit · resets 1:40pm");
         for v in [&mut before, &mut after] {
-            v.snapshot
+            let snapshot = v.snapshot.as_mut().unwrap();
+            snapshot
+                .materialized
+                .last_turn_outcome
                 .as_mut()
                 .unwrap()
-                .operational
-                .relay_protocol_version = Some(protocol);
+                .outcome = TurnOutcomeKind::Completed {
+                stop_reason: "cancelled".into(),
+            };
+            snapshot.operational.relay_protocol_version = Some(protocol);
         }
         remote
             .publisher
@@ -2165,6 +2171,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
     let _writer = crate::database::install_isolated_test_writer();
     for case in [
         "ready",
+        "assessment-reconnect",
         "failure",
         "identity",
         "input",
@@ -2279,7 +2286,54 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             classifier.clone(),
             gate.clone(),
         );
-        let blocked = view("one", true);
+        let mut blocked = view("one", true);
+        if case == "assessment-reconnect" {
+            use mj_core::assessment::{
+                Action, Failure, Input, Judgment, Status, TurnAssessment, Verdict, Work,
+            };
+            let snapshot = blocked.snapshot.as_mut().unwrap();
+            let operational = &mut snapshot.operational;
+            operational.relay_protocol_version = Some(mj_core::assessment::PROTOCOL);
+            operational.assessment_context = Some(Default::default());
+            let mut assessment = TurnAssessment::pending(
+                "request".into(),
+                3,
+                3,
+                mj_core::activity::verdict::CompletionEvidence::bounded("turn_completed", None),
+            );
+            assessment.verdict = Some(Verdict {
+                failure: Judgment {
+                    choice: Failure::Quota,
+                    confidence: 0.99,
+                    probabilities: Default::default(),
+                },
+                input: Judgment {
+                    choice: Input::Unclear,
+                    confidence: 0.5,
+                    probabilities: Default::default(),
+                },
+                work: Judgment {
+                    choice: Work::Unclear,
+                    confidence: 0.5,
+                    probabilities: Default::default(),
+                },
+                background: None,
+                reply: None,
+            });
+            assessment.action = Some(Action::RecoverQuota);
+            assessment.status = Status::Deferred;
+            operational.assessment = Some(Box::new(assessment));
+            let mut disconnected = blocked.clone();
+            disconnected.connected = false;
+            remote
+                .publisher
+                .publish("one".into(), disconnected)
+                .await
+                .unwrap();
+            receive(&mut updates).await;
+            assert!(preparations.try_recv().is_err());
+            assert!(classifications.try_recv().is_err());
+        }
         // Initial attachment alone must rediscover a legacy turn after handoff.
         remote
             .publisher
@@ -2287,15 +2341,22 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             .await
             .unwrap();
         receive(&mut updates).await;
-        observed(classifications.recv())
-            .await
-            .unwrap()
-            .send(Ok(ContinuationVerdict {
-                quota_limit: if case == "complete" { 0.0 } else { 0.99 },
-                unfinished: 0.0,
-                no_input_needed: 0.0,
-            }))
-            .unwrap();
+        if case != "assessment-reconnect" {
+            observed(classifications.recv())
+                .await
+                .unwrap()
+                .send(Ok(ContinuationVerdict {
+                    quota_limit: if case == "complete" { 0.0 } else { 0.99 },
+                    unfinished: 0.0,
+                    no_input_needed: 0.0,
+                }))
+                .unwrap();
+        } else {
+            assert!(
+                classifications.try_recv().is_err(),
+                "worker assessment is already durable"
+            );
+        }
         receive(&mut updates).await;
         if case == "complete" {
             assert!(
