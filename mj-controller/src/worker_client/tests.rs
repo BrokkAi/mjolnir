@@ -4637,7 +4637,7 @@ async fn a_triggered_sync_reports_the_session_it_reached_with_nothing_to_change(
         triggered,
         [CredentialSyncOutcome {
             unchanged_login: Some(CredentialSnapshot::of(
-                HarnessKind::Codex,
+                mj_core::config::HarnessKind::Codex,
                 &codex_login("2026-09-25T20:00:00.000Z"),
             )),
             session_id: SESSION_ID.into(),
