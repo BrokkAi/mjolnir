@@ -62,7 +62,7 @@ pub struct AttentionEntry {
 
 /// Keep workspace preference stable while attention navigation changes tabs.
 pub(crate) struct AttentionNavigation {
-    session_id: String,
+    pub(super) session_id: String,
     workspace_id: Option<String>,
 }
 

@@ -2611,6 +2611,51 @@ fn golden_attention_navigation() {
     )
     .unwrap();
 
+    for switch_workspace in [false, true] {
+        let mut interrupted = dashboard_with_attention_mix();
+        interrupted
+            .state
+            .sessions
+            .get_mut("done")
+            .unwrap()
+            .workspace_id = "third".into();
+        interrupted
+            .state
+            .sessions
+            .get_mut("quiet")
+            .unwrap()
+            .workspace_id = "other".into();
+        for (id, activity) in [("asks", 40), ("remote", 30), ("done", 20), ("quiet", 10)] {
+            let detail = interrupted.session_details.get_mut(id).unwrap();
+            detail.pending_elicitations = vec![question(id)];
+            detail.last_activity_at_ms = Some(activity);
+        }
+        interrupted.set_active_workspace(Some("default".into()));
+        interrupted.select_active_session("asks");
+        let action = chord(&mut interrupted, CommandId::NextAttention);
+        assert_eq!(
+            action,
+            DashboardAction::SelectWorkspace {
+                workspace_id: "other".into()
+            }
+        );
+        interrupted.set_active_workspace(Some("other".into()));
+        interrupted.take_navigation_session();
+        if switch_workspace {
+            interrupted.set_active_workspace(Some("default".into()));
+            interrupted.set_active_workspace(Some("other".into()));
+        } else {
+            interrupted.select_active_session("remote");
+        }
+        // Hard-won: 01e5b6981: restoring the same selection retained an earlier workspace's preference.
+        let action = chord(&mut interrupted, CommandId::NextAttention);
+        writeln!(
+            output,
+            "same selection after manual workspace switch={switch_workspace}: {action:?}"
+        )
+        .unwrap();
+    }
+
     let mut folded = dashboard_with_attention_mix();
     folded.set_active_workspace(Some("default".into()));
     let before_fold = append_attention_state(

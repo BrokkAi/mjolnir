@@ -69,6 +69,7 @@ impl DashboardState {
         if self.navigation.layout().focused() != pane {
             return;
         }
+        self.attention_navigation = None;
         self.mark_layout_modified();
         self.clamp_selections();
     }

@@ -280,6 +280,15 @@ impl DashboardState {
             self.clamp_selections();
             return;
         }
+        // Only the pending attention jump continues the traversal across tabs.
+        let attention_navigation = self.attention_navigation.take().filter(|navigation| {
+            self.navigation_session.as_deref() == Some(navigation.session_id.as_str())
+                && self
+                    .state
+                    .sessions
+                    .get(&navigation.session_id)
+                    .is_some_and(|session| Some(&session.workspace_id) == workspace_id.as_ref())
+        });
         let workspace_focused = self.focus == Focus::Workspaces;
         if let Some(current) = self.active_workspace_id.clone() {
             self.workspace_views
@@ -371,6 +380,7 @@ impl DashboardState {
         if workspace_focused {
             self.focus = Focus::Workspaces;
         }
+        self.attention_navigation = attention_navigation;
     }
 
     /// Applies a controller-provided pane-size cache unless this client has
@@ -428,6 +438,7 @@ impl DashboardState {
         if !self.state.sessions.contains_key(session_id) && !unloaded_child {
             return;
         }
+        self.attention_navigation = None;
         let pane = self
             .pane_for_session(session_id)
             .unwrap_or(self.browse_pane());
