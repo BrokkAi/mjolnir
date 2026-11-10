@@ -80,9 +80,9 @@ impl QuotaRuntime {
     /// the container has no engine to start one with.
     ///
     /// `host_has_harness` says whether this host can already run the harness
-    /// the check needs (see [`crate::codex_usage::host_has_codex`],
-    /// [`crate::grok_usage::host_has_grok`] and
-    /// [`crate::claude_usage::host_has_claude`]).
+    /// the check needs (see [`crate::codex_usage::host_has_codex`]
+    /// and [`crate::grok_usage::host_has_grok`]). A Claude check runs the
+    /// pinned managed installation, so it always says true.
     ///
     /// `Auto` runs the check on this host when `host_has_harness` is true.
     /// Otherwise it uses a container for an enabled local Podman or Docker

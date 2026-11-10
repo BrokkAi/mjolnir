@@ -70,12 +70,30 @@ pub fn spawn_quota_refresher(
     tokio::sync::watch::Sender<QuotaRefreshBatch>,
     tokio::sync::mpsc::Receiver<QuotaUpdate>,
 ) {
+    spawn_quota_refresher_with(cache, crate::claude_usage::ClaudeLauncher::Managed)
+}
+
+/// [`spawn_quota_refresher`] with the program Claude grant renewals run.
+pub(super) fn spawn_quota_refresher_with(
+    cache: QuotaCacheLoader,
+    launcher: crate::claude_usage::ClaudeLauncher,
+) -> (
+    tokio::sync::watch::Sender<QuotaRefreshBatch>,
+    tokio::sync::mpsc::Receiver<QuotaUpdate>,
+) {
     let (profiles_tx, mut profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
     let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(32);
     // Grant renewal is its own task: a slow lock, container start or
     // `claude auth login` must not hold up a probe, and a usage hold must
     // not hold up a renewal.
-    spawn_claude_grant_refresher(profiles_tx.subscribe(), QUOTA_REFRESH_INTERVAL);
+    spawn_claude_grant_refresher(
+        profiles_tx.subscribe(),
+        QUOTA_REFRESH_INTERVAL,
+        GrantRenewal {
+            launcher,
+            gate: crate::upgrade::gate().clone(),
+        },
+    );
     tokio::spawn(async move {
         // A daemon that stopped mid-check left its quota container running;
         // this instance owns it, and nothing else will remove it. Unit tests
@@ -152,6 +170,13 @@ pub fn spawn_quota_refresher(
 /// loop. This is a back-off, not a limit: the due time otherwise decides.
 const CLAUDE_GRANT_MINIMUM_WAIT: Duration = Duration::from_secs(5);
 
+/// What a grant renewal runs, and the handoff gate it takes admission from.
+#[derive(Clone)]
+pub(super) struct GrantRenewal {
+    pub(super) launcher: crate::claude_usage::ClaudeLauncher,
+    pub(super) gate: Arc<crate::upgrade::Gate>,
+}
+
 /// Keep every Claude profile's grant renewed (#1490): the daemon is the only
 /// refresher, because session copies hold no refresh token. This task is the
 /// one owner of that decision. It follows the same batches as the quota
@@ -162,6 +187,7 @@ const CLAUDE_GRANT_MINIMUM_WAIT: Duration = Duration::from_secs(5);
 pub(super) fn spawn_claude_grant_refresher(
     mut batches: tokio::sync::watch::Receiver<QuotaRefreshBatch>,
     recheck: Duration,
+    renewal: GrantRenewal,
 ) {
     tokio::spawn(async move {
         let mut tasks = tokio::task::JoinSet::new();
@@ -177,6 +203,7 @@ pub(super) fn spawn_claude_grant_refresher(
                     request.clone(),
                     batches.clone(),
                     recheck,
+                    renewal.clone(),
                 ));
                 running.insert(handle.id(), request.clone());
             }
@@ -219,6 +246,7 @@ async fn renew_claude_grant_when_due(
     request: QuotaRefreshRequest,
     mut batches: tokio::sync::watch::Receiver<QuotaRefreshBatch>,
     recheck: Duration,
+    renewal: GrantRenewal,
 ) {
     loop {
         let current = {
@@ -234,7 +262,14 @@ async fn renew_claude_grant_when_due(
             return;
         }
         let now_ms = mj_core::clock::epoch_millis();
-        let wait = match crate::quota::refresh_claude_grant(&request, now_ms).await {
+        let wait = match crate::quota::refresh_claude_grant(
+            &request,
+            now_ms,
+            &renewal.launcher,
+            &renewal.gate,
+        )
+        .await
+        {
             // Applicability follows from the request, so only a changed
             // batch can alter it.
             crate::quota::ClaudeGrantCheck::NotApplicable => None,

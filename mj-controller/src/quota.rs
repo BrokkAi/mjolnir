@@ -516,7 +516,12 @@ pub enum ClaudeGrantCheck {
 /// the only refresher: session copies carry no refresh token. This is the
 /// decision's one owner and runs apart from the usage probe, so a 429 hold on
 /// the usage API never postpones it.
-pub async fn refresh_claude_grant(request: &QuotaRefreshRequest, now_ms: i64) -> ClaudeGrantCheck {
+pub(crate) async fn refresh_claude_grant(
+    request: &QuotaRefreshRequest,
+    now_ms: i64,
+    launcher: &claude_usage::ClaudeLauncher,
+    gate: &std::sync::Arc<crate::upgrade::Gate>,
+) -> ClaudeGrantCheck {
     // macOS keeps the login in the Keychain, which only Claude Code reads.
     if request.harness != HarnessKind::Claude
         || !request.auth_scheme.uses_native_login_file()
@@ -529,15 +534,10 @@ pub async fn refresh_claude_grant(request: &QuotaRefreshRequest, now_ms: i64) ->
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<HashMap<_, _>>();
-    let host_path = environment
-        .get("PATH")
-        .map(std::ffi::OsString::from)
-        .or_else(|| std::env::var_os("PATH"));
-    let container = match quota_container(
-        &request.runtime,
-        &request.source_home,
-        claude_usage::host_has_claude(host_path.as_deref()),
-    ) {
+    // Mjolnir's pinned Claude Code runs on this host, so a container is used
+    // only where `[quota] runtime` names an engine (or the daemon itself runs
+    // in one): never because `claude` is missing from PATH.
+    let container = match quota_container(&request.runtime, &request.source_home, true) {
         Ok(container) => container,
         Err(error) => {
             tracing::warn!(
@@ -557,6 +557,8 @@ pub async fn refresh_claude_grant(request: &QuotaRefreshRequest, now_ms: i64) ->
         environment,
         executor,
         container,
+        launcher,
+        gate,
         now_ms,
     )
     .await
@@ -564,6 +566,8 @@ pub async fn refresh_claude_grant(request: &QuotaRefreshRequest, now_ms: i64) ->
         Ok(claude_usage::GrantRefresh::NotRefreshable) => {
             ClaudeGrantCheck::Waiting { due_at_ms: None }
         }
+        // Due, but a handoff is waiting: the next daemon decides again.
+        Ok(claude_usage::GrantRefresh::Deferred) => ClaudeGrantCheck::Waiting { due_at_ms: None },
         Ok(claude_usage::GrantRefresh::Current { due_at_ms }) => ClaudeGrantCheck::Waiting {
             due_at_ms: Some(due_at_ms),
         },
@@ -815,7 +819,7 @@ async fn refresh_profile_with_cache_root(
         HarnessKind::Claude => match if cfg!(target_os = "macos") {
             Ok(None)
         } else {
-            container(claude_usage::host_has_claude(host_path.as_deref()))
+            container(true)
         } {
             Err(error) => Err(error),
             Ok(container) => claude_usage::query(source_home, environment, container)

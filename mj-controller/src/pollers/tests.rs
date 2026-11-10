@@ -439,12 +439,41 @@ fn poller_with_store(
     tokio::sync::watch::Sender<QuotaRefreshBatch>,
     tokio::sync::mpsc::Receiver<QuotaUpdate>,
 ) {
-    spawn_quota_refresher(Arc::new(move |request: &QuotaRefreshRequest| {
-        stored
-            .iter()
-            .find(|report| report.profile_id == request.profile_id)
-            .cloned()
-    }))
+    poller_with_launcher(stored, crate::claude_usage::ClaudeLauncher::Managed)
+}
+
+/// [`poller_with_store`] whose Claude grant renewals run `launcher`, so a test
+/// never reaches the managed Claude Code installation.
+fn poller_with_launcher(
+    stored: Vec<crate::quota::ProfileQuota>,
+    launcher: crate::claude_usage::ClaudeLauncher,
+) -> (
+    tokio::sync::watch::Sender<QuotaRefreshBatch>,
+    tokio::sync::mpsc::Receiver<QuotaUpdate>,
+) {
+    spawn_quota_refresher_with(
+        Arc::new(move |request: &QuotaRefreshRequest| {
+            stored
+                .iter()
+                .find(|report| report.profile_id == request.profile_id)
+                .cloned()
+        }),
+        launcher,
+    )
+}
+
+/// The renewal program of a [`renewable_claude_profile`] in `directory`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn fake_claude(directory: &std::path::Path) -> crate::claude_usage::ClaudeLauncher {
+    crate::claude_usage::ClaudeLauncher::Program(directory.join("bin/claude"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_gate_renewal(directory: &std::path::Path) -> GrantRenewal {
+    GrantRenewal {
+        launcher: fake_claude(directory),
+        gate: crate::upgrade::gate().clone(),
+    }
 }
 
 fn batch(generation: u64, refresh: bool, ids: &[&str]) -> QuotaRefreshBatch {
@@ -684,7 +713,8 @@ async fn a_held_claude_profile_still_renews_its_grant_early() {
     let mut held = stored_report("claude1", QUOTA_REFRESH_INTERVAL.as_secs() + 600);
     held.harness = mj_core::config::HarnessKind::Claude;
     held.rate_limited_until_epoch_seconds = Some(epoch_seconds() + 3_600);
-    let (profiles, mut updates) = poller_with_store(vec![held.clone()]);
+    let (profiles, mut updates) =
+        poller_with_launcher(vec![held.clone()], fake_claude(directory.path()));
     profiles.send_replace(QuotaRefreshBatch {
         generation: 1,
         refresh: false,
@@ -731,7 +761,7 @@ async fn the_poller_wakes_for_every_renewal_with_only_grant_only_profiles() {
         i64::try_from(crate::claude_usage::GRANT_REFRESH_LEAD.as_millis()).unwrap() + 3_000;
     let (request, credentials) =
         renewable_claude_profile(directory.path(), "claude1", lifetime, ONE_HOUR_MS);
-    let (profiles, mut updates) = poller_with_store(Vec::new());
+    let (profiles, mut updates) = poller_with_launcher(Vec::new(), fake_claude(directory.path()));
     profiles.send_replace(QuotaRefreshBatch {
         generation: 1,
         refresh: false,
@@ -754,6 +784,49 @@ async fn the_poller_wakes_for_every_renewal_with_only_grant_only_profiles() {
     assert_quiet(&mut updates).await;
 }
 
+/// #1490 review: a renewal that has not begun is skipped while a daemon
+/// handoff waits (its admission is refused), so the handoff is never held for
+/// one and a refresh-token exchange is never cut short by it. The next daemon
+/// decides again from the file.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn a_due_claude_renewal_is_skipped_while_a_handoff_waits() {
+    let directory = tempfile::tempdir().unwrap();
+    let (request, credentials) =
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, ONE_HOUR_MS);
+    let gate = Arc::new(crate::upgrade::Gate::default());
+    // Control work is running and a handoff asks to close: the gate drains.
+    let running = gate.enter("session lifecycle").unwrap();
+    assert!(!gate.try_close());
+    let (_batches, receiver) = tokio::sync::watch::channel(QuotaRefreshBatch {
+        generation: 1,
+        refresh: false,
+        profiles: Vec::new(),
+        grants: vec![request],
+    });
+    spawn_claude_grant_refresher(
+        receiver,
+        Duration::from_millis(300),
+        GrantRenewal {
+            launcher: fake_claude(directory.path()),
+            gate: gate.clone(),
+        },
+    );
+    // Several rechecks pass; none starts the exchange.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        std::fs::read_to_string(&credentials)
+            .unwrap()
+            .contains("access-1"),
+        "a renewal started while a handoff was waiting"
+    );
+    assert!(
+        !credentials.with_file_name("renewals").exists(),
+        "the renewal program ran"
+    );
+    drop(running);
+}
+
 /// #1490 review: a profile reconfigured under the same ID (another home) is
 /// renewed at once under its new home, not after the old home's schedule.
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -766,7 +839,7 @@ async fn a_reconfigured_claude_profile_is_renewed_under_its_new_home_at_once() {
         renewable_claude_profile(first.path(), "claude1", EIGHT_HOURS_MS, 7 * ONE_HOUR_MS);
     let (new_home, new_credentials) =
         renewable_claude_profile(second.path(), "claude1", EIGHT_HOURS_MS, ONE_HOUR_MS);
-    let (profiles, _updates) = poller_with_store(Vec::new());
+    let (profiles, _updates) = poller_with_launcher(Vec::new(), fake_claude(first.path()));
     let batch = |request| QuotaRefreshBatch {
         generation: 1,
         refresh: false,
@@ -811,7 +884,11 @@ async fn a_replaced_claude_login_with_a_sooner_expiry_is_renewed_within_a_rechec
         profiles: vec![request],
         grants: Vec::new(),
     });
-    spawn_claude_grant_refresher(receiver, Duration::from_secs(1));
+    spawn_claude_grant_refresher(
+        receiver,
+        Duration::from_secs(1),
+        open_gate_renewal(directory.path()),
+    );
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
         std::fs::read_to_string(&credentials)
