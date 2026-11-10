@@ -29,7 +29,18 @@ gateway; use `--subnet` for another public subnet in that zone. The command
 creates a tagged Elastic IP (stable across stop/start), a dedicated SSH key,
 and a security group allowing SSH only from the
 controller's discovered public IPv4, or the explicit `--ssh-cidr`. It requires
-IMDSv2 and uses an encrypted 200 GiB gp3 root disk; `--disk-gib` changes its size.
+IMDSv2 and uses an encrypted 200 GiB gp3 root disk. `--disk-gib` sets its size,
+`--disk-mbps` sets throughput in MiB/s, and `--disk-iops` sets provisioned IOPS.
+Omitted performance options use AWS's gp3 defaults (125 MiB/s and 3,000 IOPS).
+AWS validates the requested size/performance combination against its
+[gp3 limits](https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html).
+For example:
+
+```console
+mj ec2 create c8id.16xlarge --zone us-east-1a --name builder \
+  --disk-gib 512 --disk-mbps 500 --disk-iops 12000
+```
+
 The image supplies the root filesystem (ext4); it is separate from local SSDs.
 
 Instances with local NVMe SSDs, such as C8id or M8id, automatically use those

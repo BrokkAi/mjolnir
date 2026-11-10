@@ -70,6 +70,12 @@ struct CreateArgs {
     /// Encrypted gp3 root disk size in GiB; separate from local SSDs.
     #[arg(long, default_value_t = 200)]
     disk_gib: u32,
+    /// EBS gp3 throughput in MiB/s. Omitted uses the AWS default.
+    #[arg(long)]
+    disk_mbps: Option<u32>,
+    /// EBS gp3 provisioned IOPS. Omitted uses the AWS default.
+    #[arg(long)]
+    disk_iops: Option<u32>,
     /// Require local NVMe storage (used automatically when available).
     /// ZFS/lz4 holds Podman and mbx; stop/start clears this storage.
     #[arg(long)]
@@ -447,11 +453,25 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             .context("AWS returned no security group ID")?;
         cloud.ec2("authorize-security-group-ingress", json!({"GroupId":group_id,"IpPermissions":[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":cidr}]}]}))?;
         let bootstrap = bootstrap(local_nvme);
+        let mut ebs = json!({
+            "VolumeSize": args.disk_gib,
+            "VolumeType": "gp3",
+            "Encrypted": true,
+            "DeleteOnTermination": true,
+        });
+        // AWS owns gp3 limits and the size/IOPS/throughput ratios, including
+        // regional differences; omitted performance settings use its defaults.
+        if let Some(mbps) = args.disk_mbps {
+            ebs["Throughput"] = mbps.into();
+        }
+        if let Some(iops) = args.disk_iops {
+            ebs["Iops"] = iops.into();
+        }
         let launched = cloud.ec2("run-instances", json!({
             "ImageId":ami,"InstanceType":args.instance_type,"MinCount":1,"MaxCount":1,
             "KeyName":key_name,"ClientToken":record.operation,"Placement":{"AvailabilityZone":args.zone},
             "NetworkInterfaces":[{"DeviceIndex":0,"SubnetId":subnet_id,"Groups":[group_id],"AssociatePublicIpAddress":true,"DeleteOnTermination":true}],
-            "BlockDeviceMappings":[{"DeviceName":root_device,"Ebs":{"VolumeSize":args.disk_gib,"VolumeType":"gp3","Encrypted":true,"DeleteOnTermination":true}}],
+            "BlockDeviceMappings":[{"DeviceName":root_device,"Ebs":ebs}],
             "MetadataOptions":{"HttpTokens":"required","HttpEndpoint":"enabled"},
             "UserData":base64::engine::general_purpose::STANDARD.encode(bootstrap),
             "TagSpecifications":[tags(&record,"instance"),tags(&record,"volume")]
@@ -953,6 +973,7 @@ sudo -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 podman info --format '{{{{.Host.Se
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     // A subprocess fixture checks the AWS CLI's actual argv/JSON boundary and
     // failure ordering. It never reads real credentials or contacts AWS.
@@ -1002,6 +1023,13 @@ elif op == 'run-instances':
     assert request['MetadataOptions']['HttpTokens'] == 'required'
     assert request['BlockDeviceMappings'][0]['Ebs']['DeleteOnTermination'] is True
     assert request['BlockDeviceMappings'][0]['Ebs']['Encrypted'] is True
+    ebs = request['BlockDeviceMappings'][0]['Ebs']
+    if (root/'ebs-settings').exists():
+        expected = json.loads((root/'ebs-settings').read_text())
+        assert {key:ebs[key] for key in expected} == expected
+    else:
+        assert ebs['VolumeSize'] == 200
+        assert 'Throughput' not in ebs and 'Iops' not in ebs
     import base64
     bootstrap = base64.b64decode(request['UserData']).decode()
     if (root/'nvme').exists():
@@ -1086,6 +1114,8 @@ print(json.dumps(response))
             subnet: None,
             ssh_cidr: Some("192.0.2.3/32".into()),
             disk_gib: 200,
+            disk_mbps: None,
+            disk_iops: None,
             zfs_cache: false,
             json: true,
         }
@@ -1101,7 +1131,40 @@ print(json.dumps(response))
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         let bin = fixture.join("bin");
         let root = config_dir().join("ec2");
-        create(create_args(), &root).unwrap();
+        fs::write(
+            bin.join("ebs-settings"),
+            r#"{"VolumeSize":512,"Throughput":500,"Iops":12000}"#,
+        )
+        .unwrap();
+        let cli = crate::Cli::try_parse_from([
+            "mj",
+            "--instance",
+            "ec2-fixture",
+            "ec2",
+            "create",
+            "c8id.16xlarge",
+            "--zone",
+            "us-east-1a",
+            "--name",
+            "builder",
+            "--ssh-cidr",
+            "192.0.2.3/32",
+            "--disk-gib",
+            "512",
+            "--disk-mbps",
+            "500",
+            "--disk-iops",
+            "12000",
+            "--json",
+        ])
+        .unwrap();
+        let Some(crate::Command::Ec2(Ec2Args {
+            command: Ec2Command::Create(args),
+        })) = cli.command
+        else {
+            panic!("expected EC2 create command");
+        };
+        create(args, &root).unwrap();
         let record = records(&root).unwrap().pop().unwrap();
         // Hard-won: #1481: a terminated VM with the same target blocked teardown.
         fs::write(bin.join("historical"), "").unwrap();
