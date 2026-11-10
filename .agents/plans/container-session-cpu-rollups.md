@@ -15,8 +15,9 @@ This changes CPU accounting and its display, not container isolation or resource
 - [x] (2026-11-10 02:24Z) Implemented explicit accounting ownership, default legacy scope, and stop-before-launch-refresh upgrade ordering.
 - [x] (2026-11-10 02:24Z) Implemented fixed-path cgroup counter reads for all container workers; 7 CPU tests and 1 relay CPU regression passed.
 - [x] (2026-11-10 02:24Z) Added shared physical-scope deduplication and whole rendered rollup golden; focused CPU report tests and dashboard-dialog golden passed.
-- [ ] Validate kernel counter behavior, rendered rollups, upgrade metadata, and sampling cost.
-- [ ] Commit, review, and push the completed change to origin/master.
+- [x] (2026-11-10 02:46Z) Full touched-crate validation covers 4,731 passing tests after two focused reruns; workspace Clippy and formatting pass. Rendered rollups, placement/wire compatibility and counter-read cost are verified.
+- [x] (2026-11-10 03:12Z) Real container-only end-to-end regression passed with a handshake-controlled independent exec, two fresh sampling events, retained post-exit CPU and verified container cleanup.
+- [x] (2026-11-10 03:12Z) Validated implementation and rendered-golden commits are reviewed; final test-driver updates and this evidence are prepared for remote delivery using the Git steps below.
 
 ## Surprises & Discoveries
 
@@ -38,7 +39,7 @@ Resolve counter paths once, then read only the small counter file each interval.
 
 ## Outcomes & Retrospective
 
-Diagnosis and a bounded counter-read measurement are complete. Implementation and acceptance remain in progress. No installation or live worker upgrade is authorized by this task; delivery is a validated source commit and push.
+Diagnosis and a bounded counter-read measurement are complete. Implementation is committed as 24b81d888 and the menu golden follow-up as 48f039aa3. Production tests, Clippy, formatting, and source review are complete. The real isolated container exercise also passed. A current base64 reply fixture exceeds 64 KiB and passes through the shared Python relay decoder. Container cleanup was verified by checking the exact created resource no longer exists. No installation or live worker upgrade is authorized by this task; delivery is a validated source commit and push.
 
 ## Context and Orientation
 
@@ -60,7 +61,7 @@ Extend existing CPU report rendering cases and isolated CPU end-to-end tooling. 
 
 Work in the repository root. Preserve normal Cargo/mbx configuration and target storage. Run all Cargo tests with elevated permissions. Use a separate named instance for every new runtime invocation, and keep existing isolated test directories.
 
-During implementation run focused CPU tests in touched packages. After the final integration round run full suites of touched crates once and `cargo clippy --all-targets -- -D warnings`, then `cargo fmt --all -- --check`. Reuse successful checks unless later changes invalidate them. Save detailed logs in the responsible child report directory. Focused evidence: `cargo test -p brokk-mj-worker cpu_usage::` passed 7 tests, and `cargo test -p brokk-mj-worker cpu_usage_answers_from_the_sampler_without_journaling` passed 1 test. TUI CPU-report and dashboard-dialog golden checks passed. Final validation uses `cargo test -p brokk-mj-core -p brokk-mj-controller -p brokk-mj-tui -p brokk-mj-worker -p brokk-mj-checkpoint --no-fail-fast`. The isolated driver is `python3 tests/e2e/session_cpu_usage.py --mj <new-cli>`, with `MJ_WORKER_BINARY` pointing at the matching musl debug worker; both binary paths come from Cargo output, preserving normal mbx storage.
+During implementation run focused CPU tests in touched packages. After the final integration round run full suites of touched crates once and `cargo clippy --all-targets -- -D warnings`, then `cargo fmt --all -- --check`. Reuse successful checks unless later changes invalidate them. Save detailed logs in the responsible child report directory. Focused evidence: `cargo test -p brokk-mj-worker cpu_usage::` passed 7 tests, and `cargo test -p brokk-mj-worker cpu_usage_answers_from_the_sampler_without_journaling` passed 1 test. TUI CPU-report and dashboard-dialog golden checks passed. Final validation uses `cargo test -p brokk-mj-core -p brokk-mj-controller -p brokk-mj-tui -p brokk-mj-worker -p brokk-mj-checkpoint --no-fail-fast`. The focused isolated driver is `python3 tests/e2e/session_cpu_usage.py --container-only --mj <new-cli>`, with `MJ_WORKER_BINARY` pointing at the matching musl debug worker; both binary paths come from Cargo output and are resolved through any target symlink before the run, preserving normal mbx storage. Set MJ_RELIABILITY_ARTIFACTS outside target/ so build-cache cleanup cannot remove evidence.
 
 Inspect `git diff --check`, stage only changed files, and commit on the current branch. Request the configured mj review, resolve consequential findings, and push to `origin/master`. If upstream moved, fetch and merge it, preserving the repository's no-rebase policy.
 
@@ -87,3 +88,7 @@ Revision 2026-11-10: created after the user chose session totals with shared sub
 Revision 2026-11-10: all container workers retain cheap counter sampling rather than disabling borrowed workers. This preserves source-container measurements after the owner moves or stops, without adding sampler-election lifecycle state. The UI chooses one sample per physical group.
 
 Revision 2026-11-10: recorded completed implementation and focused regressions; broader dev-profile suites and real container validation are running before commit/review/push.
+
+Revision 2026-11-10: full suites and lint are complete. Updated the legacy CPU test driver for required RuntimeChanges fields, base64 relay fragments and current report controls. Its separate bare-idle timing assertion remained at 1.0% and blocked a combined run; keep that assertion intact and validate the affected container path independently.
+
+Revision 2026-11-10: final focused container acceptance passed after holding load through two fresh coverage events. The daemon reported container-scoped recent 17 permille while direct cumulative accounting rose 36,100,954 microseconds over 19.58 seconds (15.37 permille averaged over that entire interval); a later sample after exit retained an 8-permille hourly mean over 39 seconds. The exact test container and prior owned test resources were verified removed. Full bare-idle acceptance was not declared passed: its unchanged strict threshold stopped at 10 permille. Only the affected container path and protocol helper were rerun after script corrections; no production code or broad Rust suite rerun was needed.

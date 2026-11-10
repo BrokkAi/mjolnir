@@ -36,7 +36,9 @@ class CpuLab(Lab):
         raise ScenarioFailure(f"timed out waiting for {description}: {json.dumps(snapshot)[:2000]}")
 
     def cpu(self, session_id):
-        reply = self.daemon_request({"action": "runtime_changes", "arguments": {"cursor": None, "wait": False}})
+        reply = self.daemon_request({"action": "runtime_changes", "arguments": {
+            "cursor": None, "wait": False, "subagent_parents": [],
+        }})
         projection = reply["value"]["Snapshot"]["projection"]
         return projection["session_cpu"].get(session_id)
 
@@ -53,6 +55,13 @@ class CpuLab(Lab):
         reply = self.daemon_request({"action": "session_record", "arguments": {"session_id": session_id}})
         return reply["value"]["target"]["container_id"]
 
+    def record_cpu_container(self, container_id):
+        ids_path = self.data / "cpu-container-ids.json"
+        ids = json.loads(ids_path.read_text()) if ids_path.exists() else []
+        if container_id not in ids:
+            ids.append(container_id)
+            ids_path.write_text(json.dumps(ids, indent=2) + "\n")
+
     @staticmethod
     def container_cpu_usec(container_id):
         result = subprocess.run(
@@ -65,10 +74,32 @@ class CpuLab(Lab):
                 return int(value)
         raise ScenarioFailure(f"container cpu.stat has no usage_usec: {result.stdout!r}")
 
+    def start_container_git_remote(self):
+        (self.runtime_root / "releases").mkdir()
+        python = self.runtime_root / "bin/python3"
+        python.unlink()
+        python.write_text('#!/bin/sh\nexec /usr/bin/python3 "$@"\n')
+        python.chmod(0o700)
+        port = self.free_port()
+        output = (self.root / "git-daemon.stdout").open("w")
+        errors = (self.root / "git-daemon.stderr").open("w")
+        server = subprocess.Popen(
+            ["git", "daemon", "--reuseaddr", "--export-all", "--listen=0.0.0.0",
+             f"--port={port}", f"--base-path={self.runtime_root}", str(self.project)],
+            stdout=output, stderr=errors, start_new_session=True,
+        )
+        self.record_process("started", "git-daemon", server.pid)
+        origin = f"git://host.containers.internal:{port}/project"
+        self.git_output(["remote", "add", "origin", origin], self.project)
+
     def run_container_sibling(self, workspace, tui):
         status, response = self.request("POST", "/api/actions", {
             "action": "new", "workspace_id": workspace, "profile_id": "fake",
             "bundle_id": "fixture", "target_id": "podman", "title": "container-cpu-sibling",
+            "resource_allocation": {"kind": "container", "cpus": 2, "memory_bytes": 4 * 1024 ** 3},
+            "additional_mounts": [{
+                "source": str(self.runtime_root), "destination": str(self.runtime_root), "access": "rw",
+            }],
         })
         assert status == 202, response
         snapshot = self.wait_snapshot(
@@ -78,49 +109,63 @@ class CpuLab(Lab):
         )
         session_id = next(row["id"] for row in snapshot["sessions"]
                           if row.get("title") == "container-cpu-sibling" and row["state"] == "running")
+        container_id = self.container_id(session_id)
+        self.record_cpu_container(container_id)
         baseline = self.wait_cpu(session_id, lambda _: True, timeout=60)
         assert baseline["scope"] == "container", baseline
-        container_id = self.container_id(session_id)
         before_usec = self.container_cpu_usec(container_id)
         started = time.monotonic()
         # This command is launched by the test driver through Podman exec, so
         # its CPU is in the session container but outside the worker's process tree.
-        burner = r'''import multiprocessing, os, time
+        burner = r'''import multiprocessing, os, sys
+stop = multiprocessing.Event()
 def burn():
-    end = time.monotonic() + 12
     value = 1
-    while time.monotonic() < end:
+    while not stop.is_set():
         value = (value * 3 + 1) % 1000003
 count = max(1, (os.cpu_count() + 49) // 50)
 children = [multiprocessing.Process(target=burn) for _ in range(count)]
 for child in children: child.start()
+sys.stdin.buffer.read(1)
+stop.set()
 for child in children: child.join()
 assert all(child.exitcode == 0 for child in children)
 '''
         command = subprocess.Popen(
-            ["podman", "exec", container_id, "python3", "-c", burner],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            ["podman", "exec", "-i", container_id, "python3", "-c", burner],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=False,
         )
         try:
             during = None
             during_usec = before_usec
+            covered = baseline["hourly_covered_secs"]
+            coverage_advances = 0
             deadline = time.monotonic() + 25
             while time.monotonic() < deadline:
                 sample = self.cpu(session_id)
                 if (sample and sample["state"] == "measured"
                         and sample["usage"]["scope"] == "container"
+                        and sample["usage"]["hourly_covered_secs"] > covered
                         and sample["usage"]["recent_permille"] > 0):
+                    # Two distinct coverage advances establish that the final
+                    # selected sample covers an interval after the burner began.
+                    covered = sample["usage"]["hourly_covered_secs"]
+                    coverage_advances += 1
                     during = sample["usage"]
                     during_usec = self.container_cpu_usec(container_id)
                     assert during_usec - before_usec >= 500_000, (before_usec, during_usec)
-                    break
+                    if coverage_advances == 2:
+                        break
                 if command.poll() is not None:
                     raise ScenarioFailure("sibling burner exited before a container CPU sample appeared")
                 time.sleep(0.2)
             if during is None:
                 raise ScenarioFailure(f"container sibling CPU was not sampled: {self.cpu(session_id)}")
+            command.stdin.write(b"x")
+            command.stdin.flush()
+            command.stdin.close()
             returncode = command.wait(timeout=20)
-            stderr = command.stderr.read()
+            stderr = command.stderr.read().decode("utf-8", "replace")
             if returncode:
                 raise ScenarioFailure(f"Podman sibling burner failed: {stderr}")
 
@@ -140,7 +185,6 @@ assert all(child.exitcode == 0 for child in children)
                 "elapsed_secs": elapsed,
                 "direct_permille": direct_permille,
             }
-            covered = during["hourly_covered_secs"]
             after = self.wait_cpu(
                 session_id,
                 lambda usage: usage["scope"] == "container" and usage["hourly_covered_secs"] > covered,
@@ -172,14 +216,16 @@ assert all(child.exitcode == 0 for child in children)
             assert "container-cpu-sibling" in tui.text()
         finally:
             if command.poll() is None:
-                command.terminate()
+                if command.stdin and not command.stdin.closed:
+                    command.stdin.close()
                 try:
                     command.wait(timeout=5)
                 except subprocess.TimeoutExpired:
+                    command.terminate()
                     command.kill()
                     command.wait()
 
-    def run_cpu(self):
+    def run_cpu(self, *, container_only=False):
         print("Preparing isolated cpu-test instance", flush=True)
         port = self.prepare()
         # Launch a CPU burner as a real descendant of the fake ACP harness,
@@ -202,6 +248,12 @@ assert all(child.exitcode == 0 for child in children)
         status, _ = self.request("POST", "/auth/session", {"code": code})
         assert status == 204
         workspace = self.snapshot()["workspaces"][0]["id"]
+        if container_only:
+            self.start_container_git_remote()
+            # Hard-won: b7d5c8399: process-tree sampling missed CPU burned by an independent container exec.
+            self.run_container_sibling(workspace, tui)
+            self.stop_daemon()
+            return
         status, _ = self.request("POST", "/api/actions", {"action": "new", "workspace_id": workspace, "profile_id": "fake", "bundle_id": "fixture", "target_id": "localhost", "title": "cpu-burner", "project_directory": str(self.project)})
         assert status == 202
         snapshot = self.wait_snapshot(lambda snapshot: any(session.get("title") == "cpu-burner" and session.get("state") == "running" for session in snapshot.get("sessions", [])), "running CPU session")
@@ -220,7 +272,7 @@ assert all(child.exitcode == 0 for child in children)
         while True:
             rows = tui.text().splitlines()
             title_row = next((index for index, row in enumerate(rows) if "cpu-burner" in row), None)
-            if title_row is not None and title_row + 1 < len(rows) and re.search(r"\d+(?:\.\d+)?%", rows[title_row + 1]):
+            if title_row is not None and re.search(r"\d+(?:\.\d+)?%", rows[title_row]):
                 break
             if time.monotonic() >= deadline:
                 raise ScenarioFailure("CPU did not reach the session row within 20s: " + tui.text())
@@ -232,6 +284,11 @@ assert all(child.exitcode == 0 for child in children)
         tui.wait_for("CPU by session…")
         tui.send(b"4")
         tui.wait_for("hourly", timeout=10)
+        screen = tui.text().splitlines()
+        recent_row = next(index for index, line in enumerate(screen) if "Recent" in line)
+        recent_column = screen[recent_row].index("Recent") + 1
+        tui.send(f"\x1b[<0;{recent_column};{recent_row+1}M\x1b[<0;{recent_column};{recent_row+1}m".encode())
+        tui.wait_for("recent", timeout=10)
         assert "cpu-burner" in tui.text()
         covered = usage["hourly_covered_secs"]
         self.command("daemon", "restart")
@@ -252,13 +309,20 @@ assert all(child.exitcode == 0 for child in children)
         evidence = {"busy": usage, "after_daemon_restart": after, "idle": idle, "load_delay_secs": round(load_delay, 2)}
         (self.root / "cpu-evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
         print(json.dumps(evidence, indent=2), flush=True)
-        tui.wait_for("% recent", timeout=max(0.1, idle_started + 20 - time.monotonic()))
+        deadline = idle_started + 20
+        while True:
+            rows = tui.text().splitlines()
+            if any("cpu-burner" in row and re.search(r"\d+(?:\.\d+)?% recent", row) for row in rows):
+                break
+            if time.monotonic() >= deadline:
+                raise ScenarioFailure("CPU did not reach the idle recent metric: " + tui.text())
+            time.sleep(0.1)
         tui.send(b"\x1b")
         deadline = idle_started + 20
         while True:
             rows = tui.text().splitlines()
             title_row = next((index for index, row in enumerate(rows) if "cpu-burner" in row), None)
-            if title_row is not None and title_row + 1 < len(rows) and not re.search(r"\d+(?:\.\d+)?%", rows[title_row + 1]):
+            if title_row is not None and not re.search(r"\d+(?:\.\d+)?%", rows[title_row]):
                 break
             if time.monotonic() >= deadline:
                 raise ScenarioFailure("CPU did not clear from the session row within 20s: " + tui.text())
@@ -267,20 +331,46 @@ assert all(child.exitcode == 0 for child in children)
         assert evidence["idle_delay_secs"] <= 20, evidence
         (self.root / "cpu-evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
         print(json.dumps(evidence, indent=2), flush=True)
+        self.start_container_git_remote()
         # Hard-won: b7d5c8399: process-tree sampling missed CPU burned by an independent container exec.
         self.run_container_sibling(workspace, tui)
         self.stop_daemon()
+
+    def cleanup_cpu_containers(self):
+        ids_path = self.data / "cpu-container-ids.json"
+        if not ids_path.exists():
+            return
+        for container_id in json.loads(ids_path.read_text()):
+            if not re.fullmatch(r"mj-[a-fA-F0-9]{12}-[a-fA-F0-9]{6}", container_id):
+                raise ScenarioFailure(f"invalid recorded Podman container ID: {container_id!r}")
+            removed = subprocess.run(
+                ["podman", "container", "rm", "--force", container_id],
+                capture_output=True, text=True, timeout=30,
+            )
+            if removed.returncode and "no such container" not in removed.stderr.lower():
+                raise ScenarioFailure(f"could not remove owned container {container_id}: {removed.stderr}")
+            exists = subprocess.run(
+                ["podman", "container", "exists", container_id],
+                capture_output=True, text=True, timeout=10,
+            )
+            if exists.returncode == 0:
+                raise ScenarioFailure(f"owned Podman container still exists after cleanup: {container_id}")
+            if exists.returncode != 1:
+                raise ScenarioFailure(f"could not verify removal of {container_id}: {exists.stderr}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mj", type=pathlib.Path, default=pathlib.Path("target/debug/mj"))
+    parser.add_argument("--container-only", action="store_true", help="run only the isolated container sibling-work case")
     args = parser.parse_args()
     lab = CpuLab(args.mj, "session-cpu", 1, watchdog=False)
     try:
-        lab.run_cpu()
+        lab.run_cpu(container_only=args.container_only)
     finally:
+        lab.stop_daemon()
         lab.cleanup_owned()
+        lab.cleanup_cpu_containers()
         lab.capture_process_tree()
         lab.integrity()
     print(f"CPU acceptance evidence: {lab.root}")
