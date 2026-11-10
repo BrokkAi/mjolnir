@@ -11,12 +11,32 @@ const SECRET_RUN_CHARS: usize = 24;
 /// API keys and account ids are all long runs of base64url, hex or dotted JWT
 /// segments, and a diagnostic has no use for them.
 pub fn redact_secrets(text: &str) -> String {
+    redact_token_runs(text, |_| "[redacted]".into())
+}
+
+/// Request-local labels preserve identifier equality without exposing contents.
+pub fn redact_secrets_distinct(
+    text: &str,
+    labels: &mut std::collections::BTreeMap<String, usize>,
+) -> String {
+    redact_token_runs(text, |token| {
+        let next = labels.len();
+        let label = labels.entry(token.to_owned()).or_insert(next);
+        format!("[redacted token {label}]")
+    })
+}
+
+fn redact_token_runs(text: &str, mut replacement: impl FnMut(&str) -> String) -> String {
     fn is_token_char(ch: char) -> bool {
         ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '+')
     }
-    fn flush(run: &mut String, redacted: &mut String) {
+    fn flush(
+        run: &mut String,
+        redacted: &mut String,
+        replacement: &mut impl FnMut(&str) -> String,
+    ) {
         if run.chars().count() >= SECRET_RUN_CHARS {
-            redacted.push_str("[redacted]");
+            redacted.push_str(&replacement(run));
         } else {
             redacted.push_str(run);
         }
@@ -28,11 +48,11 @@ pub fn redact_secrets(text: &str) -> String {
         if is_token_char(ch) {
             run.push(ch);
         } else {
-            flush(&mut run, &mut redacted);
+            flush(&mut run, &mut redacted, &mut replacement);
             redacted.push(ch);
         }
     }
-    flush(&mut run, &mut redacted);
+    flush(&mut run, &mut redacted, &mut replacement);
     redacted
 }
 

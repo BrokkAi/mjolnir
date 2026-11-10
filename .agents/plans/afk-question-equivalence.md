@@ -18,6 +18,8 @@ An absent operator should receive a notice for each new decision an agent asks a
 - [x] (2026-11-10) Final library run: 790 passed, 11 ignored, one unrelated work_facts failure; that test passed on its focused rerun.
 - [x] (2026-11-10) Remaining binary/integration suites pass (26 tests). Final implementation is validated and ready for commit and required before-push review; remote delivery follows that review.
 
+- [x] (2026-11-10) Second-review fix validated: five focused AFK regressions, full core/worker suites, workspace Clippy, and formatting pass. The worker suite now has 818 passing tests with 11 ignored. Ready for final commit and push review.
+
 ## Surprises & Discoveries
 
 The refusal owner lives in `mj-worker/src/acp/operator_away.rs` and survives bridge restarts. Its question identity is only `(agent, Question)`. Permission identities already include tool content and need no change. Requests opened before AFK use the same owner as newly opened requests.
@@ -38,6 +40,10 @@ The refusal owner lives in `mj-worker/src/acp/operator_away.rs` and survives bri
   Rationale: review found that requiredness, selection cardinality, and numeric/text constraints disappear from question_text(). Jev needs those constraints to recognize material changes.
   Date/Author: 2026-11-10 / Codex.
 
+- Decision: preserve redacted identifier equality within each AFK comparison with request-local anonymous labels.
+  Rationale: the shared egress redactor otherwise replaces distinct commit/session identifiers with the same text. Reuse its token scanner, and keep ordinary diagnostics unchanged; only AFK evidence uses equality-preserving labels.
+  Date/Author: 2026-11-10 / Codex.
+
 ## Outcomes & Retrospective
 
 Implementation and the hosted deployment are complete. The worker uses one accepted-answer map for both the old fallback identity and classifier evidence. The existing responder task owns HTTP inference; presence/history changes cancel stale inference and all acceptance stays under the same mutex. No migration, relay version, dependency, or install is needed for the service deployment. Worker integration takes effect with a Mjolnir build containing this change; this task does not authorize installing Mjolnir.
@@ -48,7 +54,7 @@ The worker runs one agent harness and owns pending structured requests. `mj-work
 
 ## Plan of Work
 
-Add a shared frozen question specification and a hosted `/v1/afk-question-verdict` route. Its evidence contains the current question and previous AFK-answered questions. Return the validated same/different choice. Extend the existing worker Jev client rather than creating another transport. Keep prior question text beside refusal memory and publish state changes to waiting responder tasks. Classify only when the old generic identity would leave a question pending; no call is needed for the first question. Apply a different verdict only while the compared presence and history remain current. Disabled Jev, network errors, invalid responses, and uncertainty preserve the current behavior.
+Add a shared frozen question specification and a hosted `/v1/afk-question-verdict` route. Its evidence contains the current question and previous AFK-answered questions. Return the validated same/different choice. Extend the existing worker Jev client rather than creating another transport. Keep prior question text beside refusal memory and publish state changes to waiting responder tasks. Classify only when the old generic identity would leave a question pending; no call is needed for the first question. Apply a different verdict only while the compared presence and history remain current. Disabled Jev, network errors, invalid responses, and tied probabilities preserve the current behavior.
 
 ## Concrete Steps
 
@@ -81,3 +87,7 @@ Updated 2026-11-10 after final service deployment 9774197c-a7da-4f0f-9d8f-e45a08
 Final validation note: work_facts::tests::a_subject_read_for_a_different_commit_is_unavailable failed once with "the tree was unavailable" in the full parallel run, then passed immediately by itself. No unrelated source changes were made; binary/integration suites continue separately because Cargo stopped after the library failure.
 
 Implementation checkpoint: all 817 worker tests have passed across the final run and the focused retry, with 11 existing ignores. The 39 service tests, TypeScript check, deploy dry run, rustfmt, workspace Clippy, and final deployed-service smoke checks pass. The final action is review and push; no Mjolnir installation was requested.
+
+Second-review update: normalized forms retain constraints, but shared secret redaction hid distinctions between long identifiers. Added request-local anonymous labeling using the shared scanner, plus a real HTTP regression proving distinct/equal IDs remain distinct/equal and no raw ID leaves the process. Deployed-service live anonymous-label cases pass (different=0.72; same=0.99). No service update is needed for this worker-only fix.
+
+Final validation after the identifier fix: cargo test -p brokk-mj-core -p brokk-mj-worker passed completely, including the earlier transient work_facts case. Worker library: 792 passed, 11 ignored; binary/integration: 26 passed. Workspace Clippy and rustfmt pass. The shared redactor retains its original diagnostic behavior; only AFK comparison evidence gets consistent anonymous labels.

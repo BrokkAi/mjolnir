@@ -669,6 +669,63 @@ mod tests {
         ));
     }
 
+    // Hard-won: #1489 review: egress redaction made distinct long IDs indistinguishable.
+    #[tokio::test]
+    async fn afk_question_protocol_preserves_redacted_identifier_equality() {
+        let classifier = Classifier::new(false).await;
+        let owner = OperatorAway::default();
+        let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()));
+        owner.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        let first_id = "a".repeat(40);
+        let second_id = "b".repeat(40);
+        assert!(matches!(
+            ask(&pending, "first", &format!("Merge commit {first_id}?"))
+                .await
+                .unwrap(),
+            Some(PendingAnswer::OperatorAway)
+        ));
+        let second = ask(&pending, "second", &format!("Merge commit {second_id}?"));
+        let (stream, evidence) = classifier.request().await;
+        let serialized = evidence.to_string();
+        assert!(!serialized.contains(&first_id) && !serialized.contains(&second_id));
+        let evidence = decoded_evidence(evidence);
+        assert_eq!(
+            evidence["current_question"]["message"],
+            "Merge commit [redacted token 0]?"
+        );
+        assert_eq!(
+            evidence["previous_questions"][0]["message"],
+            "Merge commit [redacted token 1]?"
+        );
+        classifier.respond(stream, "different").await;
+        assert!(matches!(
+            second.await.unwrap(),
+            Some(PendingAnswer::OperatorAway)
+        ));
+        let repeated = ask(&pending, "repeated", &format!("Merge commit {first_id}?"));
+        let (stream, evidence) = classifier.request().await;
+        let evidence = decoded_evidence(evidence);
+        assert_eq!(
+            evidence["current_question"],
+            evidence["previous_questions"][0]
+        );
+        assert_ne!(
+            evidence["current_question"],
+            evidence["previous_questions"][1]
+        );
+        classifier.respond(stream, "same").await;
+        pending
+            .resolve("repeated", ElicitationResponse::Decline)
+            .unwrap();
+        assert!(matches!(
+            repeated.await.unwrap(),
+            Some(PendingAnswer::Human(_))
+        ));
+    }
+
     #[tokio::test]
     async fn afk_question_classification_cannot_outlive_human_cancel_return_or_bridge_close() {
         for action in ["human", "cancel", "return", "close"] {
