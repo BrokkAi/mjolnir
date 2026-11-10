@@ -19,8 +19,10 @@ Logins should remain usable when several Mjolnir background servers (daemons) sh
 - [x] (2026-11-10) Integrated review corrections preserve authoritative OpenCode exports and unconditional credential-symlink refusal; parent fixed a remaining test-helper argument mismatch after the sync handback.
 - [x] (2026-11-10) Add safe Claude HTTP-rejection, DNS, connection-refusal and native-policy failure categories without echoing captured output.
 - [x] (2026-11-10) First focused run compiled and passed 117 controller cases; three failures exposed fixture/result expectations and a subprocess-start issue.
-- [ ] Correct the failed cases and review P1: reconcile retained newer destinations immediately, and carry immutable matched-login evidence into rejection tracking.
-- [ ] Run final touched-crate suites, workspace clippy and formatting; review, commit and push.
+- [x] (2026-11-10) Correct the failed cases and review P1: reconcile retained newer destinations immediately, and carry immutable matched-login evidence into rejection tracking.
+- [x] (2026-11-10) Pass final touched-crate suites (2,513 controller, 644 core including integration scenarios, 813 worker), workspace clippy, formatting and diff checks.
+- [x] (2026-11-10) Obtain clean review through 3088800ef; merge upstream without conflicts and push implementation as d3c6a0775 to origin/master.
+- [x] (2026-11-10) Dispatch macOS/Windows workflow run 42807206682 on delivered master; its asynchronous result is separate from the passed local validation.
 
 ## Surprises & Discoveries
 
@@ -39,14 +41,16 @@ The initial investigation is read-only against live state. Regression tests must
 ## Outcomes & Retrospective
 
 
-Investigation has established two concurrency defects, but their causal link to the user's observed outages remains unproven. Shared ownership and destination-owned installation are implemented. Independent review found and corrected the symlink no-write case. Integrated review corrected OpenCode exports and a worker test-helper mismatch. Claude diagnostics now classify only exact native/Axios-shaped messages into fixed text; unknown messages retain the generic exit status. The secret-output regression covers both streams, token-bearing request dumps and invalid UTF-8. The first focused run passed 117 controller cases and failed three; core and worker tests were not reached. Early review on d8f21f06f found that a skipped stale install could produce an empty action result and cause rejection tracking to label a newer login refused. This is being corrected before rerunning the failing cases.
+The confirmed participating-writer races are corrected and delivered to `origin/master` at `d3c6a0775` (implementation commits `d8f21f06f`, `42710631d`, `3088800ef`). Clean review covered all implementation changes; a later upstream-only merge had no conflicts. Full dev-profile touched-crate tests, workspace clippy with confirmed exit 0, formatting and diff checks passed. The platform workflow was dispatched separately. No installation, daemon restart, live token refresh or account repair was performed.
+
+The historical Claude outage cannot be attributed conclusively because its detailed refresh errors were discarded. New failures can expose only fixed safe categories. The fix coordinates participating Mjolnir operations and native Claude/Kimi/Muse refresh locks; arbitrary native Codex writers and explicit Claude sign-in remain outside those guarantees. Independent review exposed an important second ownership boundary: rejection tracking now consumes the exact unchanged matched snapshot, rather than rereading a file that may have refreshed before result delivery.
 
 ## Context and Orientation
 
 
 `mj-controller/src/quota.rs::refresh_profile_with_cache_root` probes each profile's quota and refreshes expiring logins. Codex probes reuse an app-server process through `mj-controller/src/codex_usage.rs`. Its `account/read` RPC can request proactive refresh. `mj-controller/src/claude_usage.rs`, `kimi_auth.rs` and `muse_usage.rs` implement other provider paths, including native credential locks.
 
-`mj-controller/src/worker_client/credential_sync.rs` exchanges credential copies with workers (the separate processes running agent sessions). `SessionCanonical::read` snapshots the host credential before asynchronous worker calls. `reconcile_credentials` chooses a push or pull using `mj-core/src/credentials.rs::reconcile`; a pull writes the returned bytes without rechecking the host file. The worker's `InstallCredentials` handler in `mj-worker/src/worker_runtime/unix/requests.rs` also replaces its file unconditionally. Atomic file replacement avoids partial reads but does not establish which refresh owns the newest login.
+Before this change, `mj-controller/src/worker_client/credential_sync.rs` exchanged credential copies with workers (the separate processes running agent sessions). `SessionCanonical::read` snapshots the host credential before asynchronous worker calls. `reconcile_credentials` chooses a push or pull using `mj-core/src/credentials.rs::reconcile`; a pull writes the returned bytes without rechecking the host file. The worker's `InstallCredentials` handler in `mj-worker/src/worker_runtime/unix/requests.rs` also replaces its file unconditionally. Atomic file replacement avoids partial reads but does not establish which refresh owns the newest login.
 
 `mj-core/src/file_lock.rs::FileLock` owns an operating-system file lock and explicitly unlocks it on release, including when a fork inherited a descriptor. Existing async polling lock patterns must keep blocking filesystem work off UI and server loops. Credential destination writes reject symlinks for security; do not weaken that boundary accidentally while resolving credential identity.
 
@@ -67,7 +71,7 @@ Commit only task-owned files on the current branch, request the repository's pus
 ## Validation and Acceptance
 
 
-Synthetic isolated competing refreshers must not submit the same old grant, a delayed credential pull must preserve a host credential refreshed meanwhile, and unrelated homes must progress independently. Tests must fail before the correction and pass afterward. Native lock compatibility and cancellation must be tested if those mechanisms change. Successful tests prove those controlled interleavings, not the cause of the past live outage or a multi-day live observation.
+Synthetic isolated competing refreshers must not submit the same old grant, a delayed credential pull must preserve a host credential refreshed meanwhile, and unrelated homes must progress independently. The concurrency regressions exercise interleavings that the prior unguarded code could not preserve; the final runs pass. A separate automated run of all regressions against the old source was not performed. Native lock compatibility and cancellation must be tested if those mechanisms change. Successful tests prove those controlled interleavings, not the cause of the past live outage or a multi-day live observation.
 
 ## Idempotence and Recovery
 
@@ -101,3 +105,5 @@ User clarification and integration revision (2026-11-10): Claude is worst affect
 Diagnostics revision (2026-11-10): finish safe fixed-text Claude categories and begin focused elevated validation. Preserve sensitive-output handling; do not claim to recover old discarded errors.
 
 Review revision (2026-11-10): the user requested review concurrently with tests, authorizing candidate commit d8f21f06f before test completion. Accept review P1. Retry reconciliation only after an actual snapshot transition; carry the original unchanged matching snapshot in session outcomes and record that fingerprint, never whichever file happens to be current when the result is consumed. This removes the rejection-observation race as well as the stale-install empty-result case. No action or timestamp is fabricated to suppress rejection.
+
+Final validation and delivery revision (2026-11-10): the full touched-crate command was `mbx test -p brokk-mj-core -p brokk-mj-controller -p brokk-mj-worker`; all suites passed. `mbx clippy --all-targets -- -D warnings` completed with confirmed exit 0 (a cached repeat resolved the first wrapper losing its exit status), and `mbx fmt --all -- --check` passed. Decisive local logs are `.mj/agents/8de4033e4019b0a364525fdb1b3eccc0/full-touched-crates.log` and `workspace-clippy-final.log`; platform run is https://github.com/BrokkAi/mjolnir/actions/runs/42807206682. Code is pushed; this documentation-only completion record publishes the finished plan without changing the validated implementation.
