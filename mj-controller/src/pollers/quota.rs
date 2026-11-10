@@ -12,6 +12,30 @@ pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshReques
         .collect()
 }
 
+/// The disabled Claude profiles whose sessions are live, from the credential
+/// sync's published targets (the one owner of which sessions hold which
+/// profile's copy). A session copy holds no refresh token, so the profile's
+/// grant must stay renewed while any such session runs, enabled or not.
+pub fn claude_grant_only_requests(
+    config: &mj_core::config::Config,
+    live_profile_ids: &std::collections::BTreeSet<String>,
+) -> Vec<QuotaRefreshRequest> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let runtime = crate::quota::QuotaRuntimeConfig::of(config);
+    config
+        .profiles
+        .iter()
+        .filter(|(id, profile)| {
+            !profile.enabled
+                && profile.kind == mj_core::config::HarnessKind::Claude
+                && live_profile_ids.contains(*id)
+        })
+        .map(|(id, profile)| {
+            QuotaRefreshRequest::for_profile(id, profile, cwd.clone(), runtime.clone())
+        })
+        .collect()
+}
+
 /// Reads a profile's stored report, the rebuildable copy the daemon keeps in
 /// the store. Called on a blocking thread.
 pub type QuotaCacheLoader =
@@ -70,8 +94,10 @@ pub fn spawn_quota_refresher(
         // identity is a changed profile, whose report no longer applies.
         let mut identities: std::collections::BTreeMap<String, String> = Default::default();
         // When each Claude profile's grant is next looked at, in epoch
-        // milliseconds. No entry means "at the next cycle".
-        let mut grant_checks: std::collections::BTreeMap<String, i64> = Default::default();
+        // milliseconds, under the identity the schedule was made for. No
+        // entry means "at the next cycle".
+        let mut grant_checks: std::collections::BTreeMap<String, (String, i64)> =
+            Default::default();
         loop {
             let now = epoch_seconds();
             let probe_wake = batch
@@ -80,7 +106,7 @@ pub fn spawn_quota_refresher(
                 .map(|request| next_probe_at(quotas.report(&request.profile_id)))
                 .min()
                 .map(|due| Duration::from_secs(due.saturating_sub(now).max(5)));
-            let grant_wake = grant_checks.values().min().map(|due| {
+            let grant_wake = grant_checks.values().map(|(_, due)| due).min().map(|due| {
                 Duration::from_millis(
                     due.saturating_sub(mj_core::clock::epoch_millis()).max(0) as u64
                 )
@@ -105,7 +131,7 @@ pub fn spawn_quota_refresher(
             }
             // The grant refresh comes first, so a probe uses the new token, and
             // ignores the usage API's hold: that covers usage requests only.
-            refresh_claude_grants(&batch.profiles, &mut grant_checks).await;
+            refresh_claude_grants(&batch, &mut grant_checks).await;
             let now = epoch_seconds();
             let due = batch
                 .profiles
@@ -139,28 +165,36 @@ pub fn spawn_quota_refresher(
 /// [`crate::quota::refresh_claude_grant`]), concurrently, and record when to
 /// look at each again. A failed refresh waits one probe interval, so a rejected
 /// grant is retried at the pace of the quota probe rather than in a loop.
-async fn refresh_claude_grants(
-    profiles: &[QuotaRefreshRequest],
-    checks: &mut std::collections::BTreeMap<String, i64>,
+pub(super) async fn refresh_claude_grants(
+    batch: &QuotaRefreshBatch,
+    checks: &mut std::collections::BTreeMap<String, (String, i64)>,
 ) {
     let now_ms = mj_core::clock::epoch_millis();
-    checks.retain(|id, _| profiles.iter().any(|request| &request.profile_id == id));
+    let requests = batch
+        .profiles
+        .iter()
+        .chain(&batch.grants)
+        .map(|request| (request.profile_id.as_str(), request.cache_identity()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    // A schedule belongs to the profile as it was configured: a profile
+    // reconfigured under the same ID (another home) starts over.
+    checks.retain(|id, (identity, _)| requests.get(id.as_str()) == Some(identity));
     let mut tasks = tokio::task::JoinSet::new();
-    for request in profiles {
+    for request in batch.profiles.iter().chain(&batch.grants) {
         if checks
             .get(&request.profile_id)
-            .is_some_and(|due| *due > now_ms)
+            .is_some_and(|(_, due)| *due > now_ms)
         {
             continue;
         }
         let request = request.clone();
         tasks.spawn(async move {
             let check = crate::quota::refresh_claude_grant(&request, now_ms).await;
-            (request.profile_id, check)
+            (request.profile_id.clone(), request.cache_identity(), check)
         });
     }
     while let Some(result) = tasks.join_next().await {
-        let (profile_id, check) = match result {
+        let (profile_id, identity, check) = match result {
             Ok(output) => output,
             Err(error) => {
                 tracing::warn!(%error, "Claude grant refresh task failed");
@@ -171,7 +205,7 @@ async fn refresh_claude_grants(
             crate::quota::ClaudeGrantCheck::Waiting {
                 due_at_ms: Some(due_at_ms),
             } => {
-                checks.insert(profile_id, due_at_ms);
+                checks.insert(profile_id, (identity, due_at_ms));
             }
             crate::quota::ClaudeGrantCheck::Waiting { due_at_ms: None }
             | crate::quota::ClaudeGrantCheck::Renewed => {
@@ -179,7 +213,7 @@ async fn refresh_claude_grants(
             }
             crate::quota::ClaudeGrantCheck::Failed => {
                 let retry = i64::try_from(QUOTA_REFRESH_INTERVAL.as_millis()).unwrap_or(i64::MAX);
-                checks.insert(profile_id, now_ms.saturating_add(retry));
+                checks.insert(profile_id, (identity, now_ms.saturating_add(retry)));
             }
         }
     }

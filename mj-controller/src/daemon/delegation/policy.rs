@@ -416,7 +416,31 @@ impl Policy {
         }
         self.publish_quotas();
     }
+    /// Keep the poller told which disabled Claude profiles still have live
+    /// session copies, read from the published credential sync targets.
+    fn sync_grant_only_profiles(&mut self) {
+        let live = self
+            .state
+            .credential_targets
+            .borrow()
+            .iter()
+            .filter(|target| target.harness == mj_core::config::HarnessKind::Claude)
+            .map(|target| target.profile_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if live.is_empty() && self.batch.grants.is_empty() {
+            return;
+        }
+        let grants = {
+            let owner = self.state.owner();
+            crate::pollers::claude_grant_only_requests(&owner.controller().config, &live)
+        };
+        if grants != self.batch.grants {
+            self.batch.grants = grants;
+            self.profiles_tx.send_replace(self.batch.clone());
+        }
+    }
     pub fn tick(&mut self) {
+        self.sync_grant_only_profiles();
         schedule_due_credential_syncs(
             &mut self.signals,
             &self.credentials.handle(),

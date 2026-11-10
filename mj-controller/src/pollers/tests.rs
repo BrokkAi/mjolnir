@@ -452,6 +452,7 @@ fn batch(generation: u64, refresh: bool, ids: &[&str]) -> QuotaRefreshBatch {
         generation,
         refresh,
         profiles: ids.iter().map(|id| probeless_request(id)).collect(),
+        grants: Vec::new(),
     }
 }
 
@@ -597,32 +598,34 @@ async fn a_held_profile_is_not_probed_by_the_schedule_or_by_a_refresh() {
     ));
 }
 
-/// #1490: the daemon renews a Claude grant when under half of its 8 h access
-/// token remains, even while the usage API holds the profile's probes, because
-/// session copies hold no refresh token and cannot do it themselves.
+/// A stand-in for `claude auth login` in `directory/bin` that exchanges the
+/// refresh token it is given for a fresh 8 h login, as the real command does,
+/// and a profile home whose login expires in an hour (inside the 4 h lead).
+/// Returns the request for that profile and its credential file.
 #[cfg(all(unix, not(target_os = "macos")))]
-#[tokio::test]
-async fn a_held_claude_profile_still_renews_its_grant_early() {
+fn renewable_claude_profile(
+    directory: &std::path::Path,
+    id: &str,
+) -> (QuotaRefreshRequest, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
-    let directory = tempfile::tempdir().unwrap();
-    let bin = directory.path().join("bin");
-    let home = directory.path().join("home");
+    let bin = directory.join("bin");
+    let home = directory.join(format!("home-{id}"));
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&home).unwrap();
-    // A stand-in for `claude auth login` that exchanges the refresh token it
-    // is given for a fresh 8 h login, as the real command does.
     let claude = bin.join("claude");
-    std::fs::write(
-        &claude,
-        r#"#!/bin/sh
+    if !claude.exists() {
+        std::fs::write(
+            &claude,
+            r#"#!/bin/sh
 test "$CLAUDE_CODE_OAUTH_REFRESH_TOKEN" = refresh-1 || exit 3
 expires=$(( $(date +%s) * 1000 + 28800000 ))
 printf '{"claudeAiOauth":{"accessToken":"access-2","refreshToken":"refresh-2","expiresAt":%s,"scopes":["user:inference"]}}' "$expires" > "$CLAUDE_CONFIG_DIR/.credentials.json"
 "#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let credentials = home.join(".credentials.json");
     let expires_in_an_hour = mj_core::clock::epoch_millis() + 3_600_000;
     std::fs::write(
@@ -632,27 +635,46 @@ printf '{"claudeAiOauth":{"accessToken":"access-2","refreshToken":"refresh-2","e
         ),
     )
     .unwrap();
+    let request = QuotaRefreshRequest {
+        profile_id: id.into(),
+        harness: mj_core::config::HarnessKind::Claude,
+        auth_scheme: mj_core::config::AuthScheme::NativeLogin,
+        source_home: home,
+        environment: [(
+            "PATH".to_owned(),
+            format!("{}:/usr/bin:/bin", bin.display()),
+        )]
+        .into(),
+        cwd: PathBuf::from("."),
+        codex_source: crate::quota::CodexQuotaSource::UsagePriced {
+            provider: String::new(),
+        },
+        runtime: crate::quota::QuotaRuntimeConfig::host(),
+    };
+    (request, credentials)
+}
+
+/// #1490: the daemon renews a Claude grant when under half of its 8 h access
+/// token remains, even while the usage API holds the profile's probes, and
+/// also for a disabled profile that only has live sessions (`grants`), because
+/// session copies hold no refresh token and cannot do it themselves.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn a_held_claude_profile_still_renews_its_grant_early() {
+    let directory = tempfile::tempdir().unwrap();
+    let (held_request, held_credentials) = renewable_claude_profile(directory.path(), "claude1");
+    let (grant_only, grant_only_credentials) =
+        renewable_claude_profile(directory.path(), "claude2");
 
     let mut held = stored_report("claude1", QUOTA_REFRESH_INTERVAL.as_secs() + 600);
     held.harness = mj_core::config::HarnessKind::Claude;
     held.rate_limited_until_epoch_seconds = Some(epoch_seconds() + 3_600);
     let (profiles, mut updates) = poller_with_store(vec![held.clone()]);
-    let path = format!("{}:/usr/bin:/bin", bin.display());
     profiles.send_replace(QuotaRefreshBatch {
         generation: 1,
         refresh: false,
-        profiles: vec![QuotaRefreshRequest {
-            profile_id: "claude1".into(),
-            harness: mj_core::config::HarnessKind::Claude,
-            auth_scheme: mj_core::config::AuthScheme::NativeLogin,
-            source_home: home.clone(),
-            environment: [("PATH".to_owned(), path)].into(),
-            cwd: PathBuf::from("."),
-            codex_source: crate::quota::CodexQuotaSource::UsagePriced {
-                provider: String::new(),
-            },
-            runtime: crate::quota::QuotaRuntimeConfig::host(),
-        }],
+        profiles: vec![held_request],
+        grants: vec![grant_only],
     });
     // The held report is published and the usage API is not asked.
     let QuotaUpdate::Report(outcome) = next_update(&mut updates).await else {
@@ -660,22 +682,67 @@ printf '{"claudeAiOauth":{"accessToken":"access-2","refreshToken":"refresh-2","e
     };
     assert_eq!(outcome.report, held);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while std::fs::read_to_string(&credentials)
-        .unwrap()
-        .contains("access-1")
-    {
+    for credentials in [&held_credentials, &grant_only_credentials] {
+        while std::fs::read_to_string(credentials)
+            .unwrap()
+            .contains("access-1")
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the grant was not renewed"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         assert!(
-            tokio::time::Instant::now() < deadline,
-            "the grant was not renewed"
+            std::fs::read_to_string(credentials)
+                .unwrap()
+                .contains("refresh-2")
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // The grant-only profile is never probed or published.
+    assert_quiet(&mut updates).await;
+}
+
+/// #1490 review: a profile reconfigured under the same ID (another home) must
+/// not inherit the previous home's schedule, which would postpone its renewal.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn a_reconfigured_claude_profile_does_not_keep_the_old_homes_grant_schedule() {
+    let directory = tempfile::tempdir().unwrap();
+    let (request, credentials) = renewable_claude_profile(directory.path(), "claude1");
+    let batch = QuotaRefreshBatch {
+        profiles: vec![request.clone()],
+        ..Default::default()
+    };
+    let far_future = mj_core::clock::epoch_millis() + 3_600_000;
+    let mut checks = std::collections::BTreeMap::from([(
+        "claude1".to_owned(),
+        ("identity of the previous home".to_owned(), far_future),
+    )]);
+
+    refresh_claude_grants(&batch, &mut checks).await;
+
     assert!(
         std::fs::read_to_string(&credentials)
             .unwrap()
-            .contains("refresh-2")
+            .contains("refresh-2"),
+        "the stale schedule postponed the renewal"
     );
-    assert_quiet(&mut updates).await;
+    // The same identity keeps its schedule: nothing is renewed twice.
+    checks.insert("claude1".to_owned(), (request.cache_identity(), far_future));
+    std::fs::write(
+        &credentials,
+        std::fs::read_to_string(&credentials)
+            .unwrap()
+            .replace("refresh-2", "refresh-1"),
+    )
+    .unwrap();
+    refresh_claude_grants(&batch, &mut checks).await;
+    assert!(
+        std::fs::read_to_string(&credentials)
+            .unwrap()
+            .contains("refresh-1")
+    );
 }
 
 #[test]

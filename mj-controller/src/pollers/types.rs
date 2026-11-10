@@ -8,6 +8,10 @@ pub struct QuotaRefreshBatch {
     /// (or missing) are probed.
     pub refresh: bool,
     pub profiles: Vec<QuotaRefreshRequest>,
+    /// Claude profiles that are not probed (disabled) but still have live
+    /// session copies. Those hold no refresh token, so the poller keeps their
+    /// grant renewed too (#1490). Never overlaps `profiles`.
+    pub grants: Vec<QuotaRefreshRequest>,
 }
 
 #[derive(Debug)]
