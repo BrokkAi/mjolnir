@@ -954,7 +954,7 @@ impl DashboardState {
     }
 
     /// Every top-level session in every workspace that needs a person, most
-    /// urgent first and newest activity first within a level.
+    /// urgent first, then the current workspace, then newest activity.
     pub fn attention_queue(&self) -> Vec<AttentionEntry> {
         let mut entries = self
             .listed_session_candidates()
@@ -965,6 +965,7 @@ impl DashboardState {
                 level.needs_person().then(|| {
                     (
                         std::cmp::Reverse(level),
+                        Some(session.workspace_id.as_str()) != self.active_workspace_id(),
                         std::cmp::Reverse(self.last_activity_ms(&session.id)),
                         session.id.clone(),
                         session.workspace_id.clone(),
@@ -975,7 +976,7 @@ impl DashboardState {
         entries.sort();
         entries
             .into_iter()
-            .map(|(level, _, session_id, workspace_id)| AttentionEntry {
+            .map(|(level, _, _, session_id, workspace_id)| AttentionEntry {
                 workspace_id,
                 session_id,
                 level: level.0,

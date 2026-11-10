@@ -2534,6 +2534,52 @@ fn golden_attention_navigation() {
     )
     .expect("write wrapped action");
 
+    let mut tied = dashboard_with_attention_mix();
+    tied.set_active_workspace(Some("default".into()));
+    tied.session_details
+        .get_mut("done")
+        .unwrap()
+        .pending_elicitations = vec![question("done")];
+    for (id, activity) in [("asks", 10), ("done", 20), ("remote", 30)] {
+        tied.session_details
+            .get_mut(id)
+            .unwrap()
+            .last_activity_at_ms = Some(activity);
+    }
+    tied.select_active_session("quiet");
+    let action = chord(&mut tied, CommandId::NextAttention);
+    append_attention_state(
+        &mut output,
+        "equal urgency prefers the current workspace then newest activity",
+        &mut tied,
+        140,
+        40,
+    );
+    writeln!(output, "{}", attention_values(&tied)).unwrap();
+    writeln!(
+        output,
+        "action: {action:?}; selected: {:?}",
+        tied.selected_session_id()
+    )
+    .unwrap();
+    tied.set_active_workspace(Some("other".into()));
+    writeln!(
+        output,
+        "after switching workspace: {}",
+        attention_values(&tied)
+    )
+    .unwrap();
+    tied.set_active_workspace(Some("default".into()));
+    tied.state.sessions.get_mut("remote").unwrap().state = SessionState::Error;
+    tied.select_active_session("quiet");
+    let action = chord(&mut tied, CommandId::NextAttention);
+    writeln!(
+        output,
+        "higher urgency elsewhere: {}; action: {action:?}",
+        attention_values(&tied)
+    )
+    .unwrap();
+
     let mut folded = dashboard_with_attention_mix();
     folded.set_active_workspace(Some("default".into()));
     let before_fold = append_attention_state(

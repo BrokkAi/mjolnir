@@ -18,8 +18,8 @@
 │  ○ Ord  │                                                                              │         │
 │  Idle   │                               Waiting for you:                               │  ───────╯
 │  │ I n  │                       Explicit question (default / hel)                      │  ───────╮
-│  │      │                       Classifier question (other / hel)                      │         │
-│         │                      Classifier failure (default / hel)                      │  en.    │
+│  │      │                      Classifier failure (default / hel)                      │         │
+│         │                       Classifier question (other / hel)                      │  en.    │
 │         │                                                                              │  ───────╯
 │         │                        Close this window to come back.                       │   ▁   ▄ ╮
 │         │                                                                              │         │
@@ -50,8 +50,8 @@
 │         │               the same thing again, the request waits for you.               │         │
 │  ○ Ord  │                                                                              │         │
 │  Idle   │                               Waiting for you:                               │  ───────╯
-│  │ I n  │                       Classifier question (other / hel)                      │  ───────╮
-│  │      │                      Classifier failure (default / hel)                      │         │
+│  │ I n  │                      Classifier failure (default / hel)                      │  ───────╮
+│  │      │                       Classifier question (other / hel)                      │         │
 │         │                                                                              │  en.    │
 │         │                        Close this window to come back.                       │  ───────╯
 │         │                                                                              │   ▁   ▄ ╮
@@ -117,8 +117,8 @@
 |  - Ord  |                                                                              |         |
 |  Idle   |                               Waiting for you:                               |  -------+
 |  | I n  |                       Explicit question (default / hel)                      |  -------+
-|  |      |                       Classifier question (other / hel)                      |         |
-|         |                      Classifier failure (default / hel)                      |  en.    |
+|  |      |                      Classifier failure (default / hel)                      |         |
+|         |                       Classifier question (other / hel)                      |  en.    |
 |         |                                                                              |  -------+
 |         |                        Close this window to come back.                       |   -   = +
 |         |                                                                              |         |
@@ -174,8 +174,8 @@
       │                                          │
       │             Waiting for you:             │
       │     Explicit question (default / hel)    │
-      │     Classifier question (other / hel)    │
       │    Classifier failure (default / hel)    │
+      │     Classifier question (other / hel)    │
       │                                          │
       │      Close this window to come back.     │
       │                                          │
