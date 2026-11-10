@@ -501,10 +501,13 @@ fn quota_container(
 /// What the daemon's early Claude grant refresh decided for one profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaudeGrantCheck {
-    /// Nothing to do for this profile now. `due_at_ms` is when to look again.
+    /// Not a profile whose grant the daemon renews (another harness, no
+    /// native login file, or a macOS Keychain login).
+    NotApplicable,
+    /// Nothing to do now. `due_at_ms` is when the grant needs renewing, from
+    /// the login as it is now (after a renewal, the new one). `None` when the
+    /// login is missing, holds no refresh token, or states no expiry.
     Waiting { due_at_ms: Option<i64> },
-    /// The login was renewed; the credential sync pushes it to sessions.
-    Renewed,
     /// The refresh failed. The error is already logged with its safe category.
     Failed,
 }
@@ -519,7 +522,7 @@ pub async fn refresh_claude_grant(request: &QuotaRefreshRequest, now_ms: i64) ->
         || !request.auth_scheme.uses_native_login_file()
         || cfg!(target_os = "macos")
     {
-        return ClaudeGrantCheck::Waiting { due_at_ms: None };
+        return ClaudeGrantCheck::NotApplicable;
     }
     let environment = request
         .environment
@@ -574,7 +577,10 @@ pub async fn refresh_claude_grant(request: &QuotaRefreshRequest, now_ms: i64) ->
                 refreshed_by_this_daemon = by_this_call,
                 "refreshed the Claude login ahead of expiry"
             );
-            ClaudeGrantCheck::Renewed
+            // The credential sync pushes the renewed login to sessions.
+            ClaudeGrantCheck::Waiting {
+                due_at_ms: expires_at_ms.map(claude_usage::grant_due_at),
+            }
         }
         Err(error) => {
             tracing::warn!(

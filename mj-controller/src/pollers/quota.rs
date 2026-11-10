@@ -163,8 +163,7 @@ pub fn spawn_quota_refresher(
 
 /// Renew each Claude profile's grant that is due (see
 /// [`crate::quota::refresh_claude_grant`]), concurrently, and record when to
-/// look at each again. A failed refresh waits one probe interval, so a rejected
-/// grant is retried at the pace of the quota probe rather than in a loop.
+/// look at each again.
 pub(super) async fn refresh_claude_grants(
     batch: &QuotaRefreshBatch,
     checks: &mut std::collections::BTreeMap<String, (String, i64)>,
@@ -201,19 +200,24 @@ pub(super) async fn refresh_claude_grants(
                 continue;
             }
         };
+        // Every profile the refresher handles keeps a scheduled check, so the
+        // poller wakes for it whether or not any probe is due. With no due
+        // time (no login or refresh token yet, no readable expiry) or a
+        // failure, look again after one probe interval.
+        let recheck = now_ms
+            .saturating_add(i64::try_from(QUOTA_REFRESH_INTERVAL.as_millis()).unwrap_or(i64::MAX));
         match check {
+            crate::quota::ClaudeGrantCheck::NotApplicable => {
+                checks.remove(&profile_id);
+            }
             crate::quota::ClaudeGrantCheck::Waiting {
                 due_at_ms: Some(due_at_ms),
             } => {
                 checks.insert(profile_id, (identity, due_at_ms));
             }
             crate::quota::ClaudeGrantCheck::Waiting { due_at_ms: None }
-            | crate::quota::ClaudeGrantCheck::Renewed => {
-                checks.remove(&profile_id);
-            }
-            crate::quota::ClaudeGrantCheck::Failed => {
-                let retry = i64::try_from(QUOTA_REFRESH_INTERVAL.as_millis()).unwrap_or(i64::MAX);
-                checks.insert(profile_id, (identity, now_ms.saturating_add(retry)));
+            | crate::quota::ClaudeGrantCheck::Failed => {
+                checks.insert(profile_id, (identity, recheck));
             }
         }
     }

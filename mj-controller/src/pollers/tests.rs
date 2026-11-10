@@ -598,14 +598,19 @@ async fn a_held_profile_is_not_probed_by_the_schedule_or_by_a_refresh() {
     ));
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+const EIGHT_HOURS_MS: i64 = 8 * 3_600_000;
+
 /// A stand-in for `claude auth login` in `directory/bin` that exchanges the
-/// refresh token it is given for a fresh 8 h login, as the real command does,
+/// refresh token it is given for a login lasting `renewed_lifetime_ms` (the real
+/// command grants 8 h), numbering its tokens so each renewal needs the last one,
 /// and a profile home whose login expires in an hour (inside the 4 h lead).
 /// Returns the request for that profile and its credential file.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn renewable_claude_profile(
     directory: &std::path::Path,
     id: &str,
+    renewed_lifetime_ms: i64,
 ) -> (QuotaRefreshRequest, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
@@ -617,11 +622,16 @@ fn renewable_claude_profile(
     if !claude.exists() {
         std::fs::write(
             &claude,
-            r#"#!/bin/sh
-test "$CLAUDE_CODE_OAUTH_REFRESH_TOKEN" = refresh-1 || exit 3
-expires=$(( $(date +%s) * 1000 + 28800000 ))
-printf '{"claudeAiOauth":{"accessToken":"access-2","refreshToken":"refresh-2","expiresAt":%s,"scopes":["user:inference"]}}' "$expires" > "$CLAUDE_CONFIG_DIR/.credentials.json"
-"#,
+            format!(
+                r#"#!/bin/sh
+n=$(cat "$CLAUDE_CONFIG_DIR/renewals" 2>/dev/null || echo 0)
+n=$((n + 1))
+test "$CLAUDE_CODE_OAUTH_REFRESH_TOKEN" = "refresh-$n" || exit 3
+echo "$n" > "$CLAUDE_CONFIG_DIR/renewals"
+expires=$(( $(date +%s) * 1000 + {renewed_lifetime_ms} ))
+printf '{{"claudeAiOauth":{{"accessToken":"access-%s","refreshToken":"refresh-%s","expiresAt":%s,"scopes":["user:inference"]}}}}' "$((n + 1))" "$((n + 1))" "$expires" > "$CLAUDE_CONFIG_DIR/.credentials.json"
+"#
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -662,9 +672,10 @@ printf '{"claudeAiOauth":{"accessToken":"access-2","refreshToken":"refresh-2","e
 #[tokio::test]
 async fn a_held_claude_profile_still_renews_its_grant_early() {
     let directory = tempfile::tempdir().unwrap();
-    let (held_request, held_credentials) = renewable_claude_profile(directory.path(), "claude1");
+    let (held_request, held_credentials) =
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS);
     let (grant_only, grant_only_credentials) =
-        renewable_claude_profile(directory.path(), "claude2");
+        renewable_claude_profile(directory.path(), "claude2", EIGHT_HOURS_MS);
 
     let mut held = stored_report("claude1", QUOTA_REFRESH_INTERVAL.as_secs() + 600);
     held.harness = mj_core::config::HarnessKind::Claude;
@@ -703,13 +714,49 @@ async fn a_held_claude_profile_still_renews_its_grant_early() {
     assert_quiet(&mut updates).await;
 }
 
+/// #1490 review: with no enabled profile to drive probe wakeups (only a
+/// grant-only one), the poller still wakes for each renewal. The stand-in
+/// grants a login due again within seconds, so the second renewal shows the
+/// schedule survived the first.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn the_poller_wakes_for_every_renewal_with_only_grant_only_profiles() {
+    let directory = tempfile::tempdir().unwrap();
+    // Due again 3 s after each renewal: expiry = lead + 3 s.
+    let lifetime =
+        i64::try_from(crate::claude_usage::GRANT_REFRESH_LEAD.as_millis()).unwrap() + 3_000;
+    let (request, credentials) = renewable_claude_profile(directory.path(), "claude1", lifetime);
+    let (profiles, mut updates) = poller_with_store(Vec::new());
+    profiles.send_replace(QuotaRefreshBatch {
+        generation: 1,
+        refresh: false,
+        profiles: Vec::new(),
+        grants: vec![request],
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    for renewal in ["access-2", "access-3"] {
+        while !std::fs::read_to_string(&credentials)
+            .unwrap()
+            .contains(renewal)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the poller did not wake for {renewal}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    assert_quiet(&mut updates).await;
+}
+
 /// #1490 review: a profile reconfigured under the same ID (another home) must
 /// not inherit the previous home's schedule, which would postpone its renewal.
 #[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
 async fn a_reconfigured_claude_profile_does_not_keep_the_old_homes_grant_schedule() {
     let directory = tempfile::tempdir().unwrap();
-    let (request, credentials) = renewable_claude_profile(directory.path(), "claude1");
+    let (request, credentials) =
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS);
     let batch = QuotaRefreshBatch {
         profiles: vec![request.clone()],
         ..Default::default()

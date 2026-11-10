@@ -374,6 +374,12 @@ async fn refresh_and_retry(
 /// while no daemon runs (#1490).
 pub(crate) const GRANT_REFRESH_LEAD: Duration = Duration::from_secs(4 * 60 * 60);
 
+/// When a login expiring at `expires_at_ms` is due for renewal.
+pub(crate) fn grant_due_at(expires_at_ms: i64) -> i64 {
+    let lead_ms = i64::try_from(GRANT_REFRESH_LEAD.as_millis()).unwrap_or(i64::MAX);
+    expires_at_ms.saturating_sub(lead_ms)
+}
+
 /// What [`refresh_grant_if_due`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GrantRefresh {
@@ -402,12 +408,13 @@ pub(crate) async fn refresh_grant_if_due(
     container: Option<crate::quota_runtime::ContainerCheck>,
     now_ms: i64,
 ) -> Result<GrantRefresh, ClaudeUsageError> {
-    let lead_ms = i64::try_from(GRANT_REFRESH_LEAD.as_millis()).unwrap_or(i64::MAX);
     let due_at = |credentials: &Value| -> Option<i64> {
         if !oauth_has_refresh_token(credentials) {
             return None;
         }
-        Some(oauth_expires_at(credentials.get("claudeAiOauth")?)? - lead_ms)
+        Some(grant_due_at(oauth_expires_at(
+            credentials.get("claudeAiOauth")?,
+        )?))
     };
     let credentials = match read_credentials(&home).await {
         Ok(credentials) => credentials,
