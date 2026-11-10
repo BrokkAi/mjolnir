@@ -13,12 +13,12 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use mj_core::credentials::CLAUDE_REFRESH_LOCK_WAIT;
-
 use crate::targets::{CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec};
 
 const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
-pub(crate) const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long macOS lets Claude Code's own `/usage` run. It is the bound the
+/// whole check ran under before the login exchange stopped sharing it.
+const CLI_USAGE_TIMEOUT: Duration = Duration::from_secs(60);
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 // The reset-grant endpoint uses the CLI surface to determine eligibility.
 const USAGE_USER_AGENT: &str = "claude-cli/2.1.283 (external, cli)";
@@ -87,13 +87,14 @@ pub async fn query(
     environment: HashMap<String, String>,
     container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    let executor = Arc::new(CancellableProcessExecutor::with_timeout(
-        USAGE_TIMEOUT + CLAUDE_REFRESH_LOCK_WAIT + REFRESH_TIMEOUT,
-    ));
-    let _cancel = executor.cancel_on_drop();
     if cfg!(target_os = "macos") {
+        let executor = Arc::new(CancellableProcessExecutor::with_timeout(CLI_USAGE_TIMEOUT));
+        let _cancel = executor.cancel_on_drop();
         return query_cli_with(environment, executor).await;
     }
+    // The login exchange runs under no deadline of mj's and survives this
+    // future being dropped: see `run_claude_refresh`.
+    let executor = Arc::new(crate::targets::ProcessExecutor);
     query_with_runtime(
         home,
         environment,
@@ -755,6 +756,14 @@ async fn run_claude_refresh(
     };
     command.purpose = "refresh Claude login".to_owned();
     command.sensitive_output = true;
+    // Once the child starts it runs to its own end. Anthropic spends the
+    // refresh token on the first request, so a kill (a mj deadline, or the
+    // caller being dropped) before the new login is written loses the grant.
+    // Claude Code bounds its own network steps: the token request
+    // (`fn(30000, ...)` in `Npe`, CC 2.1.321) and the profile lookup after it
+    // (`fn(1e4, ...)`) each time out. The executor therefore has no deadline
+    // and no cancellation, and the lock wait is counted apart
+    // (`CLAUDE_REFRESH_LOCK_WAIT`).
     let output = tokio::task::spawn_blocking(move || {
         // Keep the locks, the installation and the handoff admission until
         // the executor has reaped its child, even if the async caller is

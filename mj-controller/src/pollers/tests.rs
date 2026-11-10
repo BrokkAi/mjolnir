@@ -784,6 +784,65 @@ async fn the_poller_wakes_for_every_renewal_with_only_grant_only_profiles() {
     assert_quiet(&mut updates).await;
 }
 
+/// #1490 review: once `claude auth login` has started it runs to its end even
+/// when the caller is dropped (daemon shutdown, a cancelled task): Anthropic
+/// has spent the refresh token by then, and a kill before the new login is
+/// written would lose the grant.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn a_started_claude_login_exchange_survives_its_caller_being_dropped() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    // A slow exchange: announces itself, then takes a second to persist.
+    let bin = directory.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(
+        &claude,
+        r#"#!/bin/sh
+touch "$CLAUDE_CONFIG_DIR/started"
+sleep 1
+printf '{"claudeAiOauth":{"accessToken":"access-2","refreshToken":"refresh-2","expiresAt":%s,"scopes":["user:inference"]}}' "$(( $(date +%s) * 1000 + 28800000 ))" > "$CLAUDE_CONFIG_DIR/.credentials.json"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (request, credentials) =
+        renewable_claude_profile(directory.path(), "claude1", EIGHT_HOURS_MS, ONE_HOUR_MS);
+    let started = credentials.with_file_name("started");
+    let launcher = fake_claude(directory.path());
+    let gate = crate::upgrade::gate().clone();
+    let caller = tokio::spawn(async move {
+        crate::quota::refresh_claude_grant(
+            &request,
+            mj_core::clock::epoch_millis(),
+            &launcher,
+            &gate,
+        )
+        .await
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !started.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the exchange never started"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    caller.abort();
+    while std::fs::read_to_string(&credentials)
+        .unwrap()
+        .contains("access-1")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the exchange was cut short with the caller"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// #1490 review: a renewal that has not begun is skipped while a daemon
 /// handoff waits (its admission is refused), so the handoff is never held for
 /// one and a refresh-token exchange is never cut short by it. The next daemon

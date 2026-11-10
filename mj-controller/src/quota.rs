@@ -548,10 +548,9 @@ pub(crate) async fn refresh_claude_grant(
             return ClaudeGrantCheck::Failed;
         }
     };
-    let executor = std::sync::Arc::new(crate::targets::CancellableProcessExecutor::with_timeout(
-        mj_core::credentials::CLAUDE_REFRESH_LOCK_WAIT + claude_usage::REFRESH_TIMEOUT,
-    ));
-    let _cancel = executor.cancel_on_drop();
+    // No deadline and no cancellation: a started login exchange runs to its
+    // own end (see `claude_usage::run_claude_refresh`).
+    let executor = std::sync::Arc::new(crate::targets::ProcessExecutor);
     match claude_usage::refresh_grant_if_due(
         request.source_home.clone(),
         environment,
