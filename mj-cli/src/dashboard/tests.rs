@@ -395,6 +395,86 @@ fn clearing_a_draft_during_attach_does_not_restore_the_old_cached_text() {
     assert_eq!(cache.open(&session.id, "stale daemon draft").text, "");
 }
 
+#[tokio::test]
+async fn standby_paste_and_clear_supersede_warm_text_while_a_save_is_pending() {
+    let mut dashboard = populated_dashboard();
+    let mut cache = ComposerDraftCache::default();
+    let session = live_session("session-1", "2026-09-19T00:00:00Z");
+    let mut warm = open_test_chat("session-1");
+    warm.set_draft("older warm text".into());
+    let chats = BTreeMap::from([("session-1".into(), warm)]);
+    cache.capture("session-1", "standby".into(), "");
+    let (first, _) = cache.start("session-1", false).unwrap();
+    drafts::prepare_attach_draft(&mut cache, &mut dashboard, &session);
+    dashboard.select_active_session(&session.id);
+    dashboard.set_current_session(Some(&session.id));
+    dashboard.set_opening_session(Some(&session.id));
+    dashboard.focus_prompt();
+    // Paste results arrive through event dispatch rather than a key edit.
+    dashboard.handle_event_result(Event::Paste(" pasted after capture".into()));
+    drafts::capture_editor_draft(&mut cache, &dashboard, &chats, &session.id, "");
+    assert!(
+        cache
+            .get(&session.id)
+            .unwrap()
+            .text
+            .contains("pasted after capture")
+    );
+    assert!(cache.start(&session.id, false).is_none());
+    dashboard.handle_key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::CONTROL,
+    ));
+    dashboard.handle_key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('k'),
+        KeyModifiers::CONTROL,
+    ));
+    drafts::capture_editor_draft(&mut cache, &dashboard, &chats, &session.id, "");
+    cache.complete(&session.id, first, true);
+    let (cleared, draft) = cache.start(&session.id, false).unwrap();
+    assert!(draft.text.is_empty(), "empty standby must beat warm text");
+    cache.complete(&session.id, cleared, true);
+    // Navigation/re-attach and final flush without edits issue no request.
+    drafts::prepare_attach_draft(&mut cache, &mut dashboard, &session);
+    drafts::capture_editor_draft(&mut cache, &dashboard, &chats, &session.id, "");
+    assert!(cache.start(&session.id, true).is_none());
+}
+
+// Hard-won: #1486: lifecycle disposal left standby text for autosave to revive.
+#[tokio::test]
+async fn discarded_parked_composer_cannot_be_captured_or_saved_again() {
+    let mut dashboard = populated_dashboard();
+    let mut cache = ComposerDraftCache::default();
+    let mut warm = open_test_chat("session-1");
+    warm.set_draft("parked unsent prompt".into());
+    let composer = warm.take_live_composer().unwrap();
+    dashboard.adopt_standby_composer("session-1", composer);
+    let mut chats = BTreeMap::from([("session-1".into(), warm)]);
+    drafts::capture_editor_draft(&mut cache, &dashboard, &chats, "session-1", "");
+    let (pending, _) = cache.start("session-1", false).unwrap();
+    cache.capture("session-1", "newer abandoned prompt".into(), "");
+
+    // Both stopped-child and workspace-removal owners use this disposal path.
+    discard_session_composer(&mut dashboard, &mut chats, &mut cache, "session-1");
+    assert!(
+        !dashboard
+            .standby_session_ids()
+            .iter()
+            .any(|id| id == "session-1")
+    );
+    assert!(!chats.contains_key("session-1"));
+    // Even a capture already holding the ID cannot resurrect the removed editor.
+    drafts::capture_editor_draft(&mut cache, &dashboard, &chats, "session-1", "stale seed");
+    assert!(cache.get("session-1").unwrap().text.is_empty());
+    cache.complete("session-1", pending, false);
+    assert!(!cache.is_saving());
+    assert!(cache.start("session-1", false).is_none());
+    assert!(
+        cache.start("session-1", true).is_none(),
+        "no request can reach an unknown/deleted session"
+    );
+}
+
 /// The transcript on screen must belong to the row the selection is on.
 /// An attach for another session hides the chat that is still loaded; a
 /// reattach of the same one does not, because there is nothing to correct.
@@ -1622,7 +1702,7 @@ async fn delayed_lifecycle_completion_cannot_retire_replacement_chat_or_attach()
 /// session as unknown.
 #[tokio::test]
 async fn a_chat_detaching_after_its_session_left_the_feed_still_saves_its_draft() {
-    let mut controller = Controller {
+    let controller = Controller {
         config: Config::default(),
         state: State::default(),
     };
@@ -1630,18 +1710,18 @@ async fn a_chat_detaching_after_its_session_left_the_feed_still_saves_its_draft(
     let departed = live_session("session-1", "2026-09-19T00:00:00Z");
     let (updates, _received) = tokio::sync::mpsc::unbounded_channel();
     let (tracker, _changed) = CriticalOperationTracker::new();
-    let detached = || DetachedChatState {
+    let detached = || TerminalDraftState {
         client_id: "client",
         session_id: "session-1",
-        event_ordinal: 4,
+        revision: 1,
         draft: DetachedSessionDraft {
             text: "unsent".into(),
             inherited_input: None,
         },
     };
 
-    let saved = record_chat_detach_state(
-        &mut controller,
+    let saved = record_terminal_draft_state(
+        &controller,
         Some(&departed),
         &mut dashboard,
         detached(),
@@ -1655,8 +1735,8 @@ async fn a_chat_detaching_after_its_session_left_the_feed_still_saves_its_draft(
     assert_eq!(dashboard.notice(), None);
 
     assert!(
-        record_chat_detach_state(
-            &mut controller,
+        record_terminal_draft_state(
+            &controller,
             None,
             &mut dashboard,
             detached(),

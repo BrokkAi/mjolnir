@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 122;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 123;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2338,6 +2338,44 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         transaction.commit()?;
     }
 
+    // Breaking: old readers show cleared drafts and old writers bypass revision ordering.
+    if version < 123 {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute_batch(
+            "CREATE TABLE detached_drafts_v123 (
+                 draft_id TEXT PRIMARY KEY CHECK(length(trim(draft_id)) > 0),
+                 workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id),
+                 session_id TEXT REFERENCES session_contexts(session_id),
+                 source TEXT NOT NULL CHECK(length(trim(source)) > 0),
+                 owner_pid INTEGER CHECK(owner_pid IS NULL OR owner_pid > 0),
+                 saved_at TEXT NOT NULL,
+                 revision INTEGER CHECK(revision IS NULL OR revision > 0),
+                 text TEXT NOT NULL CHECK(length(text) > 0 OR revision IS NOT NULL),
+                 recovered_at TEXT
+             ) STRICT;
+             INSERT INTO detached_drafts_v123(
+                 draft_id, workspace_id, session_id, source, owner_pid,
+                 saved_at, text, recovered_at, revision
+             ) SELECT draft_id, workspace_id, session_id, source, owner_pid,
+                      saved_at, text, recovered_at, NULL
+                 FROM detached_drafts;
+             DROP TABLE detached_drafts;
+             ALTER TABLE detached_drafts_v123 RENAME TO detached_drafts;
+             CREATE INDEX detached_drafts_workspace_recent
+                 ON detached_drafts(workspace_id, saved_at DESC);
+             CREATE UNIQUE INDEX detached_drafts_terminal_revision
+                 ON detached_drafts(source, workspace_id, session_id)
+                 WHERE revision IS NOT NULL;",
+        )?;
+        transaction.execute(
+            "UPDATE schema_compatibility SET minimum_compatible_version=123 WHERE singleton=1",
+            [],
+        )?;
+        transaction.execute("INSERT INTO schema_migrations(version,applied_at) VALUES (123,strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [])?;
+        transaction.pragma_update(None, "user_version", 123)?;
+        transaction.commit()?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2935,6 +2973,71 @@ pub(super) fn restore_pre116_prompt_history(connection: &Connection, version: i6
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+
+    #[test]
+    fn terminal_draft_migration_preserves_archives_and_admits_tombstones() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        create_baseline_schema(&connection).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER stop_before_terminal_drafts BEFORE INSERT ON schema_migrations
+                 WHEN NEW.version > 122 BEGIN SELECT RAISE(ABORT, 'fixture migration boundary'); END;",
+            )
+            .unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        if !connection.is_autocommit() {
+            connection.execute_batch("ROLLBACK").unwrap();
+        }
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            122
+        );
+        connection
+            .execute_batch(
+                "DROP TRIGGER stop_before_terminal_drafts;
+                 INSERT INTO workspaces(workspace_id,name,name_key,created_at,last_opened_at)
+                     VALUES ('workspace','Workspace','workspace','now','now');
+                 INSERT INTO session_contexts(session_id,bundle_id,created_at,workspace_id)
+                     VALUES ('session','project','now','workspace');
+                 INSERT INTO detached_drafts(
+                     draft_id,workspace_id,session_id,source,owner_pid,saved_at,text,recovered_at
+                 ) VALUES ('archive','workspace','session','terminal',123,'then','old archive','recovered');",
+            )
+            .unwrap();
+
+        migrate_schema(&connection).unwrap();
+
+        let archive: (String, i64, String, Option<i64>) = connection
+            .query_row(
+                "SELECT text, owner_pid, recovered_at, revision FROM detached_drafts
+                  WHERE draft_id='archive'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            archive,
+            ("old archive".into(), 123, "recovered".into(), None)
+        );
+        connection
+            .execute(
+                "INSERT INTO detached_drafts(
+                     draft_id,workspace_id,session_id,source,owner_pid,saved_at,text,revision
+                 ) VALUES ('tombstone','workspace','session','terminal',123,'now','',1)",
+                [],
+            )
+            .unwrap();
+        let foreign_key_errors: i64 = connection
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_errors, 0);
+    }
 
     #[test]
     fn removed_plan_review_tables_raise_the_floor_and_preserve_turn_reviews() {

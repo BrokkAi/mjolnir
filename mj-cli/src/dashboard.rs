@@ -17,6 +17,7 @@ mod composer_drafts;
 pub(crate) mod io;
 mod loop_stalls;
 mod read_receipts;
+mod shutdown;
 mod startup_prompts;
 mod summary_reads;
 mod usage_report;
@@ -235,7 +236,14 @@ struct QuitTimings {
     auto_afk_finished_at: Instant,
     saves_started_at: Instant,
     saves_finished_at: Instant,
+    session_manager_started_at: Instant,
+    session_manager_finished_at: Instant,
+    dashboard_drop_started_at: Instant,
+    dashboard_drop_finished_at: Instant,
     returned_at: Instant,
+    attachment_shutdown: Duration,
+    detach_connect: Duration,
+    detach_request: Duration,
 }
 
 static QUIT_TIMINGS: std::sync::Mutex<Option<QuitTimings>> = std::sync::Mutex::new(None);
@@ -260,12 +268,50 @@ pub(crate) fn log_quit_timings(runtime_shutdown_started: Instant) {
         auto_afk_ms = ms(timings.auto_afk_started_at, timings.auto_afk_finished_at),
         terminal_restore_ms = ms(timings.auto_afk_finished_at, timings.saves_started_at),
         final_saves_ms = ms(timings.saves_started_at, timings.saves_finished_at),
-        session_manager_ms = ms(timings.saves_finished_at, timings.returned_at),
+        session_manager_ms = ms(
+            timings.session_manager_started_at,
+            timings.session_manager_finished_at
+        ),
+        cleanup_ms = ms(
+            timings
+                .saves_started_at
+                .min(timings.session_manager_started_at),
+            timings
+                .saves_finished_at
+                .max(timings.session_manager_finished_at)
+        ),
+        dashboard_drop_ms = ms(
+            timings.dashboard_drop_started_at,
+            timings.dashboard_drop_finished_at
+        ),
+        attachment_shutdown_ms = timings.attachment_shutdown.as_millis(),
+        detach_connect_ms = timings.detach_connect.as_millis(),
+        detach_request_ms = timings.detach_request.as_millis(),
         teardown_ms = ms(timings.returned_at, runtime_shutdown_started),
         runtime_shutdown_ms = ms(runtime_shutdown_started, exited_at),
         quit_requested = timings.requested_at.is_some(),
         "the dashboard exited"
     );
+}
+
+/// Record main's sequential attachment teardown in the same exit record as
+/// the dashboard-owned cleanup stages.
+pub(crate) fn record_attachment_teardown(
+    dashboard_drop_finished_at: Instant,
+    attachment_shutdown: Duration,
+    detach_connect: Duration,
+    detach_request: Duration,
+) {
+    if let Some(timings) = QUIT_TIMINGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        timings.dashboard_drop_finished_at = dashboard_drop_finished_at;
+        timings.attachment_shutdown = attachment_shutdown;
+        timings.detach_connect = detach_connect;
+        timings.detach_request = detach_request;
+    }
 }
 
 /// Bound acknowledgements, not the daemon's accepted mutation. A timeout must
@@ -1128,6 +1174,7 @@ pub(crate) async fn run_dashboard_for_workspace(
         {
             context.wiki_search_task = None;
         }
+        context.capture_composer_drafts();
         context.remember_go_selection();
         if context.shutdown_requested_at.is_some() && context.refresh_shutdown_notice() {
             break;
@@ -1178,7 +1225,6 @@ pub(crate) async fn run_dashboard_for_workspace(
         );
     }
     // All final persistence shares one budget; independent saves run together.
-    let saves_started_at = Instant::now();
     let deadline = tokio::time::Instant::now() + io::SAVE_ACK_TIMEOUT;
     let workspace_id = context.dashboard.active_workspace_id().map(str::to_owned);
     let last_workspace = async {
@@ -1190,70 +1236,86 @@ pub(crate) async fn run_dashboard_for_workspace(
         }
         Ok(())
     };
-    let (sidebar, panes, layout, workspace) = tokio::join!(
-        finish_shutdown_save(
-            "sidebar size",
-            deadline,
-            context.sidebar_size_persistence.finish()
-        ),
-        finish_shutdown_save(
-            "workspace pane sizes",
-            deadline,
-            context.pane_size_persistence.finish()
-        ),
-        finish_shutdown_save(
-            "workspace layout",
-            deadline,
-            context.layout_persistence.finish()
-        ),
-        finish_shutdown_save("last workspace", deadline, last_workspace),
-    );
-    let saves_finished_at = Instant::now();
+    let saves = async {
+        tokio::join!(
+            finish_shutdown_save(
+                "sidebar size",
+                deadline,
+                context.sidebar_size_persistence.finish()
+            ),
+            finish_shutdown_save(
+                "workspace pane sizes",
+                deadline,
+                context.pane_size_persistence.finish()
+            ),
+            finish_shutdown_save(
+                "workspace layout",
+                deadline,
+                context.layout_persistence.finish()
+            ),
+            finish_shutdown_save("last workspace", deadline, last_workspace),
+        )
+    };
+    let manager = async {
+        match context.worker_shutdown.take() {
+            Some(shutdown) => shutdown
+                .shutdown()
+                .await
+                .context("shut down dashboard session manager"),
+            None => Ok(()),
+        }
+    };
+    let (saves, manager) = shutdown::overlap_final_cleanup(saves, manager).await;
+    let saves_started_at = saves.started_at;
+    let saves_finished_at = saves.finished_at;
+    let session_manager_started_at = manager.started_at;
+    let session_manager_finished_at = manager.finished_at;
+    let (sidebar, panes, layout, workspace) = saves.output;
     for result in [sidebar, panes, layout, workspace] {
         if let Err(error) = result {
             tracing::warn!(%error, "dashboard final persistence was not confirmed");
             eprintln!("{error:#}");
         }
     }
-    let session_manager = match context.worker_shutdown.take() {
-        Some(shutdown) => shutdown
-            .shutdown()
-            .await
-            .context("shut down dashboard session manager"),
-        None => Ok(()),
+    let restart = restart_executable.zip(resume);
+    let is_restart = restart.is_some();
+    let exit = if let Some((target, resume)) = restart {
+        DashboardExit::Restart {
+            target,
+            resume: Box::new(resume),
+        }
+    } else if quit_detached {
+        DashboardExit::Detached(detached_sessions)
+    } else if context.shutdown_requested_at.is_some() {
+        DashboardExit::Interrupted
+    } else {
+        DashboardExit::Normal
     };
-    // Recorded before a session manager failure returns, so a failed quit is
-    // timed too. The rest of the context drops as this returns; `main` times
-    // that.
+    let requested_at = context.shutdown_requested_at;
+    let dashboard_drop_started_at = Instant::now();
     *QUIT_TIMINGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(QuitTimings {
-        requested_at: context.shutdown_requested_at,
+        requested_at,
         loop_ended_at,
         auto_afk_started_at,
         auto_afk_finished_at,
         saves_started_at,
         saves_finished_at,
-        returned_at: Instant::now(),
+        session_manager_started_at,
+        session_manager_finished_at,
+        dashboard_drop_started_at,
+        dashboard_drop_finished_at: dashboard_drop_started_at,
+        returned_at: dashboard_drop_started_at,
+        attachment_shutdown: Duration::ZERO,
+        detach_connect: Duration::ZERO,
+        detach_request: Duration::ZERO,
     });
-    if let Err(error) = session_manager {
-        if restart_executable.is_none() {
+    if let Err(error) = manager.output {
+        if !is_restart {
             return Err(error);
         }
         tracing::warn!(%error, "old terminal session manager failed during upgrade handoff");
     }
-    Ok(
-        if let Some((target, resume)) = restart_executable.zip(resume) {
-            DashboardExit::Restart {
-                target,
-                resume: Box::new(resume),
-            }
-        } else if quit_detached {
-            DashboardExit::Detached(detached_sessions)
-        } else if context.shutdown_requested_at.is_some() {
-            DashboardExit::Interrupted
-        } else {
-            DashboardExit::Normal
-        },
-    )
+    Ok(exit)
 }
 
 mod chat_tasks;
@@ -1534,10 +1596,14 @@ impl DashboardContext {
         let stopped = self.dashboard.take_stopped_by_suspend();
         for session_id in &stopped.sessions {
             self.cancel_chat_open_for(session_id);
-            self.chats.remove(session_id);
+            discard_session_composer(
+                &mut self.dashboard,
+                &mut self.chats,
+                &mut self.composer_drafts,
+                session_id,
+            );
             self.transcript_positions.remove(session_id);
             self.question_drafts.remove(session_id);
-            self.composer_drafts.discard(session_id);
         }
         if let Some(parent_id) = stopped.reopen {
             self.open_chat_session(&parent_id);
@@ -1556,9 +1622,13 @@ impl DashboardContext {
             .collect::<Vec<_>>();
         for session_id in sessions {
             self.cancel_chat_open_for(&session_id);
-            self.chats.remove(&session_id);
+            discard_session_composer(
+                &mut self.dashboard,
+                &mut self.chats,
+                &mut self.composer_drafts,
+                &session_id,
+            );
             self.question_drafts.remove(&session_id);
-            self.composer_drafts.discard(&session_id);
         }
     }
 
@@ -1651,6 +1721,9 @@ impl DashboardContext {
         for session_id in self.chats.keys().cloned().collect::<Vec<_>>() {
             self.record_chat_detach(&session_id);
         }
+        for session_id in self.composer_drafts.session_ids() {
+            self.flush_composer_draft(&session_id, true);
+        }
         self.shutdown_requested_at = Some(requested_at);
         // Shutdown progress belongs on screen, not behind the splash.
         self.splash = None;
@@ -1667,6 +1740,10 @@ impl DashboardContext {
     /// Returns true once every user-authored mutation has reached a durable
     /// boundary. Pure reads and projections are deliberately not blockers.
     fn refresh_shutdown_notice(&mut self) -> bool {
+        if self.composer_drafts.is_saving() {
+            self.dashboard.set_notice("Saving drafts…");
+            return false;
+        }
         if self.read_receipts.is_saving() {
             self.dashboard.set_notice("Saving read status…");
             return false;
@@ -1747,10 +1824,7 @@ impl DashboardContext {
         let session_name = self.session_notice_name(&session_id);
         io::spawn_read_receipt_persist(
             self.client_id.clone(),
-            self.controller
-                .state
-                .sessions
-                .get(&session_id)
+            self.chat_session_record(&session_id)
                 .map(|session| session.workspace_id.clone())
                 .unwrap_or_else(|| self.workspace_id.clone()),
             io::NamedSession {
@@ -2203,58 +2277,53 @@ async fn next_terminal_event(
     }
 }
 
-/// Builds a chat view for one session: its identity, the other sessions it
-/// reports activity for, and its recovery context.
-/// Records what leaving a chat produced — how far the user has read and the
-/// input they left unsent — and persists both in the background. A missing
-/// session is reported rather than fatal: the session itself is unaffected.
-///
-/// The returned handle lets the quit path wait for the write. `None` means
-/// nothing was queued.
-struct DetachedChatState<'a> {
+/// Lifecycle disposal must drop the editor itself before retiring its cached
+/// value, or the next capture would adopt the abandoned standby text again.
+fn discard_session_composer(
+    dashboard: &mut DashboardState,
+    chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
+    drafts: &mut ComposerDraftCache,
+    session_id: &str,
+) {
+    chats.remove(session_id);
+    drop(dashboard.take_standby_composer(session_id));
+    drafts.discard(session_id);
+}
+
+/// Queue a draft using the last known context even after its session leaves
+/// the current feed. Receipt durability is owned separately by ReadReceipts.
+struct TerminalDraftState<'a> {
     client_id: &'a str,
     session_id: &'a str,
-    event_ordinal: u64,
+    revision: u64,
     draft: DetachedSessionDraft,
 }
 
-fn record_chat_detach_state(
-    controller: &mut Controller,
+fn record_terminal_draft_state(
+    controller: &Controller,
     departed: Option<&SessionRecord>,
     dashboard: &mut DashboardState,
-    detached: DetachedChatState<'_>,
+    draft: TerminalDraftState<'_>,
     updates: &UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let workspace_id = if let Some(session) = controller.state.sessions.get_mut(detached.session_id)
-    {
-        session.viewed_through_event_ordinal = session
-            .viewed_through_event_ordinal
-            .max(detached.event_ordinal);
-        let workspace_id = session.workspace_id.clone();
-        dashboard.set_state(controller.state.clone());
-        workspace_id
-    } else if let Some(session) = departed {
-        // The session left the feed; only the store needs the update.
-        session.workspace_id.clone()
-    } else {
+    let Some(session) = controller.state.sessions.get(draft.session_id).or(departed) else {
         dashboard.set_notice(format!(
-            "Could not save draft and read status for {}: unknown session",
-            short_id(detached.session_id)
+            "Could not save draft for {}: unknown session",
+            short_id(draft.session_id)
         ));
         return None;
     };
-    dashboard.clear_notice();
-    let session_name = io::session_notice_name(&controller.state, detached.session_id);
-    Some(io::spawn_detached_session_state_persist(
-        detached.client_id.to_owned(),
-        workspace_id,
+    let session_name = io::session_notice_name(&controller.state, draft.session_id);
+    Some(io::spawn_terminal_draft_persist(
+        draft.client_id.to_owned(),
+        session.workspace_id.clone(),
         io::NamedSession {
-            id: detached.session_id.to_owned(),
+            id: draft.session_id.to_owned(),
             name: session_name,
         },
-        detached.event_ordinal,
-        detached.draft,
+        draft.revision,
+        draft.draft,
         updates.clone(),
         tracker,
     ))

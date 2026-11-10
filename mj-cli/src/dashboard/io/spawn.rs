@@ -1016,14 +1016,12 @@ pub(crate) struct NamedSession {
     pub(crate) name: String,
 }
 
-/// Persist everything one detach produces: the read receipt and the unsent
-/// draft. They describe the same moment and the same row, so one task keeps
-/// them together and gives the quit path a single handle to await.
-pub(crate) fn spawn_detached_session_state_persist(
+/// One revisioned owner write; the cache sequences and coalesces each session.
+pub(crate) fn spawn_terminal_draft_persist(
     client_id: String,
     workspace_id: String,
     session: NamedSession,
-    event_ordinal: u64,
+    revision: u64,
     draft: DetachedSessionDraft,
     updates: UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
@@ -1041,17 +1039,21 @@ pub(crate) fn spawn_detached_session_state_persist(
         async move {
             daemon::connect_or_start()
                 .await?
-                .persist_detached_session_state(
+                .persist_terminal_draft(
                     client_id,
                     workspace_id,
                     persisted_session_id,
-                    event_ordinal,
                     std::process::id(),
+                    revision,
                     draft,
                 )
                 .await
         },
-        move |result| DashboardIoUpdate::DetachedSessionState { session_id, result },
+        move |result| DashboardIoUpdate::TerminalDraft {
+            session_id,
+            revision,
+            result,
+        },
     )
 }
 

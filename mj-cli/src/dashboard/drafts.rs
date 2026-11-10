@@ -17,6 +17,23 @@ pub(super) fn prepare_attach_draft(
     draft
 }
 
+/// Standby owns the composer while attaching; otherwise the warm chat owns it.
+/// In particular an empty standby must win over an older warm draft.
+pub(super) fn capture_editor_draft(
+    cache: &mut ComposerDraftCache,
+    dashboard: &DashboardState,
+    chats: &BTreeMap<String, mj_chat::chat::ActiveChat>,
+    session_id: &str,
+    inherited: &str,
+) {
+    if let Some(text) = dashboard
+        .standby_prompt_draft(session_id)
+        .or_else(|| chats.get(session_id).map(|chat| chat.draft()))
+    {
+        cache.capture(session_id, text, inherited);
+    }
+}
+
 impl DashboardContext {
     /// Opens the conversation for `session_id` without waiting on the session
     /// manager. Attaching can involve worker/relay I/O, so the result comes
