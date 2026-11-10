@@ -4,8 +4,10 @@ import proxy from "../src/index.ts";
 import questions from "../../../mj-worker/src/acp/afk_question.json" with { type: "json" };
 
 const state = {
-  current_question: { message: "Who owns #11482 and who owns #10941?", fields: [] },
-  previous_questions: [{ message: "Who should own #10941?", fields: [] }],
+  current_question: { message: "", title: "Who owns #11482 and who owns #10941?",
+    fields: [{ id: "owners", title: "Assignments", kind: "text", required: true }] },
+  previous_questions: [{ message: "   ", title: "Who should own #10941?",
+    fields: [{ id: "owner", title: "Owner", kind: "text", required: true }] }],
 };
 const environment = { TYPESAFE_API_KEY: "private-test-key",
   TURN_RATE_LIMITER: { async limit() { return { success: true }; } } };
@@ -15,7 +17,7 @@ function request() {
     body: JSON.stringify(state) });
 }
 
-// Hard-won: #1489: a mixed new/repeated AFK form was mistaken for a retry.
+// Hard-won: #1489: mixed forms were mistaken for retries; title/field-only forms were refused.
 test("AFK route preserves whole-question evidence and the shared classifier contract", async t => {
   const answer = { type: "choice", choice: "different", confidence: 0.97,
     probabilities: { same: 0.03, different: 0.97 } };

@@ -13,7 +13,7 @@ interface AfkForm extends Record<string, unknown> {
 }
 
 function form(value: unknown): value is AfkForm {
-  return object(value) && typeof value.message === "string" && value.message.trim().length > 0
+  return object(value) && typeof value.message === "string"
     && Array.isArray(value.fields) && value.fields.every(object);
 }
 

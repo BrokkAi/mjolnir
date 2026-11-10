@@ -76,7 +76,7 @@ No schema or relay changes are needed. Presence and refusal history stay process
 
 ## Artifacts and Notes
 
-Issue: https://github.com/BrokkAi/mjolnir/issues/1489. Current hosted version: 05397108-1a05-4112-b210-1d2bcc0426b1 at https://mj-jev-proxy.eng-admin-a63.workers.dev. Final actual-form live results: mixed form different=0.99; identical form same=0.97. Earlier subset same=0.76 on the first deployment. Final constraint live results: single/multi change different=1.0; requiredness-only change different=0.99; field ID and option order change same=0.99. The five synthetic cases also classify as expected. Python urllib received Cloudflare 1010; normal curl requests succeeded.
+Issue: https://github.com/BrokkAi/mjolnir/issues/1489. Current hosted version: 6eeb5234-6137-4a93-a1f9-a0d121406f04 at https://mj-jev-proxy.eng-admin-a63.workers.dev. Final actual-form live results: mixed form different=0.99; identical form same=0.97. Earlier subset same=0.76 on the first deployment. Final constraint live results: single/multi change different=1.0; requiredness-only change different=0.99; field ID and option order change same=0.99. The five synthetic cases also classify as expected. Python urllib received Cloudflare 1010; normal curl requests succeeded.
 
 ## Interfaces and Dependencies
 
@@ -111,3 +111,5 @@ Fifth-review decision: remove nested JSON strings from AFK evidence. Current and
 Final structured-contract validation: five focused AFK regressions pass, including the 23-character escape boundary and inherited companion defaults. Complete core suite: 644 passed, 3 ignored plus one ignored doctest. Complete worker suite: 818 passed, 11 ignored. Workspace Clippy, formatting, all 39 service tests, TypeScript, and deploy dry run pass. Deployment 05397108-1a05-4112-b210-1d2bcc0426b1 passes actual mixed/same/subset forms and synthetic constraints, escaped short tokens, and distinct anonymous IDs.
 
 Final interface: same_afk_question takes a current serde_json::Value form and a slice of prior form Values; the service receives current_question as an object with message and fields and previous_questions as an array of those objects. No serialized form strings or compatibility alias remain. ElicitationRequest::field_is_secret owns direct and companion secrecy interpretation.
+
+Sixth-review compatibility fix: ACP allows an empty/whitespace-only message with the decision in the title and fields. Removed the service-only nonempty-message restriction and extended the existing route integration fixture to preserve those forms. All 39 service tests, TypeScript check, deploy dry run, and diff checks pass. Deployed 6eeb5234-6137-4a93-a1f9-a0d121406f04; live title-only same/new comparisons pass at 0.99. Rust sources are unchanged from the completed full core/worker and Clippy validation.
