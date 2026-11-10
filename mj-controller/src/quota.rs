@@ -896,8 +896,9 @@ async fn refresh_profile_with_cache_root(
     // Only the daemon owns the writer; other callers leave persistence to it.
     if crate::database::database_writer_installed() {
         let observed = report.clone();
+        let identity = cache_identity.clone();
         match tokio::task::spawn_blocking(move || {
-            crate::database::save_quota_report(&cache_identity, &observed)
+            crate::database::save_quota_report(&identity, &observed)
         })
         .await
         {

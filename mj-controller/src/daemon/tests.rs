@@ -882,16 +882,20 @@ async fn a_quota_refresh_request_wakes_the_daemons_poller_and_fails_without_one(
         .await
         .expect_err("no quota poller is attached, so nothing can probe");
 
-    let (wake, mut woken) = tokio::sync::mpsc::channel(1);
+    let (wake, mut woken) = tokio::sync::mpsc::unbounded_channel();
     state.attach_quota_refresh(wake);
     for _ in 0..3 {
-        // A request that arrives while one is pending is one request.
         handle_action(DaemonAction::RefreshQuota, &metadata, &state, &cancellation)
             .await
             .expect("refresh quota");
     }
-    woken.try_recv().expect("the poller was woken");
-    assert!(woken.try_recv().is_err(), "requests coalesce");
+    for _ in 0..3 {
+        assert_eq!(
+            woken.try_recv().expect("the poller receives every intent"),
+            QuotaRefreshIntent::Force
+        );
+    }
+    assert!(woken.try_recv().is_err());
 }
 
 #[tokio::test]

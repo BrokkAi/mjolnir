@@ -11,11 +11,11 @@ use tokio::sync::{mpsc, watch};
 pub(crate) struct Services {
     pub backend: Arc<ApiBackend>,
     pub quotas: watch::Receiver<QuotaReportMap>,
-    refresh: mpsc::Sender<()>,
+    refresh: mpsc::UnboundedSender<crate::daemon::QuotaRefreshIntent>,
 }
 impl Services {
     pub(crate) fn refresh_quotas(&self) {
-        let _ = self.refresh.try_send(());
+        let _ = self.refresh.send(crate::daemon::QuotaRefreshIntent::Force);
     }
 }
 
@@ -28,7 +28,7 @@ pub(super) struct Policy {
     quotas_tx: watch::Sender<QuotaReportMap>,
     profiles_tx: watch::Sender<QuotaRefreshBatch>,
     pub quota_rx: mpsc::Receiver<QuotaUpdate>,
-    pub refresh_rx: mpsc::Receiver<()>,
+    pub refresh_rx: mpsc::UnboundedReceiver<crate::daemon::QuotaRefreshIntent>,
     batch: QuotaRefreshBatch,
     published: BTreeMap<String, mj_core::config::HarnessProfile>,
     catalog_config: Option<mj_core::config::Config>,
@@ -68,6 +68,7 @@ impl Policy {
         );
         let reports = Arc::new(std::sync::Mutex::new(QuotaReportMap::new()));
         let (quotas_tx, quotas) = watch::channel(QuotaReportMap::new());
+        let (refresh, refresh_rx) = mpsc::unbounded_channel();
         catalog.set_quota_reports(reports.clone());
         let rejected = Arc::new(std::sync::Mutex::new(
             mj_core::credentials::RejectedLogins::default(),
@@ -82,10 +83,10 @@ impl Policy {
             .with_profile_catalog(catalog.clone())
             .with_quota_reports(reports.clone())
             .with_quota_publications(quotas.clone())
+            .with_quota_refresh(refresh.clone())
             .with_rejected_logins(rejected.clone()),
         );
         state.install_report_backend(&backend);
-        let (refresh, refresh_rx) = mpsc::channel(1);
         // A surface's Refresh reaches this poller through the daemon.
         state.attach_quota_refresh(refresh.clone());
         // The stored report is a rebuildable cache: a failed read only costs a probe.
@@ -159,18 +160,29 @@ impl Policy {
         if force || self.published != controller.config.profiles {
             self.published.clone_from(&controller.config.profiles);
         }
-        let desired = self
-            .batch
-            .profiles
+        self.reconcile_publications(&self.batch.profiles.clone());
+    }
+
+    /// Consume all queued requests together; Force dominates source-only
+    /// reconciliation while retaining the original manual-refresh behavior.
+    pub fn refresh(&mut self, first: crate::daemon::QuotaRefreshIntent) {
+        match coalesce_refresh_intents(first, &mut self.refresh_rx) {
+            crate::daemon::QuotaRefreshIntent::Force => self.sync(true),
+            crate::daemon::QuotaRefreshIntent::ReconcileSources => self.reconcile_sources(),
+        }
+    }
+
+    fn reconcile_publications(&mut self, requests: &[crate::quota::QuotaRefreshRequest]) {
+        let desired = requests
             .iter()
             .map(|request| (request.profile_id.clone(), request.cache_identity()))
             .collect::<BTreeMap<_, _>>();
         let changed = {
             let mut reports = self.reports.lock().expect("quota reports poisoned");
             let changed = reconcile_quota_publications(&mut reports, &desired);
-            if !changed.is_empty() {
-                self.quotas_tx.send_replace(reports.clone());
-            }
+            // ReconcileSources must wake readers even when the source reverted
+            // to an identity whose report is still reusable.
+            self.quotas_tx.send_replace(reports.clone());
             changed
         };
         if !changed.is_empty() {
@@ -184,6 +196,26 @@ impl Policy {
         self.probing.retain(|id| desired.contains_key(id));
         self.publish_quotas();
     }
+
+    fn apply_reconciled_sources(&mut self, requests: Vec<crate::quota::QuotaRefreshRequest>) {
+        replace_source_requests(&mut self.batch, &self.profiles_tx, requests.clone());
+        self.reconcile_publications(&requests);
+    }
+
+    /// Re-read native profile sources even when the daemon config is unchanged.
+    /// The Codex provider and key live in the profile home, outside config.toml.
+    fn reconcile_sources(&mut self) {
+        let controller = {
+            let owner = self.state.owner();
+            crate::controller::Controller {
+                config: owner.controller().config.clone(),
+                state: Default::default(),
+            }
+        };
+        let requests = quota_refresh_profiles(&controller);
+        self.apply_reconciled_sources(requests);
+    }
+
     /// Tell every attached surface what the daemon knows about quota.
     fn publish_quotas(&self) {
         let reports = self.reports.lock().expect("quota reports poisoned").clone();
@@ -282,6 +314,36 @@ impl Policy {
     }
 }
 
+fn coalesce_refresh_intents(
+    first: crate::daemon::QuotaRefreshIntent,
+    pending: &mut mpsc::UnboundedReceiver<crate::daemon::QuotaRefreshIntent>,
+) -> crate::daemon::QuotaRefreshIntent {
+    let mut force = first == crate::daemon::QuotaRefreshIntent::Force;
+    while let Ok(intent) = pending.try_recv() {
+        force |= intent == crate::daemon::QuotaRefreshIntent::Force;
+    }
+    if force {
+        crate::daemon::QuotaRefreshIntent::Force
+    } else {
+        crate::daemon::QuotaRefreshIntent::ReconcileSources
+    }
+}
+
+fn replace_source_requests(
+    batch: &mut QuotaRefreshBatch,
+    profiles: &watch::Sender<QuotaRefreshBatch>,
+    requests: Vec<crate::quota::QuotaRefreshRequest>,
+) -> bool {
+    if requests == batch.profiles {
+        return false;
+    }
+    batch.generation = batch.generation.saturating_add(1);
+    batch.profiles = requests;
+    batch.refresh = false;
+    profiles.send_replace(batch.clone());
+    true
+}
+
 fn publish_quota_outcome(
     reports: &mut QuotaReportMap,
     outcome: &crate::quota::QuotaRefreshOutcome,
@@ -339,6 +401,112 @@ fn surface_quota_reports(reports: &QuotaReportMap) -> BTreeMap<String, ProfileQu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_force_dominates_source_reconciliation() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        sender
+            .send(crate::daemon::QuotaRefreshIntent::ReconcileSources)
+            .unwrap();
+        sender
+            .send(crate::daemon::QuotaRefreshIntent::Force)
+            .unwrap();
+        sender
+            .send(crate::daemon::QuotaRefreshIntent::ReconcileSources)
+            .unwrap();
+
+        assert_eq!(
+            coalesce_refresh_intents(
+                crate::daemon::QuotaRefreshIntent::ReconcileSources,
+                &mut receiver,
+            ),
+            crate::daemon::QuotaRefreshIntent::Force
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn native_codex_provider_edit_republishes_only_changed_source_requests() {
+        let home = tempfile::tempdir().unwrap();
+        let native_config = home.path().join("config.toml");
+        let write_provider = |env_key: &str| {
+            std::fs::write(
+                &native_config,
+                format!(
+                    "model_provider = \"custom\"\n\
+                     [model_providers.custom]\n\
+                     base_url = \"https://api.invalid/v1\"\n\
+                     env_key = \"{env_key}\"\n\
+                     wire_api = \"responses\"\n"
+                ),
+            )
+            .unwrap();
+        };
+        write_provider("ZAI_API_KEY");
+        let codex = mj_core::config::HarnessProfile {
+            environment: [
+                ("ZAI_API_KEY".into(), "first-provider-key".into()),
+                ("ZAI_API_KEY_TWO".into(), "second-provider-key".into()),
+            ]
+            .into_iter()
+            .collect(),
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                home.path().to_path_buf(),
+            )
+        };
+        let other_home = tempfile::tempdir().unwrap();
+        let claude = mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Claude,
+            other_home.path().to_path_buf(),
+        );
+        let controller = crate::controller::Controller {
+            config: mj_core::config::Config {
+                profiles: BTreeMap::from([("codex".into(), codex), ("claude".into(), claude)]),
+                ..Default::default()
+            },
+            state: Default::default(),
+        };
+        let before = quota_refresh_profiles(&controller);
+        let (profiles_tx, profiles_rx) = watch::channel(QuotaRefreshBatch::default());
+        let mut batch = QuotaRefreshBatch {
+            profiles: before.clone(),
+            ..Default::default()
+        };
+
+        write_provider("ZAI_API_KEY_TWO");
+        let after = quota_refresh_profiles(&controller);
+        assert!(replace_source_requests(
+            &mut batch,
+            &profiles_tx,
+            after.clone()
+        ));
+
+        let published = profiles_rx.borrow().clone();
+        assert!(!published.refresh, "source reconciliation is not Force");
+        assert_ne!(
+            before
+                .iter()
+                .find(|request| request.profile_id == "codex")
+                .unwrap()
+                .cache_identity(),
+            after
+                .iter()
+                .find(|request| request.profile_id == "codex")
+                .unwrap()
+                .cache_identity(),
+        );
+        assert_eq!(
+            before
+                .iter()
+                .find(|request| request.profile_id == "claude")
+                .unwrap(),
+            after
+                .iter()
+                .find(|request| request.profile_id == "claude")
+                .unwrap(),
+        );
+    }
 
     // Hard-won: #1487: an old quota result repopulated an edited profile's slot.
     #[test]
@@ -446,8 +614,20 @@ mod tests {
             ("claude".to_owned(), report.clone()),
             ("codex".to_owned(), codex.clone()),
         ]);
+        let publications = reports
+            .iter()
+            .map(|(id, report)| {
+                (
+                    id.clone(),
+                    QuotaReportPublication {
+                        cache_identity: "test-identity".into(),
+                        report: Some(report.clone()),
+                    },
+                )
+            })
+            .collect::<QuotaReportMap>();
         let snapshot = mj_client::quota::QuotaSnapshot {
-            reports: surface_quota_reports(&reports),
+            reports: surface_quota_reports(&publications),
             ..Default::default()
         };
         let serialized = serde_json::to_vec(&snapshot).expect("serialize published snapshot");

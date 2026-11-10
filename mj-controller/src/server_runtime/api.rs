@@ -498,6 +498,7 @@ pub struct ApiBackend {
     /// aliases to their callers.
     quota_reports: Arc<Mutex<crate::quota::QuotaReportMap>>,
     quota_publications: Option<tokio::sync::watch::Receiver<crate::quota::QuotaReportMap>>,
+    quota_refresh: Option<tokio::sync::mpsc::UnboundedSender<crate::daemon::QuotaRefreshIntent>>,
     /// Profiles whose login the credential sync found refused; session and
     /// sub-agent selection refuse them until their login file changes.
     rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
@@ -659,6 +660,7 @@ impl ApiBackend {
             exports,
             quota_reports: Arc::new(Mutex::new(BTreeMap::new())),
             quota_publications: None,
+            quota_refresh: None,
             rejected_logins: Arc::default(),
             // Nothing is adopted until the daemon hands its configuration
             // over, so a backend built without one — every test that does not
@@ -686,6 +688,14 @@ impl ApiBackend {
         self
     }
 
+    pub(crate) fn with_quota_refresh(
+        mut self,
+        refresh: tokio::sync::mpsc::UnboundedSender<crate::daemon::QuotaRefreshIntent>,
+    ) -> Self {
+        self.quota_refresh = Some(refresh);
+        self
+    }
+
     /// Full poller-owned report, including model-scoped allowances omitted
     /// from user-facing quota projections.
     pub(crate) fn quota_report(
@@ -705,13 +715,21 @@ impl ApiBackend {
         if config.enabled_profile(profile_id).is_none() {
             bail!("quota profile {profile_id:?} is missing or disabled");
         }
-        let report = current
-            .get(profile_id)
-            .filter(|publication| publication.cache_identity == wanted_identity)
-            .and_then(|publication| publication.report.clone());
-        match report {
-            Some(report) => Ok(QuotaRead::Ready(report)),
-            None => Ok(QuotaRead::Pending(QuotaWait { receiver })),
+        match current.get(profile_id) {
+            Some(publication) if publication.cache_identity == wanted_identity => {
+                match publication.report.clone() {
+                    Some(report) => Ok(QuotaRead::Ready(report)),
+                    None => Ok(QuotaRead::Pending(QuotaWait { receiver })),
+                }
+            }
+            _ => {
+                self.quota_refresh
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("quota source reconciliation is unavailable"))?
+                    .send(crate::daemon::QuotaRefreshIntent::ReconcileSources)
+                    .map_err(|_| anyhow!("quota owner stopped before source reconciliation"))?;
+                Ok(QuotaRead::Pending(QuotaWait { receiver }))
+            }
         }
     }
 

@@ -154,6 +154,8 @@ struct RecordingExports {
     override_call: std::sync::Mutex<Option<(String, Vec<mj_core::subagent::ReviewOverride>)>>,
     base_call: std::sync::Mutex<Option<(String, String, Option<String>)>>,
     quota_publications: tokio::sync::watch::Sender<crate::quota::QuotaReportMap>,
+    quota_refreshes:
+        std::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::daemon::QuotaRefreshIntent>>,
 }
 
 impl ExportRuntime for RecordingExports {
@@ -255,7 +257,7 @@ async fn selection_backend_refusing(
         .await;
     // Spawns draw profiles weighted by quota left, so any quota at all would
     // let `parent` win some draws; with none it always ranks behind `codex-high`.
-    let quotas = BTreeMap::from([
+    let quotas: crate::quota::QuotaReportMap = BTreeMap::from([
         (
             "parent".to_owned(),
             quota("parent", HarnessKind::Codex, &[80, 0]),
@@ -278,12 +280,14 @@ async fn selection_backend_refusing(
     })
     .collect();
     let (quota_publications, quota_updates) = tokio::sync::watch::channel(quotas.clone());
+    let (quota_refresh, quota_refreshes) = tokio::sync::mpsc::unbounded_channel();
     let exports = Arc::new(RecordingExports {
         parent: parent_record("parent-1", "parent"),
         registered: std::sync::Mutex::new(None),
         override_call: std::sync::Mutex::new(None),
         base_call: std::sync::Mutex::new(None),
         quota_publications,
+        quota_refreshes: std::sync::Mutex::new(quota_refreshes),
     });
     let backend = Arc::new(
         ApiBackend::new(
@@ -299,6 +303,7 @@ async fn selection_backend_refusing(
         .with_profile_catalog(catalog)
         .with_quota_reports(Arc::new(std::sync::Mutex::new(quotas)))
         .with_quota_publications(quota_updates)
+        .with_quota_refresh(quota_refresh)
         .with_rejected_logins(Arc::new(std::sync::Mutex::new(rejected_logins))),
     );
     (backend, exports)
@@ -309,17 +314,20 @@ async fn quota_reader_waits_for_matching_publication_and_returns_completed_error
     let (backend, exports) = selection_backend(SAME_MODELS, None).await;
     let completed = {
         let mut reports = backend.quota_reports.lock().unwrap();
-        reports
+        let completed = reports
             .get_mut("codex-high")
             .unwrap()
             .report
             .take()
-            .unwrap()
+            .unwrap();
+        exports.quota_publications.send_replace(reports.clone());
+        completed
     };
     let pending = backend.quota_report("codex-high", "test-identity").unwrap();
     let crate::server_runtime::api::QuotaRead::Pending(wait) = pending else {
         panic!("pending profile unexpectedly had a completed report");
     };
+    assert!(exports.quota_refreshes.lock().unwrap().try_recv().is_err());
 
     // Publishing after lookup must wake the receiver returned by that lookup.
     {
@@ -339,6 +347,16 @@ async fn quota_reader_waits_for_matching_publication_and_returns_completed_error
     assert_eq!(
         report.error.as_deref(),
         Some("provider temporarily unavailable")
+    );
+    assert!(matches!(
+        backend
+            .quota_report("codex-high", "edited-native-source")
+            .unwrap(),
+        crate::server_runtime::api::QuotaRead::Pending(_)
+    ));
+    assert_eq!(
+        exports.quota_refreshes.lock().unwrap().try_recv().unwrap(),
+        crate::daemon::QuotaRefreshIntent::ReconcileSources
     );
 }
 

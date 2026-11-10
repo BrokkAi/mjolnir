@@ -127,6 +127,7 @@ async fn run(
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut quota_open = true;
+    let mut refresh_open = true;
     loop {
         if !crate::upgrade::is_draining() {
             for (id, job) in dispatch.ready(Instant::now()) {
@@ -276,7 +277,15 @@ async fn run(
                 }
             }
             changed = revisions.changed() => { changed.context("daemon revision feed stopped")?; policy.sync(false); }
-            _ = policy.refresh_rx.recv() => policy.sync(true),
+            intent = policy.refresh_rx.recv(), if refresh_open => {
+                match intent {
+                    Some(intent) => policy.refresh(intent),
+                    None => {
+                        refresh_open = false;
+                        tracing::error!("delegation quota refresh intent feed stopped");
+                    }
+                }
+            },
             update = policy.quota_rx.recv(), if quota_open => match update {
                 Some(update) => policy.quota(update),
                 None => { quota_open = false; tracing::error!("delegation quota service stopped"); }

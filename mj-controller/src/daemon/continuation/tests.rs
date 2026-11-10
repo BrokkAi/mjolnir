@@ -2054,6 +2054,7 @@ async fn quota_recovery_reads_full_owner_reports_without_requesting_another_prob
         )),
     );
     catalog.sync(&config);
+    let (refresh, mut refreshes) = mpsc::unbounded_channel();
     let backend = Arc::new(
         crate::server_runtime::api::ApiBackend::new(
             state.session_manager.client(),
@@ -2062,10 +2063,10 @@ async fn quota_recovery_reads_full_owner_reports_without_requesting_another_prob
         )
         .with_quota_reports(reports.clone())
         .with_quota_publications(quota_feed)
+        .with_quota_refresh(refresh.clone())
         .with_profile_catalog(catalog),
     );
     state.install_report_backend(&backend);
-    let (refresh, mut refreshes) = mpsc::channel(1);
     state.attach_quota_refresh(refresh);
     let mut blocked = view("one", true);
     let snapshot = blocked.snapshot.as_mut().unwrap();
@@ -2128,7 +2129,9 @@ async fn quota_recovery_reads_full_owner_reports_without_requesting_another_prob
             .notice
             .contains("using last-known quota reset times")
     );
-    assert!(refreshes.try_recv().is_err());
+    while let Ok(intent) = refreshes.try_recv() {
+        assert_eq!(intent, super::super::QuotaRefreshIntent::ReconcileSources);
+    }
 }
 
 // Hard-won: #1487: a first quota check could strand recovery, and waiting for it must not hold daemon handoff.
@@ -2139,6 +2142,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
         ProfileQuota, QuotaRefreshRequest, QuotaReportMap, QuotaReportPublication, QuotaWindow,
     };
     use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe};
+    use futures::FutureExt;
     use mj_core::config::{HarnessKind, HarnessProfile};
 
     async fn observed<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -2209,6 +2213,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             std::sync::atomic::AtomicUsize::new(0),
         )));
         catalog.sync(&config);
+        let (refresh, mut refreshes) = mpsc::unbounded_channel();
         let backend = Arc::new(
             crate::server_runtime::api::ApiBackend::new(
                 state.session_manager.client(),
@@ -2217,6 +2222,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             )
             .with_quota_reports(reports.clone())
             .with_quota_publications(quota_feed)
+            .with_quota_refresh(refresh)
             .with_profile_catalog(catalog.clone()),
         );
         state.install_report_backend(&backend);
@@ -2296,10 +2302,19 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 preparations.try_recv().is_err(),
                 "a completed non-quota reply must remain untouched"
             );
-            assert!(remote.requests.try_recv().is_err());
+            assert!(remote.requests.recv().now_or_never().is_none());
+            // The manager suppresses byte-identical views; advance only the
+            // relay frontier so this is a new publication of the same turn.
+            let mut same_turn = blocked;
+            same_turn
+                .snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .latest_ordinal += 1;
             remote
                 .publisher
-                .publish("one".into(), blocked)
+                .publish("one".into(), same_turn)
                 .await
                 .unwrap();
             receive(&mut updates).await;
@@ -2318,7 +2333,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             "a quota publication wait must hold no admission: {case}"
         );
         assert!(
-            remote.requests.try_recv().is_err(),
+            remote.requests.recv().now_or_never().is_none(),
             "no terminal no-retry record before the owner reports"
         );
         if case == "owner-stopped" {
@@ -2326,7 +2341,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             // alive: consumers hold receivers, never the owner's sender.
             drop(publications);
             receive(&mut updates).await;
-            assert!(remote.requests.try_recv().is_err());
+            assert!(remote.requests.recv().now_or_never().is_none());
             assert!(preparations.try_recv().is_err());
             cancellation.cancel();
             task.await.unwrap().unwrap();
@@ -2380,7 +2395,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             cancellation.cancel();
             task.await.unwrap().unwrap();
             assert!(
-                remote.requests.try_recv().is_err(),
+                remote.requests.recv().now_or_never().is_none(),
                 "user input must cancel the old quota wait"
             );
             remote.shutdown.shutdown().await.unwrap();
@@ -2400,7 +2415,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 "old-account report must leave current account pending"
             );
             receive(&mut updates).await;
-            assert!(remote.requests.try_recv().is_err());
+            assert!(remote.requests.recv().now_or_never().is_none());
             identity = identity_for(&config);
         }
         if case == "handoff" {
@@ -2456,6 +2471,9 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             report.error = Some("provider unavailable".into());
         }
         publish_report(&identity, report);
+        while let Ok(intent) = refreshes.try_recv() {
+            assert_eq!(intent, super::super::QuotaRefreshIntent::ReconcileSources);
+        }
         assert!(
             !observed(preparations.recv()).await.unwrap(),
             "a matching completed check must end the wait"
