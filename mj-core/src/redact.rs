@@ -15,7 +15,7 @@ pub fn redact_secrets(text: &str) -> String {
 }
 
 /// Request-local labels preserve identifier equality without exposing contents.
-pub fn redact_secrets_distinct(
+fn redact_secrets_distinct(
     text: &str,
     labels: &mut std::collections::BTreeMap<String, usize>,
 ) -> String {
@@ -61,15 +61,35 @@ fn redact_token_runs(text: &str, mut replacement: impl FnMut(&str) -> String) ->
 /// `*_id` key are Mjolnir's own identifiers, which the receiver matches
 /// against each other, so they are kept.
 pub fn redact_json_strings(value: &mut Value) {
+    redact_json_strings_with(value, true, &mut |text| redact_secrets(text));
+}
+
+/// Redact string values before serialization so escapes cannot alter identity.
+pub fn redact_json_strings_distinct(
+    value: &mut Value,
+    labels: &mut std::collections::BTreeMap<String, usize>,
+) {
+    redact_json_strings_with(value, false, &mut |text| {
+        redact_secrets_distinct(text, labels)
+    });
+}
+
+fn redact_json_strings_with(
+    value: &mut Value,
+    keep_ids: bool,
+    redactor: &mut impl FnMut(&str) -> String,
+) {
     match value {
-        Value::String(text) => *text = redact_secrets(text),
-        Value::Array(items) => items.iter_mut().for_each(redact_json_strings),
+        Value::String(text) => *text = redactor(text),
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|value| redact_json_strings_with(value, keep_ids, redactor)),
         Value::Object(fields) => {
             for (key, field) in fields.iter_mut() {
-                if key == "id" || key.ends_with("_id") {
+                if keep_ids && (key == "id" || key.ends_with("_id")) {
                     continue;
                 }
-                redact_json_strings(field);
+                redact_json_strings_with(field, keep_ids, redactor);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}

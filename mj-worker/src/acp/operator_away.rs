@@ -669,7 +669,7 @@ mod tests {
         ));
     }
 
-    // Hard-won: #1489 review: egress redaction made distinct long IDs indistinguishable.
+    // Hard-won: #1489 review: redaction collapsed long IDs and misread JSON escapes.
     #[tokio::test]
     async fn afk_question_protocol_preserves_redacted_identifier_equality() {
         let classifier = Classifier::new(false).await;
@@ -687,14 +687,14 @@ mod tests {
                 .unwrap(),
             Some(PendingAnswer::OperatorAway)
         ));
-        let second = ask(&pending, "second", &format!("Merge commit {second_id}?"));
+        let second = ask(&pending, "second", &format!("Merge commit\n{second_id}?"));
         let (stream, evidence) = classifier.request().await;
         let serialized = evidence.to_string();
         assert!(!serialized.contains(&first_id) && !serialized.contains(&second_id));
         let evidence = decoded_evidence(evidence);
         assert_eq!(
             evidence["current_question"]["message"],
-            "Merge commit [redacted token 0]?"
+            "Merge commit\n[redacted token 0]?"
         );
         assert_eq!(
             evidence["previous_questions"][0]["message"],
@@ -705,12 +705,16 @@ mod tests {
             second.await.unwrap(),
             Some(PendingAnswer::OperatorAway)
         ));
-        let repeated = ask(&pending, "repeated", &format!("Merge commit {first_id}?"));
+        let repeated = ask(&pending, "repeated", &format!("Merge commit\t{first_id}?"));
         let (stream, evidence) = classifier.request().await;
         let evidence = decoded_evidence(evidence);
         assert_eq!(
-            evidence["current_question"],
-            evidence["previous_questions"][0]
+            evidence["current_question"]["message"],
+            "Merge commit\t[redacted token 0]?"
+        );
+        assert_eq!(
+            evidence["previous_questions"][0]["message"],
+            "Merge commit [redacted token 0]?"
         );
         assert_ne!(
             evidence["current_question"],

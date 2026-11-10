@@ -176,13 +176,21 @@ impl VerdictClient {
     ) -> Result<bool> {
         // The ordinary egress redactor collapses all long identifiers. Keep
         // their equality within this comparison without sending their contents.
+        fn redact_form(
+            form: &str,
+            labels: &mut std::collections::BTreeMap<String, usize>,
+        ) -> Result<String> {
+            let mut form: serde_json::Value =
+                serde_json::from_str(form).context("decode AFK form for redaction")?;
+            mj_core::redact::redact_json_strings_distinct(&mut form, labels);
+            Ok(form.to_string())
+        }
         let mut labels = std::collections::BTreeMap::new();
-        let current_question =
-            mj_core::redact::redact_secrets_distinct(current_question, &mut labels);
+        let current_question = redact_form(current_question, &mut labels)?;
         let previous_questions: Vec<_> = previous_questions
             .iter()
-            .map(|question| mj_core::redact::redact_secrets_distinct(question, &mut labels))
-            .collect();
+            .map(|question| redact_form(question, &mut labels))
+            .collect::<Result<_>>()?;
         let state = serde_json::json!({"current_question": current_question, "previous_questions": previous_questions});
         let questions = match &self.source {
             VerdictSource::Direct { .. } => {

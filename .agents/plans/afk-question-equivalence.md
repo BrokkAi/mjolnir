@@ -20,6 +20,9 @@ An absent operator should receive a notice for each new decision an agent asks a
 
 - [x] (2026-11-10) Second-review fix validated: five focused AFK regressions, full core/worker suites, workspace Clippy, and formatting pass. The worker suite now has 818 passing tests with 11 ignored. Ready for final commit and push review.
 
+- [x] (2026-11-10) Third-review fix: redact normalized form values before serialization; the five focused AFK regressions, escaped-format live checks, Clippy, and formatting pass.
+- [ ] Final combined core/worker suite is rebuilding; commit the focused validated fix and run review in parallel, then push only after both finish.
+
 ## Surprises & Discoveries
 
 The refusal owner lives in `mj-worker/src/acp/operator_away.rs` and survives bridge restarts. Its question identity is only `(agent, Question)`. Permission identities already include tool content and need no change. Requests opened before AFK use the same owner as newly opened requests.
@@ -91,3 +94,7 @@ Implementation checkpoint: all 817 worker tests have passed across the final run
 Second-review update: normalized forms retain constraints, but shared secret redaction hid distinctions between long identifiers. Added request-local anonymous labeling using the shared scanner, plus a real HTTP regression proving distinct/equal IDs remain distinct/equal and no raw ID leaves the process. Deployed-service live anonymous-label cases pass (different=0.72; same=0.99). No service update is needed for this worker-only fix.
 
 Final validation after the identifier fix: cargo test -p brokk-mj-core -p brokk-mj-worker passed completely, including the earlier transient work_facts case. Worker library: 792 passed, 11 ignored; binary/integration: 26 passed. Workspace Clippy and rustfmt pass. The shared redactor retains its original diagnostic behavior; only AFK comparison evidence gets consistent anonymous labels.
+
+Third-review update: scanning serialized JSON made escape letters part of token identity and could produce invalid escaped text. The AFK client now parses normalized forms, redacts their string values using the shared JSON walker and token scanner, then serializes them. Ordinary diagnostic redaction still preserves its previous identifier-key behavior; AFK evidence anonymizes all values. The existing HTTP regression now covers newline/tab formatting and checks valid decoded evidence.
+
+Checkpoint: the escaped-identifier fix is independently validated by the expanded real HTTP regression, live anonymous-label formatting comparisons, workspace Clippy and rustfmt. The full suite is still running and must complete before delivery. No source edits remain in flight.
