@@ -340,6 +340,77 @@ pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<
     }))
 }
 
+/// Stop every writer in an owned container through its engine. Unlike `exec`,
+/// this also proves termination when a container exists but is already stopped.
+/// Podman retains its existing storage-preserving quiescence implementation.
+pub fn stop_container_plan(
+    locator: &TargetLocator,
+    session_id: &str,
+) -> Result<Option<CommandPlan>> {
+    if let Some(plan) = quiesce_plan(locator, session_id)? {
+        return Ok(Some(plan));
+    }
+    let (ssh, container_id, apple) = match locator {
+        TargetLocator::LocalDocker { container_id, .. } => (None, container_id, false),
+        TargetLocator::AppleContainer { container_id, .. } => (None, container_id, true),
+        TargetLocator::SshDocker {
+            ssh, container_id, ..
+        } => (Some(ssh), container_id, false),
+        TargetLocator::SshAppleContainer {
+            ssh, container_id, ..
+        } => (Some(ssh), container_id, true),
+        _ => return Ok(None),
+    };
+    let script = if apple {
+        // Apple's default list contains only running containers; a stopped
+        // container remains in `list --all`. Stop only the exact recorded ID.
+        // CLI contract: github.com/apple/container/blob/main/docs/command-reference.md
+        r#"set -eu
+container=$1
+running=$(container list --quiet)
+for id in $running; do
+    if [ "$id" = "$container" ]; then container stop --time 0 "$container" >/dev/null; fi
+done
+running=$(container list --quiet)
+for id in $running; do
+    [ "$id" != "$container" ] || { echo 'Apple session container is still running' >&2; exit 1; }
+done
+"#
+    } else {
+        r#"set -eu
+container=$1
+session=$2
+if identity=$(docker container inspect --format '{{index .Config.Labels "dev.mj.managed"}}|{{index .Config.Labels "dev.mj.session"}}' "$container" 2>/dev/null); then
+    [ "$identity" = "true|$session" ] || { echo 'refusing to stop a foreign Docker container' >&2; exit 2; }
+    running=$(docker container inspect --format '{{.State.Running}}' "$container")
+    case $running in
+        true) docker stop --time 0 "$container" >/dev/null ;;
+        false) ;;
+        *) echo 'unknown Docker container execution state' >&2; exit 1 ;;
+    esac
+    running=$(docker container inspect --format '{{.State.Running}}' "$container")
+    [ "$running" = false ] || { echo 'Docker session container is still running' >&2; exit 1; }
+else
+    docker info >/dev/null 2>&1 || { echo 'could not determine whether the Docker session container exists' >&2; exit 1; }
+fi
+"#
+    };
+    let command = CommandSpec::new(
+        "sh",
+        ["-c", script, "mj-stop-container", container_id, session_id],
+    )
+    .purpose("confirm owned container writers stopped through the engine")
+    .stage(ProvisionStage::StoppingTarget);
+    let command = match ssh {
+        Some(ssh) => command_over_ssh(command, ssh),
+        None => command,
+    };
+    Ok(Some(CommandPlan {
+        description: format!("stop environment container {session_id}"),
+        commands: vec![command],
+    }))
+}
+
 pub(super) fn podman_cleanup_plan(
     locator: &TargetLocator,
     session_id: &str,

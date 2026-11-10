@@ -66,7 +66,7 @@ impl Reclamation {
         let mut quiesced = Vec::new();
         for (worker, target) in &workers {
             if !targets::is_borrowed(target)
-                && let Some(plan) = targets::quiesce_plan(target, &worker.session_id)?
+                && let Some(plan) = targets::stop_container_plan(target, &worker.session_id)?
             {
                 plan.execute(executor)
                     .with_context(|| format!("stop environment worker {}", worker.session_id))?;

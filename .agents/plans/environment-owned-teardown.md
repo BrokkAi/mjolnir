@@ -153,3 +153,13 @@ Design reset recorded after the user's request to address the underlying fragili
 - The source-versus-destination restart intent regression and explicit branch deletion after Suspend both pass.
 
 No new worker protocol is needed. Revision 122 is breaking and remains uninstalled. Upstream still uses revision 121 at origin/master 9907bf540.
+
+Review round 1 found two remaining problems. Descendant Destroy warnings now
+carry the requested root ID through the existing tree traversal, so the CLI's
+advertised notice query includes them. Docker and Apple container retirement
+now establishes writer termination through the engine; stopped containers no
+longer fail an `exec` probe before reaching physical cleanup. Podman's deferred
+storage cleanup keeps its existing quiescence path. The engine protocol and
+daemon notice regressions pass (5 affected tests), and affected-crate Clippy is
+clean. Evidence: `/tmp/mj-environment-review-tests.log` and
+`/tmp/mj-environment-review-clippy.log`.

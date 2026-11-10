@@ -699,6 +699,18 @@ impl RuntimeState {
         branch: BranchDisposition,
         kind: LifecycleKind,
     ) -> Result<()> {
+        let requested_session_id = session_id.clone();
+        self.destroy_indexed_tree(session_id, branch, kind, requested_session_id)
+            .await
+    }
+
+    async fn destroy_indexed_tree(
+        self: &Arc<Self>,
+        session_id: String,
+        branch: BranchDisposition,
+        kind: LifecycleKind,
+        requested_session_id: String,
+    ) -> Result<()> {
         self.preempt_active_lifecycle(&session_id).await?;
         let children = blocking({
             let session_id = session_id.clone();
@@ -707,10 +719,11 @@ impl RuntimeState {
         .await?;
         for child_id in children {
             // Sub-agents borrow their parent's worker and own no branch.
-            Box::pin(self.force_destroy_indexed_session(
+            Box::pin(self.destroy_indexed_tree(
                 child_id.clone(),
                 BranchDisposition::Keep,
                 kind,
+                requested_session_id.clone(),
             ))
             .await
             .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
@@ -750,6 +763,9 @@ impl RuntimeState {
                             controller.force_destroy_session(&session_id, &executor, branch)?
                         };
                         for warning in outcome.warnings {
+                            if requested_session_id != session_id {
+                                state.push_public_notice(&requested_session_id, warning.clone());
+                            }
                             state.push_public_notice(&session_id, warning);
                         }
                         crate::controller::move_session::release_move_queue_hold(&session_id);

@@ -1510,7 +1510,10 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
 
     let commands = executor.commands.borrow();
     assert_eq!(commands.len(), 3);
-    assert_eq!(commands[0].purpose, "stop Mjolnir worker daemon");
+    assert_eq!(
+        commands[0].purpose,
+        "confirm owned container writers stopped through the engine"
+    );
     assert_eq!(commands[1].program, "sh");
     assert!(commands[1].args[1].contains("container rm --force"));
     assert!(commands[1].args[1].contains(".cache/mjolnir/git/sessions"));

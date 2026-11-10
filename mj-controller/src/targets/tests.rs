@@ -3510,6 +3510,95 @@ fn podman_quiesce_stops_and_confirms_the_owned_container_without_removing_it() {
     assert!(!command.args[1].contains("podman rm"));
 }
 
+// Hard-won: 770a4e74c: exec could not stop writers in an existing stopped container.
+#[cfg(unix)]
+#[test]
+fn container_retirement_uses_the_engine_and_retains_files_until_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = r#"#!/bin/sh
+set -eu
+state=$MJ_ENGINE_TEST_ROOT
+[ ! -e "$state/unavailable" ] || exit 17
+printf '%s\n' "$*" >>"$state/commands"
+case $1 in
+    container)
+        case $* in
+            *State.Running*) cat "$state/running" ;;
+            *) printf 'true|%s\n' "$MJ_ENGINE_TEST_SESSION" ;;
+        esac ;;
+    list) if [ "$(cat "$state/running")" = true ]; then printf '%s\n' "$MJ_ENGINE_TEST_CONTAINER"; fi ;;
+    stop) printf 'false\n' >"$state/running" ;;
+    *) exit 99 ;;
+esac
+"#;
+    for engine in ["docker", "container"] {
+        mj_core::test_hooks::install_fake_command(&bin, engine, script);
+    }
+    let container_id = resource_name(SESSION).unwrap();
+    for target in [
+        TargetLocator::LocalDocker {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+        },
+        TargetLocator::AppleContainer {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+        },
+    ] {
+        for running in [false, true] {
+            std::fs::write(root.path().join("running"), running.to_string()).unwrap();
+            let mut plan = stop_container_plan(&target, SESSION).unwrap().unwrap();
+            for command in &mut plan.commands {
+                command.env.insert(
+                    "PATH".into(),
+                    format!(
+                        "{}:{}",
+                        bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                );
+                command.env.insert(
+                    "MJ_ENGINE_TEST_ROOT".into(),
+                    root.path().display().to_string(),
+                );
+                command
+                    .env
+                    .insert("MJ_ENGINE_TEST_SESSION".into(), SESSION.into());
+                command
+                    .env
+                    .insert("MJ_ENGINE_TEST_CONTAINER".into(), container_id.clone());
+            }
+            std::fs::write(
+                root.path().join("worker-files"),
+                "retain until every writer stops",
+            )
+            .unwrap();
+            plan.execute(&ProcessExecutor).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("running"))
+                    .unwrap()
+                    .trim(),
+                "false"
+            );
+            assert!(root.path().join("worker-files").exists());
+            std::fs::write(root.path().join("unavailable"), "offline").unwrap();
+            assert!(
+                plan.execute(&ProcessExecutor).is_err(),
+                "an unavailable engine cannot prove termination"
+            );
+            std::fs::remove_file(root.path().join("unavailable")).unwrap();
+        }
+    }
+    assert!(
+        !std::fs::read_to_string(root.path().join("commands"))
+            .unwrap()
+            .lines()
+            .any(|line| line.starts_with("exec "))
+    );
+}
+
 #[test]
 fn docker_cleanup_removes_container_then_volumes_then_overlay_backing_files() {
     let name = resource_name(SESSION).unwrap();

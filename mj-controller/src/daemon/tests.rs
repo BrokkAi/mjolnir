@@ -5872,6 +5872,32 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
             .any(|notice| notice.text.contains("Resources may remain")),
         "the advertised parent notice path reports retained physical resources"
     );
+    // Hard-won: 770a4e74c: descendant warnings were invisible under the requested parent ID.
+    let requested = "77777777777777777777777777777777";
+    let descendant = "88888888888888888888888888888888";
+    let mut root = runtime_test_session(
+        requested,
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    root.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: repository.path().join(requested),
+    });
+    crate::database::save_session(&root).unwrap();
+    session.id = descendant.into();
+    crate::database::save_subagent_session(&session, &runtime_test_subagent(descendant, requested))
+        .unwrap();
+    state
+        .force_destroy_session(requested.into(), BranchDisposition::Keep)
+        .await
+        .unwrap();
+    assert!(
+        state
+            .public_notices()
+            .iter()
+            .any(|notice| notice.session_id == requested && notice.text.contains(descendant)),
+        "the advertised root notice query must include descendant cleanup failures"
+    );
 }
 
 /// A runtime whose controller comes from the real store, for the tests that
