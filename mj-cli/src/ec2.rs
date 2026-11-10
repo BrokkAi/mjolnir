@@ -550,22 +550,6 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             )?;
         }
         let image = mj_core::config::DEFAULT_CONTAINER_IMAGE;
-        eprintln!("Downloading {image} on {}.", record.target);
-        let refresh = mj_core::targets::image_refresh(
-            mj_core::targets::ImageHost::SshPodman((&ssh).into()),
-            image,
-            Some(platform),
-            mj_core::config::ImagePullPolicy::Missing,
-        )
-        .context("prepare EC2 dev image download")?;
-        // Publish only after the image is ready, so the daemon cannot race
-        // this initial pull with an image refresh or a new session launch.
-        mj_core::targets::CommandPlan {
-            description: "predownload EC2 dev image".into(),
-            commands: vec![refresh.pull],
-        }
-        .execute(&mj_controller::targets::ProcessExecutor)
-        .context("download EC2 dev image")?;
         Config::update(|config| {
             ensure!(
                 !config.machines.contains_key(&record.target)
@@ -579,7 +563,7 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             config.targets.insert(
                 record.target.clone(),
                 TargetTemplate::SshPodman {
-                    ssh,
+                    ssh: ssh.clone(),
                     container: ContainerTemplate {
                         image: image.into(),
                         pull_policy: Default::default(),
@@ -617,6 +601,30 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             config.disabled_targets.insert(raw);
             Ok(())
         })?;
+        eprintln!(
+            "Registered Podman target {}. Preloading {image}.",
+            record.target
+        );
+        let preload = mj_core::targets::image_refresh(
+            mj_core::targets::ImageHost::SshPodman((&ssh).into()),
+            image,
+            Some(platform),
+            mj_core::config::ImagePullPolicy::Missing,
+        )
+        .context("prepare EC2 dev image preload")
+        .and_then(|refresh| {
+            mj_controller::pollers::refresh_host_image(
+                &refresh,
+                &mj_controller::targets::ProcessExecutor,
+                &|_| {},
+            )
+            .map(|_| ())
+        });
+        if let Err(error) = preload {
+            eprintln!(
+                "Warning: dev image predownload failed: {error:#}\nThe host is registered; the background image refresher can retry."
+            );
+        }
         Ok(
             json!({"instance_id":id,"target":record.target,"region":record.region,"zone":args.zone,"instance_type":args.instance_type,"public_ip":host,"zfs_cache":args.zfs_cache,"operation":record.operation}),
         )
@@ -1089,14 +1097,28 @@ print(json.dumps(response))
 "#;
 
     const PODMAN_FIXTURE: &str = r#"#!/usr/bin/python3
-import json, os, pathlib, sys
+import fcntl, json, os, pathlib, sys
 root = pathlib.Path(__file__).parent
 args = sys.argv[1:]
 if args == ['info', '--format', '{{.Host.Security.Rootless}}']:
     print('true')
+elif args[:2] == ['image', 'inspect']:
+    if not (root/'image-ready').exists(): sys.exit(125)
+    print('sha256:downloaded-image')
+elif args == ['image', 'prune', '-f']:
+    pass
 elif args and args[0] == 'pull':
     config = pathlib.Path(os.environ['MJ_CONFIG_DIR'])/'config.toml'
-    assert not config.exists() or 'builder' not in config.read_text(), 'target published before image was ready'
+    assert config.exists() and 'builder' in config.read_text(), 'host must be registered before preloading'
+    locks = list((pathlib.Path(os.environ['MJ_DATA_DIR'])/'image-pulls').glob('*.lock'))
+    assert len(locks) == 1, 'preload must use the shared mj image gate'
+    with locks[0].open('a') as gate:
+        try:
+            fcntl.flock(gate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            sys.exit('preload did not hold the cross-process image gate')
     (root/'image-pull-args').write_text(json.dumps(args))
     if (root/'fail-image-pull').exists():
         sys.stderr.write('download progress\n' * 5000 + 'registry refused the image download\n')
@@ -1107,7 +1129,7 @@ else:
     sys.exit('unexpected Podman command: '+repr(args))
 "#;
 
-    fn fixture_child(name: &str) -> bool {
+    fn fixture_child(name: &str, expected_warning: Option<&str>) -> bool {
         if std::env::var_os("MJ_EC2_FIXTURE_CHILD").is_some() {
             return false;
         }
@@ -1139,7 +1161,14 @@ else:
             .env("MJ_INSTANCE", "ec2-fixture")
             .env("MJ_SSH_CONTROL_MASTER", "0")
             .env("PATH", std::env::join_paths(paths).unwrap());
-        checked(&mut command, &[]).unwrap();
+        let output = checked(&mut command, &[]).unwrap();
+        if let Some(warning) = expected_warning {
+            assert!(String::from_utf8_lossy(&output.stderr).contains(warning));
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("registry refused the image download")
+            );
+        }
         true
     }
 
@@ -1163,6 +1192,7 @@ else:
     fn aws_cli_contract_preserves_configuration_and_keys_until_termination_succeeds() {
         if fixture_child(
             "ec2::tests::aws_cli_contract_preserves_configuration_and_keys_until_termination_succeeds",
+            None,
         ) {
             return;
         }
@@ -1310,6 +1340,7 @@ else:
     fn refused_launch_remains_discoverable_and_can_be_cleaned_without_an_instance() {
         if fixture_child(
             "ec2::tests::refused_launch_remains_discoverable_and_can_be_cleaned_without_an_instance",
+            None,
         ) {
             return;
         }
@@ -1340,10 +1371,12 @@ else:
         assert!(!bin.join("key.json").exists() && !bin.join("group.json").exists());
     }
 
+    // Hard-won: 0703826: an optional image-pull failure stranded a ready, billable VM.
     #[test]
-    fn image_download_failure_retains_the_vm_without_publishing_a_target() {
+    fn image_download_failure_warns_and_registers_the_usable_host() {
         if fixture_child(
-            "ec2::tests::image_download_failure_retains_the_vm_without_publishing_a_target",
+            "ec2::tests::image_download_failure_warns_and_registers_the_usable_host",
+            Some("Warning: dev image predownload failed"),
         ) {
             return;
         }
@@ -1351,21 +1384,17 @@ else:
         let bin = fixture.join("bin");
         let root = config_dir().join("ec2");
         fs::write(bin.join("fail-image-pull"), "").unwrap();
-        let error = create(create_args(), &root).unwrap_err();
-        let detail = format!("{error:#}");
-        assert!(detail.contains("download EC2 dev image"), "{detail}");
-        assert!(
-            detail.contains("registry refused the image download"),
-            "{detail}"
-        );
+        create(create_args(), &root).unwrap();
         assert!(!bin.join("image-ready").exists());
         let record = records(&root).unwrap().pop().unwrap();
         assert_eq!(record.instance_id.as_deref(), Some("i-test"));
-        assert!(detail.contains(&record.operation));
         assert!(record.directory(&root).unwrap().join("id_ed25519").exists());
         let config = Config::load().unwrap();
-        assert!(!config.machines.contains_key("builder"));
-        assert!(!config.targets.contains_key("builder"));
+        assert!(config.machines.contains_key("builder"));
+        assert!(matches!(
+            config.targets.get("builder"),
+            Some(TargetTemplate::SshPodman { .. })
+        ));
         destroy(
             DestroyArgs {
                 host: record.operation,
