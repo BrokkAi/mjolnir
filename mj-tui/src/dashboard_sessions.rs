@@ -1060,13 +1060,13 @@ impl DashboardState {
     /// from the top otherwise. Consecutive steps retain their starting
     /// workspace preference so switching tabs cannot strand notifications.
     pub(crate) fn step_attention(&mut self, delta: isize) -> DashboardAction {
-        let workspace_id = self
+        let mut workspace_id = self
             .attention_navigation
             .as_ref()
             .filter(|navigation| self.selected_session_id() == Some(navigation.session_id.as_str()))
             .map(|navigation| navigation.workspace_id.clone())
             .unwrap_or_else(|| self.active_workspace_id().map(str::to_owned));
-        let queue = self.attention_queue_for_workspace(workspace_id.as_deref());
+        let mut queue = self.attention_queue_for_workspace(workspace_id.as_deref());
         if queue.is_empty() {
             self.attention_navigation = None;
             self.set_notice("Nothing is waiting for you.");
@@ -1075,6 +1075,11 @@ impl DashboardState {
         let position = self
             .selected_session_id()
             .and_then(|selected| queue.iter().position(|entry| entry.session_id == selected));
+        // Resolving the selected notification ends this traversal.
+        if position.is_none() && workspace_id.as_deref() != self.active_workspace_id() {
+            workspace_id = self.active_workspace_id().map(str::to_owned);
+            queue = self.attention_queue();
+        }
         let target = match position {
             Some(position) => {
                 let len = queue.len() as isize;

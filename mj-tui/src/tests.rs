@@ -2611,7 +2611,11 @@ fn golden_attention_navigation() {
     )
     .unwrap();
 
-    for switch_workspace in [false, true] {
+    for interruption in [
+        "session selection",
+        "workspace switch",
+        "resolved notification",
+    ] {
         let mut interrupted = dashboard_with_attention_mix();
         interrupted
             .state
@@ -2641,17 +2645,26 @@ fn golden_attention_navigation() {
         );
         interrupted.set_active_workspace(Some("other".into()));
         interrupted.take_navigation_session();
-        if switch_workspace {
-            interrupted.set_active_workspace(Some("default".into()));
-            interrupted.set_active_workspace(Some("other".into()));
-        } else {
-            interrupted.select_active_session("remote");
+        match interruption {
+            "session selection" => interrupted.select_active_session("remote"),
+            "workspace switch" => {
+                interrupted.set_active_workspace(Some("default".into()));
+                interrupted.set_active_workspace(Some("other".into()));
+            }
+            "resolved notification" => interrupted
+                .session_details
+                .get_mut("remote")
+                .unwrap()
+                .pending_elicitations
+                .clear(),
+            _ => unreachable!(),
         }
         // Hard-won: 01e5b6981: restoring the same selection retained an earlier workspace's preference.
+        // Hard-won: 406dfc203: resolving a selected notification retained the earlier preference.
         let action = chord(&mut interrupted, CommandId::NextAttention);
         writeln!(
             output,
-            "same selection after manual workspace switch={switch_workspace}: {action:?}"
+            "workspace preference after {interruption}: {action:?}"
         )
         .unwrap();
     }

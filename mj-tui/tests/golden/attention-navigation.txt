@@ -566,8 +566,9 @@ higher urgency elsewhere: attention levels: asks=Waiting, remote=Failed, done=Wa
 three-workspace NextAttention: ["asks", "done", "remote", "asks", "done", "remote"]
 three-workspace PreviousAttention: ["done", "asks", "remote", "done", "asks", "remote"]
 manual selection resets workspace preference: SelectWorkspace { workspace_id: "other" }
-same selection after manual workspace switch=false: Open { session_id: "quiet" }
-same selection after manual workspace switch=true: Open { session_id: "quiet" }
+workspace preference after session selection: Open { session_id: "quiet" }
+workspace preference after workspace switch: Open { session_id: "quiet" }
+workspace preference after resolved notification: Open { session_id: "quiet" }
 
 === project rows before folding (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
