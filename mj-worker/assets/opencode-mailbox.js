@@ -36,7 +36,7 @@ export default {
     const registration = await tool.hook("execute.after", async (event) => {
       // Native children share this plugin process, but not the lead's mailbox.
       if ((await session.get({ sessionID: event.sessionID })).parentID) return;
-      const response = await request("drain_mailbox", { hook_event: "PostToolUse" });
+      const response = await request("drain_mailbox", { hook_event: "PostToolBatch" });
       if (response.type !== "mailbox_drained") throw new Error("Invalid Mjolnir mailbox lease");
       const lease = response.data;
       if (!lease.lease_id) return;

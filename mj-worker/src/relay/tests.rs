@@ -7473,6 +7473,7 @@ fn mailbox_post_tool_use_drains_stay_empty_and_leave_events_for_turn_boundaries(
                 lease_id: None,
                 text: None,
                 count: 0,
+                ..
             }
         }
     ));

@@ -2143,6 +2143,7 @@ impl DurableRelay {
                 lease_id: None,
                 text: None,
                 count: 0,
+                contexts: Vec::new(),
             });
         }
         self.expire_mailbox_hook_lease_at(epoch_millis())?;
