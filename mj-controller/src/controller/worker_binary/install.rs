@@ -942,11 +942,7 @@ pub(super) fn install_worker_profile_files(
                         .purpose("upload remote container worker file"),
                 )?;
             }
-            execute_checked(
-                executor,
-                crate::targets::scp_upload(ssh, profile_stage, &format!("{upload}/profile"), true)
-                    .purpose("upload remote container profile allowlist"),
-            )?;
+            upload_profile_archive(executor, ssh, profile_stage, &format!("{upload}/profile"))?;
             let launch_installed = format!("{worker_root}/launch.json");
             let ownership_installed = format!("{worker_root}/ownership.json");
             let owned = [
@@ -1032,11 +1028,7 @@ pub(super) fn clear_profile_configuration(
 ) -> Result<()> {
     let mut paths = profile_configuration_paths(harness);
     paths.push(harness.credential_file_name());
-    paths.extend([
-        mj_core::aws_credentials::SHARED_CREDENTIALS_FILE,
-        mj_core::aws_credentials::CONFIG_FILE,
-        mj_core::aws_credentials::EMPTY_CREDENTIALS_FILE,
-    ]);
+    paths.extend(mj_core::aws_credentials::FILES);
     if harness == HarnessKind::Codex {
         paths.push(STAGED_CATALOG_FILE);
     }
@@ -1109,11 +1101,7 @@ pub(super) fn install_worker_over_ssh(
         )?;
     }
     let incoming_profile = format!("{profile_home}.incoming");
-    execute_checked(
-        executor,
-        crate::targets::scp_upload(ssh, profile_stage, &incoming_profile, true)
-            .purpose("upload SSH harness profile allowlist"),
-    )?;
+    upload_profile_archive(executor, ssh, profile_stage, &incoming_profile)?;
     execute_checked(
         executor,
         crate::targets::ssh_command(
@@ -1132,6 +1120,46 @@ pub(super) fn install_worker_over_ssh(
         crate::targets::ssh_command(ssh, ["chmod", "-R", "go-rwx", profile_home])
             .purpose("restrict SSH harness profile permissions"),
     )?;
+    Ok(())
+}
+
+/// Send the staged snapshot as one stream, avoiding SFTP round trips per
+/// plugin file. The private temporary file bounds memory and owns cleanup.
+fn upload_profile_archive(
+    executor: &impl CommandExecutor,
+    ssh: &SshTarget,
+    source: &Path,
+    destination: &str,
+) -> Result<()> {
+    use std::io::Seek;
+    let mut file = tempfile::tempfile().context("create private profile archive")?;
+    let gzip = flate2::write::GzEncoder::new(&mut file, flate2::Compression::fast());
+    let mut archive = tar::Builder::new(gzip);
+    // Recursive scp materialized links in the staged snapshot too.
+    archive.follow_symlinks(true);
+    archive
+        .append_dir_all(".", source)
+        .context("archive staged harness profile")?;
+    archive
+        .into_inner()?
+        .finish()
+        .context("finish profile archive")?;
+    file.rewind()?;
+    let command = targets::ssh_command(ssh, [
+        "sh", "-c",
+        "set -eu\numask 077\nmkdir -p -- \"$1\"\ntar -xzf - --no-same-owner --no-same-permissions -C \"$1\"\nchmod -R -- go-rwx \"$1\"",
+        "mj-profile-archive", destination,
+    ]).purpose("upload staged harness profile archive").stage(ProvisionStage::Syncing);
+    let output = executor
+        .execute_with_stdin(&command, &mut file)
+        .context("stream staged harness profile archive")?;
+    ensure!(
+        output.status == 0,
+        "{} failed with status {}: {}",
+        command.purpose,
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
     Ok(())
 }
 
@@ -1309,5 +1337,133 @@ mod mbx_shim_tests {
         .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("grep exited 2"), "{message}");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod profile_archive_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::fs;
+
+    struct SystemTar {
+        streams: Cell<usize>,
+        host: mj_core::node::NodeCommandHost,
+    }
+    impl CommandExecutor for SystemTar {
+        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
+            bail!("profile upload must use one streamed command")
+        }
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn Read + Send),
+        ) -> Result<CommandOutput> {
+            self.streams.set(self.streams.get() + 1);
+            let script = command.args.last().context("missing remote command")?;
+            use mj_core::targets::CommandHost;
+            self.host.run(
+                &CommandSpec::new("sh", ["-c", script]),
+                Some(input),
+                &|| false,
+            )
+        }
+    }
+
+    // Hard-won: #1483: recursive scp spent 162 seconds on a 17 MB profile.
+    // Hard-won: #1187: BSD chmod treats -- after the mode as a filename.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streamed_profile_roundtrips_through_system_tar_without_per_file_commands() {
+        let (daemon_side, node_side) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(mj_core::node::serve(node_side));
+        let (client, driver) = mj_core::node::NodeClient::handshake(daemon_side)
+            .await
+            .unwrap();
+        let driver = tokio::spawn(driver);
+        let (slot, receiver) = tokio::sync::watch::channel(Some(client));
+        let host = mj_core::node::NodeCommandHost::new(
+            receiver,
+            tokio::runtime::Handle::current(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let checked = tokio::task::spawn_blocking(move || {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("staged profile");
+            let nested = source.join("plugins/日本語");
+            fs::create_dir_all(&nested).unwrap();
+            // The production archive is over 8 MiB; #1482 also reported failures
+            // near that size when data crossed a node. Exercise the real node path.
+            let mut payload = vec![0; 8 * 1024 * 1024 + 70_000];
+            getrandom::fill(&mut payload).unwrap();
+            fs::write(nested.join("tool data"), &payload).unwrap();
+            fs::set_permissions(nested.join("tool data"), fs::Permissions::from_mode(0o755))
+                .unwrap();
+            fs::create_dir(source.join("empty")).unwrap();
+            fs::write(source.join(".credentials.json"), b"synthetic credentials").unwrap();
+            symlink("plugins/日本語/tool data", source.join("linked plugin")).unwrap();
+            let destination = temp.path().join("remote profile");
+            let executor = SystemTar {
+                streams: Cell::new(0),
+                host,
+            };
+            upload_profile_archive(
+                &executor,
+                &SshTarget {
+                    destination: "unused".into(),
+                    ssh_args: vec![],
+                },
+                &source,
+                destination.to_str().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(executor.streams.get(), 1);
+            assert_eq!(
+                fs::read(destination.join("plugins/日本語/tool data")).unwrap(),
+                payload
+            );
+            assert_eq!(
+                fs::read(destination.join("linked plugin")).unwrap(),
+                payload
+            );
+            assert!(
+                !destination
+                    .join("linked plugin")
+                    .symlink_metadata()
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(destination.join("empty").is_dir());
+            assert_eq!(
+                fs::read(destination.join(".credentials.json")).unwrap(),
+                b"synthetic credentials"
+            );
+            assert_eq!(
+                destination
+                    .join(".credentials.json")
+                    .metadata()
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o077,
+                0
+            );
+            assert_eq!(
+                destination
+                    .join("plugins/日本語/tool data")
+                    .metadata()
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        })
+        .await;
+        drop(slot);
+        driver.await.unwrap().unwrap();
+        server.await.unwrap().unwrap();
+        checked.unwrap();
     }
 }

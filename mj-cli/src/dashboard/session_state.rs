@@ -343,7 +343,7 @@ impl DashboardContext {
     /// Reads the checkout of the visible sessions that are due, a couple per
     /// pass so a workspace full of sessions never floods a slow target.
     pub(crate) fn refresh_git_status(&mut self) {
-        if self.shutdown_requested {
+        if self.shutdown_requested_at.is_some() {
             return;
         }
         let due = self

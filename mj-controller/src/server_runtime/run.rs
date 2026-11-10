@@ -98,7 +98,7 @@ pub(crate) async fn run_server(
         &mut capacity_state,
     );
     let container_capacities = initial.metadata.container_capacities.clone();
-    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(publication.snapshot(
+    let mut first_snapshot = publication.snapshot(
         &controller,
         &workspace_updates.borrow().clone(),
         &quotas,
@@ -119,7 +119,9 @@ pub(crate) async fn run_server(
             reviews: &review_views(&daemon_runtime),
         },
         revision,
-    ));
+    );
+    first_snapshot.notices = daemon_runtime.public_notices();
+    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(first_snapshot);
     startup.finished("build first viewer snapshot");
     let (conversation_tx, conversation_rx) = tokio::sync::watch::channel(conversations.clone());
     let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(32);
@@ -347,7 +349,7 @@ pub(crate) async fn run_server(
                     .map(|view| (view.session_id.clone(), viewer_operation(view)))
                     .collect();
                 let container_capacities = runtime.metadata.container_capacities;
-                let snapshot = publication.snapshot(
+                let mut snapshot = publication.snapshot(
                     &controller,
                     &workspace_updates.borrow().clone(),
                     &quotas,
@@ -369,6 +371,7 @@ pub(crate) async fn run_server(
                     },
                     $revision,
                 );
+                snapshot.notices = daemon_runtime.public_notices();
                 if let Err(error) = snapshot_tx.send(snapshot) {
                     tracing::debug!(revision = $revision, %error, "phone snapshot delivery failed; no viewer is subscribed");
                 }
@@ -795,11 +798,12 @@ pub(crate) async fn run_server(
                                         "all" => crate::database::HistoryScope::All,
                                         _ => crate::database::HistoryScope::Project,
                                     };
-                                    let found = crate::database::search_prompts_bounded(
+                                    let found = crate::database::search_prompt_page(
                                         &session_id,
                                         &bundle,
                                         scope,
                                         &query,
+                                        None,
                                         crate::server::MAX_HISTORY_MATCHES,
                                     )?;
                                     anyhow::Ok(crate::server::ViewerPromptHistory {
@@ -808,7 +812,7 @@ pub(crate) async fn run_server(
                                             .into_iter()
                                             .map(|entry| entry.text)
                                             .collect(),
-                                        truncated: found.truncated,
+                                        truncated: found.next.is_some(),
                                     })
                                 })
                                 .await;

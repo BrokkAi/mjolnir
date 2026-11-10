@@ -43,32 +43,3 @@ pub fn session_target_is_pollable(session: &mj_core::state::SessionRecord) -> bo
         )
         && session.target.is_some()
 }
-
-pub fn spawn_aws_resource_options_resolution(
-    config: Config,
-    target_id: String,
-    updates: tokio::sync::mpsc::UnboundedSender<(
-        String,
-        std::result::Result<Vec<SessionResourceAllocation>, String>,
-    )>,
-    tracker: mj_client::operations::CriticalOperationTracker,
-) {
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let guard = tracker.begin_cancellable(
-        format!("resolving resources for {target_id}"),
-        cancelled.clone(),
-    );
-    let _task = tokio::task::spawn_blocking(move || {
-        let controller = Controller {
-            config,
-            state: State::default(),
-        };
-        let result = controller
-            .resolve_aws_resource_options(&target_id, &CancellableProcessExecutor::new(cancelled))
-            .map_err(|error| format!("{error:#}"));
-        if let Err(error) = updates.send((target_id.clone(), result)) {
-            tracing::debug!(target_id, %error, "AWS resource options result dropped after dashboard shutdown");
-        }
-        drop(guard);
-    });
-}

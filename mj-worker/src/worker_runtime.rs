@@ -10,9 +10,7 @@ use mj_core::config::HarnessKind;
 mod root_owner;
 pub use root_owner::WorkerRootOwner;
 
-pub use mj_core::relay::{
-    REVIEW_UNTRACKED_FILE, WORKER_EXIT_FILE, WORKER_PID_FILE, WORKER_STARTUP_FILE,
-};
+pub use mj_core::relay::{WORKER_EXIT_FILE, WORKER_PID_FILE, WORKER_STARTUP_FILE};
 
 /// Record which startup step this worker is on, in `worker-startup.json` in
 /// the worker root.
@@ -146,11 +144,19 @@ pub struct AcpSupervisorSpec {
 
 impl From<&WorkerLaunchConfig> for AcpSupervisorSpec {
     fn from(config: &WorkerLaunchConfig) -> Self {
+        let mut excluded_environment = config.excluded_environment.clone();
+        if config.no_github_credentials {
+            for name in mj_core::credentials::GITHUB_AUTHENTICATION_ENVIRONMENT {
+                if !excluded_environment.iter().any(|excluded| excluded == name) {
+                    excluded_environment.push(name.into());
+                }
+            }
+        }
         Self {
             command: config.bridge_command.clone(),
             args: config.bridge_args.clone(),
             environment: config.environment.clone(),
-            excluded_environment: config.excluded_environment.clone(),
+            excluded_environment,
             cwd: config.cwd.clone(),
             harness_lease: None,
             node_lease: None,
@@ -363,6 +369,7 @@ pub fn lead_process_group() {}
 /// steer a read or write outside the session's harness home.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialEndpoint {
+    pub no_github_credentials: bool,
     pub harness: HarnessKind,
     /// The session's harness home; skills trees sync under it.
     pub home: PathBuf,
@@ -392,6 +399,7 @@ fn credential_endpoint(
         None => mj_core::config::harness_authentication_marker(config.harness, &home),
     };
     Ok(CredentialEndpoint {
+        no_github_credentials: config.no_github_credentials,
         harness: config.harness,
         home: home.clone(),
         marker,

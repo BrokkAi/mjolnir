@@ -48,7 +48,7 @@ impl KimiTaskMonitor {
     pub(crate) async fn attach(
         &mut self,
         native_session_id: String,
-        relay: &Arc<Mutex<DurableRelay>>,
+        relay: &Arc<RelayCell>,
     ) -> Result<()> {
         self.native_session_id = Some(native_session_id);
         self.follower = None;
@@ -57,11 +57,7 @@ impl KimiTaskMonitor {
         self.refresh(relay, true).await
     }
 
-    pub(crate) async fn refresh(
-        &mut self,
-        relay: &Arc<Mutex<DurableRelay>>,
-        force: bool,
-    ) -> Result<()> {
+    pub(crate) async fn refresh(&mut self, relay: &Arc<RelayCell>, force: bool) -> Result<()> {
         if self.native_session_id.is_none()
             || (!force && tokio::time::Instant::now() < self.retry_at)
         {
@@ -120,11 +116,7 @@ impl KimiTaskMonitor {
         }
     }
 
-    fn record_failure(
-        &mut self,
-        relay: &Arc<Mutex<DurableRelay>>,
-        error: anyhow::Error,
-    ) -> Result<()> {
+    fn record_failure(&mut self, relay: &Arc<RelayCell>, error: anyhow::Error) -> Result<()> {
         self.follower = None;
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         let exponent = self.consecutive_failures.saturating_sub(1).min(4);
@@ -159,7 +151,7 @@ impl KimiTaskMonitor {
 /// be in flight (#1132).
 async fn await_turn_end(
     monitor: &mut KimiTaskMonitor,
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     started: i64,
     even_if_unjournalled: bool,
 ) -> Result<()> {
@@ -177,7 +169,7 @@ async fn await_turn_end(
 
 pub(crate) async fn prepare_kimi_runtime_event(
     monitor: &mut Option<KimiTaskMonitor>,
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     event: &mut RuntimeEvent,
 ) -> Result<()> {
     let Some(monitor) = monitor.as_mut() else {

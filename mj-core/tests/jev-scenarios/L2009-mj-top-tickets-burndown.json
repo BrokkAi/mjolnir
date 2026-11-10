@@ -1,0 +1,203 @@
+{
+  "id": "L2009",
+  "title": "mj top tickets burndown",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "1872507e4d7eeafd43b66594471ab0a3",
+    "session_title": "import-hel via claude3",
+    "reply_position": 2324,
+    "captured_at": "2026-10-06T00:47:57.992Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "1. go through open tickets w/ no impact or effort and tag them appropriately\n\n2. rank the top 10 by cost:benefit"
+        },
+        {
+          "id": "user:410",
+          "role": "user",
+          "text": "Change 1 to low impact. And create low/low to Have web UI suggest a keyboard that has carriage return available."
+        },
+        {
+          "id": "user:575",
+          "role": "user",
+          "text": "3 should be fixed, The problem is MJ was using full host cores count when creating internal Tokio pools"
+        },
+        {
+          "id": "user:758",
+          "role": "user",
+          "text": "Close 8 as won't fix. We're removing the byfrost dependency separately."
+        },
+        {
+          "id": "user:853",
+          "role": "user",
+          "text": "Okay, I think we've got a good list now, but they're all kind of messy, so let's do them one at a time. Research and give me your plan for number one."
+        },
+        {
+          "id": "user:1330",
+          "role": "user",
+          "text": "I'd like the full fix. Also, merge and push to origin/master as we land fixes. Then give me your plan for the next one."
+        },
+        {
+          "id": "agent:1332",
+          "role": "assistant",
+          "text": "I'll write the ExecPlan, define the protocol shape, and then send the worker and daemon parts to implementers. First I'll check the plan standard and the relay state I'm extending."
+        },
+        {
+          "id": "agent:1369",
+          "role": "assistant",
+          "text": "I have what I need to set the design. Before writing the plan, I'll start the read-only research for the next issue (#1120) so it runs in parallel."
+        },
+        {
+          "id": "agent:1391",
+          "role": "assistant",
+          "text": "Now the shared protocol type in `mj-core`. I'm adding it first so the worker and daemon implementers can both build against it."
+        },
+        {
+          "id": "agent:1426",
+          "role": "assistant",
+          "text": "The shared type compiles. Now I'll write the ExecPlan, which records the design decisions both implementers will follow."
+        },
+        {
+          "id": "agent:1509",
+          "role": "assistant",
+          "text": "The daemon half is done: the full controller suite passed (2,239 tests) and clippy is clean. I'll review its patch while the worker half finishes."
+        },
+        {
+          "id": "agent:1672",
+          "role": "assistant",
+          "text": "While verification runs, I'll update the ExecPlan with what was built and the decisions made since it was written."
+        },
+        {
+          "id": "agent:1751",
+          "role": "assistant",
+          "text": "The daemon fix passes its focused tests. Waiting for the worker follow-up."
+        },
+        {
+          "id": "agent:1825",
+          "role": "assistant",
+          "text": "All the changed files belong to this fix. I'm staging them by name and committing."
+        },
+        {
+          "id": "agent:1838",
+          "role": "assistant",
+          "text": "`origin/master` has moved on since this session started, so I'm merging it in before pushing."
+        },
+        {
+          "id": "agent:1968",
+          "role": "assistant",
+          "text": "I've pushed the fix for #1192 to `origin/master` as `dc569825a`, followed by a merge with the 88 commits that had landed upstream (`4e537438d`). The \"Fixes #1192\" line in the commit closed the issue on push, and I removed its `agent-in-progress` label.\n\n## #1192: what changed\n\n- **Worker:** it now answers the daemon as soon as it has recovered its saved state. It then prepares the harness in the background, and that background task is the only place that reports how preparation is going: preparing (with the current step and its start time), started, or failed (with the step and the error).\n  - Preparation always ends as started or failed, including when the session is closed, the worker shuts down, or something crashes.\n  - Each of the four steps that previously had no time limit now has a 3-minute limit, set by the worker.\n  - A worker whose preparation fails keeps running, so the session can still be checkpointed and closed.\n- **Daemon:** it no longer uses a timer to guess whether preparation is still progressing. It shows \"Preparing <harness>: <step>\" with the worker's start time and sets no deadline while the worker reports progress. It reports the worker's own error if preparation fails.\n- **Compatibility:** older daemons and workers behave as before. I raised the client protocol from 54 to 55, because TUI clients now receive the new \"Preparing\" stage. The design and the reasons for each decision are in `.agents/plans/worker-serves-before-harness-preparation.md`.\n\n**Review fixes:** an independent review found that a Close arriving during preparation could leave the daemon waiting forever. I fixed that before committing: preparation now always ends in started or failed, and the daemon handles a failure or a closed relay before \"still preparing\".\n\n**Validation:**\n- Full test suites for core, worker, controller, client, TUI, CLI and chat, plus the 14 isolated startup and upgrade tests, workspace clippy and fmt.\n- After the merge, 4 snapshot tests failed. Three of them render dates in the machine's time zone and pass with `TZ=America/Chicago`. The fourth depends on which kind of Git checkout the tests run in. None of the four is affected by this change.\n\n**Not done:**\n- **End-to-end launch:** I didn't run a launch with a deliberately slow harness. This container has no signed-in harness profile.\n- **Abandoned blocked step:** if a step blocks for more than 3 minutes, its thread is abandoned rather than stopped. It can still finish a write it had already started after the failure is reported. I accepted this and recorded why in the plan.\n- **#1200:** this is very likely the \"no step recorded\" parser bug that `2fd45e3c` fixed. I can close it as a duplicate if you agree.\n\n## Plan for the next one: #1120 (restarted Claude sub-agents count as not working)\n\nI recommend closing it now, with a note asking anyone who sees it again to reopen it.\n\n- **Upstream fix:** the bug was in the Claude adapter, not in mj. Upstream fixed it in PR #1173, released in adapter 0.81.2 on 2026-09-24. I checked the source of the latest adapter release (0.86.0): a restarted sub-agent is now announced as soon as it starts, and upstream has a test for it.\n- **Our pin:** we pin 0.84.0 (`mj-core/src/harness_runtime.rs`), which already includes the fix. No pin change is needed.\n- **mj side:** mj only requires the start announcement to arrive before the state updates (`mj-worker/src/acp/native_agents.rs:62`). Nothing in mj works around the old behaviour.\n- **Unconfirmed:** I haven't seen it work in a real mj session. That would need a signed-in Claude profile, which this container doesn't have. To check it yourself, have a Claude session start a background sub-agent, wait for it to finish, restart it with `SendMessage`, and look for \"Subagents · 1 working\".\n\nIts effort label (S) overstated what was left; the real effort is close to zero. Should I close #1120 as fixed by the adapter update? After that, the next issue is #1225: a prompt sent during a turn Claude started itself skips mj's queue.\n\n`★ Insight ─────────────────────────────────────`\n- The review showed the risk of the rule \"no deadline while the worker reports progress\". It is only safe if every path, including cancellation and crashes, ends in a final state. The first version missed cancellation, which led straight to a wait that never ended.\n- Changing a type's shape can break compatibility even when no protocol version mentions it. The new \"Preparing\" stage changed a type that TUI clients decode, and clients require an exact protocol match. That's why the client protocol went up to 55.\n`─────────────────────────────────────────────────`"
+        },
+        {
+          "id": "user:2282",
+          "role": "user",
+          "text": "yes, close 1200 and 1120, then evaluate what changed in cc bridge from 0.84 to 0.86"
+        },
+        {
+          "id": "agent:2324",
+          "role": "assistant",
+          "text": "I closed #1200 and #1120 as completed, each with a comment giving the evidence (the fix commit for #1200, the upstream release for #1120).\n\n**Bridge 0.84 → 0.86:** the update is worth taking. It fixes several cancel, close and replay bugs. But one upstream change interacts badly with our open #1225, so I recommend bumping together with the #1225 fix, not before it. This is from reading upstream changes and our code; nothing was tested. The full audit is in `.mj-agents/84874e7b90f785ff5d3d0d1c52437127/claude-acp-0.86-audit.md`.\n\n## Changes that probably help mj\n\n- **Replay** ([#1208](https://github.com/agentclientprotocol/claude-agent-acp/pull/1208), [#1205](https://github.com/agentclientprotocol/claude-agent-acp/pull/1205)): messages from other sessions are filtered out when history is replayed, and background tasks that were stopped now replay correctly. mj replays history on restore and reconnect.\n- **Unfinished tools** ([#1212](https://github.com/agentclientprotocol/claude-agent-acp/pull/1212)): a turn that ends with tool calls still open now fails instead of looking complete.\n- **Close and cancel order** ([#1216](https://github.com/agentclientprotocol/claude-agent-acp/pull/1216), [#1242](https://github.com/agentclientprotocol/claude-agent-acp/pull/1242), [#1243](https://github.com/agentclientprotocol/claude-agent-acp/pull/1243)): close waits up to 5 s for cancelled turns to end, and a cancel that already fired is no longer stuck behind a slow update. This matches mj's cancel-then-close path (`mj-worker/src/acp/session.rs:1159-1182`).\n- **Sub-agent questions** ([#1241](https://github.com/agentclientprotocol/claude-agent-acp/pull/1241)): a permission request or question from a sub-agent now counts as pending input on the parent turn, so steering waits while that form is open.\n\n## The risk: upstream #1228 and our #1225\n\nThe upstream PR and our issue are both numbered 1228 by coincidence. Upstream PR [#1228](https://github.com/agentclientprotocol/claude-agent-acp/pull/1228) makes cancel drop prompts that the adapter is holding in its own queue (confirmed upstream). Our #1225 is the bug where mj sends a prompt straight to that hidden queue while a turn Claude started on its own is running (`mj-worker/src/relay/commands.rs:1626-1647`).\n\nCombined, the likely result on 0.86 is this. A user sends a message during such a turn and presses Esc, which mj says will \"interrupt and send\". Instead, the adapter drops the message, while mj still shows it as the running prompt.\n\nThis also answers the open question in #1225 about what Esc does to a prompt the adapter has already queued: on 0.86 it is cancelled.\n\n## Changes that don't affect mj\n\n- **ACP protocol:** mj requests and requires ACP version 1, which upstream says is unchanged. The new version 2 support only turns on when explicitly requested, so there is no wire break.\n- **New features:** `/mcp status` and reconnect, and a selector for custom agents, are user-visible but need no change in mj.\n- **Internal changes:** fewer token-count calls and a narrower exit-code report don't affect mj.\n- **Dependencies:** Claude Agent SDK goes 0.3.284 → 0.3.287 and the JS ACP SDK goes 1.5.1 → 1.7.0. The Node requirement (>= 22) is unchanged.\n\n**Still not fixed upstream:** #1106 (lost usage when a turn hits the session limit), #1110 (sub-turn grouping), #1203 and our #1228 (missing token counts).\n\n## Recommendation\n\nDo #1225 next, which is already next on our list, and bump to 0.86.0 in the same change. The bump touches `mj-core/src/harness_runtime.rs`, the Claude `package.json` and `package-lock.json`, and `containers/Containerfile.agent-dev`. It also needs the pin parity test and a regression test that a prompt sent during a Claude-started turn is delivered exactly once, including after Esc. Pushing to master publishes the agent-dev image, so I'd check that run as well.\n\nShould I plan #1225 with the bump included?\n\n`★ Insight ─────────────────────────────────────`\n- The upstream fix is correct on its own: a prompt you cancel shouldn't run later. It only becomes a problem because mj and the adapter both think they own the queue, which is exactly the \"two owners\" problem #1225 describes. Fixing the ownership in mj makes the adapter's new rule safe.\n- A harness bump is mostly a compatibility check, not a code change. The useful work here was matching each upstream change to the mj code it affects. That's how a fix upstream turned out to be a risk for us.\n`─────────────────────────────────────────────────`"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "yes, close 1200 and 1120, then evaluate what changed in cc bridge from 0.84 to 0.86",
+    "assistant_text_tail": " Changes that don't affect mj\n\n- **ACP protocol:** mj requests and requires ACP version 1, which upstream says is unchanged. The new version 2 support only turns on when explicitly requested, so there is no wire break.\n- **New features:** `/mcp status` and reconnect, and a selector for custom agents, are user-visible but need no change in mj.\n- **Internal changes:** fewer token-count calls and a narrower exit-code report don't affect mj.\n- **Dependencies:** Claude Agent SDK goes 0.3.284 → 0.3.287 and the JS ACP SDK goes 1.5.1 → 1.7.0. The Node requirement (>= 22) is unchanged.\n\n**Still not fixed upstream:** #1106 (lost usage when a turn hits the session limit), #1110 (sub-turn grouping), #1203 and our #1228 (missing token counts).\n\n## Recommendation\n\nDo #1225 next, which is already next on our list, and bump to 0.86.0 in the same change. The bump touches `mj-core/src/harness_runtime.rs`, the Claude `package.json` and `package-lock.json`, and `containers/Containerfile.agent-dev`. It also needs the pin parity test and a regression test that a prompt sent during a Claude-started turn is delivered exactly once, including after Esc. Pushing to master publishes the agent-dev image, so I'd check that run as well.\n\nShould I plan #1225 with the bump included?\n\n`★ Insight ─────────────────────────────────────`\n- The upstream fix is correct on its own: a prompt you cancel shouldn't run later. It only becomes a problem because mj and the adapter both think they own the queue, which is exactly the \"two owners\" problem #1225 describes. Fixing the ownership in mj makes the adapter's new rule safe.\n- A harness bump is mostly a compatibility check, not a code change. The useful work here was matching each upstream change to the mj code it affects. That's how a fix upstream turned out to be a risk for us.\n`─────────────────────────────────────────────────`",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      2324
+    ],
+    "user_position": 2282,
+    "input_rationale": "Both issues were closed and the audit delivered; the agent recommends bumping with the #1225 fix and asks whether to plan it that way.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "mjolnir",
+    "is_child": false,
+    "kind": "next_work_menu",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "menu": "solicited",
+    "policy": "2026-11-06 user decision: any approval request, menu, or offer put to the user needs the user, unless already authorized (redundant_request), answered, rhetorical, or addressed to another agent.",
+    "request_message_ids": [
+      "agent:2324"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-06T00:52:19.602Z",
+        "kind": "user",
+        "text": "Yes, you have the ball, push when complete, then tee up the next MJ issue"
+      },
+      {
+        "at": "2026-10-06T00:52:41.353Z",
+        "kind": "agent",
+        "text": "I'm taking #1225 together with the bridge bump. Three agents will work in parallel: - One implements the #1225 queue fix. - One bumps the Claude bridge pin to 0.86.0. Its files don't overlap with the "
+      },
+      {
+        "at": "2026-10-06T00:59:09.361Z",
+        "kind": "system",
+        "text": "Subagent \"1188-research\" (a32c0794) finished turn 26 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-06T01:03:07.764Z",
+        "kind": "system",
+        "text": "Subagent \"claude-bridge-086-bump\" (548badff) finished turn 26 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-06T01:26:01.316Z",
+        "kind": "system",
+        "text": "Subagent \"1225-queue-owner\" (f710e7f2) finished turn 26 (completed, end of turn)."
+      },
+      {
+        "at": "2026-10-06T01:26:04.656Z",
+        "kind": "agent",
+        "text": "The #1225 implementation is in. The full worker suite and workspace clippy pass. Before committing I'll review the core of the diff myself: the shared turn predicate and how promotion uses it."
+      }
+    ]
+  }
+}

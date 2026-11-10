@@ -1,4 +1,4 @@
-//! Mjolnir-owned delegation tools for Claude, Codex, and DSH sessions.
+//! Mjolnir-owned delegation tools for Claude, Codex, DSH, and OpenCode sessions.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -38,12 +38,17 @@ static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
 /// A child's server instructions: its report reaches the parent through `handback`.
 static CHILD_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "You are a Mjolnir sub-agent. Call handback once as your last action; your parent reads that report. If a parent decision blocks progress, hand back your question and stop; its answer arrives as your next prompt. Your first prompt names your report directory. {}",
-        mj_core::subagent::HANDBACK_REPORT_RULES
+        "You are a Mjolnir sub-agent. Call handback once as your last action; your parent reads that report. If you committed changes and have mj-review tools, get them reviewed before handing back. If a parent decision blocks progress, hand back your question and stop; its answer arrives as your next prompt. Your first prompt names your report directory. {}",
+        mj_core::subagent::HANDBACK_REPORT_RULES.as_str()
     )
 });
 
-const REVIEW_GATE_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or `gh pr create`. It replies immediately; the verdict arrives later as a Mjolnir message. Pass `path` when pushing from another worktree. The pre-push gate requires every reviewer to be clean. Retry incomplete reviews. For complete findings you judge wrong or unreasonable, `override_review` records the exact reviewed trees and audits your reason in the transcript.";
+/// Policy for the separate `mj-review` server of a managed child, delivered
+/// through initialization. A child does not push; it reviews before it reports.
+const CHILD_REVIEW_SERVER_INSTRUCTIONS: &str = "If you committed changes, call `request_review` before you hand back your report. A task that committed nothing (an investigation, a test run, a question) hands back without a review. It replies immediately; the verdict arrives later as a Mjolnir message. After calling it, end your turn: the verdict starts your next turn, and handback is refused until it arrives. Pass `path` for a worktree other than your working directory. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Hand back once the review is clean or you have overridden its findings. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
+
+/// Policy for the separate `mj-review` server, delivered through initialization.
+const REVIEW_SERVER_INSTRUCTIONS: &str = "Commit and call `request_review` before `git push` or `gh pr create`. It replies immediately; the verdict arrives later as a Mjolnir message. Pass `path` when pushing from another worktree; reviewing a worktree at HEAD lets you keep working meanwhile. A push is allowed after every reviewer is clean, or after `override_review` on the reviewed commits. Retry incomplete reviews. Do not fix every finding by default: when a verdict arrives, call `override_review` first, before committing anything, with each finding you will not fix and your reason; later reviewers are told not to raise those again. Then fix the rest, commit, and request review again. Use `set_review_baseline` to mark commits through a reviewed commit as done, so later reviews start after it.";
 
 /// A child's advice when Mjolnir has not confirmed its report. Calling again
 /// is safe: a report that did arrive is refused as already delivered.
@@ -251,7 +256,6 @@ pub struct ParentTools {
     /// Whether `spawn` offers the subtle task type. Without it, `spawn` has
     /// no `task_type` and every child uses the straightforward choice.
     pub subtle_subagents: bool,
-    pub review_gate: bool,
 }
 
 impl Default for ParentTools {
@@ -260,7 +264,6 @@ impl Default for ParentTools {
             oracle: false,
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
-            review_gate: false,
         }
     }
 }
@@ -413,29 +416,6 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         Some(HarnessKind::Codex) => CODEX_SERVER_INSTRUCTIONS.as_str(),
         _ => SERVER_INSTRUCTIONS.as_str(),
     };
-    static PUSH_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-        format!(
-            "{REVIEW_GATE_INSTRUCTIONS} {DELEGATION_ROUTING}{MAILBOX_ROUTING}{NOTIFICATION_ROUTING}"
-        )
-    });
-    static CODEX_PUSH_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-        format!(
-            "{} {}",
-            PUSH_INSTRUCTIONS.as_str(),
-            "Call mj-agents tools directly. If these tools are not visible, find mj-agents in the tool catalog."
-        )
-    });
-    static MESSAGE_PUSH_INSTRUCTIONS: LazyLock<String> =
-        LazyLock::new(|| format!("{REVIEW_GATE_INSTRUCTIONS} {MESSAGE_ONLY_INSTRUCTIONS}"));
-    let parent_instructions = if options.review_gate {
-        if harness == Some(HarnessKind::Codex) {
-            CODEX_PUSH_INSTRUCTIONS.as_str()
-        } else {
-            PUSH_INSTRUCTIONS.as_str()
-        }
-    } else {
-        parent_instructions
-    };
     let reviewer = std::fs::read(socket.with_file_name("launch.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -443,7 +423,7 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
     static REVIEWER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
         format!(
             "You are a Mjolnir reviewer child. Call handback once as your last action with your plain-text findings, or exactly `No findings.` if there are none. Your report may contain up to {} characters.",
-            mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS
+            mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
         )
     });
     let reviewer_instructions = REVIEWER_INSTRUCTIONS.as_str();
@@ -454,22 +434,13 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
         ),
         SubagentMcpRole::MessageOnly => {
             let mut tools = vec![send_message_tool(), fetch_tool()];
-            tools.extend(review_tool_definitions(options.review_gate));
             if options.oracle {
                 tools.push(ask_oracle_tool());
             }
-            (
-                if options.review_gate {
-                    MESSAGE_PUSH_INSTRUCTIONS.as_str()
-                } else {
-                    MESSAGE_ONLY_INSTRUCTIONS
-                },
-                tools,
-            )
+            (MESSAGE_ONLY_INSTRUCTIONS, tools)
         }
         SubagentMcpRole::FetchOnly => {
             let mut tools = vec![fetch_tool(), send_message_tool()];
-            tools.extend(review_tool_definitions(false));
             if options.oracle {
                 tools.push(ask_oracle_tool());
             }
@@ -483,8 +454,10 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
             }
             if reviewer {
                 tools[0]["description"] = json!(&reviewer_instructions);
-                tools[0]["inputSchema"]["properties"]["message"]["description"] =
-                    json!("Complete reviewer rubric JSON");
+                tools[0]["inputSchema"]["properties"]["message"]["description"] = json!(format!(
+                    "Complete reviewer rubric JSON, at most {} characters",
+                    mj_core::subagent::SubagentKind::Reviewer.max_handback_chars()
+                ));
             }
             (
                 if reviewer {
@@ -522,6 +495,8 @@ struct CallParams {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnArgs {
+    #[serde(default)]
+    no_github_credentials: bool,
     task_name: String,
     instructions: String,
     /// Required when the subtle type is offered. Without it, the spawn tool
@@ -633,12 +608,10 @@ fn call_with_budget_and_options(
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
     let legacy_alias = params.name == "send_input"
         && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
-    let push_review =
-        params.name == "override_review" && role.supports_push_gate() && options.review_gate;
     if params.name == "ask_oracle" && !options.oracle {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
-    if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias && !push_review {
+    if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
     let action = match params.name.as_str() {
@@ -664,6 +637,26 @@ fn call_with_budget_and_options(
             if instructions.is_empty() {
                 bail!("spawn instructions cannot be empty");
             }
+            // An absolute path stands alone, so it still works after the
+            // parent's own directory was deleted or renamed.
+            let resolved_working_directory = if args.working_directory.is_absolute() {
+                args.working_directory.clone()
+            } else {
+                let parent_directory = std::env::current_dir().context(
+                    "the parent's working directory is gone; pass an absolute working_directory",
+                )?;
+                if args.working_directory.as_os_str().is_empty() {
+                    parent_directory
+                } else {
+                    mj_core::target_path::join(&parent_directory, &args.working_directory)
+                }
+            };
+            if !resolved_working_directory.is_dir() {
+                bail!(
+                    "spawn working directory {} does not exist or is not a directory; pass an existing directory (relative paths resolve against the parent's working directory)",
+                    resolved_working_directory.display()
+                );
+            }
             // A subtle request without a subtle choice still reaches the
             // daemon: the configuration may have gained one since launch.
             let task_type = match args.task_type {
@@ -674,6 +667,7 @@ fn call_with_budget_and_options(
                 None => bail!("missing field `task_type`"),
             };
             SubagentToolAction::Spawn {
+                no_github_credentials: args.no_github_credentials,
                 task_name: args.task_name,
                 instructions: instructions.to_owned(),
                 task_type,
@@ -683,22 +677,9 @@ fn call_with_budget_and_options(
                 files: Vec::new(),
             }
         }
-        "request_review" => SubagentToolAction::RequestReview {
-            path: serde_json::from_value::<RequestReviewArgs>(params.arguments)?.path,
-        },
         "ask_oracle" => SubagentToolAction::AskOracle {
             message: serde_json::from_value::<AskOracleArgs>(params.arguments)?.message,
         },
-        "override_review" => {
-            let args: OverrideReviewArgs = serde_json::from_value(params.arguments)?;
-            let reason = args.reason.trim();
-            if reason.is_empty() {
-                bail!("override_review reason cannot be empty");
-            }
-            SubagentToolAction::OverrideReview {
-                reason: reason.to_owned(),
-            }
-        }
         "list_agents" => SubagentToolAction::ListAgents,
         "send_message" => {
             if params.arguments.get("child_session_id").is_some() {
@@ -737,6 +718,18 @@ fn call_with_budget_and_options(
         }
         other => bail!("unknown sub-agent tool {other:?}"),
     };
+    execute(socket, action, progress, budget)
+}
+
+/// Send one action to the worker's request queue and turn its answer into what
+/// the model reads. Both MCP servers use it, so every tool shares one path to
+/// the daemon.
+fn execute(
+    socket: &Path,
+    action: SubagentToolAction,
+    progress: &crate::mcp_stdio::Progress,
+    budget: impl Fn(&SubagentToolAction) -> Duration,
+) -> Result<(Value, bool)> {
     // Each call is its own request. The id keeps the worker's queue and the
     // daemon from running one request twice; it is never the model's to set.
     let request_id = mj_core::state::new_session_id()?;
@@ -863,6 +856,7 @@ fn spawn_tool(subtle_subagents: bool) -> Value {
         (SPAWN_ONE_TASK_TYPE, "the configured model and effort")
     };
     let mut properties = json!({
+        "no_github_credentials":{"type":"boolean","description":"Withhold GitHub credentials from this child and its descendants. A parent's credential opt-out is always inherited."},
         "task_name":{"type":"string"},
         "instructions":{"type":"string","description":"The assignment, context, constraints and required evidence. Point to relevant files, symbols, line ranges and earlier reports; the child reads them in the shared filesystem."},
         "task_type":{"type":"string","enum":["straightforward","subtle"],"description":"`subtle` gets a smarter, more expensive agent than `straightforward`; choose it for work that needs judgment or risks subtle bugs."},
@@ -879,7 +873,7 @@ fn spawn_tool(subtle_subagents: bool) -> Value {
     tool(
         "spawn",
         &format!(
-            "{lead} Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting {selection}. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
+            "{lead} Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting {selection}. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child whose record is in error, lost or stopped cannot be re-prompted; a child whose last turn failed can: send_message resumes it. A login the provider has refused stays unavailable until repaired with `mj login`."
         ),
         json!({
             "type":"object",
@@ -908,18 +902,17 @@ fn tool_definitions_with_options(
         spawn_tool(options.subtle_subagents),
         read_only(tool(
             "list_agents",
-            "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A finished child has parked true when its processes were released. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
+            "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A failed delivery does not change the child's state. A child whose last turn failed and whose entry has promptable true can be resumed with send_message. A finished child has parked true when its worker was stopped; parking stops the harness and the processes under it, and a detached process may keep running. An entry has facts when Mjolnir recorded what the child's worker observed: facts.finish lists the processes the child's agent had left running and its working tree when its turn ended. The facts are Mjolnir's observation, not the child's claim; read them against its report. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
             json!({"type":"object","additionalProperties":false}),
         )),
         send_message_tool(),
         tool(
             "close",
-            "Stop one child session identified by its full ID or a unique hexadecimal prefix of at least 8 characters, and retain its conversation. Closing a child keeps its report directory; only destroying the child or its parent removes it. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished and contains the resolved full child session ID; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
+            "Stop one child session identified by its full ID or a unique hexadecimal prefix of at least 8 characters, and retain its conversation. Closing a child keeps its report directory; only destroying the child or its parent removes it. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no worker left and only its record is settled. An answer of closed true means that finished and contains the resolved full child session ID; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
             child,
         ),
         fetch_tool(),
     ];
-    tools.extend(review_tool_definitions(options.review_gate));
     if options.oracle {
         tools.push(ask_oracle_tool());
     }
@@ -950,20 +943,50 @@ struct AskOracleArgs {
     message: String,
 }
 
-fn review_tool_definitions(review_gate: bool) -> Vec<Value> {
-    let mut tools = vec![tool(
-        "request_review",
-        "Request review of committed work before pushing. Reviews HEAD of `path`, a worktree of a workspace repository (default: the session working directory). The verdict arrives later as a Mjolnir message.",
-        json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}),
-    )];
-    if review_gate {
-        tools.push(tool(
+/// The tools of the separate `mj-review` server.
+fn review_tool_definitions() -> Vec<Value> {
+    vec![
+        tool(
+            "request_review",
+            "Request review of committed work before pushing. Reviews HEAD of `path`, a worktree of a workspace repository (default: the session working directory). The verdict arrives later as a Mjolnir message.",
+            json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}),
+        ),
+        tool(
             "override_review",
-            "Override the last complete before-push findings verdict and record the reviewed tree so the push can proceed. Use it only for findings you have judged incorrect or unreasonable; the reason is written into the session transcript. Refused if a review is running, a reviewer failed, or the reviewed tree contents changed.",
-            json!({"type":"object","properties":{"reason":{"type":"string","description":"Why the findings do not need to be addressed."}},"required":["reason"],"additionalProperties":false}),
-        ));
-    }
-    tools
+            "Record before-push review findings you will not fix. Pass one entry per finding: the finding in your words and why you will not fix it. Call it as soon as the verdict arrives, before committing any change; it applies only to the exact reviewed commits and is refused once they change. Later reviews are told not to report these findings again. It allows pushing the reviewed commits, but does not move the review baseline.",
+            json!({
+                "type":"object",
+                "properties":{"overrides":{
+                    "type":"array",
+                    "minItems":1,
+                    "items":{
+                        "type":"object",
+                        "properties":{
+                            "finding":{"type":"string","description":"The finding, in enough words that a later reviewer recognizes it."},
+                            "reason":{"type":"string","description":"Why this finding does not need fixing."}
+                        },
+                        "required":["finding","reason"],
+                        "additionalProperties":false
+                    }
+                }},
+                "required":["overrides"],
+                "additionalProperties":false
+            }),
+        ),
+        tool(
+            "set_review_baseline",
+            "Mark commits through `commit` as reviewed, so later reviews cover only later changes. Accepted only for a commit whose tree a review has passed, clean or by override_review. A clean review already does this. Pass `path` for another worktree.",
+            json!({
+                "type":"object",
+                "properties":{
+                    "commit":{"type":"string","description":"The reviewed commit; commits through it are marked reviewed."},
+                    "path":{"type":"string","description":"A worktree of a workspace repository (default: the session working directory)."}
+                },
+                "required":["commit"],
+                "additionalProperties":false
+            }),
+        ),
+    ]
 }
 
 #[derive(serde::Deserialize)]
@@ -975,7 +998,137 @@ struct RequestReviewArgs {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OverrideReviewArgs {
+    overrides: Vec<OverrideEntry>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OverrideEntry {
+    finding: String,
     reason: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetReviewBaselineArgs {
+    commit: String,
+    path: Option<String>,
+}
+
+/// Build the action for one review tool call, refusing empty values.
+fn review_action(name: &str, arguments: Value) -> Result<SubagentToolAction> {
+    Ok(match name {
+        "request_review" => SubagentToolAction::RequestReview {
+            path: serde_json::from_value::<RequestReviewArgs>(arguments)?.path,
+        },
+        "override_review" => {
+            if arguments.get("reason").is_some() && arguments.get("overrides").is_none() {
+                bail!(
+                    "override_review now takes `overrides`, a list of {{finding, reason}} entries, one per finding you will not fix"
+                );
+            }
+            let args: OverrideReviewArgs = serde_json::from_value(arguments)?;
+            if args.overrides.is_empty() {
+                bail!("override_review needs at least one entry in `overrides`");
+            }
+            let mut overrides = Vec::with_capacity(args.overrides.len());
+            for (index, entry) in args.overrides.iter().enumerate() {
+                let number = index + 1;
+                let finding = entry.finding.trim();
+                if finding.is_empty() {
+                    bail!("override_review overrides[{number}].finding cannot be empty");
+                }
+                let reason = entry.reason.trim();
+                if reason.is_empty() {
+                    bail!("override_review overrides[{number}].reason cannot be empty");
+                }
+                overrides.push(mj_core::subagent::ReviewOverride {
+                    finding: finding.to_owned(),
+                    reason: reason.to_owned(),
+                });
+            }
+            SubagentToolAction::OverrideReview { overrides }
+        }
+        "set_review_baseline" => {
+            let args: SetReviewBaselineArgs = serde_json::from_value(arguments)?;
+            let commit = args.commit.trim();
+            if commit.is_empty() {
+                bail!("set_review_baseline commit cannot be empty");
+            }
+            let path = match args.path {
+                Some(path) if path.trim().is_empty() => {
+                    bail!(
+                        "set_review_baseline path cannot be empty; omit it for the session working directory"
+                    )
+                }
+                other => other,
+            };
+            SubagentToolAction::SetReviewBaseline {
+                commit: commit.to_owned(),
+                path,
+            }
+        }
+        other => bail!("unknown review tool {other:?}"),
+    })
+}
+
+/// Answer one call to the review server.
+fn call_review(
+    socket: &Path,
+    params: Option<&Value>,
+    progress: &crate::mcp_stdio::Progress,
+    budget: impl Fn(&SubagentToolAction) -> Duration,
+) -> Result<(Value, bool)> {
+    let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
+    if !mj_core::subagent::REVIEW_MCP_TOOLS.contains(&params.name.as_str()) {
+        bail!("unknown review tool {:?}", params.name);
+    }
+    let action = review_action(&params.name, params.arguments)?;
+    execute(socket, action, progress, budget)
+}
+
+/// Serve the before-push review tools over MCP stdio as `mj-review`. The tools
+/// reach the controller through the same worker queue as `mj-agents`.
+pub fn run_review_mcp_stdio(
+    socket: &Path,
+    harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
+) -> Result<()> {
+    let stdin = std::io::stdin();
+    run_review(stdin.lock(), std::io::stdout(), socket, harness, role)
+}
+
+/// A managed child reviews before it reports; a top-level session, before it pushes.
+fn review_instructions(role: SubagentMcpRole) -> &'static str {
+    match role {
+        SubagentMcpRole::Child | SubagentMcpRole::FetchOnly => CHILD_REVIEW_SERVER_INSTRUCTIONS,
+        SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly => REVIEW_SERVER_INSTRUCTIONS,
+    }
+}
+
+fn run_review<R: BufRead, W: Write + Send + Sync + 'static>(
+    reader: R,
+    writer: W,
+    socket: &Path,
+    harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
+) -> Result<()> {
+    let socket = socket.to_path_buf();
+    crate::mcp_stdio::serve(
+        reader,
+        writer,
+        crate::mcp_stdio::McpServer {
+            name: mj_core::subagent::REVIEW_MCP_SERVER,
+            instructions: review_instructions(role),
+            tools: review_tool_definitions(),
+            progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
+            call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
+                call_review(&socket, params, progress, |action| {
+                    reply_timeout(action, harness)
+                })
+            },
+        },
+    )
 }
 
 fn send_message_tool() -> Value {
@@ -1008,20 +1161,18 @@ fn fetch_tool() -> Value {
 
 /// Keep handback first so the report budget can annotate it at launch.
 fn child_tool_definitions() -> Vec<Value> {
-    let mut tools = vec![
+    vec![
         read_only(tool(
             "handback",
             &format!(
                 "Hand back once, as your last action. Repeats in one turn are refused. {}",
-                mj_core::subagent::HANDBACK_REPORT_RULES
+                mj_core::subagent::HANDBACK_REPORT_RULES.as_str()
             ),
-            json!({"type":"object","properties":{"message":{"type":"string","description":"Your report, at most 4,000 characters; details go in files in your report directory."}},"required":["message"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"message":{"type":"string","description":format!("Your report, at most {} characters for workers or {} for oracles and reviewers; details go in files in your report directory.", mj_core::subagent::SubagentKind::Worker.max_handback_chars(), mj_core::subagent::SubagentKind::Oracle.max_handback_chars())}},"required":["message"],"additionalProperties":false}),
         )),
         fetch_tool(),
         send_message_tool(),
-    ];
-    tools.extend(review_tool_definitions(false));
-    tools
+    ]
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -1042,14 +1193,12 @@ mod tests {
 
     const MAILBOXES_DISABLED: ParentTools = ParentTools {
         oracle: false,
-        review_gate: false,
         agent_mailboxes_enabled: false,
         subtle_subagents: true,
     };
 
     const STRAIGHTFORWARD_ONLY: ParentTools = ParentTools {
         oracle: false,
-        review_gate: false,
         agent_mailboxes_enabled: true,
         subtle_subagents: false,
     };
@@ -1066,7 +1215,7 @@ mod tests {
         let spawn = spawn_definition(ParentTools::default());
         assert_eq!(
             spawn["description"],
-            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
+            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an enabled profile with the most quota, API-priced profiles last, supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child whose record is in error, lost or stopped cannot be re-prompted; a child whose last turn failed can: send_message resumes it. A login the provider has refused stays unavailable until repaired with `mj login`."
         );
         assert_eq!(
             spawn["inputSchema"]["properties"]["task_type"]["enum"],
@@ -1153,6 +1302,7 @@ mod tests {
                 request.action,
                 SubagentToolAction::Spawn {
                     task_type: mj_core::subagent::SubagentTaskType::Straightforward,
+                    no_github_credentials: true,
                     ..
                 }
             ));
@@ -1165,7 +1315,7 @@ mod tests {
             &socket,
             None,
             SubagentMcpRole::Parent,
-            Some(&json!({"name":"spawn", "arguments":{"task_name":"t", "instructions":"i"}})),
+            Some(&json!({"name":"spawn", "arguments":{"task_name":"t", "instructions":"i", "no_github_credentials":true}})),
             &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
             |_| Duration::from_secs(5),
             STRAIGHTFORWARD_ONLY,
@@ -1179,74 +1329,297 @@ mod tests {
     #[cfg(unix)]
     // Hard-won: 32d96d199: sessions without delegation could not request push reviews under their own role.
     #[test]
-    fn review_tools_send_durable_actions_with_or_without_delegation() {
+    fn review_tools_send_durable_actions_through_the_same_request_path() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
+        for (params, action) in [
+            (
+                json!({"name":"request_review","arguments":{"path":"/workspace"}}),
+                SubagentToolAction::RequestReview {
+                    path: Some("/workspace".into()),
+                },
+            ),
+            (
+                json!({"name":"request_review","arguments":{}}),
+                SubagentToolAction::RequestReview { path: None },
+            ),
+            (
+                json!({"name":"override_review","arguments":{"overrides":[
+                    {"finding":"  the parser accepts a bare tab ","reason":" it is a documented extension "},
+                    {"finding":"error text names the wrong file","reason":"the file is generated"}
+                ]}}),
+                SubagentToolAction::OverrideReview {
+                    overrides: vec![
+                        mj_core::subagent::ReviewOverride {
+                            finding: "the parser accepts a bare tab".into(),
+                            reason: "it is a documented extension".into(),
+                        },
+                        mj_core::subagent::ReviewOverride {
+                            finding: "error text names the wrong file".into(),
+                            reason: "the file is generated".into(),
+                        },
+                    ],
+                },
+            ),
+            (
+                json!({"name":"set_review_baseline","arguments":{"commit":" abc1234 ","path":"/other"}}),
+                SubagentToolAction::SetReviewBaseline {
+                    commit: "abc1234".into(),
+                    path: Some("/other".into()),
+                },
+            ),
+            (
+                json!({"name":"set_review_baseline","arguments":{"commit":"abc1234"}}),
+                SubagentToolAction::SetReviewBaseline {
+                    commit: "abc1234".into(),
+                    path: None,
+                },
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("subagents.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let worker = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let request: SubagentToolRequest = serde_json::from_str(&line).unwrap();
+                assert_eq!(request.action, action);
+                reader
+                    .into_inner()
+                    .write_all(b"{\"result\":{\"accepted\":true}}\n")
+                    .unwrap();
+            });
+            let (value, is_error) = call_review(
+                &socket,
+                Some(&params),
+                &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+                |_| Duration::from_secs(5),
+            )
+            .unwrap();
+            worker.join().unwrap();
+            assert!(!is_error);
+            assert_eq!(value["accepted"], true);
+        }
+    }
+
+    #[test]
+    fn review_tool_arguments_are_validated_with_clear_errors() {
+        let refused = |name: &str, arguments: Value| {
+            let error = call_review(
+                Path::new("unused.sock"),
+                Some(&json!({"name":name,"arguments":arguments})),
+                &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
+                |_| Duration::from_millis(1),
+            )
+            .unwrap_err();
+            format!("{error:#}")
+        };
+        assert!(
+            refused("override_review", json!({"overrides":[]}))
+                .contains("needs at least one entry")
+        );
+        assert!(
+            refused(
+                "override_review",
+                json!({"overrides":[{"finding":"  ","reason":"fine"}]})
+            )
+            .contains("overrides[1].finding cannot be empty")
+        );
+        assert!(
+            refused(
+                "override_review",
+                json!({"overrides":[
+                    {"finding":"ok","reason":"ok"},
+                    {"finding":"second","reason":" \n"}
+                ]})
+            )
+            .contains("overrides[2].reason cannot be empty")
+        );
+        assert!(
+            refused(
+                "override_review",
+                json!({"overrides":[{"finding":"only a finding"}]})
+            )
+            .contains("missing field `reason`")
+        );
+        assert!(
+            refused(
+                "override_review",
+                json!({"overrides":[{"finding":"f","reason":"r","extra":1}]})
+            )
+            .contains("unknown field `extra`")
+        );
+        assert!(refused("override_review", json!({})).contains("missing field `overrides`"));
+        // A model that remembers the old single-reason shape is told the new one.
+        assert!(
+            refused("override_review", json!({"reason":"unreasonable"}))
+                .contains("now takes `overrides`")
+        );
+        assert!(
+            refused("set_review_baseline", json!({"commit":" "}))
+                .contains("commit cannot be empty")
+        );
+        assert!(
+            refused("set_review_baseline", json!({"commit":"abc","path":" "}))
+                .contains("path cannot be empty")
+        );
+        assert!(refused("set_review_baseline", json!({})).contains("missing field `commit`"));
+        assert!(
+            refused("set_review_baseline", json!({"commit":"abc","extra":true}))
+                .contains("unknown field `extra`")
+        );
+        assert!(refused("request_review", json!({"extra":true})).contains("unknown field"));
+        assert!(refused("spawn", json!({})).contains("unknown review tool"));
+    }
+
+    fn mcp_exchange(
+        server: impl FnOnce(&[u8], ContractWriter) -> Result<()>,
+    ) -> (Value, Vec<Value>) {
+        let input = format!(
+            "{}\n{}\n",
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+        );
+        let output = Arc::new(Mutex::new(Vec::new()));
+        server(input.as_bytes(), ContractWriter(output.clone())).unwrap();
+        let output = output.lock().unwrap();
+        let replies: Vec<Value> = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let initialize = replies.iter().find(|r| r["id"] == 1).unwrap()["result"].clone();
+        let tools = replies.iter().find(|r| r["id"] == 2).unwrap()["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .clone();
+        (initialize, tools)
+    }
+
+    #[test]
+    fn the_review_server_lists_the_review_tools_and_its_instructions() {
+        let (initialize, tools) = mcp_exchange(|input, writer| {
+            run_review(
+                input,
+                writer,
+                Path::new("unused.sock"),
+                Some(HarnessKind::Claude),
+                SubagentMcpRole::Parent,
+            )
+        });
+        assert_eq!(initialize["serverInfo"]["name"], "mj-review");
+        let names: Vec<_> = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, mj_core::subagent::REVIEW_MCP_TOOLS);
+        let instructions = initialize["instructions"].as_str().unwrap();
+        assert_eq!(instructions, REVIEW_SERVER_INSTRUCTIONS);
+        // Claude cuts server instructions at 2048 characters.
+        assert!(instructions.chars().count() <= 2048);
+        for role in [SubagentMcpRole::Child, SubagentMcpRole::FetchOnly] {
+            let (initialize, _) = mcp_exchange(|input, writer| {
+                run_review(
+                    input,
+                    writer,
+                    Path::new("unused.sock"),
+                    Some(HarnessKind::Claude),
+                    role,
+                )
+            });
+            let instructions = initialize["instructions"].as_str().unwrap();
+            assert_eq!(instructions, CHILD_REVIEW_SERVER_INSTRUCTIONS);
+            assert!(instructions.chars().count() <= 2048);
+            assert!(instructions.contains("handback is refused until it arrives"));
+        }
+
+        let by_name = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
+        let override_review = by_name("override_review");
+        assert!(
+            override_review["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("Record before-push review findings you will not fix.")
+        );
+        let schema = &override_review["inputSchema"];
+        assert_eq!(schema["required"], json!(["overrides"]));
+        let overrides = &schema["properties"]["overrides"];
+        assert_eq!(overrides["type"], "array");
+        assert_eq!(overrides["minItems"], 1);
+        assert_eq!(overrides["items"]["required"], json!(["finding", "reason"]));
+        assert_eq!(
+            overrides["items"]["properties"]["finding"]["description"],
+            "The finding, in enough words that a later reviewer recognizes it."
+        );
+        assert_eq!(
+            overrides["items"]["properties"]["reason"]["description"],
+            "Why this finding does not need fixing."
+        );
+        let baseline = by_name("set_review_baseline");
+        assert_eq!(baseline["inputSchema"]["required"], json!(["commit"]));
+        assert!(baseline["inputSchema"]["properties"].get("path").is_some());
+        assert!(
+            baseline["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("Mark commits through `commit` as reviewed")
+        );
+        assert!(
+            by_name("request_review")["inputSchema"]["properties"]
+                .get("path")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn delegation_servers_no_longer_carry_review_tools_or_guidance() {
         for role in [
             SubagentMcpRole::Parent,
-            SubagentMcpRole::MessageOnly,
             SubagentMcpRole::Child,
+            SubagentMcpRole::MessageOnly,
             SubagentMcpRole::FetchOnly,
         ] {
-            for (params, action, review_gate) in [
-                (
-                    json!({"name":"request_review","arguments":{"path":"/workspace"}}),
-                    SubagentToolAction::RequestReview {
-                        path: Some("/workspace".into()),
-                    },
-                    false,
-                ),
-                (
-                    json!({"name":"request_review","arguments":{"path":"/workspace"}}),
-                    SubagentToolAction::RequestReview {
-                        path: Some("/workspace".into()),
-                    },
-                    true,
-                ),
-                (
-                    json!({"name":"override_review","arguments":{"reason":"finding is unreasonable"}}),
-                    SubagentToolAction::OverrideReview {
-                        reason: "finding is unreasonable".into(),
-                    },
-                    true,
-                ),
-            ] {
-                if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::FetchOnly)
-                    && params["name"] == "override_review"
-                {
-                    continue;
+            let (initialize, tools) = mcp_exchange(|input, writer| {
+                run_with_options(
+                    input,
+                    writer,
+                    Path::new("unused.sock"),
+                    Some(HarnessKind::Claude),
+                    role,
+                    ParentTools::default(),
+                )
+            });
+            assert_eq!(initialize["serverInfo"]["name"], "mj-agents");
+            for name in ["send_message", "fetch"] {
+                assert!(tools.iter().any(|tool| tool["name"] == name));
+            }
+            let instructions = initialize["instructions"].as_str().unwrap();
+            assert!(!instructions.contains("request_review"));
+            assert!(!instructions.contains("override_review"));
+            for tool in &tools {
+                let name = tool["name"].as_str().unwrap();
+                assert!(!mj_core::subagent::REVIEW_MCP_TOOLS.contains(&name));
+            }
+            if role != SubagentMcpRole::Parent {
+                assert!(!instructions.contains(DELEGATION_ROUTING));
+                for name in ["spawn", "list_agents", "close"] {
+                    assert!(tools.iter().all(|tool| tool["name"] != name));
                 }
-                let directory = tempfile::tempdir().unwrap();
-                let socket = directory.path().join("subagents.sock");
-                let listener = UnixListener::bind(&socket).unwrap();
-                let worker = std::thread::spawn(move || {
-                    let (stream, _) = listener.accept().unwrap();
-                    let mut reader = BufReader::new(stream);
-                    let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
-                    let request: SubagentToolRequest = serde_json::from_str(&line).unwrap();
-                    assert_eq!(request.action, action);
-                    reader
-                        .into_inner()
-                        .write_all(b"{\"result\":{\"accepted\":true}}\n")
-                        .unwrap();
-                });
-                let (value, is_error) = call_with_budget_and_options(
-                    &socket,
+            }
+            for name in mj_core::subagent::REVIEW_MCP_TOOLS {
+                let error = call_with_budget_and_options(
+                    Path::new("unused.sock"),
                     None,
                     role,
-                    Some(&params),
-                    &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
-                    |_| Duration::from_secs(5),
-                    ParentTools {
-                        review_gate,
-                        ..Default::default()
-                    },
+                    Some(&json!({"name":name,"arguments":{}})),
+                    &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
+                    |_| Duration::from_millis(1),
+                    ParentTools::default(),
                 )
-                .unwrap();
-                worker.join().unwrap();
-                assert!(!is_error);
-                assert_eq!(value["accepted"], true);
+                .unwrap_err();
+                assert!(error.to_string().contains("unknown sub-agent tool"));
             }
         }
     }
@@ -1299,104 +1672,6 @@ mod tests {
         assert_eq!(reply["report"], expected);
     }
 
-    // Hard-won: 32d96d199: push reviews granted the full parent tool catalog to sessions without delegation.
-    #[test]
-    fn every_role_gets_common_tools_and_only_flagged_primaries_get_overrides() {
-        for role in [
-            SubagentMcpRole::Parent,
-            SubagentMcpRole::Child,
-            SubagentMcpRole::MessageOnly,
-            SubagentMcpRole::FetchOnly,
-        ] {
-            for review_gate in [false, true] {
-                let input = format!(
-                    "{}\n{}\n",
-                    json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
-                    json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
-                );
-                let output = Arc::new(Mutex::new(Vec::new()));
-                run_with_options(
-                    input.as_bytes(),
-                    ContractWriter(output.clone()),
-                    Path::new("unused.sock"),
-                    Some(HarnessKind::Claude),
-                    role,
-                    ParentTools {
-                        review_gate,
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
-                let output = output.lock().unwrap();
-                let replies: Vec<Value> = std::str::from_utf8(&output)
-                    .unwrap()
-                    .lines()
-                    .map(|line| serde_json::from_str(line).unwrap())
-                    .collect();
-                let expected =
-                    matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly)
-                        && review_gate;
-                let tools = replies.iter().find(|r| r["id"] == 2).unwrap()["result"]["tools"]
-                    .as_array()
-                    .unwrap();
-                for name in ["send_message", "fetch", "request_review"] {
-                    assert!(tools.iter().any(|tool| tool["name"] == name));
-                }
-                assert_eq!(
-                    tools.iter().any(|tool| tool["name"] == "override_review"),
-                    expected
-                );
-                let instructions =
-                    replies.iter().find(|r| r["id"] == 1).unwrap()["result"]["instructions"]
-                        .as_str()
-                        .unwrap();
-                assert_eq!(instructions.contains(REVIEW_GATE_INSTRUCTIONS), expected);
-                if role != SubagentMcpRole::Parent {
-                    assert!(!instructions.contains(DELEGATION_ROUTING));
-                    for name in ["spawn", "list_agents", "close"] {
-                        assert!(tools.iter().all(|tool| tool["name"] != name));
-                        let error = call_with_budget_and_options(
-                            Path::new("unused.sock"),
-                            None,
-                            role,
-                            Some(&json!({"name":name})),
-                            &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
-                            |_| Duration::from_millis(1),
-                            ParentTools {
-                                review_gate,
-                                ..Default::default()
-                            },
-                        )
-                        .unwrap_err();
-                        assert!(error.to_string().contains("unknown sub-agent tool"));
-                    }
-                }
-                if expected {
-                    assert!(instructions.chars().count() <= 2048);
-                }
-                if !expected {
-                    assert!(
-                        call_with_budget_and_options(
-                            Path::new("unused.sock"),
-                            None,
-                            role,
-                            Some(
-                                &json!({"name":"override_review","arguments":{"reason":"because"}})
-                            ),
-                            &crate::mcp_stdio::Progress::silent(Duration::from_millis(1)),
-                            |_| Duration::from_millis(1),
-                            ParentTools {
-                                review_gate,
-                                ..Default::default()
-                            }
-                        )
-                        .is_err()
-                    );
-                }
-            }
-        }
-    }
-
     #[test]
     fn reviewer_mcp_instructions_preserve_the_full_rubric_budget() {
         let root = tempfile::tempdir().unwrap();
@@ -1420,7 +1695,13 @@ mod tests {
         )
         .unwrap();
         let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
-        assert!(output.contains(&mj_core::subagent::MAX_REVIEWER_HANDBACK_CHARS.to_string()));
+        assert!(
+            output.contains(
+                &mj_core::subagent::SubagentKind::Reviewer
+                    .max_handback_chars()
+                    .to_string()
+            )
+        );
         assert!(!output.contains("4,000"));
         assert!(output.contains("plain-text findings"));
     }
@@ -1506,18 +1787,21 @@ mod tests {
                                 .iter()
                                 .map(|tool| tool["name"].as_str().unwrap())
                                 .collect::<Vec<_>>(),
-                            ["fetch", "send_message", "request_review"]
+                            ["fetch", "send_message"]
                         );
                     }
                     SubagentMcpRole::Child => {
                         assert!(!instructions.contains(DELEGATION_ROUTING));
-                        assert!(instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES));
+                        assert!(
+                            instructions
+                                .contains(mj_core::subagent::HANDBACK_REPORT_RULES.as_str())
+                        );
                         assert_eq!(
                             tools
                                 .iter()
                                 .map(|tool| tool["name"].as_str().unwrap())
                                 .collect::<Vec<_>>(),
-                            ["handback", "fetch", "send_message", "request_review"]
+                            ["handback", "fetch", "send_message"]
                         );
                     }
                     SubagentMcpRole::MessageOnly => {
@@ -1527,7 +1811,7 @@ mod tests {
                                 .iter()
                                 .map(|tool| tool["name"].as_str().unwrap())
                                 .collect::<Vec<_>>(),
-                            ["send_message", "fetch", "request_review"]
+                            ["send_message", "fetch"]
                         );
                         let send_message = &tools[0];
                         assert_eq!(
@@ -1570,6 +1854,7 @@ mod tests {
                             keys,
                             [
                                 "instructions",
+                                "no_github_credentials",
                                 "task_name",
                                 "task_type",
                                 "working_directory"
@@ -1839,7 +2124,7 @@ mod tests {
             handback["description"].as_str().unwrap(),
         ] {
             assert!(
-                instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES),
+                instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES.as_str()),
                 "{instructions}"
             );
         }
@@ -2005,10 +2290,7 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap_or_default())
             .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            ["handback", "fetch", "send_message", "request_review"]
-        );
+        assert_eq!(names, ["handback", "fetch", "send_message"]);
         assert_eq!(
             tools[0]["inputSchema"]["required"],
             json!(["message"]),

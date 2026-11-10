@@ -287,8 +287,8 @@ impl QuotaSkips {
         self.0.remove(session);
     }
 
-    fn retain(&mut self, live: &BTreeSet<String>) {
-        self.0.retain(|id, _| live.contains(id));
+    fn retain(&mut self, live: &LiveSessions) {
+        self.0.retain(|id, _| live.contains_key(id));
     }
 }
 
@@ -401,13 +401,16 @@ struct Environment {
     allowed: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     /// The same decision as `allowed`, with a Move told apart; see [`Claim`].
     claim: Arc<dyn Fn(&str) -> Claim + Send + Sync>,
-    live: Arc<dyn Fn() -> BTreeSet<String> + Send + Sync>,
+    /// The daemon's session records. The map is shared, so taking it on each
+    /// update costs a pointer copy rather than one string per session.
+    live: Arc<dyn Fn() -> LiveSessions + Send + Sync>,
     review: ReviewObserver,
     quota: quota::Resolver,
     start_quota_move: quota::StartMove,
     profile: ProfileLookup,
 }
 type ProfileLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+type LiveSessions = mj_core::snapshot_map::SnapshotMap<String, SessionRecord>;
 type ReviewObserver = Arc<dyn Fn(&str, &ManagedSessionView) + Send + Sync>;
 type Classifier = Arc<
     dyn Fn(
@@ -541,7 +544,7 @@ pub(super) fn spawn(
         },
         live: {
             let state = state.clone();
-            Arc::new(move || state.live_session_ids())
+            Arc::new(move || state.session_records())
         },
         quota: {
             let state = state.clone();
@@ -942,13 +945,14 @@ fn spawn_with_gate(
                                                 && c.completed_command_id.as_ref() == Some(&completed),
                                             "continuation evidence changed"
                                         );
-                                        let command_id = format!(
-                                            "auto-continue-{}-{}",
-                                            ended_turn(snapshot)
-                                                .context("missing ended turn")?
-                                                .completed_ordinal,
-                                            c.attempts + 1
-                                        );
+                                        let command_id = mj_core::continuation::GeneratedPrompt::AutoContinue
+                                            .command_id(format_args!(
+                                                "{}-{}",
+                                                ended_turn(snapshot)
+                                                    .context("missing ended turn")?
+                                                    .completed_ordinal,
+                                                c.attempts + 1
+                                            ));
                                         if let Some(diagnostic) = &diagnostic {
                                             diagnostic.update(None, serde_json::json!({"command_id":command_id, "attempt":c.attempts + 1, "expected_ordinal":snapshot.operational.latest_ordinal}));
                                         }
@@ -1094,16 +1098,16 @@ fn spawn_with_gate(
                         }
                     }
                     let live = (environment.live)();
-                    seen.retain(|id, _| live.contains(id));
-                    deferred.retain(|id, _| live.contains(id));
-                    admission_deferred.retain(|id, _| live.contains(id));
-                    rechecks.retain(|id| live.contains(id));
-                    latest.retain(|id, _| live.contains(id));
-                    retry_after.retain(|id, _| live.contains(id));
+                    seen.retain(|id, _| live.contains_key(id));
+                    deferred.retain(|id, _| live.contains_key(id));
+                    admission_deferred.retain(|id, _| live.contains_key(id));
+                    rechecks.retain(|id| live.contains_key(id));
+                    latest.retain(|id, _| live.contains_key(id));
+                    retry_after.retain(|id, _| live.contains_key(id));
                     skips.retain(&live);
-                    assessed.retain(|id, _| live.contains(id));
-                    action_recheck.retain(|id, _| live.contains(id));
-                    seed_after.retain(|id, _| live.contains(id));
+                    assessed.retain(|id, _| live.contains_key(id));
+                    action_recheck.retain(|id, _| live.contains_key(id));
+                    seed_after.retain(|id, _| live.contains_key(id));
                 }
             }
         };

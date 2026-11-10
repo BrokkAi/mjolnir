@@ -262,6 +262,14 @@ impl DashboardState {
     /// Why runtime `id` cannot be chosen for new work, or `None` when it can.
     /// Every picker's target step asks this.
     pub(crate) fn target_unavailable(&self, id: &str) -> Option<String> {
+        if let Some(notice) = self
+            .config
+            .targets
+            .get(id)
+            .and_then(TargetTemplate::launch_refusal)
+        {
+            return Some(notice.into());
+        }
         if self.target_offered(id) {
             return None;
         }

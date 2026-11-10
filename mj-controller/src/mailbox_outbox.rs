@@ -175,16 +175,6 @@ async fn reconcile_durable_state(state: &RuntimeState, stop: &CancellationToken)
             "removed pending mailbox messages for stopped children"
         );
     }
-    let pruned =
-        tokio::task::spawn_blocking(crate::database::prune_mailbox_events_for_missing_sessions)
-            .await
-            .context("mailbox orphan cleanup task failed")??;
-    if pruned > 0 {
-        tracing::info!(
-            count = pruned,
-            "removed mailbox events for destroyed sessions"
-        );
-    }
     // Lifecycle recovery can settle a finish after startup reconciliation.
     // Rebuild missing events from durable state on the same bounded sweep
     // that retries their delivery, including after a missed completion update.
@@ -443,7 +433,7 @@ pub(crate) async fn deliver_mailbox_event(
         }
         Some(_) => {}
     }
-    downgrade_review_or_report(&mut event, protocol.expect("worker protocol was checked"));
+    prepare_review_or_report(&mut event, protocol.expect("worker protocol was checked"));
     match tokio::time::timeout(DELIVERY_TIMEOUT, handle.deliver_mailbox_event(event)).await {
         Ok(result) => result,
         Err(_) => anyhow::bail!("mailbox command acknowledgement timed out"),
@@ -465,13 +455,18 @@ pub(crate) fn mailbox_command_id(event_key: &str) -> String {
     command_id
 }
 
-fn downgrade_review_or_report(event: &mut mj_core::mailbox::MailboxEvent, protocol: u32) {
-    if matches!(
-        event.body,
-        mj_core::mailbox::MailboxEventBody::SubagentFinished { .. }
-            | mj_core::mailbox::MailboxEventBody::ReviewVerdict { .. }
-    ) && protocol < event.body.minimum_relay_protocol()
-    {
+fn prepare_review_or_report(event: &mut mj_core::mailbox::MailboxEvent, protocol: u32) {
+    let render = match event.body {
+        // Active workers can predate this daemon without a protocol change.
+        // Render here so their final result includes this daemon's closeout;
+        // keep the structured durable row and its retry identity unchanged.
+        mj_core::mailbox::MailboxEventBody::ReviewVerdict { .. } => true,
+        mj_core::mailbox::MailboxEventBody::SubagentFinished { .. } => {
+            protocol < event.body.minimum_relay_protocol()
+        }
+        _ => false,
+    };
+    if render {
         event.body = mj_core::mailbox::MailboxEventBody::PlainText {
             text: mj_core::mailbox::render_mailbox_event(event),
         };
@@ -515,8 +510,9 @@ mod tests {
         assert_eq!(next_wake(&notify, &mut sweep, &stop).await, None);
     }
 
+    // Hard-won: fdc559be0: older workers rendered final verdicts without the daemon's closeout.
     #[test]
-    fn review_verdict_wire_body_downgrades_for_protocol_42() {
+    fn review_verdict_reaches_existing_workers_with_the_daemon_closeout() {
         let event = mj_core::mailbox::MailboxEvent {
             key: "review-1".into(),
             source: "review".into(),
@@ -531,28 +527,124 @@ mod tests {
                 verdict: mj_core::review::verdict::ReviewVerdict::Clean,
             },
         };
-        for protocol in [33, 42, 43] {
+        for protocol in [33, 42, 43, mj_core::relay::RELAY_PROTOCOL_VERSION] {
             let mut delivered = event.clone();
-            super::downgrade_review_or_report(&mut delivered, protocol);
+            super::prepare_review_or_report(&mut delivered, protocol);
             let wire = serde_json::to_value(&delivered).unwrap();
+            assert_eq!(wire["body"]["type"], "plain_text");
             assert_eq!(
-                wire["body"]["type"],
-                if protocol < 43 {
-                    "plain_text"
-                } else {
-                    "review_verdict"
-                }
+                wire["body"]["text"],
+                "Review clean for commits aaaaaaa..bbbbbbb in /repo. Tree ccccccc is recorded as reviewed.\nReview finished; this is the final result. No reviewers are still running."
             );
-            if protocol < 43 {
-                assert_eq!(
-                    wire["body"]["text"],
-                    "Review clean for commits aaaaaaa..bbbbbbb in /repo. Tree ccccccc is recorded as reviewed; you may push."
-                );
-            }
             assert_eq!(
                 serde_json::from_value::<mj_core::mailbox::MailboxEvent>(wire).unwrap(),
                 delivered
             );
+        }
+    }
+    // Hard-won: 60adf13fe: a worker before protocol 54 headed a report about a failed message to a running child "finished".
+    #[test]
+    fn a_child_report_that_is_not_a_finish_reaches_older_workers_as_text() {
+        let report: mj_core::mailbox::SubagentFinishedReport =
+            serde_json::from_value(serde_json::json!({
+                "child_session_id": "child-1",
+                "task_name": "Run suites",
+                "state": "running",
+                "finished": false,
+                "message_deliveries": [{
+                    "request_id": "message-1",
+                    "status": "failed",
+                    "error": "child was not ready for queued message within 30 minutes"
+                }],
+                "output": null,
+                "report_dir": null
+            }))
+            .unwrap();
+        let event = mj_core::mailbox::MailboxEvent {
+            key: "report-1".into(),
+            source: "mjolnir".into(),
+            wake: true,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
+                report: Box::new(report),
+            },
+        };
+        for protocol in [53, 54] {
+            let mut delivered = event.clone();
+            super::prepare_review_or_report(&mut delivered, protocol);
+            let wire = serde_json::to_value(&delivered).unwrap();
+            if protocol < 54 {
+                assert_eq!(wire["body"]["type"], "plain_text");
+                let text = wire["body"]["text"].as_str().unwrap();
+                assert!(text.contains("was not delivered"), "{text}");
+                assert!(!text.contains("finished"), "{text}");
+            } else {
+                assert_eq!(delivered, event);
+            }
+        }
+    }
+
+    #[test]
+    fn a_report_with_observed_facts_reaches_older_workers_as_text_with_the_same_facts() {
+        let mut report: mj_core::mailbox::SubagentFinishedReport =
+            serde_json::from_value(serde_json::json!({
+                "child_session_id": "child-1",
+                "task_name": "Run suites",
+                "state": "completed",
+                "finished": true,
+                "output": "Done.",
+                "report_dir": null
+            }))
+            .unwrap();
+        report.facts = Some(mj_core::work_facts::WorkFacts {
+            observed_at_ms: 1,
+            processes: mj_core::work_facts::Observed::Known(mj_core::work_facts::ProcessFacts {
+                unattributed: 0,
+                running: 1,
+                shown: vec![mj_core::work_facts::RunningProcess {
+                    pid: 41301,
+                    elapsed_secs: 250,
+                    command: "sleep 600".into(),
+                    detached: true,
+                }],
+                omitted: 0,
+                identities: vec![mj_core::work_facts::ProcessIdentity {
+                    pid: 41301,
+                    start: "boot:1".into(),
+                }],
+            }),
+            worktree: mj_core::work_facts::Observed::unavailable("not a Git repository"),
+        });
+        let event = mj_core::mailbox::MailboxEvent {
+            key: "report-1".into(),
+            source: "mjolnir".into(),
+            wake: true,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::SubagentFinished {
+                report: Box::new(report),
+            },
+        };
+        let current = mj_core::relay::RELAY_FINISH_FACTS_PROTOCOL;
+        for protocol in [current - 1, current] {
+            let mut delivered = event.clone();
+            super::prepare_review_or_report(&mut delivered, protocol);
+            let wire = serde_json::to_value(&delivered).unwrap();
+            if protocol < current {
+                // An older worker cannot read `facts`, so it receives what the
+                // daemon rendered, observed lines included.
+                assert_eq!(wire["body"]["type"], "plain_text");
+                let text = wire["body"]["text"].as_str().unwrap();
+                assert!(
+                    text.contains("pid 41301, up 4m10s, detached from the harness: sleep 600"),
+                    "{text}"
+                );
+                assert!(
+                    text.contains("Working tree: unavailable (not a Git repository)"),
+                    "{text}"
+                );
+            } else {
+                assert_eq!(delivered, event);
+            }
         }
     }
 }

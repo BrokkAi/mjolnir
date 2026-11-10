@@ -815,6 +815,21 @@ impl ApiClient {
         .map(|_| ())
     }
 
+    pub(crate) async fn notices(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<mj_client::daemon::RuntimeNotice>> {
+        decode(
+            self.send(
+                self.http
+                    .get(self.url(&format!("/sessions/{session_id}/notices")))
+                    .timeout(REQUEST_TIMEOUT),
+            )
+            .await?,
+        )
+        .await
+    }
+
     /// Ask the daemon to resume a stopped session. It answers as soon as the
     /// resume is admitted, so this does not wait for the session to come up.
     pub(crate) async fn resume(

@@ -140,6 +140,19 @@ fn move_queue_relay_child() {
                     },
                 })
             }
+            // The queue never changes here: hold briefly, as the worker
+            // would, and report nothing new.
+            RelayRequest::WaitForChange {
+                after_ordinal,
+                state_digest,
+            } => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                Some(RelayResponsePayload::ChangeObserved {
+                    latest_ordinal: *after_ordinal,
+                    state_digest: state_digest.clone().unwrap_or_default(),
+                    subagent_queue_changed: false,
+                })
+            }
             _ => None,
         };
         if let Some(payload) = payload {
@@ -545,7 +558,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 additional_mounts: None,
                 resource_allocation: None,
             },
-            "need a Claude, Codex, or DSH profile",
+            "need a Claude, Codex, DSH, or OpenCode profile",
         ),
         (
             "unconfigured Mjolnir delegation",
@@ -1512,6 +1525,7 @@ fn in_place_drain_waits_for_mutations_and_durable_effects_but_not_wait_or_list()
     };
     let mutating = [
         Action::Spawn {
+            no_github_credentials: false,
             task_name: "task".into(),
             instructions: "work".into(),
             task_type: mj_core::subagent::SubagentTaskType::Straightforward,
@@ -2187,6 +2201,7 @@ fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
         &[],
         Some(&container_workspace),
         &resource,
+        None,
     )
     .unwrap();
     let cloned = plan
@@ -2786,6 +2801,7 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
                     guardian_review_model: None,
                     codex_profile: None,
                     muse_auto_review: None,
+                    aws: None,
                     ..mj_core::config::HarnessProfile::new(kind, home.clone())
                 },
             );
@@ -3004,6 +3020,80 @@ fn bare_move_preparation_normalizes_an_empty_resource_reset() {
 }
 
 #[cfg(unix)]
+// Hard-won: #1479: an explicitly resumed Move forced later profile changes into a blocked transfer.
+#[test]
+fn profile_move_after_explicit_resume_starts_fresh_without_transferring_files() {
+    let name =
+        test_name("profile_move_after_explicit_resume_starts_fresh_without_transferring_files");
+    if !isolated_test_child(&name, "MJ_MOVE_AFTER_RESUME_CHILD") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.phase = MovePhase::Cancelled;
+    operation.handoff = Some(fixture.checkpoint.clone());
+    operation.checkpoint = Some(fixture.checkpoint.clone());
+    // These are the durable fields written after an explicit Resume succeeds.
+    operation.queue_admission_finished = true;
+    operation.error = Some("Recovered through an explicit Resume operation".into());
+    crate::database::save_move_operation(&operation).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // Both retrying the old destination and choosing a different profile must
+    // start from the live worker, never from the historical handoff archive.
+    for profile in [IN_PLACE_DESTINATION_PROFILE, IN_PLACE_SOURCE_PROFILE] {
+        let mut selection = operation.selection.clone();
+        selection.profile_id = Some(profile.into());
+        let prepared = runtime
+            .block_on(fixture.controller.prepare_move_session_controlled(
+                selection,
+                &RefusingExecutor("a profile-only Move must not scan or provision storage"),
+            ))
+            .unwrap();
+        assert!(prepared.in_place);
+        assert!(prepared.workspace.is_none());
+        assert!(!prepared.stops_subagents);
+        assert_ne!(prepared.operation_id, operation.operation_id);
+        assert!(super::move_in_place_for_record(
+            &fixture.controller.state.sessions[LATCH_RELAY_SESSION],
+            &prepared.selection,
+            &fixture.controller.config.targets,
+            false,
+            Some(&operation),
+        ));
+    }
+    let stored = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    assert!(!stored.offers_retry());
+    assert!(!stored.checkpoint_retained());
+    assert!(!stored.holds_source_environment());
+    assert!(crate::server::ViewerMoveRecovery::from_operation(&stored).is_none());
+    assert!(!stored.retains_checkpoint());
+    assert_eq!(stored.retained_archives().count(), 0);
+    assert!(fixture.checkpoint.archive_path.exists());
+
+    // A cancellation before Resume, or after destination queue admission,
+    // still owns recovery. Loading it must preserve the retry and its archive.
+    for (started, finished) in [(false, false), (true, false), (true, true)] {
+        operation.queue_admission_started = started;
+        operation.queue_admission_finished = finished;
+        crate::database::save_move_operation(&operation).unwrap();
+        let stored = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        assert!(stored.offers_retry());
+        let api = crate::server::ViewerMoveRecovery::from_operation(&stored).unwrap();
+        assert!(api.checkpoint_retained);
+        assert!(stored.retains_checkpoint());
+    }
+}
+
+#[cfg(unix)]
+// Hard-won: #1470: native delegation without managed children blocked automatic quota Moves.
 #[test]
 fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
     let name = test_name("roleless_in_place_move_refuses_live_children_but_allows_parked_children");
@@ -3024,6 +3114,23 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         subtle: None,
     });
     crate::database::save_session(parent).unwrap();
+    let mut empty_selection =
+        in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE).selection;
+    empty_selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let empty = runtime
+        .block_on(
+            fixture
+                .controller
+                .prepare_move_session_controlled(empty_selection.clone(), &ProcessExecutor),
+        )
+        .unwrap();
+    assert!(empty.in_place);
+    assert!(!empty.stops_subagents);
+
     let mut child = fixture.controller.state.sessions[parent_id].clone();
     child.id = "live-child".into();
     child.state = SessionState::Running;
@@ -3062,10 +3169,6 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
     let mut selection =
         in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE).selection;
     selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
     let error = runtime
         .block_on(
             fixture
@@ -3097,6 +3200,84 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         prepared.stops_subagents,
         "a destination without parent tools stops the parked children"
     );
+
+    fixture
+        .controller
+        .state
+        .subagents
+        .get_mut("live-child")
+        .unwrap()
+        .kind = mj_core::subagent::SubagentKind::Oracle;
+    let oracle = runtime
+        .block_on(
+            fixture
+                .controller
+                .prepare_move_session_controlled(empty_selection.clone(), &ProcessExecutor),
+        )
+        .unwrap();
+    assert!(oracle.stops_subagents, "parked oracles are stopped too");
+    fixture
+        .controller
+        .state
+        .sessions
+        .get_mut("live-child")
+        .unwrap()
+        .state = SessionState::Stopped;
+    let stopped = runtime
+        .block_on(
+            fixture
+                .controller
+                .prepare_move_session_controlled(empty_selection, &ProcessExecutor),
+        )
+        .unwrap();
+    assert!(!stopped.stops_subagents);
+    let late_child = fixture
+        .controller
+        .state
+        .sessions
+        .get_mut("live-child")
+        .unwrap();
+    late_child.state = SessionState::Parked;
+    crate::database::save_session(late_child).unwrap();
+    // A child admitted after the empty preview is checked under the drained
+    // worker queue before an automatic Move can run the child-stop hook.
+    let mut automatic = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    automatic.selection = empty.selection.clone();
+    automatic.configuration_fingerprint = fixture
+        .controller
+        .move_configuration_fingerprint(&automatic.selection)
+        .unwrap();
+    automatic.quota_stop_reason = Some("weekly quota exhausted".into());
+    let executor = RecordingProcessExecutor::default();
+    let error = run_in_place_move(
+        &mut fixture.controller,
+        &mut automatic,
+        &fixture.worker_root,
+        &executor,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("automatic quota Move would stop existing sub-agents"));
+    assert_eq!(executor.move_stop_calls(), 0);
+    assert_eq!(
+        fixture.controller.state.sessions[parent_id].state,
+        SessionState::Running
+    );
+    let mut manual = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    manual.selection = empty.selection.clone();
+    manual.configuration_fingerprint = fixture
+        .controller
+        .move_configuration_fingerprint(&manual.selection)
+        .unwrap();
+    manual.accepted_preparation = Some(Box::new(empty));
+    let error = run_in_place_move(
+        &mut fixture.controller,
+        &mut manual,
+        &fixture.worker_root,
+        &executor,
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("sub-agents appeared after preparation"));
+    assert_eq!(executor.move_stop_calls(), 0);
 }
 
 #[cfg(unix)]
@@ -3465,6 +3646,7 @@ fn in_place_move_reopens_gate_after_lost_admission_close_reply() {
 /// A Native source has no parent tools, but its worker still has a request
 /// queue (`ask_oracle`, `request_review`), so an in-place Move closes it first.
 #[cfg(unix)]
+// Hard-won: #1470: the child-stop hook could stop daemon-side children after the quota check.
 #[test]
 fn in_place_move_drains_the_queue_of_a_native_source() {
     let name = test_name("in_place_move_drains_the_queue_of_a_native_source");
@@ -3497,13 +3679,16 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
     source.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
     crate::database::save_session(source).unwrap();
     let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
-    run_in_place_move(
-        &mut controller,
-        &mut operation,
-        &worker_root,
-        &RecordingProcessExecutor::default(),
-    )
-    .unwrap();
+    operation.quota_stop_reason = Some("weekly quota exhausted".into());
+    operation.quota_continuation = Some(mj_core::state::QuotaMoveContinuation::Prompt);
+    operation.queue = ResumeQueueDisposition::Start;
+    let executor = RecordingProcessExecutor::default();
+    run_in_place_move(&mut controller, &mut operation, &worker_root, &executor).unwrap();
+    assert_eq!(
+        executor.move_stop_calls(),
+        0,
+        "an automatic Move must never invoke the hook that re-reads and stops children"
+    );
 
     let queue: serde_json::Value =
         serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
@@ -4815,7 +5000,14 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
         let operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();
-        let api = crate::server::ViewerMoveRecovery::from_operation(&operation).unwrap();
+        let api = crate::server::ViewerMoveRecovery::from_operation(&operation)
+            .unwrap()
+            .with_public_failure(Some(&published));
+        assert_eq!(
+            api.failure_notice.as_deref(),
+            Some(published.as_str()),
+            "the stored public recovery instructions must reach the conversation"
+        );
         assert!(
             api.checkpoint_retained,
             "{kill:?}: the guidance promises a retry the API denies"
@@ -4929,7 +5121,14 @@ fn in_place_move_whose_handoff_is_lost_fails_truthfully_into_a_destroyable_state
         let operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();
-        let api = crate::server::ViewerMoveRecovery::from_operation(&operation).unwrap();
+        let api = crate::server::ViewerMoveRecovery::from_operation(&operation)
+            .unwrap()
+            .with_public_failure(Some(&published));
+        assert_eq!(
+            api.failure_notice.as_deref(),
+            Some(published.as_str()),
+            "the stored public recovery instructions must reach the conversation"
+        );
         assert!(!api.checkpoint_retained, "{kill:?}");
         assert!(api.environment_retained, "{kill:?}");
 
@@ -5311,9 +5510,8 @@ impl CommandExecutor for Ec2PreviewExecutor {
 
 #[cfg(unix)]
 #[test]
-fn ec2_move_preview_defers_destination_checks_and_resolves_inherited_container_sizing() {
-    let short =
-        "ec2_move_preview_defers_destination_checks_and_resolves_inherited_container_sizing";
+fn retired_ec2_move_is_rejected_before_source_interruption() {
+    let short = "retired_ec2_move_is_rejected_before_source_interruption";
     if !isolated_test_child(&test_name(short), "MJ_MOVE_EC2_PREVIEW_CHILD") {
         return;
     }
@@ -5334,7 +5532,9 @@ fn ec2_move_preview_defers_destination_checks_and_resolves_inherited_container_s
         .insert("project".into(), local_bundle(repository.path()));
     config
         .targets
-        .insert("ec2".into(), super::destination::tests::ec2_target());
+        .insert("ec2".into(), serde_json::from_value(serde_json::json!({
+            "kind": "aws-ec2", "region": "us-east-1", "launch_template": "lt-old", "ssh_user": "ubuntu"
+        })).unwrap());
     let id = "0123456789abcdef0123456789abcdef";
     let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
     session.bundle_id = "project".into();
@@ -5369,68 +5569,17 @@ fn ec2_move_preview_defers_destination_checks_and_resolves_inherited_container_s
         .enable_all()
         .build()
         .unwrap();
-    let preparation = runtime
-        .block_on(controller.prepare_move_session_controlled(selection.clone(), &executor))
-        .unwrap();
-    assert_eq!(
-        preparation.destination_checks,
-        mj_core::state::DestinationChecks::AfterProvisioning
-    );
-    assert!(preparation.selection.clear_resource_allocation);
-    assert_eq!(preparation.selection.resource_allocation, None);
-    assert!(preparation.workspace.as_ref().unwrap().blockers.is_empty());
+    let before = controller.state.sessions[id].clone();
+    let error = runtime
+        .block_on(controller.prepare_move_session_controlled(selection, &executor))
+        .unwrap_err();
     assert!(
-        preparation
-            .selection
-            .workspace
-            .included_bytes(preparation.workspace.as_ref().unwrap())
-            > 64 * 1024
-    );
-    assert!(
-        crate::database::load_move_operation(id).unwrap().is_none(),
-        "preview creates no durable launch"
-    );
-    let mut explicit = selection;
-    explicit.resource_allocation = Some(SessionResourceAllocation::AwsEc2 {
-        instance_type: "m8i.large".into(),
-        vcpus: 2,
-        memory_bytes: 8 * 1024 * 1024 * 1024,
-    });
-    let preparation = runtime
-        .block_on(controller.prepare_move_session_controlled(explicit.clone(), &executor))
-        .unwrap();
-    assert_eq!(
-        preparation.selection.resource_allocation,
-        explicit.resource_allocation
-    );
-    assert!(!preparation.selection.clear_resource_allocation);
-
-    // A settings edit while EC2 boots must invalidate confirmation even when
-    // this controller still holds the original config snapshot.
-    controller.config.save().unwrap();
-    let mut operation = source_recovery_operation(&controller.state.sessions[id]);
-    operation.selection = preparation.selection;
-    operation.configuration_fingerprint = controller
-        .move_configuration_fingerprint(&operation.selection)
-        .unwrap();
-    controller
-        .verify_current_move_configuration(&operation)
-        .unwrap();
-    let mut changed = controller.config.clone();
-    let mj_core::config::TargetTemplate::AwsEc2 { region, .. } =
-        changed.targets.get_mut("ec2").unwrap()
-    else {
-        unreachable!()
-    };
-    *region = "us-west-2".into();
-    changed.save().unwrap();
-    assert!(
-        controller
-            .verify_current_move_configuration(&operation)
-            .is_err()
+        format!("{error:#}").contains(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
+        "{error:#}"
     );
     assert_eq!(
-        crate::database::load_session_state(id).unwrap(),
-        Some(SessionState::Running)
+        crate::database::load_session_record(id).unwrap().unwrap(),
+        before
     );
+    assert!(crate::database::load_move_operation(id).unwrap().is_none());
 }

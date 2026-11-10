@@ -1,0 +1,285 @@
+{
+  "id": "L3011",
+  "title": "Native-engine coordinator",
+  "category": "still-open-earlier-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "5992a2122571ac7c7e303ec069a19314",
+    "session_title": "mjolnir via claude2",
+    "reply_position": 38479,
+    "captured_at": "2026-11-06T21:21:38.171Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:32289",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:33497",
+          "role": "user",
+          "text": "btw i can see your messages, you don't need to re-echo everything for my benefit"
+        },
+        {
+          "id": "user:33550",
+          "role": "user",
+          "text": "launch approved"
+        },
+        {
+          "id": "user:33647",
+          "role": "user",
+          "text": "what is the human-readable name associated w that"
+        },
+        {
+          "id": "agent:36371",
+          "role": "assistant",
+          "text": "There is a temporary cost in containers, and I have no objection to it. #9559's JDK hash cache cannot prove that an overlay file system is local, since one of its layers could be a network mount. So inside containers, every Java request will re-hash the JDK, about 1.6 seconds, until #10380 lands. That issue will check each layer and includes a container measurement before the later 3d step.\n\nWaiting on: G3's generated-pack evidence, the bisection of the standard-library regression, and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36424",
+          "role": "assistant",
+          "text": "G3's next step, M1b1, needs no cache version. It neither changes any existing answer nor alters the packs generated from rustdoc. The version bump moves to the later G3 step that will start writing the new data. Nothing here needs your decision.\n\nWaiting on: the bisection of the standard-library regression and the end of the #9687 r10 run."
+        },
+        {
+          "id": "user:36472",
+          "role": "user",
+          "text": "> Waiting on: the bisection of the standard-library regression and the end of the #9687 r10 run.\n\nif these are your subagents, they are finished or dead"
+        },
+        {
+          "id": "agent:36517",
+          "role": "assistant",
+          "text": "Neither is one of my subagents. All of mine are stopped. Those two waits belong to other sessions:\n\n- **#9687 r10 is still running.** I checked this host: its controller, watchdog and observer processes have been up for 3 hours 22 minutes. The results fetch is due by 19:59 UTC, and the last cleanup deadline is 20:49 UTC.\n- **The standard-library bisection** is c2a66e1c's lane, which I can't see. I've asked c2a66e1c for its status.\n\nAlso from this round: #9423 landed by taking ICFG pair 725 on its own, the same number #10146 had already pushed. I gave #10146 a fresh pair, 731/730, and moved #10106 to 732/731 above it."
+        },
+        {
+          "id": "agent:36572",
+          "role": "assistant",
+          "text": "The bisection is narrowed to one merge batch, #10222, of 12 PRs. The commit before it registers policies in 60 seconds, and the batch itself times out at 30 minutes. The current suspect is #10175, the #9559 change that gives each catalog shard one owner, because registration reads catalog shards. Per-PR tests come next. If #10175 is confirmed, its owner is 94d7c384, whose JVM work I have been reviewing.\n\nWaiting on: the first bad commit and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36626",
+          "role": "assistant",
+          "text": "#9737 step a' still changes no answers after its review fixes, so it needs no cache token. I asked for a test showing that its new per-crate Cargo naming matches the whole-workspace naming, because the new kind reads fewer manifests. The lane also filed #10381: any `Cargo.toml` edit currently invalidates every Rust crate's stored summary, which is costly in large workspaces. Nothing here needs your decision.\n\nWaiting on: the first bad commit from the bisection and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36703",
+          "role": "assistant",
+          "text": "Go v109 is free: master is at v107, and only #10372 holds v108. Master's latest migration is 0285, with 0286 held by G3 and 0287 reserved for #9559 M3b."
+        },
+        {
+          "id": "agent:36723",
+          "role": "assistant",
+          "text": "Next is the #5658 step 1b r3 packet, which is on this host."
+        },
+        {
+          "id": "agent:36766",
+          "role": "assistant",
+          "text": "I approved the first milestone of a new plan, G7, which reproduces CodeQL's two Rust pointer queries: use of a pointer after its lifetime ends, and access through an invalid pointer. Two points from it are worth knowing:\n\n- **Parity target.** CodeQL's own expected results for the invalid-pointer test list 28 findings on 25 lines, but the campaign gate counts 21. I set the full 28 as the target. 21 counts as parity only if every difference is shown to be a scoring artifact of the gate.\n- **Public interface.** The new behavior goes behind an optional profile parameter on the existing Rust pointer query, so current users see no change. The value names and the policy side belong to c43.\n\nI also accepted #5658's plan to fix the cost blocker in the Python type-query switch. It reuses one request and one cache per query, the way Go already does. A few Python provider sites will stay on the old route until related work lands, rather than holding back the switch.\n\nWaiting on: the bisection's first bad commit and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36848",
+          "role": "assistant",
+          "text": "#9737 step a' has met my conditions. Its new Rust source-listing version was never pushed or used outside temporary test stores, so it stays at 2, and the naming test is being added. #10382, a cost improvement that keeps one changed file from reconciling every crate, will come to me as a separate decision. Nothing here needs your decision.\n\nWaiting on: the bisection's first bad commit and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36895",
+          "role": "assistant",
+          "text": "I withdrew my G7 interface ruling in favor of c43's design. Instead of a mode option on the existing pointer query, there will be two new query steps, one per relation, each named for what it checks. That fits the repository's own rule against mode parameters, and it leaves the existing query, which answers a different question, untouched. It needs no query-format version bump, because it only adds steps.\n\nI kept one condition. CodeQL's lifetime query ignores pointers carried through closures, and so will these steps. When a closure could carry the pointer, the result must say closures were excluded, so that a clean result is not read as \"no problem anywhere.\"\n\nWaiting on: the bisection's first bad commit and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:36971",
+          "role": "assistant",
+          "text": "I approved bifrost3's design for typing `cls` in Python class methods. A type rule may now clear one specific gap, but only when it actually supplies the type that replaces it, which is the same rule I applied to G3. Whether it needs a cache version depends on whether anything already switched to the native route reads this rule today. The lane is tracing that. Nothing here needs your decision.\n\nWaiting on: the bisection's first bad commit and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37060",
+          "role": "assistant",
+          "text": "I confirmed that #10052 M2 can keep ICFG pair 729/728 after its latest master merge. The pair was never pushed before that merge, so it identifies only the merged code. Nothing here needs your decision.\n\nWaiting on: the bisection's first bad commit and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37081",
+          "role": "assistant",
+          "text": "079c08c9 confirmed that nothing persistent was built under 729 before the merge, so #10052 M2 keeps its pair. It will mark the PR Ready after its checks pass. Nothing needs your decision.\n\nWaiting on: the bisection's first bad commit and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37136",
+          "role": "assistant",
+          "text": "I allocated a token for #10266 and Rust adapter version 79 for #10297. Nothing here needs your decision. One condition worth knowing: #10266 lets a taint run that hits its budget keep the results it had already finished. Such a run must still be reported as incomplete, and the set of finished results must not depend on how work was scheduled across threads.\n\nWaiting on: the bisection's first bad commit and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37188",
+          "role": "assistant",
+          "text": "I accepted #10325's revised design. It adds a per-file flag that records whether a file's definition list is known to be complete. That makes \"no other file defines this name\" provable, and older rows count as unknown. The one gap I flagged: if a configuration change makes a file's resolved names out of date, the flag must not keep saying \"complete\" until the file is reprocessed. Nothing here needs your decision.\n\nWaiting on: the bisection's first bad commit and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37254",
+          "role": "assistant",
+          "text": "The Python `cls` change is already read by code in production, both method-call resolution and type lookups. So I allocated all three cache levers: ICFG pair 733/732, a policy token, and a Python type-flow version change. Nothing here needs your decision.\n\nWaiting on: the bisection's first bad commit and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37304",
+          "role": "assistant",
+          "text": "**The standard-library slowdown has its cause.** It came from #10186, the #10052 C# change that taught qualified-name lookup to find members whose names contain dots. That change replaced indexed exact-match queries with ones that split every stored name at its dots, so SQLite now scans tables where it used to seek. It hits every Rust policy run that uses the standard-library pack.\n\nThe issue is filed as bifrost-dev#10397, and I sent it to the owning session, 079c08c9 (\"bifrost-dev via claude3\"). A fix that keeps #10186's answers unchanged needs no cache token. I asked for query-plan evidence and a timing check on the regression fixture.\n\nWaiting on: 079c08c9's fix plan and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37381",
+          "role": "assistant",
+          "text": "079c08c9 has taken the #10397 fix, and its plan matches what I asked for. It keeps the dotted-name matching but goes back to indexed lookups, so answers stay identical and no cache token is needed. Expected time to a Ready PR is 2 to 3 hours.\n\n079c08c9 also reports that Mjolnir reviewer sessions have been failing to start for about an hour. That would block every lane's pre-push review, so you may want to look at it.\n\nWaiting on: the #10397 fix and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37444",
+          "role": "assistant",
+          "text": "I allocated the cache versions for the next Python change, which types subscripted annotations such as `Box[Result]` and `Result | None`. It changes the Python resolver's output, which in turn changes method-call resolution, so it needs four versions: the resolver's version, ICFG pair 734/733, a policy token and a type-flow version. Nothing here needs your decision.\n\nWaiting on: the #10397 fix and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37504",
+          "role": "assistant",
+          "text": "I accepted bifrost3's second fix for the slow Python type queries. It runs all of one query's lookups in a single shared session, as Rust already does, and moves that session code into the shared layer. Nothing here needs your decision.\n\nOne coordination risk: the Rust session code it moves is the same code #9755's next milestone builds on. I required bifrost3 to agree the change and its order with the #9755 lane first, and to keep #9755's tests passing.\n\nWaiting on: the #10397 fix and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37570",
+          "role": "assistant",
+          "text": "bifrost3 found the likely real cause of the slow Python type queries. The cache from the previous fix was never connected on the Python path, while the Go path does pass it along. Connecting it fits within what I already approved, with no Rust changes. If it brings the cost down, the larger shared-session redesign, and the coordination it needs with #9755, can be dropped. I asked for one check: the cache must be returned on every exit path, and a cancelled lookup must not leave behind a result marked as clean. Nothing here needs your decision.\n\nWaiting on: bifrost3's measurement, the #10397 fix and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37635",
+          "role": "assistant",
+          "text": "The #10399 plan surfaced a bug on master: taint run diagnostics are not deterministic. Which call sites a run refuses depends on the order threads finish. One repository gave 9 refusals on one run and 13 on another. I approved the fix, which ties each result's refusals to the lookups that result actually made, and required a test with shuffled thread order. I allocated taint output report version 7 and a token for it. Nothing here needs your decision.\n\nWaiting on: bifrost3's measurement, the #10397 fix and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37694",
+          "role": "assistant",
+          "text": "bifrost3 measured that connecting the cache barely changed the cost. The expensive part is each lookup asking whether a call like `x.next()` constructs a class, which needs the type of everything before it. I confirmed its reading of my earlier rule: only a plain name path, such as `Foo`, `mod.Foo` or `self.Inner`, can name a class. A call on a computed value now skips that question entirely. This matches what legacy and the Rust and Go routes do, and if a class really is reached that way, the result is left open rather than wrong. Nothing here needs your decision.\n\nWaiting on: bifrost3's new measurement, the #10397 fix and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37758",
+          "role": "assistant",
+          "text": "bifrost3 corrected one of my test cases, and I accepted it. Writes to an instance or overrides in a subclass can hide a class nested inside the current class. So `self.Inner()` must stay \"unknown\", which is what the code already does, and that behavior now gets its own test. Nothing here needs your decision.\n\nWaiting on: bifrost3's new measurement, the #10397 fix and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37857",
+          "role": "assistant",
+          "text": "The Python type-query switch's cost blocker is fixed. The slow test now runs in 19.5 seconds, against 17.8 seconds before the switch, where it used to time out at 300 seconds. Its query count is within 9% of the old route. The name-path rule did it, and the larger redesign is no longer needed. The session sending these updates now appears as \"Python native engine\". Nothing here needs your decision.\n\nWaiting on: the #10397 fix and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:37908",
+          "role": "assistant",
+          "text": "I will verify p8 the same way as p7: the checksums, a diff against p7 with the self-reference normalized, and the pin's tree from git."
+        },
+        {
+          "id": "agent:37974",
+          "role": "assistant",
+          "text": "I accepted the #9947 Bat re-measure packet p8. You had already approved this run for after the two fixes landed, and both are in its source. It launches once 07d292ca's own independent review also passes. The only flaw I found is a stale sentence in the packet's README naming the wrong merge batch, which does not affect the run.\n\nWaiting on: the #10397 fix, the end of the #9687 r10 run, and the Bat p8 run."
+        },
+        {
+          "id": "agent:38060",
+          "role": "assistant",
+          "text": "Another uncoordinated merge has knocked out every reserved ICFG version pair. #10385 landed by taking \"highest + 1\" on its own. Before that, it had been carrying 726, the same pair #7643 had already pushed. So I renumbered seven open PRs, from 735 up to 741.\n\nThis keeps happening because a PR that applies \"+1\" when it merges cannot see the pairs reserved for open PRs. The reservations themselves are sound; the gap is that some lanes don't use them. Two process fixes would stop this; I can't make either change myself:\n- **Option 1:** ask David's lanes to request their pairs from me.\n- **Option 2:** have the merge queue (MergeMarshall) choose any new pair above every open PR's literal, not only above master.\n\nWaiting on: the #10397 fix, the end of the #9687 r10 run, and the Bat p8 run."
+        },
+        {
+          "id": "agent:38142",
+          "role": "assistant",
+          "text": "#10052 M2 has the new pair and will apply it at its next master merge. It is not Ready yet, because its own checks found a constructor-lookup regression it is now fixing. The session sending these updates now appears as \"C# CodeQL parity gap refresh\". Nothing here needs your decision.\n\nWaiting on: the #10397 fix, the end of the #9687 r10 run, and the Bat p8 run."
+        },
+        {
+          "id": "agent:38176",
+          "role": "assistant",
+          "text": "#10146 and #10106 now carry their new pairs, 737 and 738, and both are in validation. Neither can be pushed yet, because the pre-push review gate still cannot start reviewers. The lane says you are already fixing that. Nothing else needs your decision.\n\nWaiting on: the #10397 fix, the end of the #9687 r10 run, and the Bat p8 run."
+        },
+        {
+          "id": "agent:38208",
+          "role": "assistant",
+          "text": "#7643 and #7860 now carry their new pairs, 739 and 740. Each pair appears for the first time in its own merge commit, so neither has been used before. Neither is pushed yet. The session sending these updates is now labelled \"Java policies\". Nothing here needs your decision.\n\nWaiting on: the #10397 fix, the end of the #9687 r10 run, and the Bat p8 run."
+        },
+        {
+          "id": "agent:38347",
+          "role": "assistant",
+          "text": "Two things this round:\n\n- **The Bat p8 re-measure ran.** 07d292ca's design work shows why Bat still reuses nothing. Saving is all-or-nothing per policy: one result that cannot be stored throws away the 29 good ones out of 42, and the fallback then recomputes all 42. I accepted a design that saves each good result on its own and recomputes only the unstable ones. It needs no cache token, because the final answer equals a full recompute. I required a test proving that equality, not just the argument. The estimated warm-run work on Bat drops from 84 computations to 26.\n- **Another of David's PRs, #10427, took an ICFG pair I had reserved.** I moved the two affected unpushed PRs, #10146 and #10106, off it, and gave #7643 and #7860 fresh pairs above master. This is the same coordination gap I raised earlier.\n\nWaiting on: the #10397 fix and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:38427",
+          "role": "assistant",
+          "text": "#10146 and #10106 moved to their new pairs, 744 and 745, before pushing anything. The earlier pairs that collided with David's PR were never pushed. Both are still blocked by the pre-push review gate, which keeps refusing reviews. Nothing here needs your decision.\n\nWaiting on: the #10397 fix and the end of the #9687 r10 run."
+        },
+        {
+          "id": "agent:38479",
+          "role": "assistant",
+          "text": "I accepted #9737's way of making sure stale stored rows can never mark a crate as complete. Every query gets its list of crates from a component that re-checks the current version of the source-listing proof, so rows from the old version count as unknown. This avoids rebuilding every crate's route index whenever that proof changes. I required the rule to be enforced by a type, or failing that a source-scan test, rather than by convention. Nothing here needs your decision.\n\nWaiting on: the #10397 fix and the end of the #9687 r10 run."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "> Waiting on: the bisection of the standard-library regression and the end of the #9687 r10 run.\n\nif these are your subagents, they are finished or dead",
+    "assistant_text_tail": "I accepted #9737's way of making sure stale stored rows can never mark a crate as complete. Every query gets its list of crates from a component that re-checks the current version of the source-listing proof, so rows from the old version count as unknown. This avoids rebuilding every crate's route index whenever that proof changes. I required the rule to be enforced by a type, or failing that a source-scan test, rather than by convention. Nothing here needs your decision.\n\nWaiting on: the #10397 fix and the end of the #9687 r10 run.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      38060,
+      38347
+    ],
+    "user_position": 36472,
+    "mjolnir": "worker Jev still-open language classification",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "No user input is needed.",
+    "input_rationale": "The case reply itself says nothing needs a decision, but reply 38060 laid out two process changes only the user can make to stop repeated ICFG version-pair collisions, and 38347 says the gap persists. Nothing resolves it by the case reply. Lower confidence: the agent keeps working without being blocked, so it may be informational.",
+    "label": "required_earlier",
+    "kind": "user_action",
+    "request_message_ids": [
+      "agent:38060",
+      "agent:38347"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-06T21:48:59.002Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-06T21:50:02.590Z",
+        "kind": "agent",
+        "text": "I turned down one part of #10325's latest revision. It would have forced every file processed before the upgrade to be reprocessed on the first sync afterwards. Answers would not change, but every wor"
+      }
+    ]
+  }
+}

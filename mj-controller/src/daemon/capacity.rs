@@ -996,7 +996,10 @@ mod tests {
         let warning = admitted.warning.as_deref().unwrap();
         assert!(warning.contains("more CPUs"));
         assert!(warning.contains("more RAM"));
-        assert_eq!(state.notices.lock().unwrap().back().unwrap().text, warning);
+        assert_eq!(
+            state.notices.lock().unwrap().back().unwrap().notice.text,
+            warning
+        );
         let notice_count = state.notices.lock().unwrap().len();
         let joined = state
             .admit_container_launch(

@@ -83,6 +83,9 @@ impl HarnessRuntimePolicy {
 #[serde(deny_unknown_fields)]
 pub struct WorkerOwnership {
     pub version: u32,
+    /// Retain the accepted credential policy if an orphan is adopted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     #[serde(default = "default_worker_workspace_id")]
     pub workspace_id: String,
     pub session_id: String,
@@ -146,6 +149,15 @@ pub enum WorkerRunMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
+    /// Chosen from the target locator, never from ambient container detection.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::cpu_usage::CpuAccountingMode::is_process_tree"
+    )]
+    pub cpu_accounting: crate::cpu_usage::CpuAccountingMode,
+    /// Accepted session policy; do not seed or accept GitHub authentication.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     /// Ordered input journaled before this worker accepts external commands.
     /// Kept in the launch description so a crash during initialization can
     /// finish the same prefix under its original command IDs.
@@ -193,14 +205,8 @@ pub struct WorkerLaunchConfig {
     /// that one wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_model: Option<String>,
-    /// Whether a review can ever run for this session, which is the only
-    /// reason to spend anything on capturing the working tree.
-    ///
-    /// The controller decides it: `[review] profile` has to name a reviewer,
-    /// and a sub-agent child is never reviewed. A session with this off does
-    /// no Git work at startup at all, which is what makes starting a session
-    /// in a large working tree cheap.
-    #[serde(default)]
+    /// Accepted from older daemon launch files; no longer used or written.
+    #[serde(default, skip_serializing)]
     pub review_capture: bool,
     #[serde(default)]
     pub review_trigger: crate::config::ReviewTrigger,
@@ -434,9 +440,28 @@ pub fn resolve_subagent_mcp_role(
 }
 
 impl WorkerLaunchConfig {
-    pub fn review_gate(&self) -> bool {
+    /// Whether this session is offered the `mj-review` tools. The controller
+    /// writes `review_trigger` as push only for sessions that may request
+    /// review: top-level sessions and ordinary sub-agents, never reviewers or
+    /// the oracle. This is the one owner of that fact.
+    pub fn review_tools(&self) -> bool {
+        offers_review_tools(self.review_trigger, self.harness)
+    }
+
+    /// Whether launch must prepare review state in the workspace: the session
+    /// start pin for every session offered the review tools, and the push gate
+    /// (or a notice that this harness cannot enforce one) for a primary.
+    pub fn prepares_review(&self) -> bool {
         self.review_trigger == crate::config::ReviewTrigger::Push
-            && self.harness.supports_delegation_tools()
+            && self.reviewer_launch.is_none()
+            && (self.review_tools() || (!self.is_managed_subagent() && !self.handback_tool))
+    }
+
+    /// Whether pushes from this session are held to review: the pre-push
+    /// hook, `MJ_REVIEW_GATE` and the session-start pin. Only top-level
+    /// sessions are gated; a sub-agent gets the tools without the gate.
+    pub fn review_gate(&self) -> bool {
+        self.review_tools()
             && !self.is_managed_subagent()
             && !self.handback_tool
             && self.reviewer_launch.is_none()
@@ -629,9 +654,55 @@ impl ProfileConfig {
     }
 }
 
+/// Whether a session with this review trigger on this harness is offered the
+/// mj-review tools. Launch and the daemon's completion checks share this one
+/// rule.
+pub fn offers_review_tools(
+    trigger: crate::config::ReviewTrigger,
+    harness: crate::config::HarnessKind,
+) -> bool {
+    trigger == crate::config::ReviewTrigger::Push && harness.supports_review_gate()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_cpu_wire_and_launch_default_to_process_tree() {
+        use crate::cpu_usage::{CpuAccountingMode, CpuSampleScope, SessionCpuUsage};
+        let legacy = serde_json::json!({
+            "recent_permille": 10, "hourly_permille": 20,
+            "hourly_covered_secs": 30, "online_cpus": 4
+        });
+        let usage: SessionCpuUsage = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(usage.scope, CpuSampleScope::ProcessTree);
+        let mut container = legacy;
+        container["scope"] = serde_json::json!("container");
+        assert_eq!(
+            serde_json::from_value::<SessionCpuUsage>(container)
+                .unwrap()
+                .scope,
+            CpuSampleScope::Container
+        );
+        let launch: WorkerLaunchConfig = serde_json::from_value(launch_json()).unwrap();
+        assert_eq!(launch.cpu_accounting, CpuAccountingMode::ProcessTree);
+        assert!(
+            serde_json::to_value(&launch)
+                .unwrap()
+                .get("cpu_accounting")
+                .is_none()
+        );
+        let mut launch = launch;
+        launch.cpu_accounting = CpuAccountingMode::Container;
+        let saved = serde_json::to_value(launch).unwrap();
+        assert_eq!(
+            serde_json::from_value::<WorkerLaunchConfig>(saved)
+                .unwrap()
+                .cpu_accounting,
+            CpuAccountingMode::Container
+        );
+    }
 
     fn launch_json() -> serde_json::Value {
         serde_json::json!({
@@ -645,6 +716,21 @@ mod tests {
         })
     }
 
+    /// A launch file written before per-turn review was removed still names
+    /// `"turn"`. It must keep parsing, and reads as the push gate.
+    #[test]
+    fn a_launch_file_written_for_turn_review_still_parses_as_push() {
+        let mut json = launch_json();
+        json["review_trigger"] = serde_json::json!("turn");
+        json["review_capture"] = serde_json::json!(true);
+        let launch: WorkerLaunchConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(launch.review_trigger, crate::config::ReviewTrigger::Push);
+        assert!(launch.review_gate());
+        let rewritten = serde_json::to_value(&launch).unwrap();
+        assert_eq!(rewritten["review_trigger"], "push");
+        assert!(rewritten.get("review_capture").is_none());
+    }
+
     // Hard-won: 32d96d199: push reviews exposed delegation tools with subagents=None.
     #[test]
     fn persisted_review_trigger_controls_primary_mcp_without_leaking_to_children() {
@@ -655,10 +741,11 @@ mod tests {
             HarnessKind::Codex,
             HarnessKind::Dsh,
             HarnessKind::Muse,
+            // Delegates through Mjolnir but has no push review gate.
+            HarnessKind::OpenCode,
         ] {
             for trigger in [
                 crate::config::ReviewTrigger::Off,
-                crate::config::ReviewTrigger::Turn,
                 crate::config::ReviewTrigger::Push,
             ] {
                 let mut json = launch_json();
@@ -668,8 +755,8 @@ mod tests {
                 let saved = serde_json::to_value(&launch).unwrap();
                 let read: WorkerLaunchConfig = serde_json::from_value(saved).unwrap();
                 assert_eq!(read.review_trigger, trigger);
-                let expected =
-                    trigger == crate::config::ReviewTrigger::Push && harness != HarnessKind::Muse;
+                let expected = trigger == crate::config::ReviewTrigger::Push
+                    && !matches!(harness, HarnessKind::Muse | HarnessKind::OpenCode);
                 assert_eq!(launch.review_gate(), expected);
                 for policy in [
                     SubagentPolicy::None,
@@ -693,7 +780,9 @@ mod tests {
                 launch
                     .environment
                     .insert(SESSION_MANAGED_SUBAGENT_ENV.into(), "1".into());
+                // A sub-agent is offered the review tools but never gated.
                 assert!(!launch.review_gate());
+                assert_eq!(launch.review_tools(), expected);
                 assert_eq!(
                     launch.subagent_mcp_role(),
                     Some(crate::subagent::SubagentMcpRole::FetchOnly)

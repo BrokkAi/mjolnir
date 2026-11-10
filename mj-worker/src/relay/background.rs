@@ -258,7 +258,10 @@ impl DurableRelay {
                 AirTaskState::Turn(_) | AirTaskState::HeldTurn | AirTaskState::HeldTurnEnded
             )
         {
-            if matches!(update, AirTaskUpdate::Finished { .. }) {
+            if let AirTaskUpdate::Finished {
+                settled, failed, ..
+            } = update
+            {
                 let ordinal = match state {
                     AirTaskState::Turn(ordinal) => ordinal.take(),
                     AirTaskState::HeldTurn | AirTaskState::HeldTurnEnded => {
@@ -269,17 +272,23 @@ impl DurableRelay {
                         unreachable!("turn classification checked above")
                     }
                 };
-                // A late idle may end the next turn's task (#1453). Only a
-                // silent turn trusts task end; output waits for its SDK result.
+                // The pinned bridge accounts for trailing idles (#1455).
+                // The task identity owns completion, including after output.
                 if let Some(ordinal) = ordinal
                     && self.snapshot.active_prompt.is_none()
-                    && !self.harness_turn_output_seen
                     && self
                         .snapshot
                         .harness_turn
                         .is_some_and(|turn| turn.first_ordinal == ordinal)
                 {
-                    self.settle_harness_turn(Some("autonomous_task_ended".into()))?;
+                    let stop_reason = if failed {
+                        crate::acp::drive::PROMPT_ERROR_STOP_REASON
+                    } else if settled {
+                        "end_turn"
+                    } else {
+                        "cancelled"
+                    };
+                    self.settle_harness_turn(Some("autonomous_task_ended".into()), stop_reason)?;
                 }
             }
             return self.persist_activity_transition();
@@ -353,7 +362,9 @@ impl DurableRelay {
                     }
                 }
             }
-            AirTaskUpdate::Finished { task_id, settled } => {
+            AirTaskUpdate::Finished {
+                task_id, settled, ..
+            } => {
                 let removed = self.air_tasks.remove(&air_task_key(&session_id, &task_id));
                 if removed.is_some()
                     && settled
@@ -670,7 +681,6 @@ impl DurableRelay {
     pub(super) fn forget_harness_processes(&mut self) {
         self.air_tasks.clear();
         self.claude_pending_stops.clear();
-        self.harness_turn_output_seen = false;
         self.task_settled_at_ms = None;
         self.kimi_background_tasks.clear();
         self.kimi_provisional_tasks.clear();
@@ -813,6 +823,7 @@ impl DurableRelay {
                 AirTaskUpdate::Finished {
                     task_id,
                     settled: false,
+                    failed: false,
                 },
             )?;
         }
@@ -855,7 +866,11 @@ impl DurableRelay {
                 can_stop: Some(true),
             }
         } else {
-            AirTaskUpdate::Finished { task_id, settled }
+            AirTaskUpdate::Finished {
+                task_id,
+                settled,
+                failed: false,
+            }
         };
         let session = self
             .snapshot

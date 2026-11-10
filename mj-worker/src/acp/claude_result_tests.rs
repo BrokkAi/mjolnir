@@ -272,7 +272,7 @@ impl ClaudeProbe {
 #[cfg(unix)]
 struct RelayPeer {
     probe: ClaudeProbe,
-    relay: Arc<Mutex<crate::relay::DurableRelay>>,
+    relay: Arc<crate::relay::RelayCell>,
     in_flight: BTreeMap<String, crate::relay::RelayCommand>,
     _directory: tempfile::TempDir,
 }
@@ -287,7 +287,7 @@ impl RelayPeer {
         durable.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
         let mut peer = Self {
             probe: ClaudeProbe::new().await,
-            relay: Arc::new(Mutex::new(durable)),
+            relay: Arc::new(crate::relay::RelayCell::new(durable)),
             in_flight: BTreeMap::new(),
             _directory: directory,
         };
@@ -429,6 +429,27 @@ async fn an_autonomous_spawn_waits_for_the_prompt_boundary_unless_it_already_end
             peer.probe.sdk_result(success("task-notification")).await;
             loop {
                 if matches!(peer.event().await, RuntimeEvent::ClaudeTurnResult(_)) {
+                    break;
+                }
+            }
+            assert!(
+                peer.relay
+                    .lock()
+                    .unwrap()
+                    .claim_pending_commands(true)
+                    .unwrap()
+                    .is_empty()
+            );
+            peer.probe
+                .send(
+                    json!({"jsonrpc":"2.0", "method":"session/update", "params": {
+                        "sessionId": SESSION, "update": {"sessionUpdate":"async_task_state_update",
+                        "asyncTaskId":"next-turn", "state":"completed"}
+                    }}),
+                )
+                .await;
+            loop {
+                if matches!(peer.event().await, RuntimeEvent::AirTaskChanged { .. }) {
                     break;
                 }
             }
@@ -796,7 +817,7 @@ async fn a_move_checkpoint_waits_for_the_cancelled_claude_prompt_response() {
     let directory = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(directory.path(), SESSION, "test").unwrap();
     durable.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(crate::relay::RelayCell::new(durable));
     let mut in_flight = BTreeMap::new();
     let mut probe = ClaudeProbe::new().await;
     loop {

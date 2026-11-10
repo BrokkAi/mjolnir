@@ -19,119 +19,6 @@ use crate::targets::{
 
 use super::*;
 
-struct AwsCliFixtureExecutor {
-    commands: RefCell<Vec<CommandSpec>>,
-    responses: RefCell<std::collections::VecDeque<CommandOutput>>,
-}
-
-impl AwsCliFixtureExecutor {
-    fn new(responses: impl IntoIterator<Item = &'static [u8]>) -> Self {
-        Self {
-            commands: RefCell::new(Vec::new()),
-            responses: RefCell::new(
-                responses
-                    .into_iter()
-                    .map(|stdout| CommandOutput {
-                        status: 0,
-                        stdout: stdout.to_vec(),
-                        stderr: Vec::new(),
-                    })
-                    .collect(),
-            ),
-        }
-    }
-}
-
-impl CommandExecutor for AwsCliFixtureExecutor {
-    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        self.commands.borrow_mut().push(command.clone());
-        Ok(self
-            .responses
-            .borrow_mut()
-            .pop_front()
-            .expect("one AWS CLI response per command"))
-    }
-}
-
-fn aws_options_controller(
-    launch_template: &str,
-    profile: Option<&str>,
-    version: Option<&str>,
-) -> Controller {
-    Controller {
-        config: Config {
-            targets: BTreeMap::from([(
-                "ec2".to_owned(),
-                TargetTemplate::AwsEc2 {
-                    aws_profile: profile.map(str::to_owned),
-                    region: "us-west-2".to_owned(),
-                    launch_template: launch_template.to_owned(),
-                    launch_template_version: version.map(str::to_owned),
-                    ssh_user: "ec2-user".to_owned(),
-                    address_source: Default::default(),
-                    identity_file: None,
-                    ssh_args: Vec::new(),
-                },
-            )]),
-            ..Config::default()
-        },
-        state: State::default(),
-    }
-}
-
-fn render_aws_allocations(allocations: &[SessionResourceAllocation]) -> String {
-    allocations
-        .iter()
-        .map(|allocation| match allocation {
-            SessionResourceAllocation::AwsEc2 {
-                instance_type,
-                vcpus,
-                memory_bytes,
-            } => format!("{instance_type}: {vcpus} vCPUs, {memory_bytes} bytes"),
-            SessionResourceAllocation::Container { .. } => {
-                panic!("AWS discovery returned a container allocation")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-#[test]
-fn golden_aws_resource_options_read_documented_cli_responses() {
-    // These fixtures follow the AWS CLI v2 response shapes:
-    // https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-launch-template-versions.html
-    // https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-instance-types.html
-    const RESPONSES: [&[u8]; 4] = [
-        br#"{"LaunchTemplateVersions":[{"LaunchTemplateId":"lt-0123456789abcdef0","VersionNumber":7,"LaunchTemplateData":{"ImageId":"ami-0123456789abcdef0","InstanceType":"m7i.large"}}]}"#,
-        br#"{"InstanceTypes":[{"InstanceType":"m7i.4xlarge","VCpuInfo":{"DefaultVCpus":16},"MemoryInfo":{"SizeInMiB":65536}},{"InstanceType":"m7i.2xlarge","VCpuInfo":{"DefaultVCpus":8},"MemoryInfo":{"SizeInMiB":32768}},{"InstanceType":"m7i.large","VCpuInfo":{"DefaultVCpus":2},"MemoryInfo":{"SizeInMiB":8192}},{"InstanceType":"m7i.xlarge","VCpuInfo":{"DefaultVCpus":4},"MemoryInfo":{"SizeInMiB":16384}},{"InstanceType":"m7i.malformed","VCpuInfo":{"DefaultVCpus":4}},{"InstanceType":"m7i.overflow","VCpuInfo":{"DefaultVCpus":32},"MemoryInfo":{"SizeInMiB":18446744073709551615}}]}"#,
-        br#"{"LaunchTemplateVersions":[{"LaunchTemplateName":"legacy","VersionNumber":7,"LaunchTemplateData":{"ImageId":"ami-0123456789abcdef0","InstanceType":"c6i.large"}}]}"#,
-        br#"{"InstanceTypes":[{"InstanceType":"c6i.2xlarge","VCpuInfo":{"DefaultVCpus":8},"MemoryInfo":{"SizeInMiB":16384}},{"InstanceType":"c6i.large","VCpuInfo":{"DefaultVCpus":2},"MemoryInfo":{"SizeInMiB":4096}}]}"#,
-    ];
-    let executor = AwsCliFixtureExecutor::new(RESPONSES);
-    let by_id = aws_options_controller("lt-0123456789abcdef0", Some("build"), Some("7"))
-        .resolve_aws_resource_options("ec2", &executor)
-        .expect("resolve ID-addressed launch template");
-    let by_name = aws_options_controller("legacy", None, None)
-        .resolve_aws_resource_options("ec2", &executor)
-        .expect("resolve name-addressed launch template");
-
-    let mut rendered = String::new();
-    rendered.push_str("=== launch-template id ===\n");
-    rendered.push_str(&render_aws_allocations(&by_id));
-    rendered.push_str("\n\n=== launch-template name ===\n");
-    rendered.push_str(&render_aws_allocations(&by_name));
-    rendered.push_str("\n\n=== AWS CLI commands ===\n");
-    for command in executor.commands.borrow().iter() {
-        rendered.push_str(&format!("{} {}\n", command.program, command.args.join(" ")));
-    }
-    rendered.pop();
-    mj_core::golden::assert_golden(
-        env!("CARGO_MANIFEST_DIR"),
-        "aws-resource-options",
-        &rendered,
-    );
-}
-
 #[test]
 fn provisioning_uses_accepted_fetch_and_push_settings_after_the_catalog_changes() {
     struct NoProbe;
@@ -330,6 +217,7 @@ fn github_token_is_inherited_only_by_managed_containers() {
             url: Some("git@github.com:example/app.git".into()),
             push_urls: vec![
                 "git@github.com:fork/app.git".into(),
+                "git://github.com/legacy/app.git".into(),
                 "ssh://git@example.test/app.git".into(),
             ],
             destination: "app".into(),
@@ -347,6 +235,7 @@ fn github_token_is_inherited_only_by_managed_containers() {
         bundle.repositories[0].push_urls,
         [
             "https://github.com/fork/app.git",
+            "https://github.com/legacy/app.git",
             "ssh://git@example.test/app.git"
         ]
     );
@@ -421,6 +310,18 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
             container: container_target("ghcr.io/example/dev:1.2.3", ImagePullPolicy::Auto),
         },
     );
+    config.targets.insert(
+        "ssh-apple".into(),
+        TargetTemplate::SshAppleContainer {
+            ssh: SshConnection {
+                host: "mac.example.test".into(),
+                user: Some("dev".into()),
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            container: container_target("ghcr.io/example/dev:latest", ImagePullPolicy::Auto),
+        },
+    );
     // An explicit `never` is the one way to keep an image out of the plan.
     config.targets.insert(
         "never".into(),
@@ -446,7 +347,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
     let plan = image_refresh_plan(&config);
     assert_eq!(
         plan.len(),
-        6,
+        7,
         "expected one refresh per host, image and platform: {plan:?}"
     );
 
@@ -460,10 +361,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
     assert_eq!(local.when, RefreshWhen::Always);
     assert_eq!(local.pull.program, "podman");
     assert_eq!(local.pull.args, ["pull", "ghcr.io/example/dev:latest"]);
-    assert_eq!(
-        local.prune.as_ref().expect("podman prunes").args,
-        ["image", "prune", "-f"]
-    );
+    assert_eq!(local.prune.args, ["image", "prune", "-f"]);
     assert_eq!(
         local.image_id.args,
         [
@@ -479,10 +377,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
     assert_eq!(docker.when, RefreshWhen::Always);
     assert_eq!(docker.pull.program, "docker");
     assert_eq!(docker.pull.args, ["pull", "ghcr.io/example/dev:1.2.3"]);
-    assert_eq!(
-        docker.prune.as_ref().expect("docker prunes").args,
-        ["image", "prune", "-f"]
-    );
+    assert_eq!(docker.prune.args, ["image", "prune", "-f"]);
 
     // A versioned tag and a digest pin only need the host to have a copy.
     let apple = entry(&ImageHost::AppleContainer, "ghcr.io/example/dev:1.2.3");
@@ -491,6 +386,27 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
     assert_eq!(
         apple.pull.args,
         ["image", "pull", "ghcr.io/example/dev:1.2.3"]
+    );
+    assert_eq!(apple.prune.program, "container");
+    assert_eq!(apple.prune.args, ["image", "prune"]);
+    let remote_apple = plan
+        .iter()
+        .find(|refresh| matches!(refresh.host, ImageHost::SshAppleContainer(_)))
+        .expect("the remote Apple host is refreshed over SSH");
+    assert_eq!(remote_apple.prune.program, "ssh");
+    assert!(
+        remote_apple
+            .prune
+            .args
+            .contains(&"dev@mac.example.test".to_owned())
+    );
+    assert_eq!(
+        remote_apple
+            .prune
+            .args
+            .last()
+            .map(|arg| unwrapped_remote_line(arg)),
+        Some("'container' 'image' 'prune'")
     );
     let pinned = plan
         .iter()
@@ -529,12 +445,7 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
         Some("'podman' 'pull' '--platform=linux/amd64' 'ghcr.io/example/dev:latest'")
     );
     assert_eq!(
-        ssh.prune
-            .as_ref()
-            .expect("podman prunes")
-            .args
-            .last()
-            .map(|arg| unwrapped_remote_line(arg)),
+        ssh.prune.args.last().map(|arg| unwrapped_remote_line(arg)),
         Some("'podman' 'image' 'prune' '-f'")
     );
 }
@@ -587,8 +498,6 @@ fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
     assert_eq!(
         refresh
             .prune
-            .as_ref()
-            .expect("docker prunes")
             .args
             .last()
             .map(|arg| unwrapped_remote_line(arg)),
@@ -597,50 +506,6 @@ fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
     assert_eq!(refresh.when, RefreshWhen::Always);
 }
 
-#[test]
-fn aws_resource_options_follow_the_launch_template_family() {
-    let mut config = Config::default();
-    config.targets.insert(
-        "aws".into(),
-        TargetTemplate::AwsEc2 {
-            aws_profile: None,
-            region: "us-east-1".into(),
-            launch_template: "hel-runson".into(),
-            launch_template_version: None,
-            ssh_user: "ubuntu".into(),
-            address_source: AwsAddressSource::PublicIp,
-            identity_file: None,
-            ssh_args: Vec::new(),
-        },
-    );
-    let executor = PreflightExecutor {
-        outputs: RefCell::new(vec![
-            CommandOutput {
-                status: 0,
-                stdout: br#"{"LaunchTemplateVersions":[{"LaunchTemplateData":{"InstanceType":"m8i-flex.large"}}]}"#.to_vec(),
-                stderr: Vec::new(),
-            },
-            CommandOutput {
-                status: 0,
-                stdout: br#"{"InstanceTypes":[{"InstanceType":"m8i-flex.4xlarge","VCpuInfo":{"DefaultVCpus":16},"MemoryInfo":{"SizeInMiB":65536}},{"InstanceType":"m8i-flex.2xlarge","VCpuInfo":{"DefaultVCpus":8},"MemoryInfo":{"SizeInMiB":32768}}]}"#.to_vec(),
-                stderr: Vec::new(),
-            },
-        ]),
-        notices: RefCell::new(vec![]),
-    };
-    let controller = Controller {
-        config,
-        state: State::default(),
-    };
-
-    let options = controller
-        .resolve_aws_resource_options("aws", &executor)
-        .unwrap();
-    assert_eq!(
-        options.iter().map(allocation_cpus).collect::<Vec<_>>(),
-        [8, 16]
-    );
-}
 #[test]
 fn deployment_capacity_groups_local_and_same_host_targets() {
     let container = || ConfigContainer {
@@ -926,6 +791,63 @@ fn local_engine_readiness_tells_a_missing_engine_from_one_that_did_not_answer() 
         local_engine_readiness("ssh-docker", &NoDockerExecutor),
         None
     );
+}
+
+/// An executor that records every command and answers `container system
+/// status` as a stopped or a running service would.
+struct RecordingAppleExecutor {
+    status: i32,
+    commands: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingAppleExecutor {
+    fn new(status: i32) -> Self {
+        Self {
+            status,
+            commands: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn commands(&self) -> Vec<String> {
+        self.commands.lock().unwrap().clone()
+    }
+}
+
+impl CommandExecutor for RecordingAppleExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands.lock().unwrap().push(format!(
+            "{} {}",
+            command.program,
+            command.args.join(" ")
+        ));
+        Ok(CommandOutput {
+            status: self.status,
+            stdout: Vec::new(),
+            stderr: if self.status == 0 {
+                Vec::new()
+            } else {
+                b"service is stopped".to_vec()
+            },
+        })
+    }
+}
+
+// Hard-won: #1357: the launch options readiness probe started a stopped Apple container service
+#[test]
+fn apple_container_readiness_observes_the_service_and_never_starts_it() {
+    let stopped = RecordingAppleExecutor::new(1);
+    assert_eq!(
+        local_engine_readiness("apple-container", &stopped),
+        Some(LocalEngineReadiness::NotReady)
+    );
+    assert_eq!(stopped.commands(), ["container system status"]);
+
+    let running = RecordingAppleExecutor::new(0);
+    assert_eq!(
+        local_engine_readiness("apple-container", &running),
+        Some(LocalEngineReadiness::Ready)
+    );
+    assert_eq!(running.commands(), ["container system status"]);
 }
 
 /// Launch finding R5-3: the session wizard said "local Docker is not ready.

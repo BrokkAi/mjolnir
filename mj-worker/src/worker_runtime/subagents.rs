@@ -26,12 +26,43 @@ use crate::subagent_mcp::DaemonContact;
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
 
+/// Register a worker-owned OpenCode 2 plugin without editing the user's home.
+pub(super) fn configure_opencode_mailbox_hook(
+    root: &Path,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    let directory = root.join("opencode-mailbox");
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("create OpenCode plugin directory {}", directory.display()))?;
+    let worker = std::env::current_exe().context("locate worker for OpenCode mailbox transport")?;
+    let script = include_str!("../../assets/opencode-mailbox.js")
+        .replace("__MJ_WORKER__", &serde_json::to_string(&worker)?)
+        .replace(
+            "__MJ_SOCKET__",
+            &serde_json::to_string(&root.join("control.sock"))?,
+        );
+    let path = directory.join("index.js");
+    std::fs::write(&path, script)
+        .with_context(|| format!("write OpenCode mailbox hook {}", path.display()))?;
+    std::fs::write(
+        directory.join("package.json"),
+        r#"{"name":"mjolnir-mailbox","type":"module","main":"index.js"}"#,
+    )
+    .context("write OpenCode mailbox plugin manifest")?;
+    super::json_gh_rules::configure_opencode_plugin(&directory, environment)
+}
+
 const CODEX_CONFIG_ENV: &str = "CODEX_CONFIG";
 const CODEX_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
 const CLAUDE_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
 
-/// Register this launch's `mj-agents` server in the session's private Claude
-/// profile, and allow every tool it lists, before Claude starts.
+/// Register this launch's `mj-agents` server, and the `mj-review` server when
+/// the review gate is on, in the session's private Claude profile, and allow
+/// every tool they list, before Claude starts.
+///
+/// `mj-agents` is always loaded. `mj-review` has no `alwaysLoad`, so Claude
+/// defers its tools until they are needed at push time. A review server the
+/// launch no longer offers is removed.
 ///
 /// The worker owns this registration, as it owns Codex's, and writes it on
 /// every start. A profile is staged once, but a worker upgrade or recovery
@@ -52,9 +83,11 @@ pub(super) fn configure_claude_subagent_mcp(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     agent_mailboxes_enabled: bool,
     subtle_subagents: bool,
-    review_gate: bool,
+    review_tools: bool,
 ) -> Result<()> {
-    use mj_core::subagent::{SUBAGENT_MCP_SERVER, SubagentMcpRole};
+    use mj_core::subagent::{
+        REVIEW_MCP_SERVER, REVIEW_MCP_TOOLS, SUBAGENT_MCP_SERVER, SubagentMcpRole,
+    };
     anyhow::ensure!(
         root.is_absolute(),
         "Claude MCP worker root must be absolute"
@@ -99,6 +132,7 @@ pub(super) fn configure_claude_subagent_mcp(
             })?;
         let Some(role) = role else {
             servers.remove(SUBAGENT_MCP_SERVER);
+            servers.remove(REVIEW_MCP_SERVER);
             return Ok(());
         };
         let mut args = vec![
@@ -114,9 +148,6 @@ pub(super) fn configure_claude_subagent_mcp(
             "--agent-mailboxes-enabled".to_owned(),
             agent_mailboxes_enabled.to_string(),
         ];
-        if review_gate && role.supports_push_gate() {
-            args.push("--review-gate".into());
-        }
         if !subtle_subagents {
             // Only the non-default value is written, as for Codex.
             args.extend(["--subtle-subagents".to_owned(), "false".to_owned()]);
@@ -132,6 +163,23 @@ pub(super) fn configure_claude_subagent_mcp(
                 "args": args,
             }),
         );
+        if review_tools {
+            servers.insert(
+                REVIEW_MCP_SERVER.into(),
+                serde_json::json!({
+                    "type": "stdio",
+                    // No `alwaysLoad`: the tools are needed only before a push,
+                    // so Claude loads them on demand.
+                    "command": root.join("hel"),
+                    "args": role.review_server_args(
+                        &root.join(SUBAGENT_SOCKET),
+                        mj_core::config::HarnessKind::Claude.id(),
+                    ),
+                }),
+            );
+        } else {
+            servers.remove(REVIEW_MCP_SERVER);
+        }
         Ok(())
     })?;
 
@@ -160,12 +208,20 @@ pub(super) fn configure_claude_subagent_mcp(
                     settings_path.display()
                 )
             })?;
-        let mut tools = role.tool_names().to_vec();
-        if review_gate && role.supports_push_gate() {
-            tools.push("override_review");
-        }
-        for tool in tools {
-            let rule = serde_json::Value::from(format!("mcp__{SUBAGENT_MCP_SERVER}__{tool}"));
+        let agents = role
+            .tool_names()
+            .iter()
+            .map(|tool| format!("mcp__{SUBAGENT_MCP_SERVER}__{tool}"));
+        let review = review_tools
+            .then(|| {
+                REVIEW_MCP_TOOLS
+                    .iter()
+                    .map(|tool| format!("mcp__{REVIEW_MCP_SERVER}__{tool}"))
+            })
+            .into_iter()
+            .flatten();
+        for rule in agents.chain(review) {
+            let rule = serde_json::Value::from(rule);
             if !allow.contains(&rule) {
                 allow.push(rule);
             }
@@ -447,7 +503,7 @@ fn configure_codex_mcp_with_mailboxes(
     policy: mj_core::config::ExecutionPolicy,
     mailboxes_enabled: bool,
     subtle_subagents: bool,
-    review_gate: bool,
+    review_tools: bool,
 ) -> Result<bool> {
     if !private_staged_home(root, session_id, home) {
         return Ok(false);
@@ -512,9 +568,6 @@ fn configure_codex_mcp_with_mailboxes(
             "--agent-mailboxes-enabled".to_owned(),
             mailboxes_enabled.to_string(),
         ];
-        if review_gate && role.supports_push_gate() {
-            args.push("--review-gate".into());
-        }
         if !subtle_subagents {
             // Written only when off, so a launch offering both types keeps
             // the arguments an older worker accepts.
@@ -530,6 +583,24 @@ fn configure_codex_mcp_with_mailboxes(
             server["default_tools_approval_mode"] = serde_json::json!("approve");
         }
         servers.insert(name.into(), toml::Value::try_from(server)?);
+        if review_tools {
+            // Unlike `mj-agents`, no `omit_tools_from`: Codex may defer these
+            // tools until a search finds them, which suits tools needed only
+            // before a push.
+            let mut review = serde_json::json!({
+                "command": worker,
+                "args": role.review_server_args(&root.join(SUBAGENT_SOCKET), "codex"),
+            });
+            if policy == mj_core::config::ExecutionPolicy::ConfiguredApprovals {
+                review["default_tools_approval_mode"] = serde_json::json!("approve");
+            }
+            servers.insert(
+                mj_core::subagent::REVIEW_MCP_SERVER.into(),
+                toml::Value::try_from(review)?,
+            );
+        } else {
+            servers.remove(mj_core::subagent::REVIEW_MCP_SERVER);
+        }
 
         // Keep delegation tools outside the code-mode executor so Codex
         // suspends inference until the actual MCP call returns.
@@ -558,8 +629,14 @@ fn configure_codex_mcp_with_mailboxes(
         if !namespaces.contains(&namespace) {
             namespaces.push(namespace);
         }
-    } else if servers.remove(name).is_none() {
-        return Ok(true);
+    } else {
+        let removed_agents = servers.remove(name).is_some();
+        let removed_review = servers
+            .remove(mj_core::subagent::REVIEW_MCP_SERVER)
+            .is_some();
+        if !(removed_agents || removed_review) {
+            return Ok(true);
+        }
     }
     mj_core::config::atomic_write(&path, toml::to_string(&config)?.as_bytes())
         .with_context(|| format!("write staged Codex configuration {}", path.display()))?;
@@ -575,6 +652,7 @@ pub(super) fn configure_codex_profile(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
     options: crate::subagent_mcp::ParentTools,
+    review_tools: bool,
 ) -> Result<bool> {
     configure_codex_mailbox_hook(root, environment)?;
     configure_codex_mcp_with_mailboxes(
@@ -585,7 +663,7 @@ pub(super) fn configure_codex_profile(
         policy,
         options.agent_mailboxes_enabled,
         options.subtle_subagents,
-        options.review_gate,
+        review_tools,
     )
 }
 
@@ -812,11 +890,14 @@ struct Collections {
 pub struct SubagentEndpoint {
     path: PathBuf,
     admission: Arc<SocketAdmission>,
-    relay: Option<Arc<Mutex<crate::relay::DurableRelay>>>,
+    relay: Option<Arc<crate::relay::RelayCell>>,
     state: Arc<Mutex<QueueState>>,
     /// Woken whenever a result lands, so a socket call awaiting its own request
     /// returns the moment the daemon completes it.
     completed: Arc<Notify>,
+    /// The queue's generation, published by every write so a connection
+    /// waiting for a change (`WaitForChange`) wakes.
+    generations: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl SubagentEndpoint {
@@ -837,6 +918,7 @@ impl SubagentEndpoint {
             relay: None,
             state: Arc::new(Mutex::new(state)),
             completed: Arc::new(Notify::new()),
+            generations: Arc::new(tokio::sync::watch::Sender::new(0)),
         };
         endpoint.import_legacy_results()?;
         Ok(endpoint)
@@ -940,13 +1022,10 @@ impl SubagentEndpoint {
     ) -> Result<(bool, Option<SubagentToolResult>, u64)> {
         // One owner selects the originating turn and keeps it selected until
         // the request is durable; a later daemon never reconstructs this fact.
-        let relay = self
+        let mut relay = self
             .relay
             .as_ref()
             .map(|relay| relay.lock().expect("relay lock poisoned"));
-        if let Some(relay) = &relay {
-            request.originating_command_id = relay.originating_command_id();
-        }
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
         let mark = state.collections.count;
         if let Some(result) = self.read_result(&state, &request.request_id)? {
@@ -979,6 +1058,20 @@ impl SubagentEndpoint {
                 is_error: true,
                 message: "Sub-agent request was not accepted: this session is replacing its harness (Move). Retry after the Move finishes.".into(),
             }), mark));
+        }
+        if let Some(relay) = &mut relay {
+            // A report is harness work, like output or an autonomous spawn.
+            // The MCP socket can deliver it before the adapter's tool-call
+            // update, so it opens the turn itself (#1450). Only an admitted
+            // request opens one: a retry or a refusal must not.
+            if matches!(
+                request.action,
+                mj_core::subagent::SubagentToolAction::Handback { .. }
+            ) && relay.uses_claude_harness_turns()
+            {
+                relay.open_harness_turn_if_allowed()?;
+            }
+            request.originating_command_id = relay.originating_command_id();
         }
         let mut next = state.clone();
         next.requests
@@ -1020,7 +1113,15 @@ impl SubagentEndpoint {
         mj_core::config::atomic_write(&self.path, &body)
             .with_context(|| format!("write sub-agent queue {}", self.path.display()))?;
         state.generation = state.generation.wrapping_add(1);
+        // The writer still holds the queue lock, so a woken waiter reads the
+        // queue after this write is committed.
+        self.generations.send_replace(state.generation);
         Ok(())
+    }
+
+    /// Changes after every write to the queue.
+    pub(in crate::worker_runtime) fn generations(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.generations.subscribe()
     }
 }
 
@@ -1074,6 +1175,157 @@ impl Drop for LiveWaiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: #1473: OpenCode must retain each message before acknowledging the relay lease.
+    #[test]
+    fn opencode_mailbox_plugin_retains_before_ack_and_deduplicates_retries() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let mut environment = BTreeMap::from([(
+            "OPENCODE_CONFIG_CONTENT".into(),
+            "{ // keep user plugins\n\"plugins\": [\"user-plugin\"], \"permissions\": [] }".into(),
+        )]);
+        configure_opencode_mailbox_hook(root.path(), &mut environment).unwrap();
+        let once = environment.clone();
+        configure_opencode_mailbox_hook(root.path(), &mut environment).unwrap();
+        assert_eq!(environment, once);
+        assert!(environment["OPENCODE_CONFIG_CONTENT"].contains("user-plugin"));
+        let transport = root.path().join("transport.mjs");
+        std::fs::write(
+            &transport,
+            r##"#!/usr/bin/env node
+import { createConnection } from "node:net";
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => input += chunk);
+process.stdin.on("end", () => {
+  const connection = createConnection(process.argv.at(-1));
+  let reply = "";
+  connection.setEncoding("utf8");
+  connection.on("connect", () => connection.write(JSON.stringify({
+    request_id: "test", protocol_version: 1, request: JSON.parse(input),
+  }) + "\n"));
+  connection.on("data", chunk => reply += chunk);
+  connection.on("end", () => {
+    if (reply) process.stdout.write(JSON.stringify(JSON.parse(reply).payload));
+    else process.exitCode = 1;
+  });
+});
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&transport, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let plugin_path = root.path().join("opencode-mailbox/index.js");
+        let script = std::fs::read_to_string(&plugin_path).unwrap().replace(
+            &serde_json::to_string(&std::env::current_exe().unwrap()).unwrap(),
+            &serde_json::to_string(&transport).unwrap(),
+        );
+        std::fs::write(&plugin_path, script).unwrap();
+        let mut command = std::process::Command::new("node");
+        command
+            .args(["--input-type=module", "-"])
+            .env("MJ_HOOK_PLUGIN", plugin_path)
+            .env("MJ_HOOK_SOCKET", root.path().join("control.sock"));
+        let output = mj_core::subprocess::run_with_input(
+            &mut command,
+            br#"
+import assert from "node:assert/strict";
+import { createServer } from "node:net";
+import { pathToFileURL } from "node:url";
+const plugin = (await import(pathToFileURL(process.env.MJ_HOOK_PLUGIN))).default;
+const retained = new Map();
+const first = {key: "oracle", text: "mailbox:" + "\u754c\u{1f680}".repeat(20 * 1024)};
+const second = {key: "child", text: "second message"};
+let contexts = [first];
+let drains = 0;
+let acknowledgements = 0;
+let rejectRetention = true;
+let loseAcknowledgement = true;
+const server = createServer(connection => {
+  let input = "";
+  connection.setEncoding("utf8");
+  connection.on("data", chunk => {
+    input += chunk;
+    if (!input.includes("\n")) return;
+    const request = JSON.parse(input.slice(0, input.indexOf("\n")));
+    let payload;
+    if (request.request.method === "drain_mailbox") {
+      drains++;
+      payload = {type: "mailbox_drained", data: {lease_id: "lease-" + drains, contexts}};
+    } else {
+      assert.equal(request.request.method, "ack_mailbox");
+      assert.ok(contexts.every(context => [...retained.values()].includes(context.text)),
+        "every message must already be retained when the relay is acknowledged");
+      acknowledgements++;
+      if (loseAcknowledgement) {
+        loseAcknowledgement = false;
+        connection.end();
+        return;
+      }
+      payload = {type: "mailbox_acknowledged", data: {acknowledged: true}};
+    }
+    connection.end(JSON.stringify({request_id: request.request_id,
+      protocol_version: request.protocol_version, result: "ok", payload}) + "\n");
+  });
+});
+await new Promise(resolve => server.listen(process.env.MJ_HOOK_SOCKET, resolve));
+let hook;
+let disposed = false;
+try {
+  const cleanup = await plugin.setup({
+    session: {
+      get: async ({sessionID}) => ({parentID: sessionID === "native-child" ? "lead" : undefined}),
+      synthetic: async ({id, text, delivery, resume}) => {
+        assert.equal(delivery, "steer");
+        assert.equal(resume, false);
+        if (rejectRetention) {
+          rejectRetention = false;
+          throw new Error("retention failed");
+        }
+        if (retained.has(id)) assert.equal(retained.get(id), text);
+        retained.set(id, text);
+      },
+    },
+    tool: {hook: async (name, callback) => {
+      assert.equal(name, "execute.after");
+      hook = callback;
+      return {dispose: () => {disposed = true}};
+    }},
+  });
+  const event = {sessionID: "lead", status: "completed", result: {content: "tool output", output: {ok: true}}};
+  await assert.rejects(hook(event), /retention failed/);
+  assert.equal(acknowledgements, 0);
+  await assert.rejects(hook(event), /mailbox request exited/);
+  assert.equal(retained.size, 1);
+  // An expired unacknowledged lease can include newer events on retry.
+  contexts = [first, second];
+  await hook(event);
+  assert.equal(retained.size, 2);
+  assert.deepEqual(event.result, {content: "tool output", output: {ok: true}});
+  const child = {sessionID: "native-child", status: "completed", result: {content: "child output"}};
+  await hook(child);
+  assert.equal(drains, 3);
+  assert.equal(acknowledgements, 2);
+  await cleanup();
+  assert.ok(disposed);
+} finally {
+  await new Promise(resolve => server.close(resolve));
+}
+console.log("OpenCode durable mailbox bridge passed");
+"#,
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "OpenCode durable mailbox bridge passed"
+        );
+    }
 
     #[test]
     fn a_kimi_reviewer_registers_handback_in_its_private_runtime_profile() {
@@ -1174,7 +1426,6 @@ mod tests {
                 serde_json::json!([
                     "mcp__mj-agents__send_message",
                     "mcp__mj-agents__fetch",
-                    "mcp__mj-agents__request_review",
                     "mcp__mj-agents__ask_oracle"
                 ])
             );
@@ -1671,7 +1922,6 @@ print(sys.argv[sys.argv.index('--role') + 1])
             serde_json::json!([
                 "mcp__mj-agents__send_message",
                 "mcp__mj-agents__fetch",
-                "mcp__mj-agents__request_review",
                 "mcp__mj-agents__ask_oracle"
             ])
         );
@@ -1748,8 +1998,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
                 "Bash(ls:*)",
                 "mcp__mj-agents__handback",
                 "mcp__mj-agents__fetch",
-                "mcp__mj-agents__send_message",
-                "mcp__mj-agents__request_review"
+                "mcp__mj-agents__send_message"
             ]
         );
         assert_eq!(
@@ -2218,6 +2467,7 @@ enabled = false
 
         let mutations = [
             SubagentToolAction::Spawn {
+                no_github_credentials: false,
                 task_type: mj_core::subagent::SubagentTaskType::Straightforward,
                 task_name: "task".into(),
                 instructions: "work".into(),
@@ -2300,7 +2550,7 @@ enabled = false
     fn admission_stamps_worker_turn_and_replay_cannot_retarget_it() {
         use crate::relay::test_support::{prompt, submit_relay};
         let root = tempfile::tempdir().unwrap();
-        let relay = Arc::new(Mutex::new(
+        let relay = Arc::new(crate::relay::RelayCell::new(
             crate::relay::DurableRelay::open(root.path(), "session-123", "test").unwrap(),
         ));
         {
@@ -2327,6 +2577,7 @@ enabled = false
                 .record_command_completed(
                     "original-turn",
                     mj_core::relay::RelayCommandOutcome::Prompt {
+                        work_facts: None,
                         stop_reason: "end_turn".into(),
                         usage: None,
                         diagnostic: None,
@@ -2343,6 +2594,43 @@ enabled = false
             pending[0].originating_command_id.as_deref(),
             Some("original-turn")
         );
+    }
+
+    // Hard-won: #1450: a handback from a Monitor-woken turn was refused for lack of a turn id.
+    #[test]
+    fn handback_admission_owns_the_harness_turn_in_either_order() {
+        for opened in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let relay = Arc::new(crate::relay::RelayCell::new(
+                crate::relay::DurableRelay::open(root.path(), "session-123", "test").unwrap(),
+            ));
+            {
+                let mut owner = relay.lock().unwrap();
+                owner.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
+                owner
+                    .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+                        config_options: vec![],
+                    })
+                    .unwrap();
+                if opened {
+                    owner.open_harness_turn_if_allowed().unwrap();
+                }
+            }
+            let mut endpoint = SubagentEndpoint::open(root.path()).unwrap();
+            endpoint.relay = Some(relay.clone());
+            let mut report = request("harness-handback");
+            report.action = SubagentToolAction::Handback {
+                message: "report".into(),
+            };
+            endpoint.enqueue(report).unwrap();
+            let owner = relay.lock().unwrap();
+            let expected = owner.originating_command_id().unwrap();
+            assert!(expected.starts_with("harness-turn-"));
+            assert_eq!(
+                endpoint.snapshot().0[0].originating_command_id.as_deref(),
+                Some(expected.as_str())
+            );
+        }
     }
 
     #[test]
@@ -2626,7 +2914,7 @@ struct SocketReply {
 pub(super) fn serve(
     runtime: &tokio::runtime::Handle,
     root: &Path,
-    relay: Arc<Mutex<crate::relay::DurableRelay>>,
+    relay: Arc<crate::relay::RelayCell>,
     _harness: mj_core::config::HarnessKind,
 ) -> Result<(SubagentEndpoint, SubagentSocketGuard)> {
     let mut endpoint = SubagentEndpoint::open(root)?;
@@ -2833,19 +3121,60 @@ mod review_gate_tests {
     use super::*;
     use mj_core::subagent::SubagentMcpRole;
 
+    const REVIEW_RULES: [&str; 3] = [
+        "mcp__mj-review__request_review",
+        "mcp__mj-review__override_review",
+        "mcp__mj-review__set_review_baseline",
+    ];
+
+    fn staged_profile() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("profile");
+        std::fs::create_dir(&home).unwrap();
+        (root, home)
+    }
+
+    fn claude_files(home: &Path) -> (serde_json::Value, Vec<String>) {
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap()).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap()).unwrap();
+        let allow = settings["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rule| rule.as_str().unwrap().to_owned())
+            .collect();
+        (config, allow)
+    }
+
+    fn codex_servers(home: &Path) -> toml::Table {
+        let config: toml::Table =
+            toml::from_str(&std::fs::read_to_string(home.join("config.toml")).unwrap()).unwrap();
+        config["mcp_servers"].as_table().unwrap().clone()
+    }
+
+    fn string_args(server: &serde_json::Value) -> Vec<&str> {
+        server["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|arg| arg.as_str().unwrap())
+            .collect()
+    }
+
     // Hard-won: 32d96d199: review registration required granting the delegation role.
     #[test]
-    fn private_profile_registration_passes_the_gate_only_to_top_level_sessions() {
+    fn the_review_server_is_registered_for_every_role_when_the_launch_offers_review_tools() {
         for role in [
             SubagentMcpRole::Parent,
             SubagentMcpRole::Child,
             SubagentMcpRole::MessageOnly,
             SubagentMcpRole::FetchOnly,
         ] {
-            for gate in [false, true] {
-                let root = tempfile::tempdir().unwrap();
-                let home = root.path().join("profile");
-                std::fs::create_dir(&home).unwrap();
+            for tools in [false, true] {
+                let expected = tools;
+                let (root, home) = staged_profile();
                 configure_claude_subagent_mcp(
                     root.path(),
                     "session",
@@ -2853,63 +3182,253 @@ mod review_gate_tests {
                     Some(role),
                     true,
                     true,
-                    gate,
+                    tools,
                 )
                 .unwrap();
-                let config: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap())
-                        .unwrap();
-                let expected =
-                    gate && matches!(role, SubagentMcpRole::Parent | SubagentMcpRole::MessageOnly);
+                let (config, allow) = claude_files(&home);
+                let servers = &config["mcpServers"];
+                // Delegation tools stay always loaded and carry no review state.
+                assert_eq!(servers["mj-agents"]["alwaysLoad"], true);
+                let agents = string_args(&servers["mj-agents"]);
+                assert!(!agents.contains(&"--review-gate"));
+                assert!(!agents.contains(&"--review-server"));
+                assert!(!allow.iter().any(|rule| rule.ends_with("__request_review")
+                    && rule.starts_with("mcp__mj-agents__")));
                 assert_eq!(
-                    config["mcpServers"]["mj-agents"]["args"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|value| value == "--review-gate"),
-                    expected
+                    servers.get("mj-review").is_some(),
+                    expected,
+                    "{role} {tools}"
                 );
-                let settings: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap())
-                        .unwrap();
-                assert!(
-                    settings["permissions"]["allow"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|value| value == "mcp__mj-agents__request_review")
-                );
-                assert_eq!(
-                    settings["permissions"]["allow"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|value| value == "mcp__mj-agents__override_review"),
-                    expected
-                );
-                configure_codex_mcp_with_mailboxes(
-                    root.path(),
-                    "",
-                    &home,
-                    Some(role),
+                for rule in REVIEW_RULES {
+                    assert_eq!(allow.iter().any(|allowed| allowed == rule), expected);
+                }
+                if expected {
+                    let review = &servers["mj-review"];
+                    assert_eq!(review["type"], "stdio");
+                    // No alwaysLoad: Claude defers these tools until needed.
+                    assert!(review.get("alwaysLoad").is_none());
+                    assert_eq!(
+                        review["command"],
+                        serde_json::json!(root.path().join("hel"))
+                    );
+                    let socket_path = root.path().join(SUBAGENT_SOCKET);
+                    let mut expected_args = vec![
+                        "worker",
+                        "subagent-mcp",
+                        "--socket",
+                        socket_path.to_str().unwrap(),
+                        "--harness",
+                        "claude",
+                        "--review-server",
+                    ];
+                    // Only a managed child names its role, for its instructions.
+                    if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::FetchOnly) {
+                        expected_args.extend(["--role", role.id()]);
+                    }
+                    assert_eq!(string_args(review), expected_args);
+                }
+
+                for policy in [
                     mj_core::config::ExecutionPolicy::ConfiguredApprovals,
-                    true,
-                    true,
-                    gate,
-                )
-                .unwrap();
-                let config: toml::Table =
-                    toml::from_str(&std::fs::read_to_string(home.join("config.toml")).unwrap())
-                        .unwrap();
-                assert_eq!(
-                    config["mcp_servers"]["mj-agents"]["args"]
+                    mj_core::config::ExecutionPolicy::Unconstrained,
+                ] {
+                    configure_codex_mcp_with_mailboxes(
+                        root.path(),
+                        "",
+                        &home,
+                        Some(role),
+                        policy,
+                        true,
+                        true,
+                        tools,
+                    )
+                    .unwrap();
+                    let servers = codex_servers(&home);
+                    let agents: Vec<_> = servers["mj-agents"]["args"]
                         .as_array()
                         .unwrap()
                         .iter()
-                        .any(|value| value.as_str() == Some("--review-gate")),
-                    expected
-                );
+                        .map(|arg| arg.as_str().unwrap())
+                        .collect();
+                    assert!(!agents.contains(&"--review-gate"));
+                    assert!(!agents.contains(&"--review-server"));
+                    assert_eq!(
+                        servers.contains_key("mj-review"),
+                        expected,
+                        "{role} {tools}"
+                    );
+                    if expected {
+                        let review = &servers["mj-review"];
+                        let args: Vec<_> = review["args"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|arg| arg.as_str().unwrap())
+                            .collect();
+                        let socket_path = root.path().join(SUBAGENT_SOCKET);
+                        let mut expected_args = vec![
+                            "worker",
+                            "subagent-mcp",
+                            "--socket",
+                            socket_path.to_str().unwrap(),
+                            "--harness",
+                            "codex",
+                            "--review-server",
+                        ];
+                        if matches!(role, SubagentMcpRole::Child | SubagentMcpRole::FetchOnly) {
+                            expected_args.extend(["--role", role.id()]);
+                        }
+                        assert_eq!(args, expected_args);
+                        // Codex may defer these tools; mj-agents opts out of that.
+                        assert!(review.get("omit_tools_from").is_none());
+                        assert!(servers["mj-agents"].get("omit_tools_from").is_some());
+                        assert_eq!(
+                            review.get("default_tools_approval_mode").is_some(),
+                            policy == mj_core::config::ExecutionPolicy::ConfiguredApprovals
+                        );
+                    }
+                }
             }
         }
+    }
+
+    /// A profile staged by the previous build lists the review tools under
+    /// `mj-agents`. The next worker start rewrites it, whatever the gate says.
+    #[test]
+    fn a_profile_staged_with_review_tools_under_mj_agents_is_upgraded_on_start() {
+        let (root, home) = staged_profile();
+        let socket = root.path().join(SUBAGENT_SOCKET);
+        std::fs::write(
+            home.join(".claude.json"),
+            serde_json::json!({"mcpServers":{
+                "other":{"command":"x"},
+                "mj-agents":{"type":"stdio","alwaysLoad":true,"command":root.path().join("hel"),
+                    "args":["worker","subagent-mcp","--socket",socket,"--role","parent","--review-gate"]}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"permissions":{"allow":["mcp__mj-agents__request_review","mcp__mj-agents__override_review"]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            format!(
+                "[mcp_servers.mj-agents]\ncommand = \"/old/hel\"\nargs = [\"worker\", \"subagent-mcp\", \"--socket\", \"{}\", \"--role\", \"parent\", \"--review-gate\"]\n",
+                socket.display()
+            ),
+        )
+        .unwrap();
+
+        configure_claude_subagent_mcp(
+            root.path(),
+            "session",
+            &home,
+            Some(SubagentMcpRole::Parent),
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        let (config, allow) = claude_files(&home);
+        assert_eq!(config["mcpServers"]["other"]["command"], "x");
+        assert!(!string_args(&config["mcpServers"]["mj-agents"]).contains(&"--review-gate"));
+        assert!(config["mcpServers"]["mj-review"].is_object());
+        for rule in REVIEW_RULES {
+            assert!(allow.iter().any(|allowed| allowed == rule));
+        }
+
+        configure_codex_mcp_with_mailboxes(
+            root.path(),
+            "",
+            &home,
+            Some(SubagentMcpRole::Parent),
+            mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        let servers = codex_servers(&home);
+        assert!(
+            !servers["mj-agents"]["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|arg| arg.as_str() == Some("--review-gate"))
+        );
+        assert!(servers.contains_key("mj-review"));
+
+        // Turning the gate off, or losing the role, removes the review server.
+        configure_claude_subagent_mcp(
+            root.path(),
+            "session",
+            &home,
+            Some(SubagentMcpRole::Parent),
+            true,
+            true,
+            false,
+        )
+        .unwrap();
+        let (config, _) = claude_files(&home);
+        assert!(config["mcpServers"].get("mj-review").is_none());
+        assert!(config["mcpServers"]["mj-agents"].is_object());
+        configure_codex_mcp_with_mailboxes(
+            root.path(),
+            "",
+            &home,
+            Some(SubagentMcpRole::Parent),
+            mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+            true,
+            true,
+            false,
+        )
+        .unwrap();
+        let servers = codex_servers(&home);
+        assert!(!servers.contains_key("mj-review"));
+        assert!(servers.contains_key("mj-agents"));
+
+        configure_claude_subagent_mcp(
+            root.path(),
+            "session",
+            &home,
+            Some(SubagentMcpRole::Parent),
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        configure_claude_subagent_mcp(root.path(), "session", &home, None, true, true, true)
+            .unwrap();
+        let (config, _) = claude_files(&home);
+        assert!(config["mcpServers"].get("mj-review").is_none());
+        assert!(config["mcpServers"].get("mj-agents").is_none());
+        assert_eq!(config["mcpServers"]["other"]["command"], "x");
+        configure_codex_mcp_with_mailboxes(
+            root.path(),
+            "",
+            &home,
+            Some(SubagentMcpRole::Parent),
+            mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        configure_codex_mcp_with_mailboxes(
+            root.path(),
+            "",
+            &home,
+            None,
+            mj_core::config::ExecutionPolicy::ConfiguredApprovals,
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        let servers = codex_servers(&home);
+        assert!(servers.is_empty(), "{servers:?}");
     }
 }

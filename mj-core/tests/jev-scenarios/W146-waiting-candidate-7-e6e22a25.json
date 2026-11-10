@@ -60,11 +60,6 @@
           "text": "While the lanes run, I'll read the crate-ownership rules in the architecture guidance, since the split design must follow them."
         },
         {
-          "id": "user:259",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:298",
           "role": "assistant",
           "text": "Now I'll run the profiling myself. First step: let cargo build the unit-test target once through mbx, verbosely, to capture the exact rustc command line."
@@ -85,16 +80,6 @@
           "text": "Waiting on four investigation lanes and the verbose test build that captures the rustc command line. Profiling runs start once that build finishes."
         },
         {
-          "id": "user:386",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:430",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:432",
           "role": "assistant",
           "text": "The capture build is still compiling dependencies. Another lane finished, so I'll collect it."
@@ -105,11 +90,6 @@
           "text": "Waiting on the module-graph lane, the unit-test lane, and the capture build. The three profiling compiles start after the build."
         },
         {
-          "id": "user:498",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:547",
           "role": "assistant",
           "text": "Production code is about 877,000 lines and test code about 378,000. Next I'll print the dependency weights among the largest units to see which direction each pair mostly runs."
@@ -118,11 +98,6 @@
           "id": "agent:590",
           "role": "assistant",
           "text": "The analysis test compile is running and its command line is in the log. I'll extract it and build the profiling command from it now, so the runs can start as soon as this compile ends."
-        },
-        {
-          "id": "user:630",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:739",
@@ -182,7 +157,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The wait tool's connection keeps dropping, but the background watcher on the first profiling run will resume me when it finishes. Then I'll collect the two lanes' reports with a direct wait.\n\nStatus: the first of three profiling compiles is running. Two verification lanes are checking the resolution extraction and the language registry's call sites.",
     "completion": {
       "stop_reason": "EndTurn",

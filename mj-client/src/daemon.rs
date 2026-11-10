@@ -389,6 +389,9 @@ pub struct WorkspaceSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSessionView {
+    /// Config selectors owned by the target permission policy.
+    #[serde(default)]
+    pub policy_config_keys: Vec<String>,
     pub session_id: String,
     pub projection_ordinal: u64,
     pub projection_digest: String,
@@ -412,6 +415,7 @@ impl RuntimeSessionView {
                 });
         Self {
             session_id,
+            policy_config_keys: Vec::new(),
             projection_ordinal,
             projection_digest,
             operational,
@@ -532,6 +536,9 @@ pub struct CreateSessionRequest {
     /// `mj_core::state::SessionRecord::no_github_events`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_github_events: bool,
+    /// Withhold GitHub credentials; inherited by children.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     #[serde(default)]
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
@@ -701,12 +708,11 @@ pub enum DaemonAction {
         session_id: String,
         through: u64,
     },
-    PersistDetachedSessionState {
+    PersistTerminalDraft {
         client_id: String,
-        workspace_id: String,
         session_id: String,
-        through: u64,
         owner_pid: u32,
+        revision: u64,
         draft: mj_core::storage::DetachedSessionDraft,
     },
     RecordAbandonedPrompt {
@@ -1105,7 +1111,10 @@ pub enum DaemonReply {
     DashboardStartup(Box<DashboardStartup>),
     WorkspaceLayouts(WorkspaceLayouts),
     StoredSessionMetadata(StoredSessionMetadata),
-    StoredProjectionTail(Option<Box<MaterializedSession>>),
+    StoredProjectionTail(
+        #[serde(serialize_with = "crate::runtime_feed::serialize_client_projection")]
+        Option<Box<MaterializedSession>>,
+    ),
     StoredSessionSummary(Option<Box<MaterializedSessionSummary>>),
     SavedSetup(Box<Config>),
     ArchiveSpacePreview(ArchiveSpacePreview),
@@ -1963,28 +1972,26 @@ impl DaemonClient {
         }
     }
 
-    pub async fn persist_detached_session_state(
+    pub async fn persist_terminal_draft(
         &mut self,
         client_id: String,
-        workspace_id: String,
         session_id: String,
-        through: u64,
         owner_pid: u32,
+        revision: u64,
         draft: mj_core::storage::DetachedSessionDraft,
     ) -> Result<()> {
         match self
-            .request(DaemonAction::PersistDetachedSessionState {
+            .request(DaemonAction::PersistTerminalDraft {
                 client_id,
-                workspace_id,
                 session_id,
-                through,
                 owner_pid,
+                revision,
                 draft,
             })
             .await?
         {
             DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected detached-session-state reply {reply:?}"),
+            reply => bail!("unexpected terminal-draft reply {reply:?}"),
         }
     }
 
@@ -2625,10 +2632,10 @@ impl DaemonClient {
         }
     }
 
-    /// Ask the daemon to review the turn this session just finished.
+    /// Ask the daemon to review committed work through the push gate.
     ///
-    /// The refusal is a sentence for a person -- "prompts are queued", "set
-    /// [review] profile in config.toml" -- so it travels as text rather than
+    /// The refusal includes how to proceed, such as committing tracked
+    /// changes or choosing a harness with push-gate support. It travels as text rather than
     /// as a code every surface would have to translate.
     pub async fn start_turn_review(&mut self, session_id: String) -> Result<()> {
         match self
@@ -2636,7 +2643,7 @@ impl DaemonClient {
             .await?
         {
             DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected turn-review reply {reply:?}"),
+            reply => bail!("unexpected review reply {reply:?}"),
         }
     }
 
@@ -2990,7 +2997,11 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // clients reading its PID and `/proc`, and it serves the configuration that
 // owns the store instead of clients opening `config.toml`.
 // SessionReview::Inherit adds a value older API clients cannot deserialize.
-pub const PROTOCOL_VERSION: u32 = 82;
+// Client views no longer decode forwarding phases or turn-review resolutions;
+// reviewer capture actions no longer carry turn scope or baselines.
+// RuntimeSessionView carries policy-owned config keys; older strict readers reject them.
+// Terminal draft persistence carries per-client revisions and clear tombstones.
+pub const PROTOCOL_VERSION: u32 = 85;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

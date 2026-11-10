@@ -124,7 +124,13 @@ pub(super) struct ConnectFailure {
 /// so the connect tries again. Either way the worker was never reached.
 pub(super) enum ConnectRetry {
     /// The SSH server turned the proxy away, and this is what `ssh` printed.
-    Refused(mj_core::targets::SshRefusal, String),
+    /// `walks_on` is whether the refusal is a step of the command's walk to
+    /// another master (see `SshSessionLease::note_refusal`).
+    Refused {
+        refusal: mj_core::targets::SshRefusal,
+        stderr: String,
+        walks_on: bool,
+    },
     /// The worker has not bound its control socket yet. The daemon connects
     /// moments after starting a worker, which binds it within about a second
     /// (R9-2).

@@ -307,6 +307,7 @@ pub(super) async fn prepare(
                 ),
                 None => format!("the quota for profile {source} has no known reset time"),
             };
+            let mut refused = false;
             for candidate in
                 destinations(&config, &source, harness, &model, candidates, now_ms / 1000)?
             {
@@ -326,16 +327,45 @@ pub(super) async fn prepare(
                         });
                     }
                     Err(error) => {
-                        tracing::info!(session=id, profile=%candidate.profile_id, error=%format!("{error:#}"), "quota Move preparation refused")
+                        refused = true;
+                        preparation_refused(
+                            &mut fallback.notice,
+                            id,
+                            &candidate.profile_id,
+                            &error,
+                            &format!("quota-move-prepare-{id}-{}", turn.completed_ordinal),
+                        );
                     }
                 }
             }
-            fallback.notice.push_str(&format!(
-                " No other enabled profile of this harness with quota or paid credits left can take over this session with model {model}."
-            ));
+            if !refused {
+                append_bounded(
+                    &mut fallback.notice,
+                    &format!(
+                        " No other enabled profile of this harness with quota or paid credits left can take over this session with model {model}."
+                    ),
+                );
+            }
         }
     }
     Ok(Plan::Wait(fallback))
+}
+
+pub(super) fn preparation_refused(
+    notice: &mut String,
+    session: &str,
+    profile: &str,
+    error: &anyhow::Error,
+    reference: &str,
+) {
+    tracing::info!(session, profile, reference, error=%format!("{error:#}"), "quota Move preparation refused");
+    append_bounded(
+        notice,
+        &format!(
+            " Automatic Move to profile {profile} was refused: {}.",
+            crate::daemon::session_move::public_quota_failure(error, reference)
+        ),
+    );
 }
 
 /// The longest notice the worker accepts in a `SetQuotaRecovery` (checked in
@@ -445,9 +475,12 @@ pub(super) async fn schedule(
         } = plan
             && let Err(error) = (env.start_quota_move)(*request, reason, continuation).await
         {
+            let reference = format!("quota-move-start-{id}-{}", fallback.completed_command_id);
+            tracing::warn!(session=id, profile=%destination, %reference, error=%format!("{error:#}"), "quota Move admission refused");
             append_bounded(
                 &mut fallback.notice,
-                &format!(" Could not start the Move to profile {destination}: {error:#}."),
+                &format!(" Could not start the Move to profile {destination}: {}.",
+                    crate::daemon::session_move::public_quota_failure(&error, &reference)),
             );
             handle
                 .submit(
@@ -527,7 +560,7 @@ pub(super) async fn resume(
                 )
             } else {
                 (
-                    format!("quota-retry-{ordinal}"),
+                    mj_core::continuation::GeneratedPrompt::QuotaRetry.command_id(ordinal),
                     RelayCommand::ResumeAfterQuota {
                         expected: cursor(&current)?,
                         completed_command_id: recovery.completed_command_id.clone(),

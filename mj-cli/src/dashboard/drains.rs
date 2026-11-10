@@ -89,7 +89,6 @@ impl DashboardContext {
             self.dashboard.set_profile_capabilities(capabilities);
         }
         self.drain_capacity_updates();
-        self.drain_aws_resource_options();
         self.drain_import_profiles();
         self.drain_import_tasks();
         self.drain_lifecycle_updates();
@@ -121,7 +120,6 @@ impl DashboardContext {
             self.runtime_config.take_delivered(),
             self.lifecycle.take_delivered(),
             self.capacity.take_delivered(),
-            self.aws_options.take_delivered(),
             self.import_profiles.take_delivered(),
             self.import_tasks.take_delivered(),
             self.dashboard_io.take_delivered(),
@@ -457,6 +455,7 @@ impl DashboardContext {
         self.select_workspace(next_workspace);
         self.apply_runtime_records(
             update.records,
+            update.sessions,
             update.subagents,
             update.last_subagent_policies,
         );
@@ -549,9 +548,10 @@ impl DashboardContext {
             chats,
             controller,
             dashboard,
+            runtime_sessions,
             ..
         } = self;
-        refresh_open_chats(chats, controller, dashboard);
+        refresh_open_chats(chats, controller, dashboard, runtime_sessions);
     }
 
     pub(crate) fn drain_runtime_config(&mut self) {
@@ -591,6 +591,10 @@ impl DashboardContext {
     pub(crate) fn apply_runtime_records(
         &mut self,
         records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+        runtime_sessions: mj_core::snapshot_map::SnapshotMap<
+            String,
+            mj_client::daemon::RuntimeSessionView,
+        >,
         subagents: mj_core::snapshot_map::SnapshotMap<String, SubagentMetadata>,
         last_subagent_policies: std::collections::BTreeMap<
             String,
@@ -599,6 +603,12 @@ impl DashboardContext {
     ) {
         let mut sessions = records;
         read_receipts::preserve_read_positions(&mut sessions, &self.controller.state.sessions);
+        // Live views change on nearly every feed update; chats read only their
+        // own session's policy keys, and ignore an unchanged list.
+        self.runtime_sessions = runtime_sessions;
+        for chat in self.chats.values_mut() {
+            apply_policy_config_key(chat, &self.runtime_sessions);
+        }
         let Self {
             chats, dashboard, ..
         } = self;
@@ -681,14 +691,6 @@ impl DashboardContext {
                 self.dashboard
                     .set_notice("Could not refresh target capacity: poller stopped.");
             }
-        }
-    }
-
-    pub(crate) fn drain_aws_resource_options(&mut self) {
-        while let Some((target_id, result)) = self.aws_options.next_ready() {
-            self.resolving_aws_resource_options.remove(&target_id);
-            self.dashboard
-                .apply_aws_resource_options(&target_id, result);
         }
     }
 
@@ -823,8 +825,13 @@ pub(crate) fn refresh_open_chats(
     chats: &mut BTreeMap<String, mj_chat::chat::ActiveChat>,
     controller: &Controller,
     dashboard: &DashboardState,
+    runtime_sessions: &mj_core::snapshot_map::SnapshotMap<
+        String,
+        mj_client::daemon::RuntimeSessionView,
+    >,
 ) {
     for chat in chats.values_mut() {
+        apply_policy_config_key(chat, runtime_sessions);
         let record = controller.state.sessions.get(chat.session_id());
         chat.refresh_context(
             &controller.config,
@@ -836,6 +843,16 @@ pub(crate) fn refresh_open_chats(
         }
     }
     refresh_subagent_counts(chats, dashboard);
+}
+
+pub(crate) fn apply_policy_config_key(
+    chat: &mut mj_chat::chat::ActiveChat,
+    sessions: &mj_core::snapshot_map::SnapshotMap<String, mj_client::daemon::RuntimeSessionView>,
+) {
+    let keys = sessions
+        .get(chat.session_id())
+        .map_or(&[][..], |view| view.policy_config_keys.as_slice());
+    chat.set_policy_config_keys(keys);
 }
 
 /// Hands every open conversation the dashboard's count of its sub-agents and

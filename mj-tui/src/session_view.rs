@@ -15,7 +15,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
-use crate::dashboard_sessions::session_attention_level;
+use crate::dashboard_sessions::own_attention_level;
 
 /// Revisions come from one counter, so a replaced value never repeats a
 /// revision an earlier value had.
@@ -107,7 +107,10 @@ pub(crate) struct SessionFacts {
     /// the first derivation.
     inputs: Option<[u64; 5]>,
     /// The attention level of every session record from its own facts.
-    attention: HashMap<String, AttentionLevel>,
+    own: HashMap<String, AttentionLevel>,
+    /// For each parent, its first active Mjolnir sub-agent that is waiting
+    /// on a question.
+    waiting_child: HashMap<String, String>,
     /// Live records, and records an operation keeps on screen, by id.
     listed: Vec<String>,
     /// How many times the facts were derived, for tests to count.
@@ -119,12 +122,44 @@ impl SessionFacts {
     fn derive(dashboard: &DashboardState, inputs: [u64; 5]) -> Self {
         let mut index = dashboard.row_index.borrow_mut();
         index.synchronize(&dashboard.state);
-        let attention = dashboard
+        let own = dashboard
             .state
             .sessions
             .iter()
-            .map(|(id, session)| (id.clone(), session_attention_level(dashboard, id, session)))
+            .map(|(id, session)| (id.clone(), own_attention_level(dashboard, id, session)))
             .collect::<HashMap<_, _>>();
+        let holds_form = |child: &str| {
+            own.get(child) == Some(&AttentionLevel::Waiting)
+                && dashboard.state.sessions.contains_key(child)
+                && dashboard
+                    .session_details
+                    .get(child)
+                    .is_some_and(|detail| !detail.pending_elicitations.is_empty())
+        };
+        // A descendant holding a form, at any depth, so a child's reviewer
+        // reaches the top-level row too. Validation rejects
+        // ownership cycles; `visited` keeps a malformed state finite anyway.
+        let waiting_child = index
+            .active_children
+            .keys()
+            .filter_map(|parent| {
+                let mut visited = std::collections::HashSet::new();
+                let mut stack = vec![parent.as_str()];
+                while let Some(session) = stack.pop() {
+                    if !visited.insert(session) {
+                        continue;
+                    }
+                    let Some(children) = index.active_children.get(session) else {
+                        continue;
+                    };
+                    if let Some(child) = children.iter().find(|child| holds_form(child)) {
+                        return Some((parent.clone(), child.clone()));
+                    }
+                    stack.extend(children.iter().rev().map(String::as_str));
+                }
+                None
+            })
+            .collect();
         let mut listed = index.live.clone();
         listed.extend(dashboard.session_operations.keys().cloned());
         let listed = listed
@@ -133,18 +168,36 @@ impl SessionFacts {
             .collect();
         Self {
             inputs: Some(inputs),
-            attention,
+            own,
+            waiting_child,
             listed,
             #[cfg(test)]
             derivations: 0,
         }
     }
 
-    pub(crate) fn attention_level(&self, session_id: &str) -> AttentionLevel {
-        self.attention
+    pub(crate) fn own_attention_level(&self, session_id: &str) -> AttentionLevel {
+        self.own
             .get(session_id)
             .copied()
             .unwrap_or(AttentionLevel::Inactive)
+    }
+
+    /// A parent whose Mjolnir sub-agent is waiting on a question reads as
+    /// waiting too. The child has no row outside the Sub-agents view, so
+    /// without this nothing a person normally looks at would show that the
+    /// child needs them (R11-1).
+    pub(crate) fn attention_level(&self, session_id: &str) -> AttentionLevel {
+        let own = self.own_attention_level(session_id);
+        if own < AttentionLevel::Waiting && self.waiting_child.contains_key(session_id) {
+            AttentionLevel::Waiting
+        } else {
+            own
+        }
+    }
+
+    pub(crate) fn waiting_child(&self, parent_id: &str) -> Option<&str> {
+        self.waiting_child.get(parent_id).map(String::as_str)
     }
 
     pub(crate) fn listed(&self) -> &[String] {
@@ -183,11 +236,15 @@ impl CpuRollup {
 pub(crate) struct CpuShare {
     pub(crate) permille: u16,
     pub(crate) partial: bool,
+    pub(crate) included: bool,
 }
 
 impl CpuShare {
     /// The row text: the share, then `+` when it is a lower bound.
     pub(crate) fn label(&self) -> String {
+        if self.included {
+            return "included in parent".into();
+        }
         let marker = if self.partial { "+" } else { "" };
         format!(
             "{}{marker}",
@@ -207,6 +264,8 @@ pub(crate) fn clamp_permille(permille: u32) -> u16 {
 pub(crate) struct CpuRollups {
     inputs: Option<[u64; 2]>,
     by_session: HashMap<String, CpuRollup>,
+    samples: HashMap<String, mj_core::cpu_usage::SessionCpuUsage>,
+    owners: HashMap<String, String>,
     /// Live sub-agents of each parent, in id order.
     children: HashMap<String, Vec<String>>,
     #[cfg(test)]
@@ -221,40 +280,118 @@ impl CpuRollups {
             .iter()
             .map(|(parent, ids)| (parent.clone(), ids.iter().cloned().collect()))
             .collect();
+        let mut samples: HashMap<_, _> = dashboard
+            .session_cpu
+            .iter()
+            .filter_map(|(id, view)| match view {
+                mj_client::runtime_feed::SessionCpuView::Measured { usage } => {
+                    Some((id.clone(), *usage))
+                }
+                _ => None,
+            })
+            .collect();
+        // A physical container has one contribution even while workers upgrade or move.
+        let mut groups = std::collections::BTreeMap::new();
+        for (id, session) in dashboard.state.sessions.iter().filter(|(_, session)| {
+            session.state.is_active()
+                && !matches!(
+                    session.state,
+                    mj_core::state::SessionState::Parked | mj_core::state::SessionState::Error
+                )
+        }) {
+            if let Some(scope) = session
+                .target
+                .as_ref()
+                .and_then(|target| target.cpu_container_scope())
+            {
+                groups
+                    .entry(scope)
+                    .or_insert_with(Vec::new)
+                    .push(id.clone());
+            }
+        }
+        let mut owners: HashMap<String, String> = dashboard
+            .state
+            .sessions
+            .keys()
+            .map(|id| (id.clone(), id.clone()))
+            .collect();
+        for ids in groups.values_mut() {
+            ids.sort_by_key(|id| {
+                (
+                    !dashboard
+                        .state
+                        .sessions
+                        .get(id)
+                        .and_then(|session| session.target.as_ref())
+                        .is_some_and(|target| target.owns_container()),
+                    id.clone(),
+                )
+            });
+            let canonical = &ids[0];
+            let sample = ids
+                .iter()
+                .filter_map(|id| samples.get(id))
+                .find(|sample| sample.scope == mj_core::cpu_usage::CpuSampleScope::Container)
+                .copied();
+            if let Some(sample) = sample {
+                for id in ids.iter() {
+                    owners.insert(id.clone(), canonical.clone());
+                }
+                samples.insert(canonical.clone(), sample);
+            }
+        }
+        let mut result = Self {
+            inputs: Some(inputs),
+            samples,
+            owners,
+            children,
+            ..Self::default()
+        };
         let mut by_session = HashMap::new();
         for id in dashboard.state.sessions.keys() {
-            let mut rollup = CpuRollup::default();
+            let mut members = Vec::new();
             let mut seen = std::collections::HashSet::new();
             let mut pending = vec![id.as_str()];
             while let Some(member) = pending.pop() {
                 if !seen.insert(member) {
                     continue;
                 }
-                rollup.members += 1;
-                if let Some(mj_client::runtime_feed::SessionCpuView::Measured { usage }) =
-                    dashboard.session_cpu.get(member)
-                {
-                    rollup.measured += 1;
-                    rollup.recent_permille += u32::from(usage.recent_permille);
-                    rollup.hourly_permille += u32::from(usage.hourly_permille);
-                }
+                members.push(member);
                 pending.extend(
-                    children
+                    result
+                        .children
                         .get(member)
                         .into_iter()
                         .flatten()
                         .map(String::as_str),
                 );
             }
-            by_session.insert(id.clone(), rollup);
+            by_session.insert(id.clone(), result.total(members));
         }
-        Self {
-            inputs: Some(inputs),
-            by_session,
-            children,
-            #[cfg(test)]
-            derivations: 0,
+        result.by_session = by_session;
+        result
+    }
+
+    fn total<'a>(&self, members: impl IntoIterator<Item = &'a str>) -> CpuRollup {
+        let mut rollup = CpuRollup::default();
+        let mut scopes = std::collections::HashSet::new();
+        for member in members {
+            rollup.members += 1;
+            let owner = self
+                .owners
+                .get(member)
+                .map(String::as_str)
+                .unwrap_or(member);
+            if let Some(usage) = self.samples.get(owner) {
+                rollup.measured += 1;
+                if scopes.insert(owner) {
+                    rollup.recent_permille += u32::from(usage.recent_permille);
+                    rollup.hourly_permille += u32::from(usage.hourly_permille);
+                }
+            }
         }
+        rollup
     }
 }
 
@@ -408,6 +545,35 @@ impl DashboardState {
             .unwrap_or_default()
     }
 
+    pub(crate) fn cpu_sample(
+        &self,
+        session_id: &str,
+    ) -> Option<mj_core::cpu_usage::SessionCpuUsage> {
+        let rollups = self.cpu_rollups();
+        rollups
+            .samples
+            .get(
+                rollups
+                    .owners
+                    .get(session_id)
+                    .map(String::as_str)
+                    .unwrap_or(session_id),
+            )
+            .copied()
+    }
+
+    pub(crate) fn cpu_included_in(&self, session_id: &str) -> Option<String> {
+        self.cpu_rollups()
+            .owners
+            .get(session_id)
+            .filter(|owner| owner.as_str() != session_id)
+            .cloned()
+    }
+
+    pub(crate) fn cpu_total<'a>(&self, ids: impl IntoIterator<Item = &'a str>) -> CpuRollup {
+        self.cpu_rollups().total(ids)
+    }
+
     /// The figure a Sessions row shows: `None` when nothing in the tree is
     /// measured. The row applies its own display threshold.
     pub(crate) fn cpu_share(&self, session_id: &str) -> Option<CpuShare> {
@@ -415,6 +581,7 @@ impl DashboardState {
         (rollup.measured > 0).then(|| CpuShare {
             permille: clamp_permille(rollup.recent_permille),
             partial: rollup.is_partial(),
+            included: self.cpu_included_in(session_id).is_some(),
         })
     }
 

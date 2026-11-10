@@ -99,7 +99,7 @@
                   "review"
                 ],
                 "label": "Code Review",
-                "help": "Review triggers and reviewers. An empty reviewer list means no reviewers are configured.",
+                "help": "Reviewers for code review before push. With no reviewers, review is off.",
                 "control": "page",
                 "summary": "Off"
               },
@@ -126,7 +126,7 @@
                   "quota"
                 ],
                 "label": "Quota checks",
-                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it in your local Podman or Docker runtime's image when one is enabled, else on this machine.",
+                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled.",
                 "control": "page",
                 "summary": "Auto · container when available"
               },
@@ -467,7 +467,7 @@
                   "review"
                 ],
                 "label": "Code Review",
-                "help": "Review triggers and reviewers. An empty reviewer list means no reviewers are configured.",
+                "help": "Reviewers for code review before push. With no reviewers, review is off.",
                 "control": "page",
                 "summary": "Off"
               },
@@ -494,7 +494,7 @@
                   "quota"
                 ],
                 "label": "Quota checks",
-                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it in your local Podman or Docker runtime's image when one is enabled, else on this machine.",
+                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled.",
                 "control": "page",
                 "summary": "Auto · container when available"
               },
@@ -850,7 +850,7 @@
                   "review"
                 ],
                 "label": "Code Review",
-                "help": "Review triggers and reviewers. An empty reviewer list means no reviewers are configured.",
+                "help": "Reviewers for code review before push. With no reviewers, review is off.",
                 "control": "page",
                 "summary": "Off"
               },
@@ -877,7 +877,7 @@
                   "quota"
                 ],
                 "label": "Quota checks",
-                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it in your local Podman or Docker runtime's image when one is enabled, else on this machine.",
+                "help": "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled.",
                 "control": "page",
                 "summary": "Auto · container when available"
               },

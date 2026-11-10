@@ -1693,6 +1693,9 @@ pub(crate) fn confirmation_body(
                 Line::raw(
                     "Permanently destroy this session, its environment, and its recovery archive?",
                 ),
+                Line::raw(
+                    "Cleanup failures warn about remaining resources; the session is still removed.",
+                ),
                 Line::raw(if *delete_branch_available {
                     "Its legacy managed branch is kept unless explicitly deleted. Work only in the environment is lost."
                 } else {

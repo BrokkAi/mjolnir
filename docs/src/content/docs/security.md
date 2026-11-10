@@ -112,6 +112,55 @@ not make copied secrets unreadable inside the target. Likewise, provider-side
 handling of prompts and repository content is governed by the selected
 harness and account, not by Mjolnir.
 
+Mjolnir stores what agents print as they printed it. Transcripts, checkpoints,
+and worker diagnostics keep any secret that appears in agent output, for
+example after an agent runs `env` or reads a token file, and the dashboard and
+web viewer show it. The evidence sent to the Jev classifier, and its local copy
+in `jev-decisions/`, first has every unbroken run of 24 or more letters,
+digits, `-`, `_`, `.`, or `+` replaced. That catches many API keys and tokens
+but not every credential: an AWS secret key containing `/`, or a short access
+key ID, passes through. A secret an agent prints can therefore still reach the
+hosted classifier; turn Jev off, as described above, to stop sending turn text
+to it.
+
+## Sessions are not isolated from each other's agents
+
+Mjolnir does not keep one session's agent away from another session's data.
+Through Mjolnir's own tools, an agent in any session, including one in a
+container or on a remote target, can copy files from other sessions'
+workspaces (the `mj-agents` `fetch` tool, in sessions with delegation tools
+enabled) and search and read the controller's indexed conversations, including
+other projects' (the `mj-memory` history tools). Treat every agent you run as
+trusted with all of your sessions' workspaces and conversations.
+
+Agents on the controller host can do more. The daemon's API under `/api/v1`
+accepts one bearer token, kept in the owner-only `api-token` file in Mjolnir's
+data directory; `mj api` and `mj github-token` read it from there. Any process
+that runs as your user on the controller host can read that file, and that
+includes agents in bare `local` sessions. With the token, a process can also
+write any session's workspace files, read any transcript, change a session's
+settings such as its model, destroy sessions, and mint GitHub App installation
+tokens for any repository the App can reach.
+
+Mjolnir does not scope this token to one session. An agent in a bare local
+session already runs with your account's authority: it can read your files,
+your credentials, and Mjolnir's data directory directly, so a narrower API token
+would not contain it. Each worker's control socket follows the same rule: any
+process running as the same user on the worker's machine can connect to it and
+use every method it serves. No `/api/v1` route edits Mjolnir's configuration:
+profiles, targets, and the other settings in `config.toml` change only through
+the dashboard, the cookie-authenticated web viewer settings, or the file
+itself.
+
+Sessions in containers and on remote targets are not given the `api-token`
+file, but do not rely on that as a boundary. The `fetch` tool can copy any file
+inside another local session's workspace, sub-agent reports, or temporary
+directory, and Mjolnir's data directory can lie inside one of them: for
+example when a bare local session works in your home directory, or when
+`MJ_DATA_DIR` points under `/tmp`. An agent that copies the token and can reach
+the daemon's API gains everything listed above. Treat every agent you run, in
+any runtime, as trusted with your sessions and with what the token allows.
+
 ## Profile staging is allowlisted
 
 Mjolnir never copies a harness home wholesale. It builds a per-session profile
@@ -168,6 +217,46 @@ the authority granted to that GitHub account, so a remote target receiving it
 belongs inside the token's trust boundary. Raw local sessions do not receive
 this synchronized GitHub token.
 
+AWS credentials for an Amazon Bedrock profile (one that authenticates with the
+AWS credential chain) are delivered to container and SSH sessions the same way.
+What a session receives depends on the profile:
+
+- With no `[profiles.<id>.aws]` table, a session receives a copy of the
+  controller host's own AWS credentials. Anything running in the session can
+  use everything those credentials allow, for as long as they last. `mj doctor`
+  warns about this.
+- With `[profiles.<id>.aws] role_arn = ...`, the controller uses the host's
+  AWS login to assume that IAM role for each session (AWS `AssumeRole`), and
+  the session receives only the resulting temporary credentials. They are
+  limited to the role intersected with a session policy (by default, Bedrock
+  invocation only, or the policy you set), they last an hour unless you set
+  `duration_seconds`, and the controller renews them after half of that time.
+  The session id is the role session name, so AWS CloudTrail attributes every
+  call to its session; `source_identity = true` also records it as the
+  immutable `SourceIdentity`. The host's own credentials never leave the
+  controller. If AWS refuses the role, a launch fails with AWS's error and the
+  fix. A running session keeps the scoped credentials Mjolnir issued for it
+  until they expire while the sync reports the failure, but a session that
+  still holds the host's own credentials (installed before the role was
+  configured) has them withdrawn, because static host keys never expire. The
+  worker records beside the secret which role, session, policy and
+  `SourceIdentity` Mjolnir issued credentials for, authenticated with a key
+  derived from the controller's private signing key that a session cannot
+  compute, so a record a session wrote itself counts for nothing; so after a daemon restart Mjolnir still keeps what it issued
+  and withdraws everything else. A session on a worker too old to withdraw is
+  moved to a current worker automatically when it is idle, and withdrawn then.
+  Mjolnir never falls back to the host's credentials, and the session's other
+  synchronization (GitHub token, skills, logins) continues. See [Limiting the AWS credentials sessions receive](/profiles/#limiting-the-aws-credentials-sessions-receive).
+
+This applies only to sessions that receive synced credentials. A raw local
+session reads the host's AWS files directly, an EC2 session uses its instance
+role (Mjolnir requires IMDSv2 on every instance it launches; see
+[AWS EC2 machines](https://github.com/BrokkAi/mjolnir/blob/master/docs/AWS.md)),
+explicit AWS keys in a profile or target environment stay as configured, and a
+Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`) is not covered. Scoped
+credentials bound what stolen credentials can do and for how long; they do not
+stop code in the session from using them while they are valid.
+
 The slopcop login travels the same way. When the machine running Mjolnir is
 signed in to slopcop (`SLOPCOP_TOKEN`, or the login `slopcop login` stored),
 Mjolnir keeps a copy of that token, and of a non-default service URL, in every
@@ -188,6 +277,37 @@ That token is stored in Mjolnir's private controller data, outside the Claude
 profile home, and is passed to new and resumed Claude sessions as
 `CLAUDE_CODE_OAUTH_TOKEN`. It authorizes model requests; it does not enable
 Claude Remote Control or claude.ai connectors.
+
+## SSH host keys are trusted on first use
+
+By default, Mjolnir's own SSH connections accept a host key they have never
+seen, record it in `known_hosts`, and refuse a key that later changes
+(`StrictHostKeyChecking=accept-new`). That covers its connections to SSH
+machines and EC2 instances, whose key is always new at first contact, and the
+Git fetches it runs for its clone cache and checkpoint checks, whether those run
+on the controller or on an SSH machine that hosts a target's containers. Someone
+who can intercept a first connection can present their own key, and it is
+trusted from then on. Other Git commands that run on a target follow that
+target's own SSH settings. A `StrictHostKeyChecking` option in a machine's
+`extra_args` (or an EC2 machine's `ssh_args`) changes the checking for
+Mjolnir's connections to that machine. Setting `GIT_SSH_COMMAND` does not
+reliably change it for Mjolnir's Git fetches: some of them set their own
+command.
+
+A key that is already in `known_hosts` is checked, not trusted anew, unless an
+SSH option you set turns checking off. To avoid first-use trust:
+
+- Before the first connection, add the verified key of each Git host and each
+  machine to the `known_hosts` file of the account Mjolnir uses, on every
+  machine involved: the controller and each SSH machine you use as a target.
+  Take the expected fingerprint from a source you trust, such as the SSH key
+  fingerprints your Git host publishes, and compare it with the key you add.
+  `ssh-keyscan` only reports what the network presents, so it is not a check by
+  itself.
+- To refuse unknown keys outright on an SSH machine, add
+  `"-o", "StrictHostKeyChecking=yes"` to its `extra_args`; Mjolnir puts
+  `extra_args` first, so it wins. EC2 machines take the same option in
+  `ssh_args`. This covers Mjolnir's connection to the machine, not Git.
 
 ## Isolated sessions use independent network clones
 

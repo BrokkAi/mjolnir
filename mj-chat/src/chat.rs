@@ -123,14 +123,13 @@ pub use attachments::{CHAT_DRAFT_PREFIX, PromptImage, PromptPayload};
 
 /// What `/review status` reports, on every surface.
 ///
-/// It answers the two questions a person actually has: is every turn reviewed,
-/// and is one being reviewed right now.
+/// It answers the two questions a person actually has: does review run before
+/// push, and is one being reviewed right now.
 #[must_use]
 pub fn review_status_line(review: &mj_core::config::ReviewConfig, open: bool) -> String {
-    let armed = match review.trigger {
+    let armed = match review.trigger() {
         mj_core::config::ReviewTrigger::Push => "Review trigger is before push",
-        mj_core::config::ReviewTrigger::Turn => "Reviewing every completed turn",
-        mj_core::config::ReviewTrigger::Off => "Automatic review is off; /review reviews one turn",
+        mj_core::config::ReviewTrigger::Off => "Automatic review is off; /review reviews commits",
     };
     let count = review.reviewers.len();
     let armed = if count == 0 {
@@ -518,11 +517,15 @@ pub struct ChatState {
     /// reads capture this value so a slow native read cannot paste into a new
     /// draft after the user has continued editing.
     input_generation: u64,
-    /// Stored prompts from other sessions in this project, oldest-first.
-    project_history: Vec<String>,
     /// Stored prompts from this session, oldest-first.
     session_history: Vec<String>,
-    project_history_error: Option<String>,
+    session_history_error: Option<String>,
+    /// The latest session-history listing requested; an older answer that
+    /// arrives after a newer request is dropped.
+    session_history_generation: u64,
+    /// A listing to request, set when the chat opens and after each turn so
+    /// prompts sent to this session from elsewhere reach Up and Ctrl-P.
+    pending_session_history: Option<u64>,
     prompt_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -576,6 +579,8 @@ pub struct ChatState {
     command_choices: Vec<CommandChoice>,
     model_values: Vec<SessionConfigChoice>,
     effort_values: Vec<SessionConfigChoice>,
+    /// Config keys owned by this session's execution policy.
+    policy_config_keys: Vec<String>,
     autocomplete: Option<Autocomplete>,
     /// The `/model` / `/effort` value selector, when one is open. It owns the
     /// keyboard while it is up, though an arriving elicitation still wins.
@@ -724,9 +729,10 @@ impl ChatState {
             submitting_images: Vec::new(),
             pending_attachment_markers: BTreeMap::new(),
             input_generation: 0,
-            project_history: Vec::new(),
             session_history: Vec::new(),
-            project_history_error: None,
+            session_history_error: None,
+            session_history_generation: 0,
+            pending_session_history: None,
             prompt_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),
@@ -769,6 +775,7 @@ impl ChatState {
             command_choices: builtin_command_choices(),
             model_values: Vec::new(),
             effort_values: Vec::new(),
+            policy_config_keys: Vec::new(),
             autocomplete: None,
             config_picker: None,
             anchor: TranscriptAnchor::Bottom,

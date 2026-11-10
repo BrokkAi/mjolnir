@@ -20,6 +20,44 @@ use super::super::{
 
 const MAILBOX_EVENT_RETRY_CHILD: &str = "MJ_API_MAILBOX_EVENT_RETRY_CHILD";
 
+// Hard-won: 3c523cbdd: CLI callers could not retrieve cleanup warnings after Destroy removed the record.
+#[tokio::test]
+async fn cleanup_notices_are_authenticated_and_readable_after_session_removal() {
+    let (app, _actions, _snapshots, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.sessions = Default::default();
+            snapshot.notices = vec![
+                mj_client::daemon::RuntimeNotice {
+                    id: 1,
+                    session_id: "removed".into(),
+                    text: "Cleanup failed; resources may remain.".into(),
+                },
+                mj_client::daemon::RuntimeNotice {
+                    id: 2,
+                    session_id: "other".into(),
+                    text: "Another session's notice".into(),
+                },
+            ];
+        });
+    let path = "/api/v1/sessions/removed/notices";
+    let denied = app
+        .clone()
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let response = app
+        .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let notices: Vec<mj_client::daemon::RuntimeNotice> =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].session_id, "removed");
+    assert_eq!(notices[0].text, "Cleanup failed; resources may remain.");
+}
+
 // HTTP contract integration: optional All and encoded profile names must reach
 // the same store query, with authentication and no caching on the report.
 #[tokio::test]
@@ -364,6 +402,7 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
             false,
         )
         .unwrap()
+        .inserted()
     );
     let row = crate::database::pending_mailbox_events(10)
         .unwrap()
@@ -386,6 +425,7 @@ fn legacy_event_json_remains_readable_in_outbox_rows() {
             false,
         )
         .unwrap()
+        .inserted()
     );
     writer.shutdown().unwrap();
 }
@@ -882,6 +922,14 @@ impl SessionHandleBackend for FakeSession {
         _bundle_id: String,
         _scope: mj_core::storage::HistoryScope,
         _query: String,
+        _after: Option<mj_core::storage::HistoryCursor>,
+        _limit: usize,
+    ) -> BoxFuture<'_, AnyResult<mj_core::storage::PromptHistoryPage>> {
+        Box::pin(async { Ok(Default::default()) })
+    }
+
+    fn session_prompts(
+        &self,
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::storage::PromptHistoryEntry>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -950,6 +998,9 @@ struct CapturedSessionMessageRequest {
 
 #[derive(Default)]
 struct FakeBackend {
+    /// When set, a history write announces itself on the first and waits
+    /// for the second before it finishes.
+    record_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     usage_queries: Mutex<Vec<mj_core::usage::SessionUsageQuery>>,
     workspaces: FakeWorkspaces,
     /// Successive answers to `turn_state`, newest last. The final entry
@@ -1191,6 +1242,19 @@ impl SubagentBackend for FakeBackend {
             Ok(self.prompt_ordinal)
         })
     }
+    fn record_user_prompt(
+        &self,
+        _session_id: String,
+        _command_id: String,
+        _text: String,
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if let Some((started, release)) = &self.record_gate {
+                started.notify_one();
+                release.notified().await;
+            }
+        })
+    }
     fn resolve_message_target(&self, requested_id: String) -> BoxFuture<'_, AnyResult<String>> {
         Box::pin(async move { Ok(requested_id) })
     }
@@ -1366,6 +1430,21 @@ impl SubagentBackend for FakeBackend {
         &self,
     ) -> BoxFuture<'_, AnyResult<Vec<mj_core::workspace::WorkspaceRecord>>> {
         Box::pin(async { Ok(self.workspaces.0.lock().unwrap().clone()) })
+    }
+    fn workspace(
+        &self,
+        id: String,
+    ) -> BoxFuture<'_, AnyResult<Option<mj_core::workspace::WorkspaceRecord>>> {
+        Box::pin(async move {
+            Ok(self
+                .workspaces
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|workspace| workspace.id == id)
+                .cloned())
+        })
     }
     fn create_workspace(
         &self,
@@ -1856,6 +1935,58 @@ async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches(
 }
 
 // Hard-won: 5dafd135: a withdrawn startup prompt was still submitted after the worker attached.
+// Hard-won: 09f2862aa: an interrupt during a ready session's history write could not withdraw its prompt
+#[tokio::test]
+async fn an_interrupt_during_the_history_write_withdraws_a_ready_sessions_prompt() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let backend = Arc::new(FakeBackend {
+        prompt_ordinal: 3,
+        record_gate: Some((started.clone(), release.clone())),
+        ..FakeBackend::default()
+    });
+    let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+        snapshot.sessions[0].capabilities.prompt = true;
+        snapshot.sessions[0].capabilities.interrupt_turn = false;
+    });
+    let prompt = tokio::spawn(
+        app.clone().oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"stop me"}"#))
+                .unwrap(),
+        ),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .expect("the history write began");
+
+    let interrupted = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("the interrupt found the prompt to withdraw")
+    .unwrap();
+    assert_eq!(interrupted.status(), StatusCode::ACCEPTED);
+    release.notify_one();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), prompt)
+        .await
+        .expect("the withdrawn prompt answers")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(
+        backend.prompts.lock().unwrap().is_empty(),
+        "a withdrawn prompt is never submitted"
+    );
+}
+
 #[tokio::test]
 async fn an_interrupt_withdraws_a_prompt_held_for_a_starting_session() {
     // R2-1: an ACP cancel sent while the prompt was held reached
@@ -2218,7 +2349,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
     assert!(actions.try_recv().is_err());
 
     let response = tokio::spawn(app.oneshot(start_request(start_body(
-        r#","prompt":"add a README line","no_github_events":true,"remember_container_size":true"#,
+        r#","prompt":"add a README line","no_github_events":true,"no_github_credentials":true,"remember_container_size":true"#,
     ))));
     let request = actions.recv().await.unwrap();
     assert_eq!(
@@ -2231,6 +2362,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
             review: None,
             no_project_memory: false,
             no_github_events: true,
+            no_github_credentials: true,
             at: None,
             branch: None,
             base: None,
@@ -3130,6 +3262,8 @@ async fn wait_for_an_earlier_turn_names_the_later_turn_it_answers_about() {
             execution: MaterializedExecutionState::Idle,
             active_turn: None,
             last_turn_outcome: Some(MaterializedTurnOutcome {
+                work_facts: None,
+                answered_through: None,
                 diagnostic: None,
                 usage: None,
                 command_id: "prompt-2".into(),
@@ -3177,6 +3311,7 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     })).unwrap();
     let mut turn = completed(5, "QuotaLimit");
     turn.diagnostic = Some(diagnostic.clone());
+    turn.answered_through = Some(9);
     let backend = Arc::new(FakeBackend {
         turn_states: Mutex::new(vec![Some(TurnState {
             execution: MaterializedExecutionState::Idle,
@@ -3210,6 +3345,11 @@ async fn wait_preserves_quota_diagnostic_without_scheduling_retry() {
     assert_eq!(body["diagnostic"]["reset_at"], "23:00 UTC");
     assert_eq!(body["session"]["last_turn_diagnostic"], body["diagnostic"]);
     assert!(body["capacity_retry"].is_null());
+    assert!(
+        body["session"]["last_turn_outcome"]
+            .get("answered_through")
+            .is_none()
+    );
     assert!(
         body["session"]["last_turn_outcome"]
             .get("diagnostic")
@@ -3471,6 +3611,8 @@ fn an_unanswered_turn_reaches_wait_as_a_named_error() {
 
 fn completed(accepted_ordinal: u64, stop_reason: &str) -> MaterializedTurnOutcome {
     MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: format!("prompt-{accepted_ordinal}"),
@@ -3808,6 +3950,8 @@ fn a_stored_expect_continuation_verdict_holds_no_wait_on_an_idle_session() {
     use mj_core::activity::{ActivityState, verdict};
     use mj_core::assessment::{Action, Status};
     let turn = MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "api-b098".into(),
@@ -4115,6 +4259,8 @@ fn rejections_stopped_sessions_and_an_empty_session_each_end_the_wait() {
 
     let mut rejected = idle(None);
     rejected.last_turn_outcome = Some(MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "prompt-1".into(),
@@ -4743,13 +4889,20 @@ async fn input_aware_wait_returns_the_form_without_needing_a_turn_summary() {
     assert_eq!(body["pending_elicitations"][0]["id"], "question-1");
 }
 
+/// A backend whose store holds the fixture session's workspace, which is
+/// where a resume of that session must find it.
+fn backend_holding_the_session_workspace() -> Arc<FakeBackend> {
+    let mut workspace = FakeWorkspaces::record("default");
+    workspace.id = "default".into();
+    Arc::new(FakeBackend {
+        workspaces: FakeWorkspaces(Mutex::new(vec![workspace])),
+        ..FakeBackend::default()
+    })
+}
+
 /// Make the fixture session look the way `mj suspend` leaves one: suspended, with
 /// resume as the thing it can do next.
 fn make_stopped(snapshot: &mut ViewerSnapshot) {
-    snapshot.workspaces.push(super::super::ViewerWorkspace {
-        id: snapshot.sessions[0].workspace_id.clone(),
-        name: "default".into(),
-    });
     let session = &mut snapshot.sessions[0];
     session.state = "stopped".into();
     session.lifecycle = ViewerLifecycleCategory::Suspended;
@@ -4763,7 +4916,7 @@ fn make_stopped(snapshot: &mut ViewerSnapshot) {
 #[tokio::test]
 async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operation() {
     let (app, mut actions, snapshot_tx, _) =
-        api_app(Arc::new(FakeBackend::default()), make_stopped);
+        api_app(backend_holding_the_session_workspace(), make_stopped);
     let mut response = tokio::spawn(
         app.oneshot(
             bearer(Request::post("/api/v1/sessions/session-1/resume"))
@@ -4857,6 +5010,7 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     let mut session = snapshot.sessions[0].clone();
     session.lifecycle = ViewerLifecycleCategory::Failed;
     session.move_recovery = Some(crate::server::ViewerMoveRecovery {
+        failure_notice: None,
         oracle: None,
         oracle_choice: None,
         operation_id: "move-a".into(),
@@ -4897,7 +5051,7 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
 #[tokio::test]
 async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
     let (app, mut actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+        api_app(backend_holding_the_session_workspace(), |snapshot| {
             make_stopped(snapshot);
             // A launch that failed before its first checkpoint.
             let session = &mut snapshot.sessions[0];
@@ -4957,7 +5111,7 @@ fn a_published_session_says_whether_it_has_a_checkpoint() {
 #[tokio::test]
 async fn resuming_an_unknown_session_is_not_found() {
     let (app, _actions, _snapshot_tx, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), make_stopped);
+        api_app(backend_holding_the_session_workspace(), make_stopped);
     let response = app
         .oneshot(
             bearer(Request::post("/api/v1/sessions/session-404/resume"))
@@ -5791,6 +5945,8 @@ async fn missing_target_access_returns_actionable_conflict_for_branch_and_bundle
 
 fn finished_child_turn(command_id: &str) -> MaterializedTurnOutcome {
     MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: command_id.into(),
@@ -6459,10 +6615,41 @@ async fn session_review_api_rejects_the_legacy_on_mode() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let message = String::from_utf8_lossy(&body);
-    for value in ["inherit", "off", "turn", "push"] {
+    for value in ["inherit", "off", "push"] {
         assert!(message.contains(value), "{message}");
     }
     assert!(actions.is_empty());
+}
+
+/// Per-turn review was removed. A public request for it is refused with the
+/// way to proceed, while a stored action that still says `turn` reads as push.
+#[tokio::test]
+async fn session_review_api_refuses_turn_and_says_what_to_use() {
+    let (app, actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(start_request(start_body(
+            r#", "review":{"mode":"turn","reviewers":[]}"#,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let message = String::from_utf8_lossy(&body);
+    assert!(message.contains("Per-turn review was removed"), "{message}");
+    assert!(message.contains("push"), "{message}");
+    assert!(actions.is_empty());
+
+    let stored: ControllerAction = serde_json::from_str(
+        r#"{"action":"new","profile_id":"codex-1","bundle_id":"project","target_id":"raw","review":{"mode":"turn"}}"#,
+    )
+    .unwrap();
+    let ControllerAction::New { review, .. } = stored else {
+        panic!("expected new-session action");
+    };
+    assert_eq!(
+        review,
+        Some(mj_core::config::SessionReview::Push { reviewers: None })
+    );
 }
 
 #[tokio::test]
@@ -6470,7 +6657,7 @@ async fn session_review_api_rejects_stored_legacy_fields() {
     let (app, actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = app
         .oneshot(start_request(start_body(
-            r#", "review":{"mode":"turn","model":"gpt-6-astra","count":2}"#,
+            r#", "review":{"mode":"push","model":"gpt-6-astra","count":2}"#,
         )))
         .await
         .unwrap();
@@ -6482,7 +6669,7 @@ async fn session_review_api_rejects_stored_legacy_fields() {
 async fn session_review_api_forwards_an_explicitly_empty_reviewer_list() {
     let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let response = tokio::spawn(app.oneshot(start_request(start_body(
-        r#", "review":{"mode":"turn","reviewers":[]}"#,
+        r#", "review":{"mode":"push","reviewers":[]}"#,
     ))));
     let request = actions.recv().await.unwrap();
     let ControllerAction::New { review, .. } = request.action else {
@@ -6490,7 +6677,7 @@ async fn session_review_api_forwards_an_explicitly_empty_reviewer_list() {
     };
     assert_eq!(
         review,
-        Some(mj_core::config::SessionReview::Turn {
+        Some(mj_core::config::SessionReview::Push {
             reviewers: Some(Vec::new()),
         })
     );
@@ -6535,5 +6722,84 @@ async fn session_review_api_accepts_inherit_and_forwards_its_settings() {
     assert_eq!(
         response.await.unwrap().unwrap().status(),
         StatusCode::CONFLICT
+    );
+}
+
+// Hard-won: #1450: a harness completion without an accepted ordinal reopened the first prompt wait.
+#[test]
+fn harness_completion_answers_started_prompts_but_not_queued_prompts() {
+    let mut outcome = completed(20, "end_turn");
+    outcome.command_id = mj_core::continuation::harness_turn_id(15);
+    outcome.accepted_ordinal = None;
+    outcome.turn_start_position = Some(15);
+    outcome.answered_through = Some(15);
+    let mut observation = idle(Some(outcome));
+    observation.activity = mj_core::activity::ActivityState::Idle { since_ms: None };
+    observation.start_status = Some(StartStatus::Submitted { turn_id: 7 });
+    assert!(resolve_wait(&observation, &WaitRequest::default()).is_some());
+    let request = WaitRequest {
+        turn_id: Some(7),
+        ..Default::default()
+    };
+    assert!(resolve_wait(&observation, &request).is_some());
+    observation
+        .last_turn_outcome
+        .as_mut()
+        .unwrap()
+        .answered_through = Some(6);
+    // Stored answers do not change when the queue changes.
+    let (config, state) = sample_config_state();
+    let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
+    let durable = TurnState {
+        execution: MaterializedExecutionState::Idle,
+        active_turn: None,
+        last_turn_outcome: observation.last_turn_outcome.clone(),
+    };
+    let durable_observation =
+        build_observation(&snapshot, &snapshot.sessions[0], None, Some(&durable), None);
+    assert!(resolve_wait(&durable_observation, &request).is_none());
+    observation.queued.push("queued-prompt".into());
+    assert!(resolve_wait(&observation, &request).is_none());
+    // Hard-won: #1450 review: a queued prompt that started read as answered by the older harness turn.
+    observation.queued.clear();
+    observation.active_turn = Some(MaterializedTurn {
+        command_id: "queued-prompt".into(),
+        accepted_ordinal: Some(7),
+        turn_start_position: 21,
+        started_at_ms: 0,
+        steered_into: None,
+    });
+    assert!(resolve_wait(&observation, &request).is_none());
+}
+
+// Hard-won: #1450 review: a wait for a running prompt ended on a queued prompt's rejection
+#[test]
+fn queued_rejection_does_not_finish_the_running_prompt_wait() {
+    let mut outcome = completed(7, "error");
+    outcome.answered_through = Some(4);
+    outcome.outcome = TurnOutcomeKind::Rejected {
+        reason: None,
+        message: "transport failed".into(),
+    };
+    let observation = idle(Some(outcome));
+    assert!(
+        resolve_wait(
+            &observation,
+            &WaitRequest {
+                turn_id: Some(5),
+                ..Default::default()
+            }
+        )
+        .is_none()
+    );
+    assert!(
+        resolve_wait(
+            &observation,
+            &WaitRequest {
+                turn_id: Some(7),
+                ..Default::default()
+            }
+        )
+        .is_some()
     );
 }

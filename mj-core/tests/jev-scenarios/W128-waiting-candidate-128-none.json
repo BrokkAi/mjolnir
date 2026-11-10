@@ -25,11 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:21",
-          "role": "user",
-          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /home/jonathan/Projects/mjolnir/.mj/clones/55224b4db70fd4f5a2ded170be482077/.mj/agents/593dc88b8596ee520316c193041ba427. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nPrepare concrete minimal Muse bridge change needed for requested gh auto-whitelist BEFORE asking Mjolnir. Do not publish, push, tag, or commit yet. Work in separate clone under /mnt/optane/tmp/mj-gh-muse-acp-55224 (create directory/clone git@github.com:BrokkAi/muse-acp.git default current master; don't change existing ~/Projects/muse-acp; no branch creation/change/rebase). Read that repo AGENTS/release instructions. Pinned v0.19.0 remote tag confirmed exists (object0212b3709a648ceba161fda32360477e3c61672e); outdated ~/Projects/muse-acp only v0.4.3 is NOT adequate. Fetch/clone with normal elevated network if needed. Read exact current master implementation; if beyond0.19 report incompatible changes.\nDesign owned by parent: add an opt-in native adapter allow-prefix facility, supplied through per-session metadata if natural existing API or bridge environment if existing env configuration used. Mjolnir will configure exactly gh. Prefer generic structured argv prefixes e.g MUSE_ACP_ALLOW_COMMAND_PREFIXES='[[\"gh\"]]' rather than hardcoded global gh trust. Match Muse shell approval subject's COMPLETE structured argv for currentRequirementId/stage, exact argv prefix and no lossy titles/raw text or wrappers. Approve only offered allow ONCE choice, through existing guarded MSP approval/decide helper BEFORE enqueue_review; do not seed unpublished approval-policy.json or silently select persistent scopes. Whole-command staging must ensure every remaining unrelated stage is independently reviewed; if cannot prove this, require unambiguous single-stage full gh command only. Preserve normal reviewer and ACP handling for every unknown/nonmatch, other tools, plans, incomplete argv, conflicting stage IDs/compound boundaries. Prefix facility opt-in so generic adapter users unchanged.\nUse existing typed schema/helper for shell stages and choices; no new parser unless unavoidable. Add meaningful protocol/integration regression fixture for pre-review gh vs unmatched/compound/incomplete/other tool, allow response once and exact requirement ID. Validate per repo docs, tests elevated outside sandbox, dev profile; no cargo output redirects or new target env (mbx requirement). Read release runbook, prepare exact concrete version bump/publication steps needed, but do not perform remote mutation. Return implementation diff summary, decisive source refs/tests, checkout path and final reviewable patch; report any blockers. This is external dependency preparation, parent owns Mjolnir pin/env wiring after review."
-        },
-        {
           "id": "agent:25",
           "role": "assistant",
           "text": "I’ll inspect current Muse ACP, prepare the opt-in prefix approval change and regression coverage, and leave the patch uncommitted for review.\n"
@@ -70,11 +65,6 @@
           "text": "Prepared the uncommitted Muse patch and handed it back with validation evidence and release steps. Rust tests and clippy pass; one unrelated Python npm-packaging test fails. No remote changes made."
         },
         {
-          "id": "user:1463",
-          "role": "user",
-          "text": "Patch reviewed interface confirmed. Prepare fully reviewable release WITHOUT remote mutation/branch changes: bump proposed0.20.0 root Cargo.toml, Cargo.lock entry, CHANGELOG now and final parent pin/image companion patch instructions. Investigate failing Python npm packaging test (KeyError0) on baseline vs changed code, fix if environment/test fixture problem within authorized preparation; rerun ONLY failing test after fix, don't full repeat Rust suites for version/changelog-only edits. Need no known required check failure before requesting explicit external release authorization. RELEASING explicitly requires topic PR plus separate publication authorization; parent will ask user after all Mj main work is validated and concrete adapter release prepared. Do not push/tag/commit or create branch. Current 4-file functional patch already reviewable, keep final patch report synced with bump/test fix."
-        },
-        {
           "id": "agent:1467",
           "role": "assistant",
           "text": "I’ll prepare the 0.20.0 bump and isolate the npm packaging failure, then update the final patch and companion pin instructions without changing branches or publishing.\n"
@@ -95,11 +85,6 @@
           "text": "Prepared the 0.20.0 release patch and companion pin instructions. Fixed the baseline npm packaging failure; the affected test passes with npm 12 and npm 9. No known local check failures remain.\n\nNo commits, branch changes, or remote mutations performed."
         },
         {
-          "id": "user:1792",
-          "role": "user",
-          "text": "User explicitly approved: 'do it' in response to create/merge Muse release PR, publish muse-acp0.20.0, then update Mjolnir pin. Authorization covers external release branch/PR/merge/tag/publication; no new main Mj branch. Continue using prepared /mnt/optane/tmp/mj-gh-muse-acp-55224. Parent owns Git mutations/PR/merge/tag/publish and final acceptance; you own release coordination and monitoring. First READ-ONLY verify current source state, AGENTS/release instructions, upstream head/version namespace (fetch read-only remote refs okay but do not merge/mutate working source or branches), and tell concise exact required steps/check names + whether0.20.0 still free. Existing full adapter validation successful; do NOT repeat local suites for unchanged prepared sources. Parent applying main companion patch while you verify. After parent creates PR, monitor its CI/release preflight and provide merge readiness; after parent merge monitor exact-SHA push preflights; after parent tag monitor publication+verify npm/GitHub. No remote comments/messages except requested PR lifecycle owned parent; no commits/pushes/tags/branches on your own. Keep reports concise with run/PR URLs, facts, errors. No unnecessary new approval."
-        },
-        {
           "id": "agent:1796",
           "role": "assistant",
           "text": "I’ll verify the prepared source, upstream state, and release requirements without changing the checkout. Then I’ll report whether 0.20.0 is available and the exact checks needed for the parent’s release steps.\n"
@@ -108,11 +93,6 @@
           "id": "agent:1884",
           "role": "assistant",
           "text": "0.20.0 is available on GitHub and npm. Upstream added only nightly/documentation changes; the prepared runtime patch remains applicable.\n\nReported the exact PR, preflight, merge, and publication checks to the parent. Awaiting its PR URL for monitoring."
-        },
-        {
-          "id": "user:1964",
-          "role": "user",
-          "text": "Created authorized release branch/PR451 https://github.com/BrokkAi/muse-acp/pull/451 head2bb7e153437574892b6bcaed2b6ab197da84e5d0. Commitaea2ff0 + clean mergeorigin/master238041f. Parent reviewed upstream docs/nightly only, reused local successful checks. Monitor PR ci(check,msrv,npm-launcher) AND branch PUSH release sixplatform+publisher preflight. Tell me exact check/approval/merge readiness including any required reviews or pending policy; do NOT merge/comment. Can report when branch preflight underway and runIDs to plan timeline, final when ready. User has approved all release publication, no extra permission. Mj companion being applied/tested concurrently; no push until npm published."
         },
         {
           "id": "agent:1968",
@@ -128,11 +108,6 @@
           "id": "agent:2105",
           "role": "assistant",
           "text": "PR #451 is conflict-free. All six release builds are running; npm-launcher passed. Remaining CI and publisher checks are pending.\n\nReview is requested from `foundev`; no review is submitted. Branch-protection details are inaccessible to this token, so merge readiness is not yet confirmed."
-        },
-        {
-          "id": "user:2189",
-          "role": "user",
-          "text": "Continue monitoring PR+push CI and branch release runs to completion; report failures or success, no need more branch-protection probing/authorization audits. When tests pass parent will attempt ordinary gh pr merge --merge --match-head-commit (NO admin/bypass) and respect server response; an optional requested reviewer isn't new user approval requirement. Separate real-host verifier3ffaaf now checking feature against isolated pinned Muse scripted loopback before publication, no external model/account; parent may wait result before merge. No source mutation."
         },
         {
           "id": "agent:2194",
@@ -160,11 +135,6 @@
           "text": "PR #451’s PR CI, push CI, and all six release builds plus publisher preflight passed. GitHub reports `CLEAN` and `MERGEABLE`.\n\nReady for the parent’s ordinary merge attempt, pending its separate real-host verification result."
         },
         {
-          "id": "user:2426",
-          "role": "user",
-          "text": "Real-host verifier found exact bug: pinned Muse1.4.14 shell toolName bash, but matcher expected invented workspace-shell. Other completeargv/stage/requirement/choice fields match. Parent accepted fix design: only actual bash tool identity; verifier3ffa now owns external matcher/fixture correction + captured realhost shape protocol regression + actual adapter bypass probe. No merge/tag yet. Parent will commit/push followup on same authorized release branch and send new head; then only affected checks rerun normally remote, previous local full suite reused except filteredregression. You remain read-only coordination; no extra policy/audit calls."
-        },
-        {
           "id": "agent:2431",
           "role": "assistant",
           "text": "Merge is on hold for the `bash` tool identity fix. I’ll leave the source unchanged and wait for the new head and probe results before monitoring its CI and release preflight.\n"
@@ -173,11 +143,6 @@
           "id": "agent:2471",
           "role": "assistant",
           "text": "Merge and tag remain on hold. Awaiting the corrected head and verifier results; no source or remote changes made."
-        },
-        {
-          "id": "user:2520",
-          "role": "user",
-          "text": "Corrected head pushed:12ecd703da51707e30a9cfbb50c01acfb840aac0 on PR451. toolName bash ONLY, captured actual native approval fixture, Hard-won aea2ff0. Filtered protocol+devbuild pass. Real pinned1.4.14 adapter probe PASS: gh--version exact offered once, 1 agent turn/0review/0ACP; unmatchedprintf real reviewer turn and normaldecision. Parent accepted. PRbody updated final behavior+proof. Monitor NEW head PR/push ci and branchrelease sixplatform+publisher to SUCCESS; old2bb results not readiness. No further feature blockers. Once ready parent ordinarymerge --merge --matchhead12ec, then exactmergepush checks. No extra audits."
         },
         {
           "id": "agent:2524",
@@ -310,11 +275,6 @@
           "text": "Corrected head `12ecd703` passed PR CI, push CI, all six release builds, and publisher preflight. PR #451 is `CLEAN` and `MERGEABLE`.\n\nReady for the parent’s ordinary merge attempt."
         },
         {
-          "id": "user:3624",
-          "role": "user",
-          "text": "Ordinary merge succeeded without admin/bypass. PR451 MERGED at2026-10-30T17:59:09Z exact merge SHA f9f5c78083377621558aaf0761c8d048dc532bd5. Monitor exactSHA master PUSH ci AND release to SUCCESS incl six platforms+publisher authorization/stagedassets/npm preflight. No tag until those both succeed per runbook. Don't use branch/PR results instead. Parent owns tag once ready, existing publicationauthorization remains explicit. No further audits/manualworkflowdispatch needed. Report final URLs/steps/failure evidence."
-        },
-        {
           "id": "agent:3628",
           "role": "assistant",
           "text": "I’ll monitor only the master push runs for merge commit `f9f5c780` and report when both CI and release preflight succeed.\n"
@@ -372,7 +332,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Ordinary merge succeeded without admin/bypass. PR451 MERGED at2026-10-30T17:59:09Z exact merge SHA f9f5c78083377621558aaf0761c8d048dc532bd5. Monitor exactSHA master PUSH ci AND release to SUCCESS incl six platforms+publisher authorization/stagedassets/npm preflight. No tag until those both succeed per runbook. Don't use branch/PR results instead. Parent owns tag once ready, existing publicationauthorization remains explicit. No further audits/manualworkflowdispatch needed. Report final URLs/steps/failure evidence.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "Exact-merge release preflight failed on Windows x86_64: `editor_bridge_http_needs_the_session_token_and_refuses_browsers` timed out waiting for ACP response `id:3`. Publisher was skipped.\n\nSaved the full failure log and reported it to the parent. Tagging remains blocked.",
     "completion": {
       "stop_reason": "EndTurn",

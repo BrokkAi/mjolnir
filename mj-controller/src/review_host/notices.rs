@@ -186,8 +186,6 @@ impl HostState {
             .preparing
             .keys()
             .chain(self.reviews.keys())
-            .chain(self.recovery_in_flight.iter())
-            .chain(self.recovery_candidates.iter())
             .cloned()
             .collect::<BTreeSet<_>>();
         for pending in std::mem::take(&mut self.pending_open).into_values() {
@@ -234,7 +232,7 @@ impl HostState {
         // clearing it here made the restart silent. The baseline has not
         // advanced, so the next review covers the same changes.
         for (session_id, slot) in &self.reviews {
-            if slot.push.as_ref().is_some_and(|push| push.finishing) {
+            if slot.finishing {
                 continue;
             }
             let queued = lane

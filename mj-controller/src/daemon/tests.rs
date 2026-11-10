@@ -950,6 +950,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
             kind: LifecycleKind::Resume,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
+            last_stage_change: tokio::time::Instant::now(),
             resume_workspace_id: Some("workspace-a".into()),
             resume_destination: None,
             notice: None,
@@ -978,6 +979,7 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
             kind: LifecycleKind::Resume,
             started_at_epoch_seconds: epoch_seconds().saturating_sub(45),
             active_stages: BTreeMap::new(),
+            last_stage_change: tokio::time::Instant::now(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -1034,6 +1036,13 @@ fn zombie_only_daemon_group_counts_as_gone() {
 }
 
 pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
+    test_runtime_state_with(Controller {
+        config: Config::default(),
+        state: mj_core::state::State::default(),
+    })
+}
+
+pub(super) fn test_runtime_state_with(controller: Controller) -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
@@ -1042,10 +1051,7 @@ pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
     );
     Arc::new(RuntimeState::new_with_controller_loader(
         remote.control,
-        Controller {
-            config: Config::default(),
-            state: mj_core::state::State::default(),
-        },
+        controller,
         recovery.observer(),
         upgrades.observer(),
         Vec::new(),
@@ -1059,25 +1065,44 @@ pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
 }
 
 /// The wait notice names what the daemon is waiting for, so `UpgradeBlockers`
-/// must report a live gate label and stop reporting it once released. The gate
-/// is process-wide and other tests hold their own labels beside this one, so
-/// the test asserts only on a label nothing else uses.
+/// must report a live gate label and stop reporting it once released. A
+/// lifecycle hold also names its session, kind and current stage, read from the
+/// lifecycle registry when the notice renders. The gate is process-wide, so
+/// the test runs in a child process where no other test holds a label.
 #[tokio::test]
 async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
+    const CHILD: &str = "MJ_UPGRADE_BLOCKERS_TEST_CHILD";
     const LABEL: &str = "test-only upgrade blocker";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let name = format!(
+            "{}::upgrade_blockers_names_the_daemon_owned_work_then_releases_it",
+            module_path!()
+                .strip_prefix("mj_controller::")
+                .unwrap_or(module_path!())
+        );
+        crate::controller::test_support::IsolatedTest::new(name)
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "upgrade-blockers-test")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
     let state = test_runtime_state();
     let metadata = test_metadata("127.0.0.1:1".parse().unwrap());
     let shutdown = CancellationToken::new();
-    let labels = |reply: DaemonReply| match reply {
-        DaemonReply::UpgradeBlockers(labels) => labels,
-        other => panic!("expected named blockers, got {other:?}"),
+    let blockers = || async {
+        match handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
+            .await
+            .unwrap()
+        {
+            DaemonReply::UpgradeBlockers(labels) => labels,
+            other => panic!("expected named blockers, got {other:?}"),
+        }
     };
     let held = crate::upgrade::activity(LABEL).unwrap();
-    let named = labels(
-        handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
-            .await
-            .unwrap(),
-    );
+    let named = blockers().await;
     assert!(
         named.iter().any(|blocker| blocker
             .strip_prefix(&format!("{LABEL} ("))
@@ -1085,14 +1110,70 @@ async fn upgrade_blockers_names_the_daemon_owned_work_then_releases_it() {
         "the blocker is named with its age: {named:?}"
     );
     drop(held);
-    let released = labels(
-        handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
-            .await
-            .unwrap(),
-    );
+    let released = blockers().await;
     assert!(
         !released.iter().any(|blocker| blocker.starts_with(LABEL)),
         "released work is still named: {released:?}"
+    );
+
+    // Four lifecycles hold the handoff; the notice names the oldest three.
+    let sessions = ["e5dfbd99-a", "e5dfbd99-b", "e5dfbd99-c", "e5dfbd99-d"];
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let operations = sessions
+        .map(|session| {
+            let release = release.clone();
+            state
+                .start_or_join_lifecycle(session.into(), LifecycleKind::Create, {
+                    move |_, _, _| async move {
+                        drop(release.acquire().await.unwrap());
+                        Ok(DaemonLifecycleResult::Done)
+                    }
+                })
+                .unwrap()
+        })
+        .to_vec();
+    let lifecycle_blocker = || async {
+        let named = blockers().await;
+        let [blocker] = named.as_slice() else {
+            panic!("only the lifecycles block: {named:?}")
+        };
+        blocker.clone()
+    };
+    let blocker = lifecycle_blocker().await;
+    assert!(
+        blocker.starts_with("session lifecycle x4: create e5dfbd99 (")
+            && blocker.matches("create e5dfbd99 (").count() == 3
+            && blocker.ends_with("; and 1 more"),
+        "{blocker}"
+    );
+    assert!(
+        !blocker.contains(','),
+        "no stage has been reported: {blocker}"
+    );
+    // A stage the lifecycle registry records appears in the next notice.
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        sessions[0].into(),
+    );
+    executor.stage_started(ProvisionStage::Cloning);
+    executor.stage_started(ProvisionStage::Syncing);
+    let blocker = lifecycle_blocker().await;
+    assert!(
+        blocker.starts_with("session lifecycle x4: create e5dfbd99 (Clone + Sync, "),
+        "{blocker}"
+    );
+    executor.stage_finished(ProvisionStage::Cloning);
+    executor.stage_finished(ProvisionStage::Syncing);
+    release.add_permits(sessions.len());
+    for operation in operations {
+        RuntimeState::wait_lifecycle_result(operation)
+            .await
+            .unwrap();
+    }
+    assert!(
+        blockers().await.is_empty(),
+        "finished lifecycles are no longer named"
     );
 }
 
@@ -1203,19 +1284,23 @@ async fn automatic_upgrade_drains_a_lifecycle_without_cancelling_it() {
     assert!(crate::upgrade::activity("late operation").is_err());
 }
 
-struct TestRemoteManager {
+pub(super) struct TestRemoteManager {
     control: SessionManagerControl,
     requests: RemoteSessionRequests,
-    publisher: RemoteSessionPublisher,
+    pub(super) publisher: RemoteSessionPublisher,
     _shutdown: SessionManagerShutdown,
     _targets: tokio::sync::watch::Sender<Vec<RelaySessionTarget>>,
 }
 
 impl TestRemoteManager {
     async fn new() -> Self {
+        Self::for_session("session-1").await
+    }
+
+    /// A manager whose one session is `session_id`.
+    pub(super) async fn for_session(session_id: &str) -> Self {
         let channels =
             crate::session_manager::spawn_remote_session_manager().expect("remote manager");
-        let session_id = "session-1";
         channels.targets.send_replace(vec![RelaySessionTarget {
             session_id: session_id.to_owned(),
             spec: CommandSpec::new("true", Vec::<String>::new()),
@@ -1243,7 +1328,7 @@ impl TestRemoteManager {
     }
 }
 
-fn test_runtime_state_with_manager(manager: &TestRemoteManager) -> Arc<RuntimeState> {
+pub(super) fn test_runtime_state_with_manager(manager: &TestRemoteManager) -> Arc<RuntimeState> {
     let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
         manager.control.clone(),
@@ -1292,11 +1377,7 @@ async fn in_process_reviewer_forwarding_stops_when_the_caller_goes_away() {
         RemoteSessionRequest::Reviewer {
             session_id: "session-1".into(),
             role: None,
-            action: crate::session_manager::ReviewerAction::CaptureDelta {
-                repositories: None,
-                scope: Default::default(),
-                baselines: Default::default(),
-            },
+            action: crate::session_manager::ReviewerAction::CaptureDelta { repositories: None },
             reply,
         },
         manager.control.clone(),
@@ -1391,6 +1472,7 @@ pub(super) fn runtime_test_session(
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "local".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -1462,7 +1544,7 @@ fn active_child_session_ids_skips_children_that_already_stopped() {
     .map(|subagent| (subagent.child_session_id.clone(), subagent.into()))
     .collect();
 
-    let children = active_child_session_ids(&state, &parent.id);
+    let children = state.active_child_session_ids(&parent.id);
 
     assert_eq!(children, vec!["running-child".to_owned()]);
 }
@@ -1563,8 +1645,8 @@ async fn missing_target_retry_completes_a_committed_transition() {
     assert_eq!(stored.last_error.as_deref(), Some(detail));
     let notices = state.notices.lock().unwrap();
     assert_eq!(notices.len(), 2);
-    assert!(notices.front().unwrap().text.contains("retrying"));
-    assert_eq!(notices.back().unwrap().text, detail);
+    assert!(notices.front().unwrap().notice.text.contains("retrying"));
+    assert_eq!(notices.back().unwrap().notice.text, detail);
 }
 
 #[test]
@@ -2571,6 +2653,7 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
             kind,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
+            last_stage_change: tokio::time::Instant::now(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -2622,6 +2705,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
             kind: LifecycleKind::Suspend,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
+            last_stage_change: tokio::time::Instant::now(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -3303,10 +3387,254 @@ async fn force_destruction_preemption_times_out_without_destroying() {
     );
 }
 
+/// A running Create whose stages keep starting and finishing is progressing,
+/// however long it takes in total.
+#[tokio::test(start_paused = true)]
+async fn a_create_that_keeps_finishing_stages_is_not_failed_as_stalled() {
+    let state = test_runtime_state();
+    state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+            |_state, _session_id, _cancelled| async move {
+                std::future::pending::<()>().await;
+                #[allow(unreachable_code)]
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        "session-1".into(),
+    );
+    // Four hours in total, each stage well under the bound.
+    for _ in 0..24 {
+        executor.stage_started(ProvisionStage::Syncing);
+        tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+        check_progress(&state, create::CREATE_STALL_BOUND)
+            .expect("a Create that is making progress is not stalled");
+        executor.stage_finished(ProvisionStage::Syncing);
+        tokio::time::sleep(Duration::from_secs(5 * 60)).await;
+        check_progress(&state, create::CREATE_STALL_BOUND)
+            .expect("a Create that is making progress is not stalled");
+    }
+}
+
+/// The stall check as the reviewer start runs it while a Create is running.
+fn check_progress(state: &Arc<RuntimeState>, bound: Duration) -> Result<()> {
+    state.check_create_progress(
+        "session-1",
+        bound,
+        &mut create::PostCreateWait::new("test wait"),
+    )
+}
+
+/// A running Create with no work of its own, for the stall tests.
+fn start_idle_create(state: &Arc<RuntimeState>) {
+    state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+            |_state, _session_id, _cancelled| async move {
+                std::future::pending::<()>().await;
+                #[allow(unreachable_code)]
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+}
+
+/// Queueing for a turn (a container start slot, the worker binary store, an
+/// SSH connection to open) is waiting, not a stalled stage: it may last longer
+/// than the stall bound, and admission restarts the clock.
+#[tokio::test(start_paused = true)]
+async fn a_create_queued_for_a_turn_longer_than_the_bound_is_not_stalled() {
+    let state = test_runtime_state();
+    start_idle_create(&state);
+    tokio::task::yield_now().await;
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        "session-1".into(),
+    );
+    let bound = create::CREATE_STALL_BOUND;
+    for queue in [
+        ProvisionStage::WaitingForImagePull,
+        ProvisionStage::WaitingForStartSlot,
+        ProvisionStage::WaitingForWorkerStore,
+        ProvisionStage::WaitingForSshConnection,
+    ] {
+        executor.stage_started(queue.clone());
+        tokio::time::sleep(bound * 3).await;
+        check_progress(&state, bound)
+            .unwrap_or_else(|error| panic!("a Create queued in {queue:?} is not stalled: {error}"));
+        executor.stage_finished(queue);
+    }
+    // Admitted: the clock starts again from admission, and the next stage can
+    // stall like any other.
+    executor.stage_started(ProvisionStage::Starting);
+    tokio::time::sleep(bound - Duration::from_secs(1)).await;
+    check_progress(&state, bound).unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(check_progress(&state, bound).is_err());
+}
+
+/// Harness preparation reports its own progress and failure, and one step (a
+/// download) can be slow: it stays off the stall clock, as it is off the
+/// native startup deadline.
+// Hard-won: pre-push review of 2ac022d85: a reviewer whose harness preparation spent over ten minutes in one step was cancelled as stalled
+#[tokio::test(start_paused = true)]
+async fn a_create_preparing_a_harness_longer_than_the_bound_is_not_stalled() {
+    let state = test_runtime_state();
+    start_idle_create(&state);
+    tokio::task::yield_now().await;
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        "session-1".into(),
+    );
+    let bound = create::CREATE_STALL_BOUND;
+    let preparing = ProvisionStage::PreparingHarness {
+        harness: mj_core::config::HarnessKind::Codex,
+        step: "Downloading".into(),
+        since_ms: 0,
+    };
+    executor.stage_started(preparing.clone());
+    tokio::time::sleep(bound * 3).await;
+    check_progress(&state, bound).expect("harness preparation is not a stall");
+    executor.stage_finished(preparing);
+    // The clock starts again when preparation ends.
+    tokio::time::sleep(bound - Duration::from_secs(1)).await;
+    check_progress(&state, bound).unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(check_progress(&state, bound).is_err());
+}
+
+// Hard-won: 9c928ddc2: a stalled Create only failed the reviewer start and kept running with its lifecycle admission held, which blocks daemon handoff.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_create_is_cancelled_and_releases_its_admission() {
+    let state = test_runtime_state();
+    let cancel_seen = Arc::new(AtomicBool::new(false));
+    let result = state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+            let cancel_seen = cancel_seen.clone();
+            |_state, _session_id, cancelled| async move {
+                while !cancelled.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                cancel_seen.store(true, Ordering::Release);
+                anyhow::bail!("create cancelled")
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        "session-1".into(),
+    );
+    executor.stage_started(ProvisionStage::Syncing);
+    let bound = create::CREATE_STALL_BOUND;
+    tokio::time::sleep(bound - Duration::from_secs(1)).await;
+    check_progress(&state, bound).unwrap();
+    assert!(!cancel_seen.load(Ordering::Acquire));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let error = check_progress(&state, bound).unwrap_err().to_string();
+    assert!(error.contains("its Create was cancelled"), "{error}");
+    // Asked again while the cancel is still under way, the message says so
+    // and does not claim the Create had committed.
+    let again = check_progress(&state, bound).unwrap_err().to_string();
+    assert!(again.contains("already being cancelled"), "{again}");
+    // The cancel reached the Create's own flag, and the Create ended, which
+    // is what drops its admission.
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        RuntimeState::wait_lifecycle_result(result),
+    )
+    .await
+    .expect("the cancelled Create ends");
+    assert!(outcome.is_err());
+    assert!(cancel_seen.load(Ordering::Acquire));
+}
+
+// Hard-won: 9c928ddc2: readiness waits after the Create finished had no bound, so a harness that never reported its capabilities waited for ever.
+#[tokio::test(start_paused = true)]
+async fn a_readiness_wait_with_no_create_running_fails_at_the_startup_timeout() {
+    let state = test_runtime_state();
+    let timeout = crate::controller::NATIVE_SESSION_STARTUP_TIMEOUT;
+    let mut waiting = create::PostCreateWait::new("report its capabilities");
+    // The wait began while a Create ran: that time is the Create's, and its
+    // own stall check bounds it.
+    let finish = Arc::new(tokio::sync::Notify::new());
+    let watch = state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+            let finish = finish.clone();
+            |_state, _session_id, _cancelled| async move {
+                finish.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::sleep(timeout * 4).await;
+    state
+        .check_create_progress("session-1", create::CREATE_STALL_BOUND * 100, &mut waiting)
+        .unwrap();
+    // The Create ends; the wait now has the full bound from that moment.
+    finish.notify_one();
+    RuntimeState::wait_lifecycle_result(watch).await.unwrap();
+    state
+        .check_create_progress("session-1", create::CREATE_STALL_BOUND, &mut waiting)
+        .unwrap();
+    tokio::time::sleep(timeout - Duration::from_secs(1)).await;
+    state
+        .check_create_progress("session-1", create::CREATE_STALL_BOUND, &mut waiting)
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let error = state
+        .check_create_progress("session-1", create::CREATE_STALL_BOUND, &mut waiting)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("did not report its capabilities within 300 s"),
+        "{error}"
+    );
+}
+
+// Hard-won: #1438: a 120 s total deadline cancelled slow Creates mid-provision, and removing it outright left a command that hangs on a live connection with nothing to end its start.
+#[tokio::test(start_paused = true)]
+async fn a_create_stalled_in_one_stage_fails_its_start_and_names_the_stage() {
+    let state = test_runtime_state();
+    state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Create, {
+            |_state, _session_id, _cancelled| async move {
+                std::future::pending::<()>().await;
+                #[allow(unreachable_code)]
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    tokio::task::yield_now().await;
+    let executor = DaemonStageReportingExecutor::new(
+        RefusingExecutor("a stage notification"),
+        state.clone(),
+        "session-1".into(),
+    );
+    executor.stage_started(ProvisionStage::Syncing);
+    let bound = create::CREATE_STALL_BOUND;
+    tokio::time::sleep(bound - Duration::from_secs(1)).await;
+    check_progress(&state, bound).unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let error = check_progress(&state, bound).unwrap_err().to_string();
+    assert!(
+        error.contains("stalled in: Sync")
+            && error.contains("no stage started or finished for 601 s"),
+        "{error}"
+    );
+}
+
 /// A background image download belongs to the daemon, not to a session, so
 /// whichever workspace the person is looking at shows it.
 /// A view of `session-1` whose harness is ready for its first prompt.
-fn ready_startup_view() -> ManagedSessionView {
+pub(super) fn ready_startup_view() -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let operational = mj_core::relay::RelayOperationalState {
         assessment: None,
@@ -3621,6 +3949,7 @@ async fn relay_turn_start_retires_only_the_recorded_public_lifecycle_failure() {
     observe(
         &mut view,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         },
@@ -3643,6 +3972,7 @@ async fn relay_turn_start_retires_only_the_recorded_public_lifecycle_failure() {
     observe(
         &mut view,
         RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         },
@@ -4604,7 +4934,7 @@ fn notice_texts(state: &RuntimeState) -> Vec<String> {
         .lock()
         .unwrap()
         .iter()
-        .map(|notice| notice.text.clone())
+        .map(|entry| entry.notice.text.clone())
         .collect()
 }
 
@@ -5412,6 +5742,162 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
         !found.nothing_to_restore,
         "the indexed conversation keeps the prompt a restore starts from"
     );
+
+    // A second session has no surviving machine configuration. Destruction
+    // must still remove its record and publish a safe warning independently.
+    session.id = "abcdef0123456789abcdef0123456789".into();
+    session.target_template_id = "removed-machine".into();
+    session.target = Some(mj_core::state::TargetLocator::SshPodman {
+        host: "removed.invalid".into(),
+        container_id: "gone-container".into(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    });
+    crate::database::save_session(&session).unwrap();
+    state.push_notice(&session.id, "private diagnostic /secret/path");
+    // Hard-won: 27c51a34c: unavailable target configuration blocked Destroy too.
+    state
+        .destroy_stopped_session(session.id.clone(), BranchDisposition::Keep)
+        .await
+        .unwrap();
+    assert!(
+        !crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(&session.id)
+    );
+    let notices = state.public_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].session_id, session.id);
+    assert!(notices[0].text.contains("Resources may remain"));
+    let wire = serde_json::to_string(&crate::server::ViewerSnapshot {
+        notices,
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(wire.contains("Resources may remain"));
+    assert!(!wire.contains("private diagnostic"));
+    assert!(!wire.contains("removed.invalid"));
+
+    let repository = crate::controller::test_support::committed_repository();
+    let parent_id = "22222222222222222222222222222222";
+    let child_id = "33333333333333333333333333333333";
+    let mut parent =
+        crate::controller::test_support::managed_clone_session(repository.path(), parent_id);
+    let checkout = parent
+        .managed_worktree
+        .as_ref()
+        .unwrap()
+        .worktree_root
+        .clone();
+    let worker_root = repository.path().join(parent_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    std::fs::write(worker_root.join("keep"), "parent worker evidence").unwrap();
+    parent.state = SessionState::Running;
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    });
+    crate::database::save_session(&parent).unwrap();
+    session.id = child_id.into();
+    crate::database::save_subagent_session(&session, &runtime_test_subagent(child_id, parent_id))
+        .unwrap();
+    let environment = crate::database::session_environment(parent_id)
+        .unwrap()
+        .unwrap();
+    // Hard-won: ae628e069: a direct child Destroy lost its writer before a later parent Destroy.
+    state
+        .force_destroy_session(child_id.into(), BranchDisposition::Keep)
+        .await
+        .unwrap();
+    assert!(
+        !crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(child_id)
+    );
+    assert!(
+        crate::database::environment_workers(&environment.id)
+            .unwrap()
+            .iter()
+            .any(|worker| worker.session_id == child_id)
+    );
+    // Rebuild daemon-owned state from durable records, with no cascade memory.
+    let state = test_runtime_state_loading_the_store();
+    let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_test_destroy BEFORE DELETE ON sessions WHEN OLD.session_id = '22222222222222222222222222222222' BEGIN SELECT RAISE(ABORT, 'test root deletion unavailable'); END;").unwrap();
+    // Hard-won: 5b9868d0d: forgetting an unconfirmed child lost the evidence needed to protect its parent's shared checkout.
+    assert!(
+        state
+            .force_destroy_session(parent_id.into(), BranchDisposition::Keep)
+            .await
+            .is_err()
+    );
+    let retained = crate::database::load_state().unwrap();
+    assert!(retained.sessions.contains_key(parent_id));
+    assert!(!retained.sessions.contains_key(child_id));
+    assert!(
+        crate::database::environment_workers(&environment.id)
+            .unwrap()
+            .iter()
+            .any(|worker| worker.session_id == child_id)
+    );
+    assert!(checkout.exists());
+    assert!(worker_root.join("keep").exists());
+    connection
+        .execute_batch("DROP TRIGGER reject_test_destroy;")
+        .unwrap();
+    state
+        .force_destroy_session(parent_id.into(), BranchDisposition::Keep)
+        .await
+        .unwrap();
+    let removed = crate::database::load_state().unwrap();
+    assert!(!removed.sessions.contains_key(parent_id));
+    assert!(!removed.sessions.contains_key(child_id));
+    assert!(
+        checkout.exists(),
+        "a surviving child may still write the shared checkout"
+    );
+    assert!(
+        worker_root.join("keep").exists(),
+        "parent cleanup cannot remove resources still used by its child"
+    );
+    let root_notices: Vec<_> = state
+        .public_notices()
+        .into_iter()
+        .filter(|notice| notice.session_id == parent_id)
+        .collect();
+    assert!(
+        root_notices
+            .iter()
+            .any(|notice| notice.text.contains("Resources may remain")),
+        "the advertised parent notice path reports retained physical resources"
+    );
+    // Hard-won: 770a4e74c: descendant warnings were invisible under the requested parent ID.
+    let requested = "77777777777777777777777777777777";
+    let descendant = "88888888888888888888888888888888";
+    let mut root = runtime_test_session(
+        requested,
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    root.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: repository.path().join(requested),
+    });
+    crate::database::save_session(&root).unwrap();
+    session.id = descendant.into();
+    crate::database::save_subagent_session(&session, &runtime_test_subagent(descendant, requested))
+        .unwrap();
+    state
+        .force_destroy_session(requested.into(), BranchDisposition::Keep)
+        .await
+        .unwrap();
+    assert!(
+        state
+            .public_notices()
+            .iter()
+            .any(|notice| notice.session_id == requested && notice.text.contains(descendant)),
+        "the advertised root notice query must include descendant cleanup failures"
+    );
 }
 
 /// A runtime whose controller comes from the real store, for the tests that
@@ -5455,13 +5941,15 @@ async fn report_candidates_follow_committed_child_lifecycle_without_losing_faile
     }
     let _writer = crate::database::install_isolated_test_writer();
     let mut parent = crate::controller::test_support::checkpoint_test_session("report-parent");
-    parent.state = SessionState::Stopped;
+    parent.state = SessionState::Running;
     crate::database::save_session(&parent).unwrap();
     let mut child = crate::controller::test_support::checkpoint_test_session("report-child");
     child.state = SessionState::Stopped;
     child.last_error = None;
     let relation = runtime_test_subagent(&child.id, &parent.id);
     crate::database::save_subagent_session(&child, &relation).unwrap();
+    parent.state = SessionState::Stopped;
+    crate::database::save_session(&parent).unwrap();
     let mut state = test_runtime_state_loading_the_store();
     Arc::get_mut(&mut state).unwrap().committed =
         Some(crate::database::subscribe_committed_state().unwrap());
@@ -5671,6 +6159,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            aws: None,
             models: Default::default(),
             legacy_subagents: None,
             ..mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, home)
@@ -5695,6 +6184,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: false,
             create_managed_worktree: Some(false),
             at: None,
             branch: None,
@@ -6612,6 +7102,11 @@ async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
     crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
         .unwrap();
 
+    crate::database::record_subagent_report_dir(
+        child_id,
+        &reports.join(child_id).to_string_lossy(),
+    )
+    .unwrap();
     let state = test_runtime_state_loading_the_store();
     let metadata = test_metadata("127.0.0.1:1".parse().unwrap());
     let shutdown = CancellationToken::new();
@@ -6638,17 +7133,27 @@ async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
         }
     });
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while crate::database::load_state()
-        .unwrap()
-        .sessions
-        .contains_key(child_id)
-    {
+    loop {
+        if crate::upgrade::gate()
+            .active_labels()
+            .iter()
+            .any(|label| label.starts_with("session destroy"))
+        {
+            break;
+        }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the sub-agent is destroyed first"
+            "Destroy must hold handoff admission while preempting earlier work"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
     }
+    assert!(
+        crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(child_id),
+        "preemption completes before the atomic child snapshot"
+    );
 
     let blockers = match handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
         .await
@@ -6701,7 +7206,7 @@ async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
 /// checkpoints only the parent. Each child is removed the way a destroy
 /// removes one, after SessionWiki has taken its conversation, and the parent's
 /// record lists what was stopped for its model. A child that cannot be
-/// stopped the ordinary way is removed anyway and never fails the parent.
+/// stopped retains its ownership and prevents shared-file retirement.
 #[cfg(unix)]
 #[tokio::test]
 async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent() {
@@ -6785,6 +7290,8 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
             }));
     }
     conversation.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "task-1".into(),
@@ -6838,22 +7345,32 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     sessionwiki::index::open().unwrap();
 
     let state = test_runtime_state_loading_the_store();
-    tokio::time::timeout(
+    let error = tokio::time::timeout(
         Duration::from_secs(60),
         state.suspend_session(parent_id.to_owned()),
     )
     .await
     .unwrap()
-    .unwrap();
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("stop sub-agent"));
 
     let stored = crate::database::load_state().unwrap();
-    assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
-    for child in [finished_id, stuck_id, oracle_id] {
+    assert_ne!(stored.sessions[parent_id].state, SessionState::Stopped);
+    for child in [stuck_id, oracle_id] {
         assert!(
-            !stored.sessions.contains_key(child) && !stored.subagents.contains_key(child),
-            "sub-agent {child} is removed, not suspended"
+            stored.sessions.contains_key(child) && stored.subagents.contains_key(child),
+            "failed stops preserve retryable ownership"
         );
     }
+    let owner = crate::database::session_environment(parent_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::database::environment_workers(&owner.id)
+            .unwrap()
+            .iter()
+            .any(|worker| worker.session_id == stuck_id)
+    );
     assert_eq!(
         crate::database::load_stopped_subagents(parent_id).unwrap(),
         [
@@ -7356,11 +7873,7 @@ async fn a_suspend_without_the_acknowledgement_ignores_review_refs_on_a_publishe
     let tree = test_git(&clone.checkout, &["rev-parse", "HEAD^{tree}"]);
     test_git(
         &clone.checkout,
-        &[
-            "update-ref",
-            mj_checkpoint::archive::REVIEW_BASELINE_REF,
-            &tree,
-        ],
+        &["update-ref", "refs/mj/review-baseline", &tree],
     );
     test_git(
         &clone.checkout,
@@ -7471,6 +7984,11 @@ async fn a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified(
     crate::database::save_subagent_session(
         &stopped,
         &runtime_test_subagent(stopped_id, LATCH_RELAY_SESSION),
+    )
+    .unwrap();
+    crate::database::record_subagent_report_dir(
+        stopped_id,
+        &report_root.join(stopped_id).to_string_lossy(),
     )
     .unwrap();
     for id in [stopped_id, unrelated_id] {
@@ -7880,8 +8398,8 @@ async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
         "the relation stays"
     );
     assert!(
-        !worker_root.exists(),
-        "only the child's own worker root is removed"
+        worker_root.exists(),
+        "the shared environment retains the child's private root"
     );
     assert!(
         !root.path().join("started").exists(),
@@ -8146,7 +8664,10 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
             stored.sessions[LATCH_RELAY_SESSION].state,
             SessionState::Stopped
         );
-        assert!(!worker_root.exists());
+        assert!(
+            worker_root.exists(),
+            "private roots remain owned until the environment retires"
+        );
         let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();
@@ -8228,9 +8749,7 @@ async fn exercise_child_close_with_a_nested_workspace(
             TurnReviewSeed {
                 task: "review the changes".into(),
                 user_messages: Vec::new(),
-                baselines: Default::default(),
-                through_ordinal: 1,
-                prior_review: None,
+                declined: Vec::new(),
             },
             "failed-start".into(),
             std::num::NonZeroUsize::new(1).unwrap(),
@@ -8246,12 +8765,9 @@ async fn exercise_child_close_with_a_nested_workspace(
         crate::database::save_turn_review_state(
             parent_id,
             &crate::database::TurnReviewState {
-                pending_followup: false,
-                forward_attempts: 0,
                 active_group: Some(mj_core::storage::ActiveReviewGroup {
                     driver: driver.snapshot(),
                     reviewers: vec![Default::default()],
-                    scope: Default::default(),
                     registrations: vec![mj_core::storage::ReviewerRegistration {
                         role: "reviewer-1".into(),
                         request_key: relation.request_key.clone(),
@@ -8335,8 +8851,8 @@ async fn exercise_child_close_with_a_nested_workspace(
         assert!(
             crate::database::turn_review_state(parent_id)
                 .unwrap()
-                .baselines
-                .is_empty()
+                .push_findings
+                .is_none()
         );
         state.review_host.shutdown().await.unwrap();
     } else {
@@ -8357,7 +8873,10 @@ async fn exercise_child_close_with_a_nested_workspace(
     let closed = &stored.sessions[LATCH_RELAY_SESSION];
     assert_eq!(closed.state, SessionState::Stopped);
     assert!(closed.target.is_none() && closed.checkpoint.is_none());
-    assert!(!worker_root.exists());
+    assert!(
+        worker_root.exists(),
+        "private roots remain owned until the environment retires"
+    );
     assert_eq!(stored.sessions[parent_id], parent);
     assert_eq!(
         std::fs::read_to_string(parent_root.join("private")).unwrap(),
@@ -8399,10 +8918,15 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
     struct AliveWorker;
     impl CommandExecutor for AliveWorker {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            assert_eq!(command.purpose, "probe Mjolnir worker daemon liveness");
+            // The root exists (its journal is there); only the worker is unreachable.
+            let stdout = match command.purpose.as_str() {
+                "probe Mjolnir worker root" => b"recoverable\n".to_vec(),
+                "probe Mjolnir worker daemon liveness" => b"alive\n".to_vec(),
+                other => panic!("unexpected command: {other}"),
+            };
             Ok(CommandOutput {
                 status: 0,
-                stdout: b"alive\n".to_vec(),
+                stdout,
                 stderr: Vec::new(),
             })
         }
@@ -8823,6 +9347,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
             kind: LifecycleKind::Move,
             started_at_epoch_seconds: 1,
             active_stages: BTreeMap::new(),
+            last_stage_change: tokio::time::Instant::now(),
             resume_workspace_id: None,
             resume_destination: None,
             notice: None,
@@ -9256,6 +9781,7 @@ async fn initial_worker_receipts_settle_after_the_first_turn_has_already_parked(
         .record_command_completed(
             &prompt_id,
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "end_turn".into(),
                 usage: None,
                 diagnostic: None,
@@ -9698,7 +10224,7 @@ async fn shutdown_joins_independent_startup_teardown_before_closing_the_store() 
     ));
 }
 
-fn test_runtime_state_holding(state: mj_core::state::State) -> Arc<RuntimeState> {
+pub(super) fn test_runtime_state_holding(state: mj_core::state::State) -> Arc<RuntimeState> {
     let remote = spawn_remote_session_manager().unwrap();
     let recovery = crate::recovery::RecoveryCoordinator::spawn(remote.control.clone());
     let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
@@ -9875,7 +10401,7 @@ async fn archiving_old_children_needs_no_index_copy_and_preserves_the_parent() {
     let repository = crate::controller::test_support::committed_repository();
     let parent_id = "0123456789abcdef0123456789abcdef";
     let child_id = "33333333333333333333333333333333";
-    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Stopped);
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
     parent.project_directory = Some(repository.path().to_owned());
     parent.updated_at = "2000-01-01T00:00:00Z".into();
     let archives = mj_core::config::sessions_dir();
@@ -9908,10 +10434,13 @@ async fn archiving_old_children_needs_no_index_copy_and_preserves_the_parent() {
     );
     crate::database::save_session(&parent).unwrap();
     let mut child = parent.clone();
+    child.state = SessionState::Stopped;
     child.id = child_id.into();
     child.checkpoint = None;
     crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
         .unwrap();
+    parent.state = SessionState::Stopped;
+    crate::database::save_session(&parent).unwrap();
     let state = test_runtime_state_loading_the_store();
     let archived = tokio::time::timeout(Duration::from_secs(60), state.archive_aged_sessions(1))
         .await
@@ -11160,6 +11689,7 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
         failing_controller_loader,
     ));
     let request = |kind, request_key: &str| crate::controller::RegisterSubagentRequest {
+        no_github_credentials: false,
         kind,
         reviewer_launch: None,
         parent_session_id: parent_id.into(),

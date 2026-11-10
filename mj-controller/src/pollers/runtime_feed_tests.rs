@@ -45,6 +45,7 @@ fn session_record(id: &str) -> SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "target-1".into(),
         resource_allocation: None,
         container_cpus: None,
@@ -136,6 +137,7 @@ fn runtime_view(
     projection_digest: &str,
 ) -> daemon::RuntimeSessionView {
     daemon::RuntimeSessionView {
+        policy_config_keys: Vec::new(),
         session_id: session_id.into(),
         projection_ordinal,
         projection_digest: projection_digest.into(),
@@ -223,6 +225,8 @@ async fn runtime_feed_publishes_records_snapshot_before_session_projection() {
         RuntimeFeedUpdate::Snapshot(snapshot) => {
             assert_eq!(snapshot.records.len(), 1);
             assert_eq!(snapshot.records["session-1"].id, "session-1");
+            // Hard-won: b417a7c: the snapshot lost its live views, so chats dropped their policy keys
+            assert!(snapshot.sessions.contains_key("session-1"));
         }
         RuntimeFeedUpdate::Session { .. } | RuntimeFeedUpdate::SessionRemoved(_) => {
             panic!("session projection preceded its snapshot")

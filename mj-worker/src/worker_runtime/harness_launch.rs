@@ -402,15 +402,11 @@ pub(super) fn primary_supervisor_spec(
 pub(super) fn prepare_review_gate(
     launch: &mj_core::worker_launch::WorkerLaunchConfig,
 ) -> Result<Vec<String>> {
-    if launch.review_trigger != mj_core::config::ReviewTrigger::Push
-        || launch.is_managed_subagent()
-        || launch.handback_tool
-        || launch.reviewer_launch.is_some()
-    {
+    if !launch.prepares_review() {
         return Ok(Vec::new());
     }
     let mut notices = Vec::new();
-    if launch.review_gate() {
+    if launch.review_tools() {
         let git = crate::review::capture::BoundedGit::new(
             crate::review::capture::WORKSPACE_STATE_TIMEOUT,
         );
@@ -418,11 +414,17 @@ pub(super) fn prepare_review_gate(
         let mut roots = vec![launch.cwd.clone()];
         roots.extend(super::reviewer_workspace_directories(launch));
         for repository in crate::review::capture::discover_repositories(&git, &roots) {
+            // Every session that may request review records where its work
+            // starts, so its first review covers the commits made after it.
             crate::review::capture::ensure_session_start_head(
                 &git,
                 &repository,
                 &launch.session_id,
             )?;
+            // Only a gated primary also holds its pushes to review.
+            if !launch.review_gate() {
+                continue;
+            }
             use crate::review::hook::{HookInstall, install_pre_push_hook};
             let reason = match install_pre_push_hook(&git, &repository) {
                 Ok(HookInstall::Installed | HookInstall::Rewritten) => None,

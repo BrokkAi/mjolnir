@@ -13,6 +13,7 @@ mod api_commands;
 mod daemon;
 mod dashboard;
 mod desktop;
+mod ec2;
 mod go;
 mod hints;
 mod import;
@@ -111,6 +112,8 @@ enum Command {
     Acp(acp::AcpArgs),
     /// Diagnose platform and configuration prerequisites.
     Doctor(DoctorArgs),
+    /// Create, list, or destroy persistent EC2 hosts with rootless Podman.
+    Ec2(ec2::Ec2Args),
     /// Rerun agent and repository discovery, preserving existing configuration.
     Setup(SetupArgs),
     /// Adopt a native coding-agent session as a stopped Mjolnir session.
@@ -186,11 +189,13 @@ enum Command {
     Suspend(api_commands::SuspendArgs),
     /// Permanently destroy a session, its environment, and recovery archive.
     Destroy(api_commands::DestroyArgs),
+    /// Read recent cleanup notices, including after a session was destroyed.
+    Notices(api_commands::NoticesArgs),
     /// Resume a stopped session from its checkpoint.
     Resume(api_commands::ResumeArgs),
     /// Cancel the turn a session is running.
     InterruptTurn(api_commands::SessionArgs),
-    /// Start a review of a session's last turn, or show the review it has open.
+    /// Review a session's committed work, or show the review it has open.
     Review(api_commands::ReviewArgs),
     /// Stop a session's background task, or all tasks the worker can stop.
     StopTask(api_commands::StopTaskArgs),
@@ -523,13 +528,13 @@ fn main() -> Result<()> {
     // child inherits it. This also covers `daemon-run`, which is this same
     // binary, so a per-instance daemon validates its own environment on boot.
     mj_core::config::apply_instance_flag(cli.instance.as_deref())?;
-    if matches!(cli.command, Some(Command::DaemonRun)) {
+    if matches!(cli.command, Some(Command::DaemonRun | Command::Node)) {
         // Set this before starting threads: the launcher's session checkout
-        // can be removed while the daemon is still running.
-        let home =
-            mj_core::path_input::user_home().context("locate the daemon's home directory")?;
+        // can be removed while the daemon or its sibling node is still running.
+        let home = mj_core::path_input::user_home()
+            .context("locate the background process's home directory")?;
         std::env::set_current_dir(&home)
-            .with_context(|| format!("set daemon working directory to {}", home.display()))?;
+            .with_context(|| format!("set background working directory to {}", home.display()))?;
     }
     let log = Some(logging::ControllerLog::start(
         command_name(cli.command.as_ref()),
@@ -547,8 +552,14 @@ fn main() -> Result<()> {
     result
 }
 
+/// Tokio starts one worker per CPU by default. The daemon mostly waits on I/O,
+/// and on a 120-CPU host the idle workers' wakeups cost more than they add.
+const MAX_RUNTIME_THREADS: usize = 16;
+
 fn run(cli: Cli) -> Result<()> {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(cores.min(MAX_RUNTIME_THREADS))
         .enable_all()
         .build()
         .context("build Tokio runtime")?;
@@ -574,6 +585,7 @@ fn run(cli: Cli) -> Result<()> {
         update_notice,
         cli.no_splash,
     ));
+    let runtime_shutdown_started = std::time::Instant::now();
     if daemon {
         shutdown_daemon_runtime(runtime);
     } else if matches!(
@@ -597,6 +609,7 @@ fn run(cli: Cli) -> Result<()> {
             RUNTIME_SHUTDOWN_GRACE,
         );
     }
+    dashboard::log_quit_timings(runtime_shutdown_started);
     match result? {
         DashboardExit::Restart { target, resume } => resume.restart(&target),
         _ => Ok(()),
@@ -836,6 +849,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Node) => "node",
         Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
+        Some(Command::Ec2(_)) => "ec2",
         Some(Command::Setup(_)) => "setup",
         Some(Command::Import(_)) => "import",
         Some(Command::Recover(_)) => "recover",
@@ -862,6 +876,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Sessions(_)) => "sessions",
         Some(Command::Suspend(_)) => "suspend",
         Some(Command::Destroy(_)) => "destroy",
+        Some(Command::Notices(_)) => "notices",
         Some(Command::Resume(_)) => "resume",
         Some(Command::InterruptTurn(_)) => "interrupt-turn",
         Some(Command::Review(_)) => "review",
@@ -1020,6 +1035,7 @@ async fn run_command(
                 .await
                 .map(|()| DashboardExit::Normal)
         }
+        Some(Command::Ec2(args)) => ec2::run(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Doctor(args)) => {
             if daemon::container::exec_in_container(&container_forwarded_args()).await? {
                 return Ok(DashboardExit::Normal);
@@ -1190,6 +1206,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Destroy(args)) => api_commands::destroy(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Notices(args)) => api_commands::notices(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Resume(mut args)) => {
@@ -1873,18 +1892,36 @@ async fn run_workspace_dashboard(
             Ok(DashboardExit::Normal)
         }
     };
+    let dashboard_drop_finished_at = std::time::Instant::now();
+    let attachment_shutdown_started_at = std::time::Instant::now();
     attachment_cancellation.cancel();
     if let Err(error) = attachment.task.await {
         tracing::warn!(%error, "workspace attachment task failed");
     }
+    let attachment_shutdown = attachment_shutdown_started_at.elapsed();
+    let detach_connect_started_at = std::time::Instant::now();
+    let detach_connect;
+    let mut detach_request = std::time::Duration::ZERO;
     match daemon::connect_existing().await {
         Ok(mut current_daemon) => {
+            detach_connect = detach_connect_started_at.elapsed();
+            let detach_request_started_at = std::time::Instant::now();
             if let Err(error) = current_daemon.detach(client_id).await {
                 tracing::warn!(%error, "could not detach dashboard from workspace");
             }
+            detach_request = detach_request_started_at.elapsed();
         }
-        Err(error) => tracing::warn!(%error, "daemon unavailable while dashboard detached"),
+        Err(error) => {
+            detach_connect = detach_connect_started_at.elapsed();
+            tracing::warn!(%error, "daemon unavailable while dashboard detached");
+        }
     }
+    dashboard::record_attachment_teardown(
+        dashboard_drop_finished_at,
+        attachment_shutdown,
+        detach_connect,
+        detach_request,
+    );
     result
 }
 
@@ -3428,6 +3465,7 @@ mod tests {
                 review: None,
                 no_project_memory: false,
                 no_github_events: false,
+                no_github_credentials: false,
                 target_template_id: "podman".into(),
                 resource_allocation: None,
                 additional_mounts: Vec::new(),

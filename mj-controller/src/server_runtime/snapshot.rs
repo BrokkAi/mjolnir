@@ -648,7 +648,10 @@ pub(super) fn viewer_snapshot_selected(
             .0
             .get_mut(&session_id)
             .expect("selected session");
-        session.move_recovery = move_recoveries.get(&session.id).cloned();
+        session.move_recovery = move_recoveries
+            .get(&session.id)
+            .cloned()
+            .map(|recovery| recovery.with_public_failure(session.launch_error.as_deref()));
         if let Some(record) = controller.state.sessions.get(&session.id)
             && let Some(source) = project_sources.source(record, controller)
         {
@@ -811,6 +814,11 @@ pub(super) fn viewer_snapshot_selected(
                 facts
                     .as_ref()
                     .expect("live operational state always has ACP session facts"),
+            );
+            session.policy_config_keys = crate::server::filter_policy_config_options(
+                &mut session.config_options,
+                session.execution_enforcement,
+                &state.config_options,
             );
             // Share activity classification with the terminal. The browser
             // retains its detailed turn/step/background clock presentation.

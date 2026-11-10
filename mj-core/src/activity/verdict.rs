@@ -12,6 +12,13 @@ pub const USER_PROMPT_BYTES: usize = 1024;
 pub const ASSISTANT_TEXT_BYTES: usize = 2048;
 pub const TOOL_TITLE_BYTES: usize = 128;
 pub const IN_FLIGHT_TOOLS: usize = 16;
+
+/// A tool or command title as every classifier sees it: its first
+/// [`TOOL_TITLE_BYTES`], where the program and its operation are.
+pub fn tool_title(text: &str) -> String {
+    text[..text.floor_char_boundary(TOOL_TITLE_BYTES)].to_owned()
+}
+
 /// Jev recommends high confidence for automation; weaker answers preserve current behavior.
 pub const ACT_CONFIDENCE: f32 = 0.85;
 pub const NO_INPUT_CONFIDENCE: f32 = 0.15;
@@ -251,7 +258,7 @@ pub enum Decision {
     KeepCurrent,
 }
 
-/// The latest prompt that ended: its command and the ordinal of its
+/// The latest prompt or harness turn that ended: its command and the ordinal of its
 /// completion event. `HandbackReminder` names a turn by this identity, and its
 /// sender takes `completed_ordinal` from the projected turn outcome, so the two
 /// must stay equal.

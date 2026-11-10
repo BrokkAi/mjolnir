@@ -54,6 +54,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
                 .delete(cancel_container_upgrade),
         )
         .route("/sessions/{session_id}/destroy", post(destroy))
+        .route("/sessions/{session_id}/notices", get(session_notices))
         .route("/sessions/{session_id}/resume", post(resume))
         .route(
             "/sessions/{session_id}/background-tasks/stop",

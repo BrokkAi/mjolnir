@@ -230,14 +230,7 @@ impl RuntimeState {
         session_id: String,
         branch: BranchDisposition,
     ) -> Result<()> {
-        self.tear_down_stopped_session(
-            session_id,
-            LifecycleKind::DestroyStopped,
-            branch,
-            CheckoutDisposition::Remove,
-        )
-        .await
-        .map(|_| ())
+        self.force_destroy_session(session_id, branch).await
     }
 
     /// Discard the record of a session that ended as `Lost`: its managed
@@ -521,7 +514,7 @@ impl RuntimeState {
             Box::pin(self.force_destroy_indexed_session(
                 child_id.clone(),
                 BranchDisposition::Keep,
-                LifecycleKind::ForceDestroy,
+                LifecycleKind::StopSubagent,
             ))
             .await
             .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
@@ -706,30 +699,35 @@ impl RuntimeState {
         branch: BranchDisposition,
         kind: LifecycleKind,
     ) -> Result<()> {
-        let report_cleanup = self.snapshot_subagent_report_cleanup(&session_id).await;
+        let requested_session_id = session_id.clone();
+        self.destroy_indexed_tree(session_id, branch, kind, requested_session_id)
+            .await
+    }
+
+    async fn destroy_indexed_tree(
+        self: &Arc<Self>,
+        session_id: String,
+        branch: BranchDisposition,
+        kind: LifecycleKind,
+        requested_session_id: String,
+    ) -> Result<()> {
+        self.preempt_active_lifecycle(&session_id).await?;
         let children = blocking({
             let session_id = session_id.clone();
-            move || {
-                Ok(crate::database::list_subagents(&session_id)?
-                    .into_iter()
-                    .map(|child| child.child_session_id)
-                    .collect::<Vec<_>>())
-            }
+            move || crate::database::begin_session_destroy(&session_id)
         })
         .await?;
         for child_id in children {
             // Sub-agents borrow their parent's worker and own no branch.
-            Box::pin(self.force_destroy_indexed_session(
+            Box::pin(self.destroy_indexed_tree(
                 child_id.clone(),
                 BranchDisposition::Keep,
                 kind,
+                requested_session_id.clone(),
             ))
             .await
             .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
         }
-        self.finish_subagent_report_cleanup(&session_id, report_cleanup)
-            .await;
-        self.preempt_active_lifecycle(&session_id).await?;
         let exists = blocking({
             let session_id = session_id.clone();
             move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
@@ -756,10 +754,20 @@ impl RuntimeState {
                         let mut controller = Controller::load()?;
                         let executor = DaemonStageReportingExecutor::new(
                             CancellableProcessExecutor::new(cancelled),
-                            state,
+                            state.clone(),
                             session_id.clone(),
                         );
-                        controller.force_destroy_session(&session_id, &executor, branch)?;
+                        let outcome = if kind == LifecycleKind::StopSubagent {
+                            controller.stop_subagent(&session_id, &executor)?
+                        } else {
+                            controller.force_destroy_session(&session_id, &executor, branch)?
+                        };
+                        for warning in outcome.warnings {
+                            if requested_session_id != session_id {
+                                state.push_public_notice(&requested_session_id, warning.clone());
+                            }
+                            state.push_public_notice(&session_id, warning);
+                        }
                         crate::controller::move_session::release_move_queue_hold(&session_id);
                         Ok(DaemonLifecycleResult::Done)
                     }

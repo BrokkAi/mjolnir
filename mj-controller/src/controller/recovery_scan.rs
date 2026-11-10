@@ -223,6 +223,12 @@ impl Controller {
                     .and_then(|backend| {
                         adopted_container_workspace(&backend, session_id, executor)
                     });
+                let no_github_credentials = candidate
+                    .ownership
+                    .as_ref()
+                    .map_or(!self.config.github.session_credentials, |ownership| {
+                        ownership.no_github_credentials
+                    });
                 let mut record = adopted_session_record(
                     session_id,
                     target_id,
@@ -234,6 +240,7 @@ impl Controller {
                 );
                 record.target_runtime =
                     Some(record.target_runtime_settings(&self.config)?.into_owned());
+                record.no_github_credentials = no_github_credentials;
                 record.container_workspace = container_workspace;
                 record.project = Some(project);
                 (record, true)
@@ -343,9 +350,46 @@ impl Controller {
         require_instance_access(&candidate, &scan.instance_id, all_instances)?;
         let template = self.config.targets.get(target_id).unwrap();
         let backend = recovery_backend_locator(template, &candidate.locator, session_id)?;
-        targets::close_plan(&backend, session_id)?
-            .execute(executor)
-            .map(|_| ())
+        crate::worker_lifecycle::run_blocking(
+            session_id,
+            "destroy recovered environment",
+            executor,
+            || {
+                let environments = crate::database::worker_environments(session_id)?;
+                let owned = environments
+                    .into_iter()
+                    .filter(|environment| {
+                        environment.owner_session_id == session_id
+                            && environment
+                                .placement
+                                .target
+                                .as_ref()
+                                .is_some_and(|target| target.same_resource(&candidate.locator))
+                    })
+                    .collect::<Vec<_>>();
+                if owned.is_empty() {
+                    let root = targets::worker_root(&backend, session_id)?;
+                    super::worker_binary::stop_worker(
+                        &crate::worker_lifecycle::require(session_id)?,
+                        executor,
+                        &backend,
+                        &root,
+                    )?;
+                    executor.notify_notice("Worker stopped. Files were retained because complete shared-environment ownership is unavailable.");
+                    return Ok(());
+                }
+                for environment in owned {
+                    super::environment::retire_owned_environment(
+                        environment,
+                        &self.config,
+                        executor,
+                        super::BranchDisposition::Keep,
+                        super::CheckoutDisposition::Remove,
+                    )?;
+                }
+                Ok(())
+            },
+        )
     }
 }
 
@@ -364,97 +408,8 @@ const fn locator_in_flight(state: SessionState) -> bool {
 /// Whether two locators name the same managed resource. Only the identity
 /// fields count: borrowing, workspace storage, and a discovered address say
 /// how a session reaches the resource, not which resource it is.
-fn same_resource(left: &TargetLocator, right: &TargetLocator) -> bool {
-    match (left, right) {
-        (
-            TargetLocator::LocalBare { worker_root: left },
-            TargetLocator::LocalBare { worker_root: right },
-        ) => left == right,
-        (
-            TargetLocator::LocalPodman {
-                container_id: left, ..
-            },
-            TargetLocator::LocalPodman {
-                container_id: right,
-                ..
-            },
-        )
-        | (
-            TargetLocator::LocalDocker {
-                container_id: left, ..
-            },
-            TargetLocator::LocalDocker {
-                container_id: right,
-                ..
-            },
-        )
-        | (
-            TargetLocator::AppleContainer {
-                container_id: left, ..
-            },
-            TargetLocator::AppleContainer {
-                container_id: right,
-                ..
-            },
-        ) => left == right,
-        (
-            TargetLocator::SshAppleContainer {
-                host: left_host,
-                container_id: left_container,
-                ..
-            },
-            TargetLocator::SshAppleContainer {
-                host: right_host,
-                container_id: right_container,
-                ..
-            },
-        ) => left_host == right_host && left_container == right_container,
-        (
-            TargetLocator::AwsEc2 {
-                instance_id: left, ..
-            },
-            TargetLocator::AwsEc2 {
-                instance_id: right, ..
-            },
-        ) => left == right,
-        (
-            TargetLocator::SshBare {
-                host: left_host,
-                workspace: left_workspace,
-                ..
-            },
-            TargetLocator::SshBare {
-                host: right_host,
-                workspace: right_workspace,
-                ..
-            },
-        ) => left_host == right_host && left_workspace == right_workspace,
-        (
-            TargetLocator::SshPodman {
-                host: left_host,
-                container_id: left_container,
-                ..
-            },
-            TargetLocator::SshPodman {
-                host: right_host,
-                container_id: right_container,
-                ..
-            },
-        )
-        | (
-            TargetLocator::SshDocker {
-                host: left_host,
-                container_id: left_container,
-                ..
-            },
-            TargetLocator::SshDocker {
-                host: right_host,
-                container_id: right_container,
-                ..
-            },
-        ) => left_host == right_host && left_container == right_container,
-        _ => false,
-    }
+pub(super) fn same_resource(left: &TargetLocator, right: &TargetLocator) -> bool {
+    left.same_resource(right)
 }
 
 /// Drop candidates another or an unknown instance created, counting them so
@@ -590,6 +545,7 @@ fn adopted_session_record(
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: target_id.to_owned(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

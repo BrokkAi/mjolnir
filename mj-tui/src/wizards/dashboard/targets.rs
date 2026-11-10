@@ -248,15 +248,6 @@ impl DashboardState {
         if wizard.resource_editor().target_id.as_deref() == Some(&target_id) {
             return DashboardAction::None;
         }
-        if matches!(
-            self.config.targets[&target_id],
-            TargetTemplate::AwsEc2 { .. }
-        ) && matches!(
-            wizard.resource_allocation(),
-            Some(SessionResourceAllocation::Container { .. })
-        ) {
-            *wizard.sizing_mut().1 = None;
-        }
         if let Some(allocation) = wizard.resource_allocation().cloned() {
             let editor = wizard.resource_editor_mut();
             editor.reset(Some(&allocation));
@@ -277,14 +268,8 @@ impl DashboardState {
     pub(super) fn prepare_wizard_target<W: WizardDraft>(&self, wizard: &mut W) -> DashboardAction {
         let previous = wizard.previous_allocation(self);
         let target_index = wizard.target();
-        let (aws_options, allocation, sizing_error) = wizard.sizing_mut();
-        let action = self.prepare_target(
-            target_index,
-            aws_options,
-            allocation,
-            sizing_error,
-            previous,
-        );
+        let (allocation, sizing_error) = wizard.sizing_mut();
+        let action = self.prepare_target(target_index, allocation, sizing_error, previous);
         let allocation = wizard.resource_allocation().cloned();
         let target_id = nth_key(&self.config.targets, target_index);
         let editor = wizard.resource_editor_mut();
@@ -296,7 +281,6 @@ impl DashboardState {
     fn prepare_target(
         &self,
         target_index: usize,
-        aws_options: &BTreeMap<String, Vec<SessionResourceAllocation>>,
         allocation: &mut Option<SessionResourceAllocation>,
         sizing_error: &mut Option<String>,
         previous: Option<&SessionResourceAllocation>,
@@ -338,15 +322,9 @@ impl DashboardState {
                 DashboardAction::None
             }
             TargetTemplate::AwsEc2 { .. } => {
-                if let Some(options) = aws_options.get(&target_id) {
-                    *allocation = preferred_aws_allocation(options, previous).cloned();
-                    DashboardAction::None
-                } else {
-                    *allocation = None;
-                    DashboardAction::ResolveAwsResourceOptions {
-                        target_template_ids: vec![target_id],
-                    }
-                }
+                *allocation = None;
+                *sizing_error = Some(mj_core::config::LEGACY_EC2_TARGET_NOTICE.into());
+                DashboardAction::None
             }
             TargetTemplate::SshBare { .. } => {
                 *allocation = None;
@@ -404,7 +382,7 @@ impl DashboardState {
             .map(|capacity| (capacity.total.cpus, capacity.total.memory_bytes))
             .or_else(|| self.host_limits(&target_id));
         let result = wizard.resource_editor().allocation(limits, uses_remaining);
-        let (_, allocation, error) = wizard.sizing_mut();
+        let (allocation, error) = wizard.sizing_mut();
         match result {
             Ok(value)
                 if uses_remaining

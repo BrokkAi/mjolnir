@@ -25,11 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:27",
-          "role": "user",
-          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /workspace/054dfa0752db439117fe0cd354046caa/.mj-agents/79295402ce48404960733a034396a4fd. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Write anything longer (logs, tables, full findings) to files in your report directory and list their paths in the report; never put it in the report itself. Fix mechanical errors yourself (compile errors, lint and format findings, test failures your own change caused) and list each fix in one line of your report. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When a parent decision blocks further progress, hand back the question with the evidence needed to decide. The parent owns consequential design decisions and final acceptance.\n\nRead and follow /workspace/054dfa0752db439117fe0cd354046caa/audit-3543/BRIEF.md. Your tickets: #3552 ([Lint A][PHP]) and #3565 ([Lint B][PHP]). PHP B4/B5 use the reviewed phpstorm-stubs result-use model, which has no compiled shard in packs/v0.2.0."
-        },
-        {
           "id": "agent:33",
           "role": "assistant",
           "text": "I’ll read the audit brief and the routed project guidance, then inspect the PHP lint implementation and fixtures before making the smallest scoped changes for #3552/#3565. I’ll preserve concurrent work and finish with focused validation plus the required handback report."
@@ -62,7 +57,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "xplicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When a parent decision blocks further progress, hand back the question with the evidence needed to decide. The parent owns consequential design decisions and final acceptance.\n\nRead and follow /workspace/054dfa0752db439117fe0cd354046caa/audit-3543/BRIEF.md. Your tickets: #3552 ([Lint A][PHP]) and #3565 ([Lint B][PHP]). PHP B4/B5 use the reviewed phpstorm-stubs result-use model, which has no compiled shard in packs/v0.2.0.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The audit evidence and release manifests are staged in the report directory. I’m waiting on the parent-built audit binary, then I’ll run the released-rule fixture matrix and write the final verdict without touching product code or GitHub state.",
     "completion": {
       "stop_reason": "EndTurn",

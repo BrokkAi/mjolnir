@@ -1,8 +1,5 @@
 use super::*;
 
-/// Create the initial resource. AWS address discovery and all SSH bootstrap
-/// happen after parsing the `run-instances` response and constructing a locator.
-///
 /// `container_workspace` is the session record's recorded container workspace.
 /// Container targets clone into it and mount their workspace storage there;
 /// a session that predates per-session workspaces records none and keeps the
@@ -21,6 +18,7 @@ pub fn provision_plan(
         additional_mounts,
         container_workspace,
         &resource_name(session_id)?,
+        None,
     )
 }
 
@@ -31,6 +29,7 @@ pub fn provision_plan_named(
     additional_mounts: &[AdditionalMount],
     container_workspace: Option<&Path>,
     name: &str,
+    github_token: Option<&str>,
 ) -> Result<CommandPlan> {
     ensure!(
         resource_name_belongs_to(name, session_id)?,
@@ -62,6 +61,7 @@ pub fn provision_plan_named(
             additional_mounts,
             container_workspace,
             name,
+            github_token,
         )?;
         plan.commands = plan
             .commands
@@ -79,6 +79,7 @@ pub fn provision_plan_named(
             additional_mounts,
             container_workspace,
             name,
+            github_token,
         )?;
         plan.commands = plan
             .commands
@@ -109,7 +110,7 @@ pub fn provision_plan_named(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, &workspace, |args| {
+            commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
                 container_exec("podman", name, args)
             }));
         }
@@ -129,7 +130,7 @@ pub fn provision_plan_named(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, &workspace, |args| {
+            commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
                 container_exec("docker", name, args)
             }));
         }
@@ -156,12 +157,9 @@ pub fn provision_plan_named(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, &workspace, |args| {
+            commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
                 container_exec("container", name, args)
             }));
-        }
-        TargetTemplate::AwsEc2(aws) => {
-            commands.push(ec2_launch_command(aws, session_id)?);
         }
         TargetTemplate::SshBare {
             ssh,
@@ -176,7 +174,7 @@ pub fn provision_plan_named(
                     .creates_target(),
             );
             commands.extend(install_git_plan(ExecutionBoundary::Ssh(ssh)).commands);
-            commands.extend(clone_commands(bundle, &workspace, |args| {
+            commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
                 ssh_command_owned(ssh, args)
             }));
         }
@@ -202,10 +200,8 @@ pub fn provision_plan_named(
                 })
                 .commands,
             );
-            commands.extend(clone_commands(bundle, &workspace, |args| {
-                let mut remote = vec!["podman".to_owned(), "exec".to_owned(), name.to_owned()];
-                remote.extend(args);
-                ssh_command_owned(ssh, remote)
+            commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
+                command_over_ssh(container_exec("podman", name, args), ssh)
             }));
         }
     }
@@ -569,41 +565,4 @@ pub(super) fn execute_checked(
         );
     }
     Ok(())
-}
-
-/// Shared EC2 creation request; Move adds its durable per-attempt client token.
-pub fn ec2_launch_command(aws: &AwsTemplate, session_id: &str) -> Result<CommandSpec> {
-    validate_aws(aws)?;
-    let launch_key = if aws.launch_template.starts_with("lt-") {
-        "LaunchTemplateId"
-    } else {
-        "LaunchTemplateName"
-    };
-    let mut launch = format!("{launch_key}={}", aws.launch_template);
-    if let Some(version) = &aws.launch_template_version {
-        launch.push_str(",Version=");
-        launch.push_str(version);
-    }
-    let mut args = vec![
-        "--profile".to_owned(),
-        aws.profile.clone(),
-        "--region".to_owned(),
-        aws.region.clone(),
-        "ec2".to_owned(),
-        "run-instances".to_owned(),
-        "--launch-template".to_owned(),
-        launch,
-    ];
-    if let Some(instance_type) = &aws.instance_type {
-        args.extend(["--instance-type".to_owned(), instance_type.clone()]);
-    }
-    args.extend(managed_resource_identity_args(
-        ManagedResourceKind::Ec2Instance,
-        session_id,
-    ));
-    args.extend(["--output".to_owned(), "json".to_owned()]);
-    Ok(CommandSpec::new("aws", args)
-        .purpose("launch EC2 session instance")
-        .stage(ProvisionStage::Provisioning)
-        .creates_target())
 }

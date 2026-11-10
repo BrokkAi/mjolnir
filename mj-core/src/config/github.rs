@@ -7,9 +7,16 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// Optional GitHub integration settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GithubConfig {
+    /// Share GitHub authentication with newly created sessions. Each session
+    /// retains its accepted choice, and children inherit an opt-out.
+    #[serde(
+        default = "super::default_true",
+        skip_serializing_if = "super::is_true"
+    )]
+    pub session_credentials: bool,
     /// Controller-side token file distributed to sessions instead of App or
     /// host CLI credentials. Its contents are never serialized here.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -23,9 +30,23 @@ pub struct GithubConfig {
     pub watch: GithubWatchConfig,
 }
 
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            session_credentials: true,
+            session_token_path: None,
+            app: None,
+            watch: GithubWatchConfig::default(),
+        }
+    }
+}
+
 impl GithubConfig {
     pub fn is_default(&self) -> bool {
-        self.session_token_path.is_none() && self.app.is_none() && self.watch.is_default()
+        self.session_credentials
+            && self.session_token_path.is_none()
+            && self.app.is_none()
+            && self.watch.is_default()
     }
 
     pub fn validate(&self) -> Result<()> {

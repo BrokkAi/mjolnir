@@ -24,7 +24,6 @@ async function mount(page, {
   targets = null,
   containerTarget = defaultContainerTarget,
   extraTargets = [],
-  resourceOptions = {},
   gitIdentity = { name: 'Fixture Author', email: 'fixture@example.test', per_directory: false },
   gitIdentityError = null,
 } = {}) {
@@ -40,7 +39,6 @@ async function mount(page, {
       ], bundles, capacity: [], launch_failures: [],
     },
     snapshots: 0, preflights: [], preflightFailures: 0, actions: [], creates: [], rejectCreate: false,
-    resourceOptionRequests: [], resourceOptions,
     completions: [], discoveries: [], discoveryFailures: 0,
     discover: body => body.kind === 'github' ? {
       entries: [{ name: 'example/app', source: 'https://github.com/example/app', description: 'A useful project', kind: 'repository' }],
@@ -89,12 +87,7 @@ async function mount(page, {
     }
     if (/^\/api\/sessions\/[^/]+\/container-upgrade$/.test(pathname)) return json(state.upgradePreview);
     if (pathname === '/api/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
-    const resourceOptionsMatch = /^\/api\/targets\/([^/]+)\/resource-options$/.exec(pathname);
-    if (resourceOptionsMatch) {
-      const targetId = decodeURIComponent(resourceOptionsMatch[1]);
-      state.resourceOptionRequests.push(targetId);
-      return json(state.resourceOptions[targetId]);
-    }
+
     if (pathname === '/api/preflight/new') {
       const request = route.request().postDataJSON();
       state.preflights.push(request);
@@ -197,7 +190,6 @@ async function captureNewSessionState(output, page, label, state, extra = null) 
   output.push(`subagent selector count: ${await page.locator('#new-subagents').count()}`);
   if (state.actions.length) output.push(`action: POST /api/actions ${JSON.stringify(state.actions)}`);
   if (state.preflights.length) output.push(`request: POST /api/preflight/new ${JSON.stringify(state.preflights)}`);
-  if (state.resourceOptionRequests.length) output.push(`request: GET /api/targets/*/resource-options ${JSON.stringify(state.resourceOptionRequests)}`);
   if (state.completions.length) output.push(`request: POST /api/paths/complete ${JSON.stringify(state.completions)}`);
   if (state.discoveries.length) output.push(`request: POST /api/projects/discover ${JSON.stringify(state.discoveries)}`);
   if (state.creates.length) output.push(`request: POST /api/bundles ${JSON.stringify(state.creates)}`);
@@ -398,25 +390,6 @@ test('golden_viewer_new_session', async ({ context }) => {
     await expect.poll(() => state.actions.length).toBe(3);
     expect(state.actions[2]).toEqual({ action: 'upgrade-container', request: { selection: state.upgradePreview, acknowledge_writable_layer_loss: true } });
 
-  });
-
-  const ec2Choices = [
-    { kind: 'aws-ec2', instance_type: 'c7i.large', vcpus: 2, memory_bytes: 4294967296 },
-    { kind: 'aws-ec2', instance_type: 'm7i.2xlarge', vcpus: 8, memory_bytes: 34359738368 },
-  ];
-  await withNewSessionPage(context, {
-    extraTargets: [{ id: 'ec2', kind: 'aws-ec2', resource_allocation_kind: 'aws-ec2', requires_project_directory: false }],
-    resourceOptions: { ec2: { options: ec2Choices, default_allocation: ec2Choices[1] } },
-  }, output, 'EC2 resource choice and launch', async (page, state) => {
-    await page.locator('#new-next').click();
-    await page.locator('#new-target').getByRole('radio', { name: /^ec2/ }).check();
-    await expect.poll(() => page.locator('#new-resource-aws').inputValue()).toBe('m7i.2xlarge');
-    await captureNewSessionState(output, page, 'EC2 default resource option', state);
-    await page.locator('#new-resource-aws').selectOption('c7i.large');
-    await page.locator('#new-next').click();
-    await page.getByRole('button', { name: 'existing', exact: true }).click();
-    await expect(page.locator('#new-step')).not.toContainText('Checking project');
-    return startHeldLaunch(page, state);
   });
 
   await withNewSessionPage(context, {}, output, 'host-specific path suggestions and URL source', async (page, state) => {

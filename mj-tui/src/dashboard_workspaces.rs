@@ -297,6 +297,7 @@ impl DashboardState {
         if let Some(workspace_id) = workspace_id {
             if let Some(view) = self.workspace_views.get(&workspace_id).cloned() {
                 self.sessions_scroll.set(view.sessions_scroll);
+                *self.sessions_wheel_scrolled_from.borrow_mut() = view.sessions_wheel_scrolled_from;
                 self.targets_scroll.set(view.targets_scroll);
                 self.quota_scroll.set(view.quota_scroll);
                 self.capacity_index = view.capacity_index;
@@ -309,6 +310,7 @@ impl DashboardState {
                 self.sessions_scroll.set(0);
                 self.targets_scroll.set(0);
                 self.quota_scroll.set(0);
+                self.sessions_wheel_scrolled_from.take();
                 self.capacity_index = 0;
                 self.quota_index = 0;
                 self.restore_workspace_pane_sizes(PaneSizes::default());
@@ -327,6 +329,7 @@ impl DashboardState {
             self.sessions_scroll.set(0);
             self.targets_scroll.set(0);
             self.quota_scroll.set(0);
+            self.sessions_wheel_scrolled_from.take();
             self.capacity_index = 0;
             self.quota_index = 0;
             self.restore_workspace_pane_sizes(PaneSizes::default());
@@ -384,6 +387,7 @@ impl DashboardState {
             .entry(workspace_id.to_owned())
             .or_insert_with(|| WorkspaceViewState {
                 sessions_scroll: 0,
+                sessions_wheel_scrolled_from: None,
                 targets_scroll: 0,
                 quota_scroll: 0,
                 capacity_index: 0,

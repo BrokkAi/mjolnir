@@ -25,11 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:27",
-          "role": "user",
-          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /workspace/31e44e629cb2bbaa225a83cd820af443/.mj-agents/2ac5fa34294d2b293f2ce3909e0e6875. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Write anything longer (logs, tables, full findings) to files in your report directory and list their paths in the report; never put it in the report itself. Fix mechanical errors yourself (compile errors, lint and format findings, test failures your own change caused) and list each fix in one line of your report. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When a parent decision blocks further progress, hand back the question with the evidence needed to decide. The parent owns consequential design decisions and final acceptance.\n\nLane `models-config`. Follow the lane brief /workspace/31e44e629cb2bbaa225a83cd820af443/bifrost/.agents/docs/codeql-python-rules-2026-10/execution/lane-brief.md. Worktree: /workspace/31e44e629cb2bbaa225a83cd820af443/bifrost/.worktrees/models-config. Tickets #4342 (PY22 API-configuration models) and #4331 (PY10 web source, response and URL-control models). Triage reports: /workspace/31e44e629cb2bbaa225a83cd820af443/bifrost/.agents/docs/codeql-python-rules-2026-10/execution/triage/py22-4342.md and .../triage/py10-py17-4331-4338.md (the #4331 half).\n\nParent decisions:\n- #4342: slice 1, the four direct-identity rules (Flask debug, Paramiko missing host key validation, requests verify=False, ssl.wrap_socket default); slice 2, cookie and CSRF rules. Build slice 2 on existing generic typestate or call-argument facts; do not wait for Rust CQ09 #4313 (another agent, not on master). TLS protocol (coordinate #3800/#3801) and crypto algorithm identity (CQ10 #4314) are deferred; PAM via existing typestate only if time remains.\n- #4331: slice 1 only, Python web source and response models with fixtures. URL-control facts wait on #4312 (another agent) and external-call classification is a separate gap; report both as remaining.\n- Reuse the existing Python model and semantic-pack machinery in this repo; follow the generated-pack cache-version rules if producer output changes. Do not edit Rust CQ model files.\n- Each modeled rule needs a policy fixture with positives and the campaign's near misses."
-        },
-        {
           "id": "agent:32",
           "role": "assistant",
           "text": "{\"type\":\"error\",\"error\":{\"message\":\"model 'gpt-6-luna' is not enabled in rustponsesapi\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null},\"status\":400}\n\n"
@@ -43,11 +38,6 @@
           "id": "agent:102",
           "role": "assistant",
           "text": "Handback delivered. The assigned worktree is clean at `origin/master`, so no lane implementation or validation artifacts were present to report."
-        },
-        {
-          "id": "user:156",
-          "role": "user",
-          "text": "Correction: the clean worktree is the starting point, not a sign that the work is done or missing. Your assignment is to IMPLEMENT the work yourself in /workspace/31e44e629cb2bbaa225a83cd820af443/bifrost/.worktrees/models-config, starting from that clean detached HEAD. Nobody has done it yet. Re-read your original spawn message (tickets #4342 slices 1-2 and #4331 slice 1, with the parent decisions listed there) and the lane brief, write the ExecPlan, implement the Python models with policy fixtures, validate, commit in that worktree, and hand back per the brief's Finishing section. Do not stop until those slices are done or concretely blocked with evidence."
         },
         {
           "id": "agent:172",
@@ -117,7 +107,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Correction: the clean worktree is the starting point, not a sign that the work is done or missing. Your assignment is to IMPLEMENT the work yourself in /workspace/31e44e629cb2bbaa225a83cd820af443/bifrost/.worktrees/models-config, starting from that clean detached HEAD. Nobody has done it yet. Re-read your original spawn message (tickets #4342 slices 1-2 and #4331 slice 1, with the parent decisions listed there) and the lane brief, write the ExecPlan, implement the Python models with policy fixtures, validate, commit in that worktree, and hand back per the brief's Finishing section. Do not stop until those slices are done or concretely blocked with evidence.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The lane now has exact-call policy fixtures for the four direct API rules, cookie and CSRF configuration cases, plus an end-to-end taint fixture joining Flask/Django request reads to response writes. The fixtures include the campaign controls (wrong receiver, safe values, non-sensitive cookie names, and non-reaching sources). I’m moving into validation now; the initial Cargo build is still waiting on shared compilation work, so I’m first checking formatting and plan consistency while it runs.",
     "completion": {
       "stop_reason": "EndTurn",

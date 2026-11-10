@@ -23,15 +23,15 @@ use tokio_util::sync::CancellationToken;
 
 use super::review_capture::ReviewCapture;
 use super::{
-    AcpSupervisorSpec, CredentialEndpoint, REVIEW_UNTRACKED_FILE, WorkerLaunchConfig,
-    acp_additional_directories, reviewer_workspace_directories,
+    AcpSupervisorSpec, CredentialEndpoint, WorkerLaunchConfig, acp_additional_directories,
+    reviewer_workspace_directories,
 };
 
 use crate::acp::{self, CommandRequest, LaunchSpec, RuntimeEvent};
 use crate::relay::{
     ClaimedRelayCommand, DeferredRelayAttach, DurableRelay, RELAY_STATE_FILE,
-    RESTORED_RELAY_SEED_FILE, RelayCommand, RelayCommandOutcome, RelayErrorCode, RelayObservation,
-    RelayProtocolError, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
+    RESTORED_RELAY_SEED_FILE, RelayCell, RelayCommand, RelayCommandOutcome, RelayErrorCode,
+    RelayObservation, RelayProtocolError, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
     RelayResponseEnvelope, RelayResponsePayload, invalid_relay_request_response,
     unsupported_relay_method_response,
 };
@@ -91,20 +91,17 @@ struct HarnessPreparationCompletion {
     idle_dispatch_wakes: Option<mpsc::Receiver<()>>,
 }
 
-pub(super) type UntrackedReviewEntries =
-    Arc<Mutex<std::collections::BTreeMap<PathBuf, Vec<crate::review::capture::UntrackedEntry>>>>;
-
 struct HarnessPreparationSetup {
     root: PathBuf,
     config: WorkerLaunchConfig,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     session_git_config_include: Option<PathBuf>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
-    relay_state_exists: bool,
-    untracked_at_start: UntrackedReviewEntries,
     resume_session: Option<String>,
     native_session_may_have_history: bool,
+    /// What a sub-agent's worker observes at the end of each turn.
+    capture: Option<crate::work_facts::WorkObserver>,
 }
 
 #[derive(Clone)]
@@ -142,11 +139,13 @@ struct AcpPreparationSetup {
     config: WorkerLaunchConfig,
     session_environment: BTreeMap<String, String>,
     supervisor_spec: AcpSupervisorSpec,
-    relay: Arc<Mutex<DurableRelay>>,
-    untracked_at_start: UntrackedReviewEntries,
+    relay: Arc<RelayCell>,
     resume_session: Option<String>,
     native_session_may_have_history: bool,
     profile_registration: bool,
+    /// Read from the launch before preparation strips the marker from the
+    /// harness environment, so the ACP runtime knows the session is a child.
+    managed_subagent: bool,
     subagent_role: Option<mj_core::subagent::SubagentMcpRole>,
     runtime: tokio::runtime::Handle,
     managed_cache_root: Option<PathBuf>,
@@ -230,10 +229,10 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         session_environment,
         supervisor_spec,
         relay,
-        untracked_at_start,
         resume_session,
         native_session_may_have_history,
         profile_registration,
+        managed_subagent,
         subagent_role,
         runtime,
         managed_cache_root,
@@ -252,14 +251,12 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     };
     let supervisor_path = root.join("acp-supervisor.json");
     supervisor_spec.write_spec(&supervisor_path)?;
-    let review_gate = config.review_gate();
+    let review_tools = config.review_tools();
     let worker_executable = std::env::current_exe().context("locate Hel worker executable")?;
     let reviewer = Arc::new(ReviewCapture {
         session_id: config.session_id.clone(),
         cwd: config.cwd.clone(),
         additional_directories: reviewer_workspace_directories(&config),
-        review_capture: config.review_capture,
-        untracked_at_start,
         primary_relay: relay.clone(),
         operation: tokio::sync::Mutex::new(()),
     });
@@ -315,7 +312,6 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &session_environment,
         &mut additional_directories,
     );
-    let managed_subagent = config.is_managed_subagent();
     let acp_spec = LaunchSpec {
         operator_away: relay
             .lock()
@@ -361,7 +357,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             role,
             agent_mailboxes_enabled: config.agent_mailboxes_enabled,
             subtle_subagents: config.subtle_subagents,
-            review_gate,
+            review_tools,
             profile_registration,
         }),
         project_memory: config.project_memory,
@@ -397,9 +393,10 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
 
 fn start_bridge(
     setup: PreparedAcpSetup,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     dispatch_wakes: mpsc::Receiver<()>,
     kimi_task_home: Option<std::result::Result<PathBuf, String>>,
+    capture: Option<crate::work_facts::WorkObserver>,
     runtime: tokio::runtime::Handle,
     cancel: CancellationToken,
 ) -> Result<StartedBridgeTasks> {
@@ -446,6 +443,7 @@ fn start_bridge(
         commands_tx,
         user_shells,
         kimi_task_home.map(KimiTaskMonitor::new),
+        capture,
     )));
     if cancel.is_cancelled() {
         bail!("preparation cancelled while starting the relay coordinator");
@@ -514,17 +512,94 @@ fn preparation_error(snapshot: &PreparationSnapshot, operation: &str) -> Option<
     }
 }
 
-fn overlay_preparation_state(response: &mut RelayResponseEnvelope, snapshot: &PreparationSnapshot) {
-    let state = match &mut response.body {
-        RelayResponseBody::Ok {
-            payload: RelayResponsePayload::Status(state),
+/// Hold a `WaitForChange` until the relay's latest event or operational state,
+/// or this connection's sub-agent queue, differs from what the controller
+/// names, or until [`mj_core::relay::RELAY_CHANGE_WAIT_BOUND`] passes. The
+/// state is built as an attach builds it, preparation included, so its digest
+/// is the one the controller holds.
+pub(crate) async fn wait_for_change(
+    relay: &Arc<RelayCell>,
+    preparation: Option<&watch::Receiver<PreparationSnapshot>>,
+    subagents: Option<&super::subagents::SubagentEndpoint>,
+    feed: &super::subagents::SubagentFeed,
+    after_ordinal: u64,
+    state_digest: Option<&str>,
+) -> Result<RelayResponseBody> {
+    let mut releases = Some(relay.releases());
+    let mut preparation = preparation.cloned();
+    // A finished preparation closes its channel but keeps its last value,
+    // which an attach still reads; keep reading it, stop awaiting it.
+    let mut preparation_open = preparation.is_some();
+    let mut generations = subagents.map(super::subagents::SubagentEndpoint::generations);
+    let deadline = tokio::time::Instant::now() + mj_core::relay::RELAY_CHANGE_WAIT_BOUND;
+    loop {
+        // Mark each signal seen before looking, so a change while looking
+        // still wakes the wait below. Looking only observes the relay, which
+        // is not counted as a change.
+        if let Some(releases) = &mut releases {
+            releases.borrow_and_update();
         }
-        | RelayResponseBody::Ok {
-            payload: RelayResponsePayload::Attached { state, .. },
-        } => state,
-        _ => return,
-    };
-    state.harness_preparation = snapshot.state.clone();
+        if let Some(generations) = &mut generations {
+            generations.borrow_and_update();
+        }
+        let harness_preparation = preparation
+            .as_mut()
+            .and_then(|receiver| receiver.borrow_and_update().state.clone());
+        let mut state = relay
+            .observe()
+            .expect("relay state lock poisoned")
+            .operational_state();
+        state.harness_preparation = harness_preparation;
+        let latest_ordinal = state.latest_ordinal;
+        let digest = mj_core::relay::relay_state_digest(&state)?;
+        let subagent_queue_changed = subagents.is_some_and(|endpoint| feed.has_unpolled(endpoint));
+        let changed = latest_ordinal != after_ordinal
+            || state_digest != Some(digest.as_str())
+            || subagent_queue_changed;
+        let observed = RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ChangeObserved {
+                latest_ordinal,
+                state_digest: digest,
+                subagent_queue_changed,
+            },
+        };
+        if changed {
+            return Ok(observed);
+        }
+        // A signal whose sender is gone can never change again; stop
+        // watching it instead of waking on its closure forever.
+        tokio::select! {
+            changed = async {
+                match &mut releases {
+                    Some(receiver) => receiver.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            } => if !changed { releases = None },
+            changed = async {
+                match &mut generations {
+                    Some(receiver) => receiver.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            } => if !changed { generations = None },
+            changed = async {
+                match preparation.as_mut().filter(|_| preparation_open) {
+                    Some(receiver) => receiver.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            } => if !changed { preparation_open = false },
+            () = tokio::time::sleep_until(deadline) => return Ok(observed),
+        }
+    }
+}
+
+/// Attach replies carry the preparation already; see [`handle_request`].
+fn overlay_preparation_state(response: &mut RelayResponseEnvelope, snapshot: &PreparationSnapshot) {
+    if let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::Status(state),
+    } = &mut response.body
+    {
+        state.harness_preparation = snapshot.state.clone();
+    }
 }
 
 fn unavailable_request(envelope: RelayRequestEnvelope, message: String) -> RelayResponseEnvelope {
@@ -552,7 +627,7 @@ mod history_tests {
     #[tokio::test]
     async fn history_round_trips_large_replies_without_delegation_or_durable_events() {
         let temp = tempfile::tempdir().unwrap();
-        let relay = Arc::new(Mutex::new(
+        let relay = Arc::new(RelayCell::new(
             DurableRelay::open(temp.path(), "history-test", "1.0.0").unwrap(),
         ));
         let memory = ProjectMemoryEndpoint::new(Some(super::super::ProjectMemoryLaunchConfig {
@@ -763,6 +838,12 @@ pub async fn run_daemon_owned(
     let startup_directory = std::env::current_dir()?;
     let root = super::resolve_relative_worker_root(root, &startup_directory);
     super::resolve_relative_harness_home(&mut config, &startup_directory);
+    if config.no_github_credentials {
+        mj_core::credentials::remove_github_authentication_environment(&mut config.environment);
+        mj_core::credentials::remove_github_authentication_environment(
+            &mut config.target_environment,
+        );
+    }
     let checkpoint_only = config.run_mode == mj_core::worker_launch::WorkerRunMode::CheckpointOnly;
     super::record_startup_step(&root, "policy");
     if !checkpoint_only {
@@ -795,7 +876,6 @@ pub async fn run_daemon_owned(
     }
     let relay_state_exists = root.join(RELAY_STATE_FILE).exists();
     let restarting = relay_state_exists || root.join(RESTORED_RELAY_SEED_FILE).exists();
-    let untracked_at_start = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
     // Validate and recover durable state before publishing a socket. A
     // failed startup must never leave a fresh endpoint that looks live.
     super::record_startup_step(&root, "durable-relay");
@@ -854,20 +934,36 @@ pub async fn run_daemon_owned(
         durable_relay.record_observation(RelayObservation::SessionRestarted)?;
     }
 
-    let relay = Arc::new(Mutex::new(durable_relay));
+    // Only a managed sub-agent that is not a reviewer observes its agent's work
+    // when a turn ends (`SESSION_MANAGED_SUBAGENT_ENV`, set by the controller for
+    // every sub-agent, and no `reviewer_launch`): an ordinary session has no
+    // parent to report to, and a reviewer's verdict names no working tree.
+    let capture = (config.is_managed_subagent() && config.reviewer_launch.is_none()).then(|| {
+        crate::work_facts::WorkObserver {
+            session_id: config.session_id.clone(),
+            worker_pid: std::process::id(),
+            directory: config.cwd.clone(),
+            git: "git".into(),
+            harness_ready_ms: durable_relay.harness_ready_clock(),
+            children: Default::default(),
+        }
+    });
+    let relay = Arc::new(RelayCell::new(durable_relay));
     // Client tasks are detached, so a durable failure they cannot recover
     // from has to travel back here to stop the daemon.
     let (fatal_tx, mut fatal_rx) = mpsc::channel(1);
     let (cpu_tx, cpu_rx) = tokio::sync::watch::channel(Ok(None));
-    let cpu_task = tokio::spawn(crate::cpu_usage::sample_cpu(cpu_tx));
-    let cpu_abort = cpu_task.abort_handle();
+    let cpu_task = tokio::spawn(crate::cpu_usage::sample_cpu(
+        cpu_tx,
+        config.cpu_accounting.clone(),
+    ));
     struct StopCpu(tokio::task::AbortHandle);
     impl Drop for StopCpu {
         fn drop(&mut self) {
             self.0.abort();
         }
     }
-    let _stop_cpu = StopCpu(cpu_abort);
+    let _stop_cpu = StopCpu(cpu_task.abort_handle());
     let cpu_fatal = fatal_tx.clone();
     let cpu_session_id = config.session_id.clone();
     tokio::spawn(async move {
@@ -918,11 +1014,7 @@ pub async fn run_daemon_owned(
         .await;
     }
 
-    let initial_step = if config.review_capture {
-        "review-baseline"
-    } else {
-        "login-resolve"
-    };
+    let initial_step = "login-resolve";
     let (preparation_tx, preparation_rx) = watch::channel(PreparationSnapshot {
         state: Some(mj_core::relay::HarnessPreparation::Preparing {
             step: initial_step.to_owned(),
@@ -966,10 +1058,9 @@ pub async fn run_daemon_owned(
         session_git_config_include,
         credentials,
         kimi_task_home,
-        relay_state_exists,
-        untracked_at_start,
         resume_session,
         native_session_may_have_history,
+        capture,
     };
     let prep_status = preparation_tx.clone();
     let prep_cancel = preparation_cancel.clone();
@@ -1224,7 +1315,7 @@ pub async fn run_daemon_owned(
 async fn accept_worker_clients(
     listener: UnixListener,
     _socket_guard: SocketGuard,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     dispatch_wake: mpsc::Sender<()>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     runtime: ConnectionRuntime,
@@ -1401,21 +1492,6 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-fn reuse_review_baselines(
-    relay_state_exists: bool,
-    recorded: &std::collections::BTreeMap<PathBuf, Vec<crate::review::capture::UntrackedEntry>>,
-    git: &dyn mj_checkpoint::archive::GitCommandRunner,
-    session: &str,
-) -> bool {
-    relay_state_exists
-        || (!recorded.is_empty()
-            && crate::review::capture::session_holds_review_baselines(
-                git,
-                &recorded.keys().cloned().collect::<Vec<_>>(),
-                session,
-            ))
-}
-
 async fn prepare_and_start_harness(
     setup: HarnessPreparationSetup,
     dispatch_wake_rx: &mut Option<mpsc::Receiver<()>>,
@@ -1429,91 +1505,14 @@ async fn prepare_and_start_harness(
         session_git_config_include,
         credentials,
         kimi_task_home,
-        relay_state_exists,
-        untracked_at_start,
         resume_session,
         native_session_may_have_history,
+        capture,
     } = setup;
-    if config.is_managed_subagent() {
-        config.review_trigger = Default::default();
-    }
-    let review_gate = config.review_gate();
+    let managed_subagent = config.is_managed_subagent();
+    let review_tools = config.review_tools();
     let subagent_role = config.subagent_mcp_role();
     let root = root_path.as_path();
-    // The first capture must precede the primary harness, so pre-existing
-    // edits are not reported as this session's turn. Restarts and in-place moves
-    // retain their original baseline and untracked list.
-    if config.review_capture {
-        let budget = preparation_step(
-            root,
-            status,
-            "review-baseline",
-            LOCAL_PREPARATION_STEP_TIMEOUT,
-            cancel,
-        )
-        .await?;
-        let record = root.join(REVIEW_UNTRACKED_FILE);
-        let recorded: std::collections::BTreeMap<
-            PathBuf,
-            Vec<crate::review::capture::UntrackedEntry>,
-        > = {
-            let read_record = record.clone();
-            bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
-                if step_cancel.is_cancelled() {
-                    anyhow::bail!("preparation cancelled before reading review baseline");
-                }
-                Ok(std::fs::read(&read_record)
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                    .unwrap_or_default())
-            })
-            .await?
-        };
-        let recorded = {
-            let mut workspace_roots = vec![config.cwd.clone()];
-            workspace_roots.extend(reviewer_workspace_directories(&config));
-            let session_id = config.session_id.clone();
-            bounded_preparation_step(&budget, async move {
-                let git = crate::review::capture::BoundedGit::new(
-                    crate::review::capture::WORKSPACE_STATE_TIMEOUT,
-                );
-                let _cancel_git = git.cancellation_guard();
-                tokio::task::spawn_blocking(move || {
-                    if reuse_review_baselines(relay_state_exists, &recorded, &git, &session_id) {
-                        return Ok(recorded);
-                    }
-                    let repositories =
-                        crate::review::capture::discover_repositories(&git, &workspace_roots);
-                    crate::review::capture::initialize_review_baselines(
-                        &git,
-                        &repositories,
-                        &session_id,
-                    )
-                })
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!("review baseline initialization stopped: {error}")
-                })?
-            })
-            .await?
-        };
-        let untracked_root = record;
-        let untracked_at_start = untracked_at_start.clone();
-        bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
-            if step_cancel.is_cancelled() {
-                anyhow::bail!("preparation cancelled before recording review baseline");
-            }
-            if let Ok(bytes) = serde_json::to_vec_pretty(&recorded) {
-                let _ = mj_core::config::atomic_write(&untracked_root, &bytes);
-            }
-            *untracked_at_start
-                .lock()
-                .expect("untracked-at-start lock poisoned") = recorded;
-            Ok(())
-        })
-        .await?;
-    }
-
     let login_budget = preparation_step(
         root,
         status,
@@ -1541,6 +1540,7 @@ async fn prepare_and_start_harness(
     session_environment.remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
     session_environment.remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
     let github_root = root.to_owned();
+    let no_github_credentials = config.no_github_credentials;
     let github_home = worker_home.clone();
     let git_config_include = session_git_config_include.clone();
     let mut explicit_environment = config.environment.clone();
@@ -1560,6 +1560,7 @@ async fn prepare_and_start_harness(
                 &mut session_environment,
                 github_home.as_deref(),
                 git_config_include.as_deref(),
+                no_github_credentials,
             )?;
             match &slopcop_login {
                 Ok(login) => configure_slopcop_cli(&github_root, login)?,
@@ -1577,11 +1578,12 @@ async fn prepare_and_start_harness(
     // Persist only explicit and Mjolnir-generated overrides, never shell exports.
     config.environment = session_environment.clone();
 
-    if config.execution_policy == ExecutionPolicy::ConfiguredApprovals
+    if (config.execution_policy == ExecutionPolicy::ConfiguredApprovals
         && matches!(
             config.harness,
             HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::OpenCode | HarnessKind::Muse
-        )
+        ))
+        || super::json_gh_rules::configures_native_rules_always(config.harness)
     {
         let budget = preparation_step(
             root,
@@ -1591,15 +1593,27 @@ async fn prepare_and_start_harness(
             cancel,
         )
         .await?;
-        let home = credentials
-            .as_ref()
-            .map_err(|message| anyhow::anyhow!("{message}"))?
-            .home
-            .clone();
+        // Only the TOML-configured harnesses edit a file in their home.
+        let home = if matches!(config.harness, HarnessKind::Kimi | HarnessKind::Grok) {
+            Some(
+                credentials
+                    .as_ref()
+                    .map_err(|message| anyhow::anyhow!("{message}"))?
+                    .home
+                    .clone(),
+            )
+        } else {
+            None
+        };
         let root = root.to_owned();
         let session_id = config.session_id.clone();
         let harness = config.harness;
         let policy = config.execution_policy;
+        // A child, a None choice and a Mjolnir choice all leave delegation to
+        // Mjolnir (or to nobody), so OpenCode's own `subagent` tool goes.
+        let denials = super::json_gh_rules::OpenCodeDenials {
+            native_subagent: config.subagents.suppresses_native(),
+        };
         let native_base_environment = base_environment.clone();
         let native_explicit_environment = config.environment.clone();
         let mut environment = native_base_environment.clone();
@@ -1609,14 +1623,21 @@ async fn prepare_and_start_harness(
                 if step_cancel.is_cancelled() {
                     bail!("preparation cancelled before configuring command permissions");
                 }
-                super::gh_rules::configure_toml_gh_rules(
-                    &root,
-                    &session_id,
-                    &home,
+                if let Some(home) = &home {
+                    super::gh_rules::configure_toml_gh_rules(
+                        &root,
+                        &session_id,
+                        home,
+                        harness,
+                        policy,
+                    )?;
+                }
+                super::json_gh_rules::configure_json_gh_rules(
                     harness,
                     policy,
+                    denials,
+                    &mut environment,
                 )?;
-                super::json_gh_rules::configure_json_gh_rules(harness, policy, &mut environment)?;
                 environment.retain(|name, value| {
                     native_explicit_environment.contains_key(name)
                         || native_base_environment.get(name) != Some(value)
@@ -1665,8 +1686,8 @@ async fn prepare_and_start_harness(
                             oracle: false,
                             agent_mailboxes_enabled: mailboxes_enabled,
                             subtle_subagents,
-                            review_gate,
                         },
+                        review_tools,
                     )?;
                     Ok((registered, environment))
                 })
@@ -1712,7 +1733,7 @@ async fn prepare_and_start_harness(
                         role,
                         mailboxes_enabled,
                         subtle_subagents,
-                        review_gate,
+                        review_tools,
                     )?;
                     let mailbox_hook_available =
                         super::subagents::configure_claude_mailbox_hook(&root, &session_id, &home)?;
@@ -1727,6 +1748,30 @@ async fn prepare_and_start_harness(
                 .await?;
             claude_mailbox_hook_available = mailbox_hook_available;
             registered
+        }
+        HarnessKind::OpenCode => {
+            let budget = preparation_step(
+                root,
+                status,
+                "mailbox-plugin",
+                LOCAL_PREPARATION_STEP_TIMEOUT,
+                cancel,
+            )
+            .await?;
+            let root = root.to_owned();
+            let mut environment = config.environment.clone();
+            config.environment =
+                bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+                    if step_cancel.is_cancelled() {
+                        bail!(
+                            "preparation cancelled before configuring the OpenCode mailbox plugin"
+                        );
+                    }
+                    super::subagents::configure_opencode_mailbox_hook(&root, &mut environment)?;
+                    Ok(environment)
+                })
+                .await?;
+            false // OpenCode receives its MCP servers through ACP.
         }
         HarnessKind::Kimi if subagent_role.is_some() => {
             let budget = preparation_step(
@@ -1803,11 +1848,7 @@ async fn prepare_and_start_harness(
         .await?;
     }
 
-    if config.review_trigger == mj_core::config::ReviewTrigger::Push
-        && !config.is_managed_subagent()
-        && !config.handback_tool
-        && config.reviewer_launch.is_none()
-    {
+    if config.prepares_review() {
         let budget = preparation_step(
             root,
             status,
@@ -1871,10 +1912,10 @@ async fn prepare_and_start_harness(
         session_environment: prepared_harness.environment,
         supervisor_spec: prepared_harness.spec,
         relay: relay.clone(),
-        untracked_at_start,
         resume_session,
         native_session_may_have_history,
         profile_registration,
+        managed_subagent,
         subagent_role,
         runtime: tokio::runtime::Handle::current(),
         managed_cache_root,
@@ -1913,6 +1954,7 @@ async fn prepare_and_start_harness(
             relay,
             dispatch_wakes,
             kimi_task_home,
+            capture,
             bridge_runtime,
             bridge_cancel,
         )
@@ -1972,7 +2014,7 @@ pub async fn prepare_managed_harness(mut config: WorkerLaunchConfig) -> Result<(
 
 pub(super) async fn serve_terminal_relay(
     listener: UnixListener,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     dispatch_wake: mpsc::Sender<()>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     runtime: ConnectionRuntime,
@@ -2034,7 +2076,7 @@ pub(super) struct ConnectionRuntime {
 #[cfg(test)]
 pub(super) async fn serve_client(
     stream: UnixStream,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     dispatch_wake: mpsc::Sender<()>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     commands: Option<mpsc::Sender<CommandRequest>>,
@@ -2056,7 +2098,7 @@ pub(super) async fn serve_client(
 
 pub(super) async fn serve_client_with_memory(
     stream: UnixStream,
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     dispatch_wake: mpsc::Sender<()>,
     credentials: std::result::Result<CredentialEndpoint, String>,
     runtime: ConnectionRuntime,
@@ -2142,6 +2184,36 @@ pub(super) async fn serve_client_with_memory(
                 .as_ref()
                 .and_then(|services| services.subagents.clone())
                 .or_else(|| subagents.clone());
+            if let RelayRequest::WaitForChange {
+                after_ordinal,
+                state_digest,
+            } = &envelope.request
+            {
+                let body = match wait_for_change(
+                    &relay,
+                    preparation.as_ref(),
+                    request_subagents.as_ref(),
+                    &subagent_feed,
+                    *after_ordinal,
+                    state_digest.as_deref(),
+                )
+                .await
+                {
+                    Ok(body) => body,
+                    Err(error) => compaction_error(
+                        RelayErrorCode::Internal,
+                        &format!("wait for a relay change: {error:#}"),
+                    ),
+                };
+                let response = RelayResponseEnvelope {
+                    request_id: envelope.request_id,
+                    protocol_version: envelope.protocol_version,
+                    body,
+                };
+                write_logged_response(&mut writer, &response, &session_id, "wait_for_change")
+                    .await?;
+                continue;
+            }
             if let RelayRequest::SetOperatorAway { away, revision } = &envelope.request {
                 let state = {
                     let relay = relay.lock().expect("relay state lock poisoned");
@@ -2234,6 +2306,8 @@ pub(super) async fn serve_client_with_memory(
                 RelayRequest::CredentialState
                     | RelayRequest::AwsCredentialsState
                     | RelayRequest::InstallAwsCredentials { .. }
+                    | RelayRequest::RemoveAwsCredentials
+                    | RelayRequest::AwsCredentialsScope
                     | RelayRequest::SlopcopLoginState
                     | RelayRequest::InstallSlopcopLogin { .. }
                     | RelayRequest::RemoveSlopcopLogin
@@ -2443,7 +2517,13 @@ pub(super) async fn serve_client_with_memory(
                 }
             );
             let operation = envelope.request.method_name();
-            let mut response = match handle_request(&relay, envelope).await {
+            // An attach's state carries the preparation before the relay
+            // digests it, so a changed preparation is never mistaken for a
+            // state the controller already holds.
+            let attach_preparation = preparation
+                .as_ref()
+                .and_then(|receiver| receiver.borrow().state.clone());
+            let mut response = match handle_request(&relay, envelope, attach_preparation).await {
                 Ok(response) => response,
                 Err(error) => {
                     tracing::error!(
@@ -2556,54 +2636,17 @@ mod preparation_tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
-    // Hard-won: c29b1379c: an in-place Move's relay reset made review rescan the checkout and refuse it.
-    #[test]
-    fn review_baseline_reuse_survives_relay_reset_only_with_a_record_and_owned_pins() {
-        use crate::test_support::git;
-        use mj_checkpoint::archive::SystemGit;
-
-        let repository = tempfile::tempdir().unwrap();
-        let root = repository.path();
-        git(root, &["init", "-q"]);
-        git(root, &["config", "user.name", "Review Test"]);
-        git(root, &["config", "user.email", "review@example.test"]);
-        git(root, &["commit", "--allow-empty", "-qm", "base"]);
-        let empty = std::collections::BTreeMap::new();
-        assert!(reuse_review_baselines(true, &empty, &SystemGit, "session"));
-        assert!(!reuse_review_baselines(
-            false, &empty, &SystemGit, "session"
-        ));
-        let recorded = crate::review::capture::initialize_review_baselines(
-            &SystemGit,
-            &[root.to_path_buf()],
-            "session",
-        )
-        .unwrap();
-        assert!(reuse_review_baselines(
-            false, &recorded, &SystemGit, "session"
-        ));
-        assert!(!reuse_review_baselines(
-            false, &recorded, &SystemGit, "other"
-        ));
-        assert!(reuse_review_baselines(true, &recorded, &SystemGit, "other"));
-        let reference = mj_checkpoint::archive::review_baseline_ref(&SystemGit, root).unwrap();
-        git(root, &["update-ref", "-d", &reference]);
-        assert!(!reuse_review_baselines(
-            false, &recorded, &SystemGit, "session"
-        ));
-    }
-
     type TestReader = BufReader<OwnedReadHalf>;
 
-    fn test_relay(root: &std::path::Path) -> Arc<Mutex<DurableRelay>> {
-        Arc::new(Mutex::new(
+    fn test_relay(root: &std::path::Path) -> Arc<RelayCell> {
+        Arc::new(RelayCell::new(
             DurableRelay::open(root, "preparation-test", "1.0.0").unwrap(),
         ))
     }
 
     async fn start_control_server(
         root: &std::path::Path,
-        relay: Arc<Mutex<DurableRelay>>,
+        relay: Arc<RelayCell>,
         dispatch_wake: mpsc::Sender<()>,
         preparation: watch::Receiver<PreparationSnapshot>,
         preparation_cancel: CancellationToken,
@@ -2675,8 +2718,6 @@ mod preparation_tests {
                     session_id: "preparation-test".into(),
                     cwd: root.into(),
                     additional_directories: Vec::new(),
-                    review_capture: false,
-                    untracked_at_start: Arc::new(Mutex::new(BTreeMap::new())),
                     primary_relay: relay.clone(),
                     operation: tokio::sync::Mutex::new(()),
                 }),
@@ -2741,6 +2782,7 @@ mod preparation_tests {
             RelayRequest::Attach {
                 after_ordinal: 0,
                 after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+                known_state_digest: None,
             },
         )
         .await;
@@ -2815,6 +2857,7 @@ mod preparation_tests {
             shells,
             None,
             None,
+            None,
         ));
         events
             .send(RuntimeEvent::SessionConfigured {
@@ -2877,6 +2920,7 @@ mod preparation_tests {
             RelayRequest::Attach {
                 after_ordinal: 0,
                 after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+                known_state_digest: None,
             },
         )
         .await;
@@ -3094,6 +3138,7 @@ mod preparation_tests {
             RelayRequest::Attach {
                 after_ordinal: 0,
                 after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+                known_state_digest: None,
             },
         )
         .await;

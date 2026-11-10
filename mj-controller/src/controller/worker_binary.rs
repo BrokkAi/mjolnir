@@ -15,7 +15,9 @@ use crate::session_manager::{
     DeferredWorkerBinaryRefresh, ProjectMemorySyncTarget, WorkerBinaryRefresh,
     WorkerLaunchRefreshPlan, WorkerRecoveryPlan, WorkerWorkspace,
 };
-use crate::targets::{self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, SshTarget};
+use crate::targets::{
+    self, CommandExecutor, CommandPlan, CommandSpec, ProvisionStage, ProvisionStageGuard, SshTarget,
+};
 use mj_core::config::{HarnessKind, HarnessProfile, ProjectBundle, atomic_write, data_dir};
 #[cfg(test)]
 use mj_core::harness_runtime::{CLAUDE_ACP_VERSION, CODEX_ACP_VERSION};

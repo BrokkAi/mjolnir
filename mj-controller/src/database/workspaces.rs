@@ -495,6 +495,11 @@ pub fn reassign_resumable_session_workspace_at(
     ensure!(destination_exists, "unknown workspace {workspace_id:?}");
     if current_workspace != workspace_id {
         tx.execute(
+            "UPDATE detached_drafts SET workspace_id = ?2
+              WHERE session_id = ?1 AND revision IS NOT NULL",
+            params![session_id, workspace_id],
+        )?;
+        tx.execute(
             "UPDATE session_contexts SET workspace_id = ?2 WHERE session_id = ?1",
             params![session_id, workspace_id],
         )?;
@@ -530,6 +535,11 @@ pub fn set_sessions_workspace_at(
     )?;
     ensure!(destination_exists, "unknown workspace {workspace_id:?}");
     for session_id in session_ids {
+        tx.execute(
+            "UPDATE detached_drafts SET workspace_id = ?2
+              WHERE session_id = ?1 AND revision IS NOT NULL",
+            params![session_id, workspace_id],
+        )?;
         let changed = tx.execute(
             "UPDATE session_contexts SET workspace_id = ?2 WHERE session_id = ?1",
             params![session_id, workspace_id],
@@ -585,8 +595,9 @@ pub fn assign_new_session_workspace_at(
     session_id: &str,
     workspace_id: &str,
 ) -> Result<()> {
-    let connection = open(path)?;
-    let current: String = connection
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current: String = tx
         .query_row(
             "SELECT workspace_id FROM session_contexts WHERE session_id = ?1",
             [session_id],
@@ -600,15 +611,21 @@ pub fn assign_new_session_workspace_at(
         current == DEFAULT_WORKSPACE_ID,
         "session {session_id} already belongs to workspace {current}"
     );
-    let exists: bool = connection.query_row(
+    let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM workspaces WHERE workspace_id = ?1)",
         [workspace_id],
         |row| row.get(0),
     )?;
     ensure!(exists, "unknown workspace {workspace_id:?}");
-    connection.execute(
+    tx.execute(
+        "UPDATE detached_drafts SET workspace_id = ?2
+          WHERE session_id = ?1 AND revision IS NOT NULL",
+        params![session_id, workspace_id],
+    )?;
+    tx.execute(
         "UPDATE session_contexts SET workspace_id = ?2 WHERE session_id = ?1",
         params![session_id, workspace_id],
     )?;
+    tx.commit()?;
     Ok(())
 }

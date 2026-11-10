@@ -310,6 +310,8 @@ pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
 #[serde(deny_unknown_fields)]
 pub struct MaterializedTurnOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_through: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<crate::diagnostic::TurnDiagnostic>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -322,9 +324,27 @@ pub struct MaterializedTurnOutcome {
     pub completed_ordinal: u64,
     pub completed_at_ms: i64,
     pub outcome: TurnOutcomeKind,
+    /// What the child's worker observed when this turn ended (see
+    /// `RelayCommandOutcome::Prompt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_facts: Option<crate::work_facts::WorkFacts>,
 }
 
 impl MaterializedTurnOutcome {
+    /// The highest acceptance answered by the projection, or a legacy row.
+    pub fn answered_ordinal(&self) -> Option<u64> {
+        self.answered_through.or_else(|| {
+            crate::subagent::reminded_turn_ordinal(&self.command_id).or(self.accepted_ordinal)
+        })
+    }
+
+    pub fn answers(&self, ordinal: u64) -> bool {
+        self.accepted_ordinal == Some(ordinal)
+            || self
+                .answered_ordinal()
+                .is_some_and(|through| through >= ordinal)
+    }
+
     /// Only work that actually started can have been interrupted.
     pub fn interruption_ordinal(&self) -> Option<u64> {
         (self.turn_start_position.is_some()
@@ -1171,6 +1191,39 @@ pub fn allocation_memory(allocation: &SessionResourceAllocation) -> u64 {
 }
 
 impl TargetLocator {
+    /// Physical accounting identity: engine, SSH destination (None for local), container.
+    pub fn cpu_container_scope(&self) -> Option<(&str, Option<&str>, &str)> {
+        match self {
+            Self::LocalPodman { container_id, .. } => Some(("podman", None, container_id)),
+            Self::LocalDocker { container_id, .. } => Some(("docker", None, container_id)),
+            Self::AppleContainer { container_id, .. } => Some(("apple", None, container_id)),
+            Self::SshPodman {
+                host, container_id, ..
+            } => Some(("podman", Some(host), container_id)),
+            Self::SshDocker {
+                host, container_id, ..
+            } => Some(("docker", Some(host), container_id)),
+            Self::SshAppleContainer {
+                host, container_id, ..
+            } => Some(("apple", Some(host), container_id)),
+            _ => None,
+        }
+    }
+
+    /// Same physical accounting scope, including after an owner moves targets.
+    pub fn shares_cpu_container(&self, other: &Self) -> bool {
+        self.cpu_container_scope()
+            .is_some_and(|scope| Some(scope) == other.cpu_container_scope())
+    }
+    /// Container placement includes borrowed workers: each can survive its owner moving.
+    pub fn cpu_accounting(&self) -> crate::cpu_usage::CpuAccountingMode {
+        if self.cpu_container_scope().is_some() {
+            crate::cpu_usage::CpuAccountingMode::Container
+        } else {
+            crate::cpu_usage::CpuAccountingMode::ProcessTree
+        }
+    }
+
     /// Whether this locator owns a container rather than borrowing one.
     pub const fn owns_container(&self) -> bool {
         match self {
@@ -1530,6 +1583,9 @@ pub struct SessionRecord {
     // Read legacy saved session JSON; creation requests have no old-name alias.
     #[serde(default, alias = "no_mailbox", skip_serializing_if = "is_false")]
     pub no_github_events: bool,
+    /// Withhold GitHub credentials; inherited by children.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     pub target_template_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_allocation: Option<SessionResourceAllocation>,
@@ -1622,7 +1678,6 @@ pub const BASELINE_CONTAINER_CPUS: u64 = 4;
 pub const BASELINE_CONTAINER_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MINIMUM_CONTAINER_CPUS: u64 = 2;
 pub const MINIMUM_CONTAINER_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const PREFERRED_AWS_CPUS: u64 = 8;
 const MINIMUM_HOST_MEMORY_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const GIB_BYTES: u128 = 1024 * 1024 * 1024;
 
@@ -1839,25 +1894,6 @@ pub fn default_container_size(
     )
 }
 
-/// The TUI's preferred EC2 size: retain the same instance type if offered,
-/// else choose 8 vCPUs, else the first offered option.
-pub fn preferred_aws_allocation<'a>(
-    options: &'a [SessionResourceAllocation],
-    previous: Option<&SessionResourceAllocation>,
-) -> Option<&'a SessionResourceAllocation> {
-    if let Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) = previous
-        && let Some(option) = options.iter().find(|option| {
-            matches!(option, SessionResourceAllocation::AwsEc2 { instance_type: candidate, .. } if candidate == instance_type)
-        })
-    {
-        return Some(option);
-    }
-    options
-        .iter()
-        .find(|option| allocation_cpus(option) == PREFERRED_AWS_CPUS)
-        .or_else(|| options.first())
-}
-
 fn default_session_workspace_id() -> String {
     crate::workspace::DEFAULT_WORKSPACE_ID.to_owned()
 }
@@ -2030,6 +2066,25 @@ impl SessionRecord {
         )
     }
 
+    /// How this session's harness realizes its target's execution policy:
+    /// the policy recorded when its target was selected, so a later change
+    /// to the target template does not move it, and the profile's Muse
+    /// auto-review choice. `None` when the policy cannot be resolved or the
+    /// harness keeps its own configuration.
+    pub fn execution_enforcement(
+        &self,
+        config: &Config,
+    ) -> Option<crate::config::ExecutionEnforcement> {
+        let policy = self.target_runtime_settings(config).ok()?.execution_policy;
+        let muse_auto_review = config
+            .profiles
+            .get(&self.last_profile)
+            .and_then(|profile| profile.muse_auto_review)
+            .unwrap_or(false);
+        self.harness_kind
+            .resolve_execution_enforcement(policy, muse_auto_review)
+    }
+
     /// The target access settings this session's commands use: the ones
     /// recorded when its target was selected, with the machine's current ssh
     /// options while they still reach the same host, user, and port, or the
@@ -2038,34 +2093,13 @@ impl SessionRecord {
         &'a self,
         config: &Config,
     ) -> Result<std::borrow::Cow<'a, TargetRuntimeSettings>> {
-        if let Some(runtime) = &self.target_runtime {
-            // How to reach the target follows the machine's current ssh
-            // options; where it is stays as recorded (launch finding R3-7).
-            if let Some(refreshed) =
-                config
-                    .targets
-                    .get(&self.target_template_id)
-                    .and_then(|template| {
-                        runtime.with_current_ssh_options(&TargetRuntimeSettings::from(template))
-                    })
-            {
-                return Ok(std::borrow::Cow::Owned(refreshed));
-            }
-            return Ok(std::borrow::Cow::Borrowed(runtime));
-        }
-        let template = config.targets.get(&self.target_template_id).ok_or_else(|| {
-            crate::refusal::Refusal::precondition(format!(
-                "Session {:?} has no recorded target access settings. Restore target {:?} in config.toml once, then retry.",
-                self.id, self.target_template_id))
-        })?;
-        let runtime = TargetRuntimeSettings::from(template);
-        if let Some(locator) = &self.target {
-            crate::targets::TargetLocator::try_from(crate::targets::RecordedTarget {
-                locator, runtime: Some(&runtime), session_id: &self.id,
-            }).map_err(|error| crate::refusal::Refusal::precondition(format!(
-                "Session {:?} cannot recover target {:?}: {error}. Restore its original target settings, then retry.", self.id, self.target_template_id)))?;
-        }
-        Ok(std::borrow::Cow::Owned(runtime))
+        target_runtime_settings_for(
+            &self.id,
+            &self.target_template_id,
+            self.target.as_ref(),
+            self.target_runtime.as_ref(),
+            config,
+        )
     }
 
     /// The recorded failure that is safe to publish whatever state this
@@ -2339,7 +2373,9 @@ fn repository_source_identity(repository: &ProjectRepository) -> Option<ProjectS
     repository
         .github
         .as_deref()
-        .and_then(ProjectSourceIdentity::git_remote)
+        .and_then(|source| {
+            ProjectSourceIdentity::git_remote(source, crate::remote_git::Shorthand::Allowed)
+        })
         .or_else(|| {
             repository
                 .local
@@ -2393,10 +2429,12 @@ impl ProjectSourceIdentity {
     }
 
     /// Canonicalizes a Git remote so raw checkouts group as the same project
-    /// even when their worktree paths differ.
-    pub fn git_remote(source: &str) -> Option<Self> {
-        let identity = crate::repository::RepositoryIdentity::from_remote(source)?;
-        let full = crate::repository::RepositoryIdentity::remote_label(source)?;
+    /// even when their worktree paths differ. `shorthand` says whether a bare
+    /// `owner/repository` is GitHub; text read from `git config` must not
+    /// allow it, because there it is a relative path.
+    pub fn git_remote(source: &str, shorthand: crate::remote_git::Shorthand) -> Option<Self> {
+        let identity = crate::repository::RepositoryIdentity::from_remote_with(source, shorthand)?;
+        let full = crate::repository::RepositoryIdentity::remote_label_with(source, shorthand)?;
         Some(Self {
             key: identity.key(),
             short: full.rsplit(['/', ':']).next()?.to_owned(),
@@ -2505,6 +2543,47 @@ impl State {
             .copied()
             .unwrap_or(true)
     }
+
+    /// The review choice that governs `session_id`. An ordinary sub-agent
+    /// reviews under the choice of the session that spawned it, followed up
+    /// the chain to a top-level session, so the parent's record stays the only
+    /// copy and a later change to it applies to its children. Every other
+    /// session uses its own record. Both the launch that offers the review
+    /// tools and the review host that picks reviewers ask this one function.
+    ///
+    /// Fails with the id of a missing ancestor record, or with the session
+    /// itself when the parent chain loops.
+    pub fn effective_review(
+        &self,
+        session_id: &str,
+    ) -> std::result::Result<Option<&crate::config::SessionReview>, String> {
+        let mut current = session_id;
+        // A chain longer than the relation table repeats a session.
+        for _ in 0..=self.subagents.len() {
+            match self.subagents.get(current) {
+                Some(child) if child.kind == crate::subagent::SubagentKind::Worker => {
+                    if !self.sessions.contains_key(&child.parent_session_id) {
+                        return Err(child.parent_session_id.clone());
+                    }
+                    current = &child.parent_session_id;
+                }
+                _ => return Ok(self.sessions.get(current).and_then(|s| s.review.as_ref())),
+            }
+        }
+        Err(session_id.to_owned())
+    }
+
+    /// `effective_review`, with a parent chain that cannot be followed
+    /// reviewing as Off. Launch (no review tools), the review host, the
+    /// delegation completion and the viewer all read the choice through this
+    /// one rule.
+    pub fn effective_review_or_off(
+        &self,
+        session_id: &str,
+    ) -> Option<&crate::config::SessionReview> {
+        const OFF: &crate::config::SessionReview = &crate::config::SessionReview::Off;
+        self.effective_review(session_id).unwrap_or(Some(OFF))
+    }
 }
 
 /// The effective code checkout for one session, including who owns it.
@@ -2573,6 +2652,17 @@ impl<'a> Checkout<'a> {
         }
     }
 
+    /// The record that owns a borrowed checkout, following nested borrowing
+    /// to the session that holds the workspace. `None` for a checkout the
+    /// session owns itself.
+    #[must_use]
+    pub fn owner(&self) -> Option<&'a SessionRecord> {
+        match self {
+            Self::Borrowed { owner, checkout } => checkout.owner().or(Some(*owner)),
+            Self::Attached { .. } | Self::ManagedWorktree { .. } | Self::ManagedWorkspace => None,
+        }
+    }
+
     /// The concrete repository directory when the record stores one.
     /// Bundle workspace paths are target-specific and are not in the record.
     #[must_use]
@@ -2630,6 +2720,22 @@ pub fn live_session_ids(
 }
 
 impl State {
+    /// Managed children that a parent suspend or Move stop hook must end,
+    /// including parked children and oracles.
+    #[must_use]
+    pub fn active_child_session_ids(&self, parent_session_id: &str) -> Vec<String> {
+        self.subagents
+            .values()
+            .filter(|child| child.parent_session_id == parent_session_id)
+            .filter(|child| {
+                self.sessions
+                    .get(&child.child_session_id)
+                    .is_some_and(|session| session.state.is_active())
+            })
+            .map(|child| child.child_session_id.clone())
+            .collect()
+    }
+
     /// Whether a sub-agent of `parent_session_id` still has a target. A
     /// child's worker, parked or live, runs in its parent's container, so
     /// recreating that container would end it.
@@ -2697,6 +2803,19 @@ impl State {
             });
         }
         Ok(session.checkout())
+    }
+
+    /// The record whose workspace `session_id` works in: the session itself,
+    /// or, for a sub-agent, the parent it borrows from. Facts about how the
+    /// workspace was created (its exact checkout, its history cutoff) belong
+    /// to that record, so a reader asks here instead of the child's own
+    /// fields, which a child leaves empty.
+    pub fn workspace_owner(&self, session_id: &str) -> Result<&SessionRecord> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        Ok(self.checkout(session_id)?.owner().unwrap_or(session))
     }
 
     /// How a notice names a session: the title the session list shows
@@ -3216,6 +3335,136 @@ pub struct ResumeRepositorySourceReceipt {
     pub bundle_id: String,
     pub checkpoint_sha256: String,
     pub repositories: Vec<crate::config::ProjectRepository>,
+}
+
+/// Access settings for a recorded physical placement, independent of its session.
+pub fn target_runtime_settings_for<'a>(
+    session_id: &str,
+    target_template_id: &str,
+    target: Option<&TargetLocator>,
+    runtime: Option<&'a TargetRuntimeSettings>,
+    config: &Config,
+) -> Result<std::borrow::Cow<'a, TargetRuntimeSettings>> {
+    if let Some(runtime) = runtime {
+        // How to reach the target follows the machine's current ssh
+        // options; where it is stays as recorded (launch finding R3-7).
+        if let Some(refreshed) = config.targets.get(target_template_id).and_then(|template| {
+            runtime.with_current_ssh_options(&TargetRuntimeSettings::from(template))
+        }) {
+            return Ok(std::borrow::Cow::Owned(refreshed));
+        }
+        return Ok(std::borrow::Cow::Borrowed(runtime));
+    }
+    let template = config.targets.get(target_template_id).ok_or_else(|| {
+            crate::refusal::Refusal::precondition(format!(
+                "Session {:?} has no recorded target access settings. Restore target {:?} in config.toml once, then retry.",
+                session_id, target_template_id))
+        })?;
+    let runtime = TargetRuntimeSettings::from(template);
+    if let Some(locator) = target {
+        crate::targets::TargetLocator::try_from(crate::targets::RecordedTarget {
+                locator, runtime: Some(&runtime), session_id,
+            }).map_err(|error| crate::refusal::Refusal::precondition(format!(
+                "Session {:?} cannot recover target {:?}: {error}. Restore its original target settings, then retry.", session_id, target_template_id)))?;
+    }
+    Ok(std::borrow::Cow::Owned(runtime))
+}
+
+impl TargetLocator {
+    /// Physical identity ignores borrowing, SSH discovery and storage metadata.
+    pub fn same_resource(&self, other: &Self) -> bool {
+        let (left, right) = (self, other);
+        match (left, right) {
+            (
+                TargetLocator::LocalBare { worker_root: left },
+                TargetLocator::LocalBare { worker_root: right },
+            ) => left == right,
+            (
+                TargetLocator::LocalPodman {
+                    container_id: left, ..
+                },
+                TargetLocator::LocalPodman {
+                    container_id: right,
+                    ..
+                },
+            )
+            | (
+                TargetLocator::LocalDocker {
+                    container_id: left, ..
+                },
+                TargetLocator::LocalDocker {
+                    container_id: right,
+                    ..
+                },
+            )
+            | (
+                TargetLocator::AppleContainer {
+                    container_id: left, ..
+                },
+                TargetLocator::AppleContainer {
+                    container_id: right,
+                    ..
+                },
+            ) => left == right,
+            (
+                TargetLocator::SshAppleContainer {
+                    host: left_host,
+                    container_id: left_container,
+                    ..
+                },
+                TargetLocator::SshAppleContainer {
+                    host: right_host,
+                    container_id: right_container,
+                    ..
+                },
+            ) => left_host == right_host && left_container == right_container,
+            (
+                TargetLocator::AwsEc2 {
+                    instance_id: left, ..
+                },
+                TargetLocator::AwsEc2 {
+                    instance_id: right, ..
+                },
+            ) => left == right,
+            (
+                TargetLocator::SshBare {
+                    host: left_host,
+                    workspace: left_workspace,
+                    ..
+                },
+                TargetLocator::SshBare {
+                    host: right_host,
+                    workspace: right_workspace,
+                    ..
+                },
+            ) => left_host == right_host && left_workspace == right_workspace,
+            (
+                TargetLocator::SshPodman {
+                    host: left_host,
+                    container_id: left_container,
+                    ..
+                },
+                TargetLocator::SshPodman {
+                    host: right_host,
+                    container_id: right_container,
+                    ..
+                },
+            )
+            | (
+                TargetLocator::SshDocker {
+                    host: left_host,
+                    container_id: left_container,
+                    ..
+                },
+                TargetLocator::SshDocker {
+                    host: right_host,
+                    container_id: right_container,
+                    ..
+                },
+            ) => left_host == right_host && left_container == right_container,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]

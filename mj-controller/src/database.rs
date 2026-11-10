@@ -31,7 +31,10 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 112;
+const SCHEMA_VERSION: i64 = 123;
+
+mod environments;
+pub(crate) use environments::*;
 
 mod session_move;
 pub use session_move::*;

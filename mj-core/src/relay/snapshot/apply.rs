@@ -370,6 +370,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         .active_prompt
                         .as_ref()
                         .map(|prompt| prompt.command_id.clone());
+                    // With no prompt of ours running, the stop is aimed at the
+                    // harness's own turn. A second stop of the same turn never
+                    // downgrades an acknowledged first one.
+                    if snapshot.active_prompt.is_none()
+                        && let Some(turn) = snapshot.autonomous_harness_turn()
+                        && snapshot
+                            .cancelling_harness_turn
+                            .is_none_or(|target| target.first_ordinal != turn.first_ordinal)
+                    {
+                        snapshot.cancelling_harness_turn = Some(HarnessTurnCancel {
+                            first_ordinal: turn.first_ordinal,
+                            applied: false,
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -377,20 +391,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 // Legacy protocol-39 journals still replay this command.
                 RelayCommand::SetSubagentWait { .. } => {}
                 RelayCommand::Prompt { prompt }
-                    if !crate::continuation::is_generated_prompt(command_id)
-                        && !crate::continuation::is_generated_prompt_text(
-                            &prompt
-                                .iter()
-                                .filter_map(|b| {
-                                    if let ContentBlock::Text(t) = b {
-                                        Some(t.text.as_str())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ) =>
+                    if crate::continuation::is_user_authored_message(
+                        Some(command_id),
+                        &prompt
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Text(t) = b {
+                                    Some(t.text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ) =>
                 {
                     snapshot.continuation = crate::continuation::ContinuationState {
                         user_command_id: Some(command_id.clone()),
@@ -404,19 +418,16 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.continuation.completed_command_id = None;
                     snapshot.continuation.harness_turn = None;
                 }
+                // Another session's message delivered as a turn, by a mailbox
+                // wake or, for workers without mailbox delivery, as a prompt.
                 RelayCommand::MailboxWake { .. } => {
-                    let continuation = &mut snapshot.continuation;
-                    // The accepted wake owns a new turn even after restore or
-                    // cancellation. It may recover from quota without granting
-                    // new authorization or renewing the ordinary nudge allowance.
-                    if continuation.user_command_id.is_none() {
-                        continuation.user_command_id = Some(command_id.clone());
-                        continuation.suppressed = true;
-                    }
-                    continuation.completed_command_id = None;
-                    continuation.harness_turn = None;
-                    continuation.quota_suppressed = false;
-                    continuation.quota_recovery = None;
+                    begin_delivered_message_turn(&mut snapshot.continuation, command_id);
+                }
+                RelayCommand::Prompt { .. }
+                    if crate::continuation::GeneratedPrompt::of(command_id)
+                        == Some(crate::continuation::GeneratedPrompt::SessionMessageTurn) =>
+                {
+                    begin_delivered_message_turn(&mut snapshot.continuation, command_id);
                 }
                 RelayCommand::InstallPromptContext { text } => {
                     match snapshot.pending_prompt_context.as_mut() {
@@ -457,11 +468,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                                 )
                             )
                     }) {
-                        a.revision = event.ordinal;
-                        a.status = crate::assessment::Status::Pending;
-                        a.evidence = None;
-                        a.verdict = None;
-                        a.action = None;
+                        a.classify_again(event.ordinal);
                         a.failures = 0;
                         a.retry_at_ms = None;
                         a.reason = "authorization_evidence_changed".into();
@@ -844,11 +851,20 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     RelayCommandOutcome::NoticeRecorded,
                 ) => {}
                 (RelayCommand::GoalControl { .. }, RelayCommandOutcome::GoalControlled) => {}
-                (RelayCommand::Cancel, RelayCommandOutcome::Cancelled)
-                | (RelayCommand::CancelTurn, RelayCommandOutcome::Cancelled)
+                (
+                    RelayCommand::Cancel | RelayCommand::CancelTurn,
+                    RelayCommandOutcome::Cancelled,
+                ) => {
+                    if let Some(target) = snapshot.cancelling_harness_turn.as_mut() {
+                        target.applied = true;
+                    }
+                }
                 // A cancel acknowledgement does not end its originating
                 // prompt, and must never retarget cancellation to a later one.
-                | (RelayCommand::CancelTurnFor { .. } | RelayCommand::ApplyQueuedFor { .. }, RelayCommandOutcome::Cancelled) => {}
+                (
+                    RelayCommand::CancelTurnFor { .. } | RelayCommand::ApplyQueuedFor { .. },
+                    RelayCommandOutcome::Cancelled,
+                ) => {}
                 (
                     RelayCommand::ResolveSteering { steering_id },
                     RelayCommandOutcome::NoticeRecorded,
@@ -1168,6 +1184,15 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             if matches!(command, RelayCommand::Cancel | RelayCommand::CancelTurn) {
                 snapshot.cancelling_prompt_id = None;
+                // A refused stop leaves the turn running. Admission refuses a
+                // second stop while one is pending, so an acknowledged stop
+                // is the only one this can meet.
+                if snapshot
+                    .cancelling_harness_turn
+                    .is_some_and(|target| !target.applied)
+                {
+                    snapshot.cancelling_harness_turn = None;
+                }
             }
             snapshot
                 .dispatches
@@ -1325,12 +1350,21 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
         }
         RelayObservation::HarnessTurnSettled {
-            prompt_in_flight, ..
+            prompt_in_flight,
+            autonomous,
+            ..
         } => {
-            let started = snapshot.continuation.autonomous_turn_started.take();
-            if let Some(turn) = &snapshot.harness_turn
+            if let Some(turn) = autonomous {
+                snapshot.turn_completion = Some(crate::activity::verdict::TurnCompletion {
+                    command_id: crate::continuation::harness_turn_id(turn.start_ordinal),
+                    completed_ordinal: event.ordinal,
+                    decision: crate::activity::verdict::Decision::KeepCurrent,
+                });
+            }
+            let autonomous_turn = snapshot.autonomous_harness_turn();
+            snapshot.continuation.autonomous_turn_started = None;
+            if let Some(turn) = autonomous_turn
                 && !*prompt_in_flight
-                && started == Some(turn.first_ordinal)
             {
                 // Physical completion does not depend on a retained user command.
                 // Missing authorization gates nudges, never provider assessment.
@@ -1344,9 +1378,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     ),
                 ));
             }
-            if let Some(turn) = &snapshot.harness_turn
+            if let Some(turn) = autonomous_turn
                 && !*prompt_in_flight
-                && started == Some(turn.first_ordinal)
                 && snapshot.continuation.user_command_id.is_some()
             {
                 let id = crate::continuation::harness_turn_id(turn.first_ordinal);
@@ -1684,6 +1717,15 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
     {
         snapshot.cancelling_prompt_id = None;
     }
+    // The stop belongs to the autonomous turn it named; once that turn is gone
+    // (settled, interrupted, or taken over by a prompt) nothing is left to stop.
+    if snapshot.cancelling_harness_turn.is_some_and(|target| {
+        snapshot
+            .autonomous_harness_turn()
+            .is_none_or(|turn| turn.first_ordinal != target.first_ordinal)
+    }) {
+        snapshot.cancelling_harness_turn = None;
+    }
     apply_assessment_context(snapshot, event);
     snapshot.compact_terminal_commands()?;
     snapshot.latest_ordinal = event.ordinal;
@@ -1964,4 +2006,21 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         }
         _ => {}
     }
+}
+
+/// The accepted delivery owns a new turn even after restore or cancellation.
+/// It may recover from quota without granting new authorization or renewing
+/// the ordinary nudge allowance.
+fn begin_delivered_message_turn(
+    continuation: &mut crate::continuation::ContinuationState,
+    command_id: &str,
+) {
+    if continuation.user_command_id.is_none() {
+        continuation.user_command_id = Some(command_id.to_owned());
+        continuation.suppressed = true;
+    }
+    continuation.completed_command_id = None;
+    continuation.harness_turn = None;
+    continuation.quota_suppressed = false;
+    continuation.quota_recovery = None;
 }

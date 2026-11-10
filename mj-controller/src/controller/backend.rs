@@ -6,18 +6,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use mj_core::config::{AwsAddressSource, Config, ProjectBundle, TargetTemplate, data_dir};
+use mj_core::config::{Config, ProjectBundle, TargetTemplate, data_dir};
 use mj_core::state::{
     PodmanWorkspaceLocator, ResourceAllocationKind, SessionRecord, SessionResourceAllocation,
-    TargetLocator, allocation_cpus,
+    TargetLocator,
 };
 
 use crate::targets::{
-    self, AwsTemplate, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate,
-    ImageRefresh, ProjectBundleSpec, ProvisionStage, RepositorySpec, SshTarget,
+    self, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate, ImageRefresh,
+    ProjectBundleSpec, ProvisionStage, RepositorySpec, SshTarget,
 };
 
-use super::{Controller, execute_checked};
+use super::Controller;
 
 impl Controller {
     /// Inspect the actual execution checkout in a background worker.
@@ -133,120 +133,6 @@ impl Controller {
             &numstat,
             &porcelain,
         ))
-    }
-
-    pub fn resolve_aws_resource_options(
-        &self,
-        target_id: &str,
-        executor: &impl CommandExecutor,
-    ) -> Result<Vec<SessionResourceAllocation>> {
-        let TargetTemplate::AwsEc2 {
-            aws_profile,
-            region,
-            launch_template,
-            launch_template_version,
-            ..
-        } = self
-            .config
-            .targets
-            .get(target_id)
-            .with_context(|| format!("unknown target template {target_id:?}"))?
-        else {
-            bail!("target {target_id:?} is not an AWS EC2 target");
-        };
-        let profile = aws_profile.as_deref().unwrap_or("default");
-        let launch_key = if launch_template.starts_with("lt-") {
-            "--launch-template-id"
-        } else {
-            "--launch-template-name"
-        };
-        let version = launch_template_version.as_deref().unwrap_or("$Default");
-        let describe_template = CommandSpec::new(
-            "aws",
-            [
-                "--profile",
-                profile,
-                "--region",
-                region,
-                "ec2",
-                "describe-launch-template-versions",
-                launch_key,
-                launch_template,
-                "--versions",
-                version,
-                "--output",
-                "json",
-            ],
-        )
-        .purpose("resolve EC2 launch template instance family");
-        let output = executor.execute(&describe_template)?;
-        if output.status != 0 {
-            bail!(
-                "{} failed with status {}: {}",
-                describe_template.purpose,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        let response: serde_json::Value =
-            serde_json::from_slice(&output.stdout).context("parse EC2 launch template response")?;
-        let instance_type = response
-            .pointer("/LaunchTemplateVersions/0/LaunchTemplateData/InstanceType")
-            .and_then(serde_json::Value::as_str)
-            .context("launch template does not specify a concrete instance type")?;
-        let family = instance_type
-            .rsplit_once('.')
-            .map(|(family, _)| family)
-            .context("launch template instance type has no size suffix")?;
-        let filter = format!("Name=instance-type,Values={family}.*");
-        let describe_types = CommandSpec::new(
-            "aws",
-            [
-                "--profile",
-                profile,
-                "--region",
-                region,
-                "ec2",
-                "describe-instance-types",
-                "--filters",
-                &filter,
-                "--output",
-                "json",
-            ],
-        )
-        .purpose("discover EC2 instance sizes");
-        let output = executor.execute(&describe_types)?;
-        if output.status != 0 {
-            bail!(
-                "{} failed with status {}: {}",
-                describe_types.purpose,
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        let response: serde_json::Value =
-            serde_json::from_slice(&output.stdout).context("parse EC2 instance type response")?;
-        let mut options = response
-            .get("InstanceTypes")
-            .and_then(serde_json::Value::as_array)
-            .context("EC2 instance type response omitted InstanceTypes")?
-            .iter()
-            .filter_map(|entry| {
-                Some(SessionResourceAllocation::AwsEc2 {
-                    instance_type: entry.get("InstanceType")?.as_str()?.to_owned(),
-                    vcpus: entry.pointer("/VCpuInfo/DefaultVCpus")?.as_u64()?,
-                    memory_bytes: entry
-                        .pointer("/MemoryInfo/SizeInMiB")?
-                        .as_u64()?
-                        .checked_mul(1024 * 1024)?,
-                })
-            })
-            .collect::<Vec<_>>();
-        options.sort_by_key(allocation_cpus);
-        if !options.iter().any(|option| allocation_cpus(option) == 8) {
-            bail!("EC2 family {family:?} has no exact 8-vCPU baseline size");
-        }
-        Ok(options)
     }
 
     pub fn reconnect_command(&self, session_id: &str) -> Result<CommandSpec> {
@@ -569,7 +455,17 @@ pub(crate) fn local_engine_readiness(
     let result = match kind {
         "local-podman" => targets::verify_local_podman(executor).map(|_| ()),
         "local-docker" => targets::verify_local_docker(executor).map(|_| ()),
-        "apple-container" => targets::ensure_apple_container_runtime(executor).map(|_| ()),
+        // Observe only: opening the launch options must not start a service
+        // the user may have stopped. Starting stays with daemon startup and
+        // the launch preflight.
+        "apple-container" => {
+            targets::apple_container_runtime_status(executor).and_then(|status| match status {
+                targets::AppleContainerStatus::Running => Ok(()),
+                targets::AppleContainerStatus::Stopped { status, detail } => {
+                    anyhow::bail!("container system status exited with status {status}: {detail}")
+                }
+            })
+        }
         _ => return None,
     };
     Some(match result {
@@ -586,15 +482,6 @@ pub(crate) fn is_missing_command(error: &anyhow::Error) -> bool {
             .downcast_ref::<std::io::Error>()
             .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
     })
-}
-
-/// The check a target gets before anything is launched on it, as the
-/// machine probe runs it for an EC2 launch template.
-pub(crate) fn verify_target_before_launch(
-    template: &TargetTemplate,
-    executor: &impl CommandExecutor,
-) -> Result<()> {
-    verify_target(template, executor, TargetCheck::BeforeLaunch)
 }
 
 /// Check that a target's host and runtime can run sessions.
@@ -687,55 +574,7 @@ pub(super) fn verify_target(
         TargetTemplate::SshBare { ssh, .. } => {
             verify_ssh_connectivity(&SshTarget::from(ssh), executor)
         }
-        TargetTemplate::AwsEc2 {
-            aws_profile,
-            region,
-            launch_template,
-            launch_template_version,
-            ..
-        } => {
-            let mut identity_args = vec!["sts".into(), "get-caller-identity".into()];
-            if let Some(profile) = aws_profile {
-                identity_args.extend(["--profile".into(), profile.clone()]);
-            }
-            let identity = CommandSpec::new("aws", identity_args)
-                .purpose("verify AWS credentials")
-                .stage(ProvisionStage::Provisioning);
-            let output = executor.execute(&identity)?;
-            ensure!(
-                output.status == 0,
-                "AWS credential test failed with status {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-
-            let mut launch_args = vec![
-                "ec2".into(),
-                "describe-launch-template-versions".into(),
-                "--region".into(),
-                region.clone(),
-                if launch_template.starts_with("lt-") { "--launch-template-id" } else { "--launch-template-name" }.into(),
-                launch_template.clone(),
-                "--versions".into(),
-                launch_template_version
-                    .clone()
-                    .unwrap_or_else(|| "$Default".into()),
-            ];
-            if let Some(profile) = aws_profile {
-                launch_args.extend(["--profile".into(), profile.clone()]);
-            }
-            let launch = CommandSpec::new("aws", launch_args)
-                .purpose("verify AWS launch template")
-                .stage(ProvisionStage::Provisioning);
-            let output = executor.execute(&launch)?;
-            ensure!(
-                output.status == 0,
-                "AWS launch-template test failed with status {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            Ok(())
-        }
+        TargetTemplate::AwsEc2 { .. } => bail!(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
         TargetTemplate::LocalBare => Ok(()),
     }
 }
@@ -851,13 +690,14 @@ fn backend_bundle_with_sources(
     })
 }
 
-/// Per-session container size overrides. They win over both the target
+/// Per-session container overrides. They win over both the target
 /// template's values and any recorded resource allocation, and they are read
 /// only while a container is being created.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct ContainerOverrides<'a> {
     pub cpus: Option<&'a str>,
     pub memory: Option<&'a str>,
+    pub no_github_credentials: bool,
 }
 
 impl<'a> ContainerOverrides<'a> {
@@ -865,6 +705,7 @@ impl<'a> ContainerOverrides<'a> {
         Self {
             cpus: session.container_cpus.as_deref(),
             memory: session.container_memory.as_deref(),
+            no_github_credentials: session.no_github_credentials,
         }
     }
 }
@@ -893,32 +734,7 @@ pub(super) fn backend_target(
                 container: backend_container(container, allocation, overrides),
             }
         }
-        TargetTemplate::AwsEc2 {
-            aws_profile,
-            region,
-            launch_template,
-            launch_template_version,
-            ssh_user,
-            identity_file,
-            ssh_args,
-            ..
-        } => targets::TargetTemplate::AwsEc2(AwsTemplate {
-            profile: aws_profile.clone().unwrap_or_else(|| "default".into()),
-            region: region.clone(),
-            launch_template: launch_template.clone(),
-            launch_template_version: launch_template_version.clone(),
-            instance_type: match allocation {
-                Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) => {
-                    Some(instance_type.clone())
-                }
-                _ => None,
-            },
-            // The address is filled after describe-instances.
-            ssh: SshTarget {
-                destination: format!("{ssh_user}@pending.invalid"),
-                ssh_args: targets::ssh_args_with_identity(ssh_args, identity_file.as_deref()),
-            },
-        }),
+        TargetTemplate::AwsEc2 { .. } => bail!(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
         TargetTemplate::SshBare {
             ssh,
             workspace_prefix,
@@ -1093,9 +909,9 @@ pub(super) fn configure_github_token_environment(target: &mut targets::TargetTem
         | targets::TargetTemplate::SshPodman { container, .. }
         | targets::TargetTemplate::SshDocker { container, .. }
         | targets::TargetTemplate::SshAppleContainer { container, .. } => container,
-        targets::TargetTemplate::LocalBare
-        | targets::TargetTemplate::AwsEc2(_)
-        | targets::TargetTemplate::SshBare { .. } => return false,
+        targets::TargetTemplate::LocalBare | targets::TargetTemplate::SshBare { .. } => {
+            return false;
+        }
     };
     container
         .extra_run_args
@@ -1144,7 +960,11 @@ fn backend_container(
     if let Some(memory) = memory {
         extra_run_args.push(format!("--memory={memory}"));
     }
-    for (key, value) in &container.environment {
+    let mut environment = container.environment.resolved().clone();
+    if overrides.no_github_credentials {
+        mj_core::credentials::remove_github_authentication_environment(&mut environment);
+    }
+    for (key, value) in &environment {
         extra_run_args.extend(["--env".to_string(), format!("{key}={value}")]);
     }
     ContainerTemplate {
@@ -1218,12 +1038,26 @@ fn wait_for_ssh_ready(
     }
 }
 
+/// Wait for a newly provisioned EC2 host using the same readiness policy as
+/// session-owned instances. Call from supervised blocking work.
+pub fn wait_for_ec2_ssh(executor: &impl CommandExecutor, ssh: &SshTarget) -> Result<()> {
+    wait_for_ssh_ready(
+        executor,
+        &crate::targets::ssh_command(ssh, ["true"])
+            .purpose("wait for EC2 SSH availability")
+            .stage(ProvisionStage::Booting),
+        AWS_SSH_READY_TIMEOUT,
+        Instant::now,
+        std::thread::sleep,
+    )
+}
+
 pub(super) fn locator_after_provision_named(
     canonical: &TargetTemplate,
     backend: &targets::TargetTemplate,
     session_id: &str,
-    first_output: Option<&CommandOutput>,
-    executor: &(impl CommandExecutor + Sync),
+    _first_output: Option<&CommandOutput>,
+    _executor: &(impl CommandExecutor + Sync),
     name: &str,
 ) -> Result<TargetLocator> {
     let generated = name.to_owned();
@@ -1280,109 +1114,7 @@ pub(super) fn locator_after_provision_named(
             host: ssh.host.clone(),
             container_id: generated,
         },
-        TargetTemplate::AwsEc2 { .. } => {
-            let output = first_output.context("AWS launch produced no output")?;
-            let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-                .context("parse aws ec2 run-instances response")?;
-            let instance_id = json
-                .pointer("/Instances/0/InstanceId")
-                .and_then(serde_json::Value::as_str)
-                .context("AWS response omitted instance ID")?
-                .to_string();
-            return ec2_locator_after_launch(canonical, instance_id, executor);
-        }
-    })
-}
-
-/// Resolve a created instance. Callers persist its ID before these long waits.
-pub(super) fn ec2_locator_after_launch(
-    canonical: &TargetTemplate,
-    instance_id: String,
-    executor: &(impl CommandExecutor + Sync),
-) -> Result<TargetLocator> {
-    let TargetTemplate::AwsEc2 {
-        aws_profile,
-        region,
-        ssh_user,
-        address_source,
-        identity_file,
-        ssh_args,
-        ..
-    } = canonical
-    else {
-        bail!("EC2 locator requires an EC2 target");
-    };
-    let profile = aws_profile.clone().unwrap_or_else(|| "default".into());
-    execute_checked(
-        executor,
-        CommandSpec::new(
-            "aws",
-            [
-                "--profile".into(),
-                profile.clone(),
-                "--region".into(),
-                region.clone(),
-                "ec2".into(),
-                "wait".into(),
-                "instance-running".into(),
-                "--instance-ids".into(),
-                instance_id.clone(),
-            ],
-        )
-        .purpose("wait for EC2 session instance to run")
-        .stage(ProvisionStage::Booting),
-    )?;
-    let field = match address_source {
-        AwsAddressSource::PublicDns => "PublicDnsName",
-        AwsAddressSource::PublicIp => "PublicIpAddress",
-        AwsAddressSource::PrivateDns => "PrivateDnsName",
-        AwsAddressSource::PrivateIp => "PrivateIpAddress",
-    };
-    let address = execute_checked(
-        executor,
-        CommandSpec::new(
-            "aws",
-            [
-                "--profile".into(),
-                profile.clone(),
-                "--region".into(),
-                region.clone(),
-                "ec2".into(),
-                "describe-instances".into(),
-                "--instance-ids".into(),
-                instance_id.clone(),
-                "--query".into(),
-                format!("Reservations[0].Instances[0].{field}"),
-                "--output".into(),
-                "text".into(),
-            ],
-        )
-        .purpose("resolve EC2 session address")
-        .stage(ProvisionStage::Booting),
-    )?;
-    let address = String::from_utf8(address.stdout)
-        .context("AWS address was not UTF-8")?
-        .trim()
-        .to_string();
-    if address.is_empty() || address == "None" {
-        bail!("AWS instance {instance_id} has no configured address");
-    }
-    let ssh = SshTarget {
-        destination: format!("{ssh_user}@{address}"),
-        ssh_args: targets::ssh_args_with_identity(ssh_args, identity_file.as_deref()),
-    };
-    wait_for_ssh_ready(
-        executor,
-        &crate::targets::ssh_command(&ssh, ["true"])
-            .purpose("wait for EC2 SSH availability")
-            .stage(ProvisionStage::Booting),
-        AWS_SSH_READY_TIMEOUT,
-        Instant::now,
-        std::thread::sleep,
-    )?;
-    Ok(TargetLocator::AwsEc2 {
-        instance_id,
-        address: Some(address),
+        TargetTemplate::AwsEc2 { .. } => bail!(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
     })
 }
 
@@ -1395,16 +1127,37 @@ pub(crate) fn backend_locator(
     session: &SessionRecord,
     config: &Config,
 ) -> Result<targets::TargetLocator> {
-    let runtime = if session.target_runtime.is_some() || targets::locator_needs_connection(locator)
-    {
-        Some(session.target_runtime_settings(config)?)
+    recorded_backend_locator(
+        locator,
+        &session.id,
+        &session.target_template_id,
+        session.target_runtime.as_ref(),
+        config,
+    )
+}
+
+pub(super) fn recorded_backend_locator(
+    locator: &TargetLocator,
+    session_id: &str,
+    target_template_id: &str,
+    runtime: Option<&mj_core::state::TargetRuntimeSettings>,
+    config: &Config,
+) -> Result<targets::TargetLocator> {
+    let runtime = if runtime.is_some() || targets::locator_needs_connection(locator) {
+        Some(mj_core::state::target_runtime_settings_for(
+            session_id,
+            target_template_id,
+            Some(locator),
+            runtime,
+            config,
+        )?)
     } else {
         None
     };
     Ok(targets::TargetLocator::try_from(targets::RecordedTarget {
         locator,
         runtime: runtime.as_deref(),
-        session_id: &session.id,
+        session_id,
     })?)
 }
 

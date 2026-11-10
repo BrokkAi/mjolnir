@@ -237,7 +237,9 @@ button:disabled {
   color: var(--dim);
 }
 
-.pill.alert {
+.pill.alert,
+#subagents-button.alert,
+#subagents-button-desktop.alert {
   border-color: var(--failed);
   color: var(--failed);
 }
@@ -1513,6 +1515,10 @@ article > h3 {
   padding: 4px 8px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+#conversation-move-failure {
+  overflow-wrap: anywhere;
 }
 
 .conversation-transition {

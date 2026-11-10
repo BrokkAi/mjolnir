@@ -303,6 +303,17 @@ impl TurnAssessment {
             question_message: None,
         }
     }
+    /// Classify this turn again at `revision`: everything derived from the
+    /// previous verdict goes, including which reply held its question, so the
+    /// next verdict and its question locator start from nothing.
+    pub fn classify_again(&mut self, revision: u64) {
+        self.revision = revision;
+        self.status = Status::Pending;
+        self.evidence = None;
+        self.verdict = None;
+        self.action = None;
+        self.question_message = None;
+    }
     pub fn current(&self) -> bool {
         !matches!(self.status, Status::Consumed | Status::Superseded)
     }
@@ -362,6 +373,7 @@ pub struct ContextHistory {
     #[serde(default)]
     pub final_reply_omitted: bool,
 }
+
 impl Default for ContextHistory {
     fn default() -> Self {
         Self {
@@ -464,10 +476,8 @@ impl ContextHistory {
     pub fn user(&mut self, id: &str, prompt: &[agent_client_protocol::v1::schema::ContentBlock]) {
         use agent_client_protocol::v1::schema::ContentBlock;
         self.open_assistant_id = None;
-        if crate::continuation::is_generated_prompt(id) {
-            return;
-        }
         let mut text = String::new();
+        let mut non_text = false;
         for block in prompt {
             if let ContentBlock::Text(t) = block {
                 if !text.is_empty() {
@@ -475,11 +485,15 @@ impl ContextHistory {
                 }
                 text.push_str(&t.text);
             } else {
-                self.authorization_complete = false;
+                non_text = true;
             }
         }
-        if crate::continuation::is_generated_prompt_text(&text) {
+        // A prompt Mjolnir submitted is not the person's, whatever it carries.
+        if !crate::continuation::is_user_authored_message(Some(id), &text) {
             return;
+        }
+        if non_text {
+            self.authorization_complete = false;
         }
         if text.trim().is_empty() {
             return;
@@ -553,6 +567,26 @@ impl ContextHistory {
             self.assistant_history_omitted = true;
         }
         true
+    }
+
+    /// Whether a user message in this history is one that today's rules
+    /// attribute to Mjolnir. Histories are stored as written (journal event
+    /// digests cover them), so one kept by an earlier worker can hold a
+    /// prompt a newer rule recognizes, such as another session's message.
+    pub fn has_generated_prompts(&self) -> bool {
+        self.messages.iter().any(|m| {
+            m.role == "user" && !crate::continuation::is_user_authored_message(Some(&m.id), &m.text)
+        })
+    }
+
+    /// This history without the user messages that today's rules attribute
+    /// to Mjolnir: what readers hand to Jev and the question locator.
+    pub fn without_generated_prompts(&self) -> Self {
+        let mut history = self.clone();
+        history.messages.retain(|m| {
+            m.role != "user" || crate::continuation::is_user_authored_message(Some(&m.id), &m.text)
+        });
+        history
     }
 
     pub fn evidence(&self) -> crate::continuation::ContinuationEvidence {
@@ -863,6 +897,37 @@ mod tests {
         context.user("api-123", &prompt);
         assert!(context.messages.is_empty());
         assert!(context.authorization_complete);
+        // Hard-won: 8b08e8bc1: handback reminders and peer-session messages counted as user authorization
+        let typed = [ContentBlock::Text(TextContent::new(
+            "Please also update the docs.",
+        ))];
+        context.user(&crate::subagent::handback_reminder_command_id(7), &typed);
+        context.user(
+            &crate::continuation::GeneratedPrompt::SessionMessageTurn.command_id("peer-1"),
+            &typed,
+        );
+        assert!(context.messages.is_empty());
+        // Hard-won: 97731d30a: a history stored before the upgrade kept a peer message as user authorization.
+        let written = serde_json::json!({
+            "messages": [
+                {"id": "user:prompt-1", "role": "user", "text": "Fix the build."},
+                {"id": "agent:2", "role": "assistant", "text": "Fixed."},
+                {"id": "user:session-message-turn-peer-1", "role": "user", "text": "Please also push it."},
+                {"id": "agent:4", "role": "assistant", "text": "Pushing now."},
+            ],
+            "authorization_complete": true,
+            "assistant_history_omitted": false,
+            "open_assistant_id": null,
+            "final_reply_omitted": false,
+        });
+        let stored: ContextHistory = serde_json::from_value(written.clone()).unwrap();
+        // Journal digests cover the stored form, so reading it must not change it.
+        assert_eq!(serde_json::to_value(&stored).unwrap(), written);
+        assert!(stored.has_generated_prompts());
+        let read = stored.without_generated_prompts();
+        let ids: Vec<_> = read.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["user:prompt-1", "agent:2", "agent:4"]);
+        assert!(!read.has_generated_prompts());
     }
 
     #[test]

@@ -154,9 +154,8 @@ impl RuntimeState {
     /// the parent resumes, or at once when the close fails after this and
     /// leaves the parent live.
     ///
-    /// Only reading and recording that list can fail this. A child that
-    /// cannot be stopped is logged and its records are removed anyway: it
-    /// never fails the parent's suspend.
+    /// Every child must be stopped before the parent can retire shared files.
+    /// A failed stop leaves its logical and physical ownership available for retry.
     pub(super) async fn stop_subagents_for_suspend(
         self: &Arc<Self>,
         parent_session_id: &str,
@@ -165,7 +164,9 @@ impl RuntimeState {
             let parent_session_id = parent_session_id.to_owned();
             move || {
                 let controller = Controller::load()?;
-                let stopped = active_child_session_ids(&controller.state, &parent_session_id)
+                let stopped = controller
+                    .state
+                    .active_child_session_ids(&parent_session_id)
                     .iter()
                     .map(|child_id| {
                         crate::controller::stopped_subagent(&controller.state, child_id)
@@ -216,88 +217,22 @@ impl RuntimeState {
         for child in stopped {
             let child_id = child.child_session_id;
             // A sub-agent borrows its parent's worker and owns no branch.
-            let Err(error) = Box::pin(self.force_destroy_indexed_session(
+            Box::pin(self.force_destroy_indexed_session(
                 child_id.clone(),
                 BranchDisposition::Keep,
                 LifecycleKind::StopSubagent,
             ))
             .await
-            else {
-                continue;
-            };
-            tracing::warn!(
-                session_id = %parent_session_id,
-                %child_id,
-                error = format!("{error:#}"),
-                "could not stop a sub-agent for its parent's suspend; removing its records"
-            );
-            if let Err(error) = self.remove_subagent_records(&child_id).await {
-                tracing::warn!(
-                    session_id = %parent_session_id,
-                    %child_id,
-                    error = format!("{error:#}"),
-                    "could not remove the records of a sub-agent its parent's suspend stopped"
-                );
-            }
+            .with_context(|| format!("stop sub-agent {child_id} before suspending its parent"))?;
         }
         Ok(())
-    }
-
-    pub(super) async fn snapshot_subagent_report_cleanup(
-        self: &Arc<Self>,
-        parent_session_id: &str,
-    ) -> Option<crate::controller::SubagentReportCleanup> {
-        let result = blocking({
-            let parent_session_id = parent_session_id.to_owned();
-            move || Controller::load()?.subagent_report_cleanup(&parent_session_id)
-        })
-        .await;
-        match result {
-            Ok(cleanup) => cleanup,
-            Err(error) => {
-                tracing::warn!(
-                    session_id = parent_session_id,
-                    error = format!("{error:#}"),
-                    "cannot snapshot sub-agent report cleanup"
-                );
-                None
-            }
-        }
-    }
-
-    pub(super) async fn finish_subagent_report_cleanup(
-        self: &Arc<Self>,
-        parent_session_id: &str,
-        cleanup: Option<crate::controller::SubagentReportCleanup>,
-    ) {
-        let Some(cleanup) = cleanup else { return };
-        if let Err(error) = blocking(move || {
-            cleanup.run(&ProcessExecutor);
-            Ok(())
-        })
-        .await
-        {
-            tracing::warn!(
-                session_id = parent_session_id,
-                error = format!("{error:#}"),
-                "sub-agent report cleanup task failed"
-            );
-        }
     }
 
     async fn stop_subagents_and_remove_reports(
         self: &Arc<Self>,
         parent_session_id: &str,
     ) -> Result<()> {
-        // Capture relations before the cascade deletes their durable records.
-        // The caller has already verified the parent's checkpoint.
-        let cleanup = self
-            .snapshot_subagent_report_cleanup(parent_session_id)
-            .await;
-        self.stop_subagents_for_suspend(parent_session_id).await?;
-        self.finish_subagent_report_cleanup(parent_session_id, cleanup)
-            .await;
-        Ok(())
+        self.stop_subagents_for_suspend(parent_session_id).await
     }
 
     /// An automatic close keeps every sub-agent. Their workers run in this
@@ -458,29 +393,6 @@ impl RuntimeState {
     /// Forget a sub-agent whose stop failed: its record, its relation to the
     /// parent, its conversation and its attachments. Its worker lives on the
     /// parent's target, which the parent's suspend releases next.
-    async fn remove_subagent_records(self: &Arc<Self>, child_id: &str) -> Result<()> {
-        self.preempt_active_lifecycle(child_id).await?;
-        blocking({
-            let child_id = child_id.to_owned();
-            move || {
-                if let Err(error) = mj_core::attachment::AttachmentStore::controller(&child_id)
-                    .and_then(|store| store.remove_session_data())
-                {
-                    tracing::warn!(
-                        %child_id,
-                        error = format!("{error:#}"),
-                        "could not remove a stopped sub-agent's attachments"
-                    );
-                }
-                crate::database::delete_session(&child_id)
-            }
-        })
-        .await?;
-        self.reload_controller().await?;
-        self.publish_revision();
-        Ok(())
-    }
-
     pub(super) async fn wait_before_close(self: &Arc<Self>, session_id: &str) -> Result<()> {
         // Cancellation is a request: the old owner must actually finish before
         // close acquires the target, including an irreversible create commit.

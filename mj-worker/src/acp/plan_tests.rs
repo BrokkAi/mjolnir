@@ -127,88 +127,283 @@ async fn set_claude_config_mode(probe: &mut PlanProbe, request_id: &str, mode: &
     }
 }
 
-// Hard-won: f8bb425: Leaving Claude Plan mode forced bypassPermissions instead of restoring the prior mode.
+// Hard-won: f8bb425: Leaving Claude Plan mode forced bypassPermissions under Guardian.
 #[tokio::test]
-async fn claude_plan_mode_stays_active_and_exit_restores_the_pre_plan_mode() {
-    for config in [false, true] {
-        let mut probe = PlanProbe::with_config(ExecutionPolicy::Unconstrained, config).await;
-        if config {
-            set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
-        } else {
+async fn claude_plan_mode_stays_active_and_exit_restores_the_policy_mode() {
+    for (policy, desired) in [
+        (ExecutionPolicy::ConfiguredApprovals, "auto"),
+        (ExecutionPolicy::Unconstrained, "bypassPermissions"),
+    ] {
+        for config in [false, true] {
+            let mut probe = PlanProbe::with_config(policy, config).await;
+            if config {
+                set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
+            } else {
+                probe
+                    .commands
+                    .send(CommandRequest::SetSessionMode {
+                        request_id: "enter-plan".into(),
+                        mode_id: "plan".into(),
+                    })
+                    .await
+                    .unwrap();
+                let entering = probe.message().await;
+                assert_eq!(entering["params"]["modeId"], "plan");
+                probe.result(&entering, json!({})).await;
+                loop {
+                    if let RuntimeEvent::SessionModeApplied { request_id, .. } = probe.event().await
+                    {
+                        assert_eq!(request_id, "enter-plan");
+                        break;
+                    }
+                }
+            }
+            // Entering Plan must not immediately send another request that
+            // restores the launch policy.
+            probe.no_message().await;
             probe
                 .commands
-                .send(CommandRequest::SetSessionMode {
-                    request_id: "enter-plan".into(),
-                    mode_id: "plan".into(),
+                .send(CommandRequest::RestoreExecutionMode {
+                    request_id: "exit-plan".into(),
                 })
                 .await
                 .unwrap();
-            let entering = probe.message().await;
-            assert_eq!(entering["params"]["modeId"], "plan");
-            probe.result(&entering, json!({})).await;
+            let restoring = probe.message().await;
+            if config {
+                assert_eq!(restoring["method"], "session/set_config_option");
+                assert_eq!(restoring["params"]["value"], desired);
+            } else {
+                assert_eq!(restoring["method"], "session/set_mode");
+                assert_eq!(restoring["params"]["modeId"], desired);
+            }
+            while let Ok(event) = probe.events.try_recv() {
+                assert!(!matches!(event, RuntimeEvent::ConfigApplied { .. }));
+            }
+            probe
+                .result(
+                    &restoring,
+                    if config {
+                        json!({"configOptions": mode_config(desired)})
+                    } else {
+                        json!({})
+                    },
+                )
+                .await;
             loop {
-                if let RuntimeEvent::SessionModeApplied { request_id, .. } = probe.event().await {
-                    assert_eq!(request_id, "enter-plan");
+                if let RuntimeEvent::ConfigApplied {
+                    request_id,
+                    key,
+                    value,
+                    ..
+                } = probe.event().await
+                {
+                    assert_eq!(request_id, "exit-plan");
+                    assert_eq!(key, "mode");
+                    assert_eq!(value, desired);
                     break;
                 }
             }
+            probe.no_message().await;
+            probe.close().await;
         }
-        // Entering Plan must not immediately send another request that
-        // restores the launch policy.
-        probe.no_message().await;
-        probe
-            .commands
-            .send(CommandRequest::RestoreExecutionMode {
-                request_id: "exit-plan".into(),
-            })
-            .await
-            .unwrap();
-        let restoring = probe.message().await;
-        if config {
-            assert_eq!(restoring["method"], "session/set_config_option");
-            assert_eq!(restoring["params"]["value"], "bypassPermissions");
-        } else {
-            assert_eq!(restoring["method"], "session/set_mode");
-            assert_eq!(restoring["params"]["modeId"], "bypassPermissions");
-        }
-        while let Ok(event) = probe.events.try_recv() {
-            assert!(!matches!(event, RuntimeEvent::ConfigApplied { .. }));
-        }
-        probe
-            .result(
-                &restoring,
-                if config {
-                    json!({"configOptions": mode_config("bypassPermissions")})
-                } else {
-                    json!({})
-                },
-            )
-            .await;
-        loop {
-            if let RuntimeEvent::ConfigApplied {
-                request_id,
-                key,
-                value,
-                ..
-            } = probe.event().await
-            {
-                assert_eq!(request_id, "exit-plan");
-                assert_eq!(key, "mode");
-                assert_eq!(value, "bypassPermissions");
-                break;
-            }
-        }
-        probe.no_message().await;
-        probe.close().await;
     }
 }
 
-// Hard-won: f8bb425: Plan exit escalated a lower prior permission mode to bypassPermissions.
+/// The worker owns the mode it enforces: a caller outside it, such as an
+/// older controller, cannot select another mode, and nothing reaches Claude.
+/// Plan stays available.
+// Hard-won: 9249142: a Guardian session put in bypassPermissions stayed there when Claude refused Auto
 #[tokio::test]
-async fn claude_plan_exit_does_not_force_bypass_when_the_prior_mode_was_lower() {
-    let mut probe = PlanProbe::with_config(ExecutionPolicy::Unconstrained, true).await;
-    set_claude_config_mode(&mut probe, "before-plan", "acceptEdits").await;
+async fn a_caller_outside_the_worker_cannot_move_a_policy_owned_mode() {
+    let mut probe = PlanProbe::with_config(ExecutionPolicy::ConfiguredApprovals, true).await;
+    for (request_id, value) in [
+        ("accept-edits", "acceptEdits"),
+        ("bypass", "bypassPermissions"),
+    ] {
+        probe
+            .commands
+            .send(CommandRequest::SetConfig {
+                request_id: request_id.into(),
+                key: "mode".into(),
+                value: value.into(),
+            })
+            .await
+            .unwrap();
+        loop {
+            match probe.event().await {
+                RuntimeEvent::CommandRejected {
+                    request_id: rejected,
+                    message,
+                    ..
+                } => {
+                    assert_eq!(rejected, request_id);
+                    assert!(message.contains("permission policy"), "{message}");
+                    break;
+                }
+                RuntimeEvent::ConfigApplied { .. } => panic!("{value} must be refused"),
+                _ => {}
+            }
+        }
+        probe.no_message().await;
+    }
     set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
+    probe.close().await;
+}
+
+/// `mode` reaches a bridge's Mode selector whatever its id, so the policy's
+/// ownership follows the same resolution.
+// Hard-won: 853cd39: the `mode` alias reached a differently named policy selector unchecked
+#[test]
+fn a_mode_alias_is_checked_against_the_selector_it_reaches() {
+    let options: Vec<SessionConfigOption> = serde_json::from_value(json!([{
+        "id": "interaction_mode", "name": "Mode", "category": "mode", "type": "select",
+        "currentValue": "auto", "options": [
+            {"value": "auto", "name": "Auto"}, {"value": "plan", "name": "Plan"},
+            {"value": "bypassPermissions", "name": "Bypass"}
+        ]
+    }]))
+    .unwrap();
+    let guardian = HarnessKind::Claude.execution_enforcement(ExecutionPolicy::ConfiguredApprovals);
+    for key in ["mode", "interaction_mode"] {
+        assert!(
+            !policy_permits(guardian, &options, Some(key), "bypassPermissions"),
+            "{key}"
+        );
+        assert!(
+            policy_permits(guardian, &options, Some(key), "plan"),
+            "{key}"
+        );
+    }
+}
+
+/// On a model without Auto the bridge does not list it, and the mode selector
+/// must stay the policy's: no other mode can be chosen then either.
+// Hard-won: 49cecf8: without Auto on offer the mode selector stopped being owned
+#[test]
+fn a_guardian_mode_selector_stays_owned_without_auto_on_offer() {
+    let options: Vec<SessionConfigOption> = serde_json::from_value(json!([{
+        "id": "mode", "name": "Mode", "category": "mode", "type": "select",
+        "currentValue": "default", "options": [
+            {"value": "default", "name": "Default"}, {"value": "plan", "name": "Plan"},
+            {"value": "bypassPermissions", "name": "Bypass"}
+        ]
+    }]))
+    .unwrap();
+    let guardian = HarnessKind::Claude.execution_enforcement(ExecutionPolicy::ConfiguredApprovals);
+    assert_eq!(
+        guardian.unwrap().owned_config_keys(&options),
+        vec!["mode".to_owned()]
+    );
+    assert!(!policy_permits(
+        guardian,
+        &options,
+        Some("mode"),
+        "bypassPermissions"
+    ));
+    assert!(policy_permits(guardian, &options, Some("mode"), "plan"));
+}
+
+/// A `mode` selector without the optional Mode category is still the one a
+/// SetConfig for `mode` reaches, so the policy owns it.
+// Hard-won: 9888b76: a `mode` selector without the Mode category was not owned
+#[test]
+fn an_uncategorized_mode_selector_is_policy_owned() {
+    let options: Vec<SessionConfigOption> = serde_json::from_value(json!([{
+        "id": "mode", "name": "Mode", "type": "select", "currentValue": "auto",
+        "options": [
+            {"value": "auto", "name": "Auto"}, {"value": "plan", "name": "Plan"},
+            {"value": "bypassPermissions", "name": "Bypass"}
+        ]
+    }]))
+    .unwrap();
+    let guardian = HarnessKind::Claude.execution_enforcement(ExecutionPolicy::ConfiguredApprovals);
+    assert_eq!(
+        guardian.unwrap().owned_config_keys(&options),
+        vec!["mode".to_owned()]
+    );
+    assert!(!policy_permits(
+        guardian,
+        &options,
+        Some("mode"),
+        "bypassPermissions"
+    ));
+}
+
+/// A model whose catalogue omits Auto has refused it as plainly as an error
+/// answer: leaving Plan takes Claude's default mode with a warning.
+// Hard-won: d33f5a5: an unadvertised policy mode failed the command instead of keeping the session usable
+#[tokio::test]
+async fn leaving_plan_without_auto_on_offer_takes_claudes_default_mode() {
+    let without_auto = json!([{
+        "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": "plan",
+        "options": [
+            {"value": "default", "name": "Default"}, {"value": "plan", "name": "Plan"},
+            {"value": "acceptEdits", "name": "Accept edits"}
+        ]
+    }]);
+    let mut probe = PlanProbe::config_only(ExecutionPolicy::ConfiguredApprovals).await;
+    probe
+        .commands
+        .send(CommandRequest::SetConfig {
+            request_id: "enter-plan".into(),
+            key: "mode".into(),
+            value: "plan".into(),
+        })
+        .await
+        .unwrap();
+    let entering = probe.message().await;
+    probe
+        .result(&entering, json!({"configOptions": without_auto}))
+        .await;
+    probe
+        .commands
+        .send(CommandRequest::RestoreExecutionMode {
+            request_id: "exit-plan".into(),
+        })
+        .await
+        .unwrap();
+    let default = probe.message().await;
+    assert_eq!(default["params"]["value"], "default");
+    let mut left = without_auto.clone();
+    left[0]["currentValue"] = json!("default");
+    probe.result(&default, json!({"configOptions": left})).await;
+    let mut warned = false;
+    loop {
+        match probe.event().await {
+            RuntimeEvent::Warning { message } if message.contains("does not offer") => {
+                warned = true;
+            }
+            RuntimeEvent::ConfigApplied {
+                request_id, value, ..
+            } if request_id == "exit-plan" => {
+                assert_eq!(value, "default");
+                break;
+            }
+            RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+            RuntimeEvent::Stopped => panic!("leaving Plan ended the session"),
+            _ => {}
+        }
+    }
+    assert!(warned);
+    probe.no_message().await;
+    probe.close().await;
+}
+
+/// Kimi carries its execution mode on the Plan selector, like Claude, so it
+/// leaves Plan through the worker, which restores the policy's own mode.
+// Hard-won: ac3b724: refusing every mode but Plan and the policy's left Kimi stuck in Plan
+#[tokio::test]
+async fn kimi_leaves_plan_for_the_policy_mode() {
+    let mut probe =
+        PlanProbe::with_harness(ExecutionPolicy::Unconstrained, true, HarnessKind::Kimi).await;
+    set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
+    let mut surface = mj_core::acp::surface::AcpSessionSurface::default();
+    surface.set_harness_kind(HarnessKind::Kimi);
+    surface.set_config_options(&serde_json::from_value::<Vec<_>>(mode_config("plan")).unwrap());
+    assert_eq!(
+        surface.plan_control(false),
+        Ok(mj_core::acp::PlanControl::RestoreExecutionMode)
+    );
     probe
         .commands
         .send(CommandRequest::RestoreExecutionMode {
@@ -218,16 +413,42 @@ async fn claude_plan_exit_does_not_force_bypass_when_the_prior_mode_was_lower() 
         .unwrap();
     let restoring = probe.message().await;
     assert_eq!(restoring["method"], "session/set_config_option");
-    assert_eq!(restoring["params"]["value"], "acceptEdits");
+    assert_eq!(restoring["params"]["value"], "auto");
+    // Hard-won: ce521dc: Kimi answers with the configuration it held before
+    // the change, so a strict confirmation failed every Plan exit.
     probe
-        .result(
-            &restoring,
-            json!({"configOptions": mode_config("acceptEdits")}),
-        )
+        .result(&restoring, json!({"configOptions": mode_config("plan")}))
         .await;
     loop {
-        if let RuntimeEvent::ConfigApplied { value, .. } = probe.event().await {
-            assert_eq!(value, "acceptEdits");
+        match probe.event().await {
+            RuntimeEvent::ConfigApplied {
+                request_id, value, ..
+            } if request_id == "exit-plan" => {
+                assert_eq!(value, "auto");
+                break;
+            }
+            RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    probe.no_message().await;
+    probe.close().await;
+}
+
+// Hard-won: 734385a: a refused approval mode skipped Muse's guardian auto-review
+#[tokio::test]
+async fn muse_guardian_keeps_auto_review_when_the_bridge_refuses_its_approval_mode() {
+    // The probe's handshake asserts that `auto_review on` follows the refused
+    // approval mode; the session then reports the refusal and keeps serving.
+    let mut probe = PlanProbe::refusing_policy_mode(
+        ExecutionPolicy::ConfiguredApprovals,
+        false,
+        HarnessKind::Muse,
+    )
+    .await;
+    loop {
+        if let RuntimeEvent::Warning { message } = probe.event().await {
+            assert!(message.contains("this bridge refuses it"), "{message}");
             break;
         }
     }
@@ -235,12 +456,16 @@ async fn claude_plan_exit_does_not_force_bypass_when_the_prior_mode_was_lower() 
     probe.close().await;
 }
 
-// Hard-won: f8bb425: A person-chosen mode during Plan was overwritten on exit.
+// Hard-won: 734385a: leaving Plan only retried a refused Auto, so Plan could not be left
 #[tokio::test]
-async fn explicit_mode_change_during_plan_is_not_reverted_at_plan_exit() {
-    let mut probe = PlanProbe::with_config(ExecutionPolicy::Unconstrained, true).await;
+async fn leaving_plan_takes_claudes_default_mode_when_auto_is_refused() {
+    let mut probe = PlanProbe::refusing_policy_mode(
+        ExecutionPolicy::ConfiguredApprovals,
+        true,
+        HarnessKind::Claude,
+    )
+    .await;
     set_claude_config_mode(&mut probe, "enter-plan", "plan").await;
-    set_claude_config_mode(&mut probe, "user-mode", "acceptEdits").await;
     probe
         .commands
         .send(CommandRequest::RestoreExecutionMode {
@@ -248,16 +473,32 @@ async fn explicit_mode_change_during_plan_is_not_reverted_at_plan_exit() {
         })
         .await
         .unwrap();
+    let auto = probe.message().await;
+    assert_eq!(auto["params"]["value"], "auto");
+    probe.refuse(&auto).await;
+    let default = probe.message().await;
+    assert_eq!(default["method"], "session/set_config_option");
+    assert_eq!(default["params"]["value"], "default");
+    probe
+        .result(&default, json!({"configOptions": mode_config("default")}))
+        .await;
+    let mut warned = false;
     loop {
-        if let RuntimeEvent::ConfigApplied {
-            request_id, value, ..
-        } = probe.event().await
-        {
-            assert_eq!(request_id, "exit-plan");
-            assert_eq!(value, "acceptEdits");
-            break;
+        match probe.event().await {
+            RuntimeEvent::Warning { message } if message.contains("this bridge refuses it") => {
+                warned = true;
+            }
+            RuntimeEvent::ConfigApplied {
+                request_id, value, ..
+            } if request_id == "exit-plan" => {
+                assert_eq!(value, "default");
+                break;
+            }
+            RuntimeEvent::CommandRejected { message, .. } => panic!("{message}"),
+            _ => {}
         }
     }
+    assert!(warned, "leaving Plan for another mode must say why");
     probe.no_message().await;
     probe.close().await;
 }
@@ -416,6 +657,33 @@ impl PlanProbe {
         harness: HarnessKind,
         managed_subagent: bool,
     ) -> Self {
+        Self::open(policy, config, harness, managed_subagent, false, true).await
+    }
+
+    /// A Claude probe whose bridge carries its modes only on the `mode`
+    /// config option, with no legacy mode list.
+    async fn config_only(policy: ExecutionPolicy) -> Self {
+        Self::open(policy, true, HarnessKind::Claude, false, false, false).await
+    }
+
+    /// A probe whose bridge answers the startup request for the policy mode
+    /// with a refusal, as Claude Code does when a model cannot use Auto.
+    async fn refusing_policy_mode(
+        policy: ExecutionPolicy,
+        config: bool,
+        harness: HarnessKind,
+    ) -> Self {
+        Self::open(policy, config, harness, false, true, true).await
+    }
+
+    async fn open(
+        policy: ExecutionPolicy,
+        config: bool,
+        harness: HarnessKind,
+        managed_subagent: bool,
+        refuse_mode: bool,
+        legacy_modes: bool,
+    ) -> Self {
         let (client, agent) = tokio::io::duplex(4096);
         let (client_read, client_write) = tokio::io::split(client);
         let (agent_read, agent_write) = tokio::io::split(agent);
@@ -507,15 +775,19 @@ impl PlanProbe {
         probe
             .result(
                 &new,
-                json!({"sessionId": "plan-session", "configOptions": options.clone(), "modes": {
-                    "currentModeId": "plan", "availableModes": [
-                        {"id": "plan", "name": "Plan"}, {"id": "auto", "name": "Auto"},
-                        {"id": "bypassPermissions", "name": "Bypass"},
-                        {"id": "agent", "name": "Agent"},
-                        {"id": "agent-full-access", "name": "Full access"},
-                        {"id": "allowAll", "name": "Allow all"}
-                    ]
-                }}),
+                if legacy_modes {
+                    json!({"sessionId": "plan-session", "configOptions": options.clone(), "modes": {
+                        "currentModeId": "plan", "availableModes": [
+                            {"id": "plan", "name": "Plan"}, {"id": "auto", "name": "Auto"},
+                            {"id": "bypassPermissions", "name": "Bypass"},
+                            {"id": "agent", "name": "Agent"},
+                            {"id": "agent-full-access", "name": "Full access"},
+                            {"id": "allowAll", "name": "Allow all"}
+                        ]
+                    }})
+                } else {
+                    json!({"sessionId": "plan-session", "configOptions": options.clone()})
+                },
             )
             .await;
         // A harness that carries its approval policy on a config selector
@@ -529,22 +801,39 @@ impl PlanProbe {
             assert_eq!(mode["method"], "session/set_config_option");
             assert_eq!(mode["params"]["configId"], selector);
             assert_eq!(mode["params"]["value"], enforced);
-            crate::acp::tests::select_option(
-                &mut options,
-                &json!({"configId": selector, "value": enforced}),
-            );
-            probe
-                .result(&mode, json!({"configOptions": options.clone()}))
-                .await;
+            if refuse_mode {
+                probe.refuse(&mode).await;
+            } else {
+                crate::acp::tests::select_option(
+                    &mut options,
+                    &json!({"configId": selector, "value": enforced}),
+                );
+                probe
+                    .result(&mode, json!({"configOptions": options.clone()}))
+                    .await;
+            }
         } else if let Some(enforced) = enforced
             && config
         {
             let mode = probe.message().await;
             assert_eq!(mode["method"], "session/set_config_option");
             assert_eq!(mode["params"]["value"], enforced);
-            probe
-                .result(&mode, json!({"configOptions": mode_config(enforced)}))
-                .await;
+            if refuse_mode {
+                probe.refuse(&mode).await;
+                // Claude answers a refusal by taking its default mode.
+                if harness == HarnessKind::Claude {
+                    let default = probe.message().await;
+                    assert_eq!(default["method"], "session/set_config_option");
+                    assert_eq!(default["params"]["value"], "default");
+                    probe
+                        .result(&default, json!({"configOptions": mode_config("default")}))
+                        .await;
+                }
+            } else {
+                probe
+                    .result(&mode, json!({"configOptions": mode_config(enforced)}))
+                    .await;
+            }
         } else if let Some(enforced) = enforced {
             let mode = probe.message().await;
             assert_eq!(mode["method"], "session/set_mode");
@@ -589,6 +878,15 @@ impl PlanProbe {
     async fn result(&mut self, request: &Value, result: Value) {
         self.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": result}))
             .await;
+    }
+
+    /// Answer a mode request the way Claude Code refuses Auto.
+    async fn refuse(&mut self, request: &Value) {
+        self.send(json!({"jsonrpc": "2.0", "id": request["id"], "error": {
+            "code": -32603, "message": "Internal error",
+            "data": {"details": "Cannot set permission mode: this bridge refuses it"}
+        }}))
+        .await;
     }
 
     /// Finish a prompt the way a working harness does: one line of answer,
@@ -872,7 +1170,7 @@ async fn rejected_mode_change_never_submits_the_approved_plan() {
     loop {
         match probe.event().await {
             RuntimeEvent::Warning { message }
-                if message.contains("could not restore the pre-Plan mode") =>
+                if message.contains("could not restore the policy mode") =>
             {
                 warned = true
             }
@@ -1640,52 +1938,51 @@ fn claude_plan_approval_offers_yes_under_the_session_policy_and_no_bypass_in_gua
     assert!(!is_plan_permission(
         &serde_json::from_value(bridge_exit_plan_request(guardian, false)).unwrap()
     ));
+    // The policy owns the mode, so approving a plan offers only the policy's
+    // own option, with and without clearing the context.
     assert_eq!(
         offered(&bridge_exit_plan_request(guardian, false), guardian),
-        pairs(&[
-            ("exit-plan-auto", "Yes"),
-            ("exit-plan-default", "Yes, manually approve edits"),
-            ("reject", "No, keep planning"),
-        ])
+        pairs(&[("exit-plan-auto", "Yes"), ("reject", "No, keep planning")])
     );
     assert_eq!(
         offered(&bridge_exit_plan_request(guardian, true), guardian),
         pairs(&[
             ("exit-plan-auto", "Yes"),
-            ("exit-plan-default", "Yes, manually approve edits"),
             ("exit-plan-clear-auto", "Yes, clear context"),
             ("reject", "No, keep planning"),
         ])
     );
-    // A YOLO session keeps Auto as a deliberate step down.
     assert_eq!(
         offered(&bridge_exit_plan_request(yolo, false), yolo),
-        pairs(&[
-            ("exit-plan-bypass", "Yes"),
-            ("exit-plan-default", "Yes, manually approve edits"),
-            ("exit-plan-auto", "Yes, and use auto mode"),
-            ("reject", "No, keep planning"),
-        ])
+        pairs(&[("exit-plan-bypass", "Yes"), ("reject", "No, keep planning")])
     );
     assert_eq!(
         offered(&bridge_exit_plan_request(yolo, true), yolo),
         pairs(&[
             ("exit-plan-bypass", "Yes"),
-            ("exit-plan-default", "Yes, manually approve edits"),
             ("exit-plan-clear-bypass", "Yes, clear context"),
-            ("exit-plan-auto", "Yes, and use auto mode"),
             ("reject", "No, keep planning"),
         ])
     );
-    // A Guardian session whose bridge led with bypass (Plan entered from a
-    // mode set by hand) still gets no option above its policy.
+    // Only the policy's clear-context option is on offer: it still rules out
+    // every other mode.
+    let mut clear_only = bridge_exit_plan_request(guardian, true);
+    clear_only["options"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|option| option["optionId"] != "exit-plan-auto");
     assert_eq!(
-        offered(&bridge_exit_plan_request(yolo, true), guardian),
+        offered(&clear_only, guardian),
         pairs(&[
-            ("exit-plan-auto", "Yes"),
-            ("exit-plan-default", "Yes, manually approve edits"),
+            ("exit-plan-clear-auto", "Yes, clear context"),
             ("reject", "No, keep planning"),
         ])
+    );
+    // A Guardian session whose bridge led with bypass still gets no option
+    // above its policy.
+    assert_eq!(
+        offered(&bridge_exit_plan_request(yolo, true), guardian),
+        pairs(&[("exit-plan-auto", "Yes"), ("reject", "No, keep planning")])
     );
 }
 
@@ -1762,8 +2059,11 @@ async fn claude_plan_approval_form_selects_the_policy_mode_and_refuses_hidden_by
 
 /// Exercise the actual ACP callbacks, including the harness-specific plan
 /// envelopes, while keeping question ownership independent of harness kind.
+/// A parent agent answers questions with a message but cannot grant
+/// approvals, so tool permissions and plan reviews stay open for a person,
+/// and so do secrets, which a message would keep in plain text.
 #[tokio::test]
-async fn managed_children_cancel_questions_and_permissions_at_the_original_responder() {
+async fn managed_children_cancel_questions_and_keep_approvals_for_a_person() {
     for harness in HarnessKind::ALL {
         for policy in [
             ExecutionPolicy::ConfiguredApprovals,
@@ -1777,6 +2077,12 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
             let question = json!({
                 "jsonrpc":"2.0", "id":"ask", "method":"elicitation/create", "params":{
                     "sessionId":"plan-session", "mode":"form", "message":"Which file?",
+                    "requestedSchema":{"type":"object", "properties":{"file":{"type":"string", "title":"File"}}}
+                }
+            });
+            let secret = json!({
+                "jsonrpc":"2.0", "id":"secret", "method":"elicitation/create", "params":{
+                    "sessionId":"plan-session", "mode":"form", "message":"Paste the token",
                     "requestedSchema":{"type":"object", "properties":{"token":{"type":"string", "title":"Secret token", "_meta":{"codex":{"isSecret":true}}}}}
                 }
             });
@@ -1787,7 +2093,7 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
                 }
             });
             let plan = json!({"jsonrpc":"2.0", "id":"plan", "method":"session/request_permission", "params":permission("The proposed plan", &["bypassPermissions", "reject"])});
-            let mut asks = vec![question, plan];
+            let mut approvals = vec![plan, secret];
             if policy.is_unconstrained() {
                 probe.send(tool_ask).await;
                 let answer = probe.message().await;
@@ -1818,12 +2124,13 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
                     }
                 }
             } else {
-                asks.push(tool_ask);
+                approvals.push(tool_ask);
             }
             if harness == HarnessKind::Grok {
-                asks.push(json!({"jsonrpc":"2.0", "id":"grok-plan", "method":"x.ai/exit_plan_mode", "params":{"sessionId":"plan-session", "plan":"Proposed plan"}}));
+                approvals.push(json!({"jsonrpc":"2.0", "id":"grok-plan", "method":"x.ai/exit_plan_mode", "params":{"sessionId":"plan-session", "plan":"Proposed plan"}}));
             }
-            for ask in asks {
+            {
+                let ask = question;
                 let id = ask["id"].clone();
                 probe.send(ask.clone()).await;
                 let request = loop {
@@ -1833,24 +2140,12 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
                         _ => {}
                     }
                 };
-                if id == "ask" {
-                    assert!(
-                        request.fields[0].secret,
-                        "secret questions follow the same routing policy"
-                    );
-                }
                 let answer = probe.message().await;
                 assert_eq!(
                     answer["id"], id,
                     "{harness:?}: answer belongs to the original request"
                 );
-                match ask["method"].as_str().unwrap() {
-                    "elicitation/create" => assert_eq!(answer["result"]["action"], "cancel"),
-                    "session/request_permission" => {
-                        assert_eq!(answer["result"]["outcome"]["outcome"], "cancelled")
-                    }
-                    _ => assert_eq!(answer["result"]["outcome"], "cancelled"),
-                }
+                assert_eq!(answer["result"]["action"], "cancel");
                 loop {
                     if let RuntimeEvent::ElicitationResolved {
                         elicitation_id,
@@ -1870,6 +2165,37 @@ async fn managed_children_cancel_questions_and_permissions_at_the_original_respo
                         .await
                         .is_err(),
                     "the form must no longer be externally answerable"
+                );
+            }
+            // With the person present, nothing answers an approval but them.
+            probe.operator_away.set(mj_core::state::OperatorPresence {
+                away: false,
+                revision: 2,
+            });
+            for ask in approvals {
+                let id = ask["id"].clone();
+                probe.send(ask).await;
+                let request = loop {
+                    match probe.event().await {
+                        RuntimeEvent::ElicitationRequested { request } => break request,
+                        RuntimeEvent::Warning { message } => panic!("{harness:?}: {message}"),
+                        _ => {}
+                    }
+                };
+                assert!(
+                    !request.goes_to_parent(),
+                    "{harness:?}: {id} stays with a person"
+                );
+                probe
+                    .answer_with(&request.id, ElicitationResponse::Cancel)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{harness:?}: a person must be able to answer {id}: {error:#}")
+                    });
+                assert_eq!(
+                    probe.message().await["id"],
+                    id,
+                    "{harness:?}: the person's answer reaches the original request"
                 );
             }
             probe.close().await;

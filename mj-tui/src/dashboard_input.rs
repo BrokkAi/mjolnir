@@ -352,12 +352,22 @@ impl DashboardState {
         // when it produces no action: the frame the next pointer event is
         // hit-tested against has to be rebuilt after it.
         match mouse.kind {
+            // The Sessions wheel scrolls the list under a fixed selection; the
+            // short Targets and Quota lists move their selection instead.
             MouseEventKind::ScrollUp if rows_visible => {
-                self.scroll_selection_for(hovered, -1);
+                if hovered == Focus::Sessions {
+                    self.scroll_sessions_view(-1);
+                } else {
+                    self.scroll_selection_for(hovered, -1);
+                }
                 self.record_event_handled();
             }
             MouseEventKind::ScrollDown if rows_visible => {
-                self.scroll_selection_for(hovered, 1);
+                if hovered == Focus::Sessions {
+                    self.scroll_sessions_view(1);
+                } else {
+                    self.scroll_selection_for(hovered, 1);
+                }
                 self.record_event_handled();
             }
             MouseEventKind::Down(MouseButton::Left) => {

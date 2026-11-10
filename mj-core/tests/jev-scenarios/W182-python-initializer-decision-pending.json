@@ -305,24 +305,9 @@
           "text": "Yes, that's right, and I should have flagged it in my summary instead of leaving it for you to find.\n\n**What each phase was scoped to do**\n- **The campaign (2026-10-02/03) was a gap analysis.** For each of the 187 Python CodeQL rules it built a fixture and a probe policy and ran the probe on the 0.12.0 release. The probe's job was to show whether Bifrost could express the rule; it was never meant to be a rule to ship. The output was verdict rows, `disposition.tsv`, and the PY01-PY22 tickets. Many probes were written against facts that didn't exist yet, so they fail on purpose, use stand-ins, or approximate the rule. That's why I call them drafts.\n- **This program's goal was \"close the gaps to enable effective python rules.\"** I read that as the engine gaps the campaign found, and that's what the lanes did. Writing the rules was never a step in either plan. Each issue comment I posted said \"Pack rules are not yet authored\", but I never raised it with you as unfinished work.\n\n**What carries over**\n- Each probe's positive and near-miss fixture works as test data for the real rule.\n- Each verdict report names the CodeQL query and the behavior it needs.\n- The engine facts the rules need are now on master, or in #4527 and #4545.\n\nSo the remaining step is to rewrite each probe against the current RQL forms, validate it on a pinned engine build, and publish it in a pack. That is real work, though much less than the campaign itself. There was a precedent I should have followed: the Rust mined-rules campaign ended with a rule PR to bifrost-packs.\n\nIf you want, I'll start the authoring now, using the grouping from my last message: the quality pack first in bifrost-packs, then the stdlib security rules, then the third-party rules in premium."
         },
         {
-          "id": "user:13496",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
-          "id": "user:13506",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
-        },
-        {
           "id": "agent:13509",
           "role": "assistant",
           "text": "I checked `list_agents`: no child is running, and every child is either parked or stopped. The notification refers to children I had already collected (the CI investigation for #4527 and the return-class-set lane). There are no new reports.\n\nNothing is in progress. Two things are waiting:\n- **PRs #4527 and #4545:** open and blocked, waiting on the MergeMarshall queue and the master baseline failures.\n- **Your decision on the policy authoring:** whether to start group 1, the Python quality pack in bifrost-packs, and whether you agree that groups 2 and 3 are placed public and premium."
-        },
-        {
-          "id": "user:13551",
-          "role": "user",
-          "text": "One or more sub-agents finished. Call wait to collect their reports."
         },
         {
           "id": "agent:13553",
@@ -347,7 +332,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "There were no new reports. The `wait` call returned 37 old handbacks, which I read in full with `jq`. They came from the triage children, the engine lanes, and the pack lanes of earlier waves, and I had already collected all of them. I've now closed all 37, so the repeated \"sub-agents finished\" notifications should stop.\n\nNothing is running now:\n- **PRs #4527 and #4545:** still open and blocked, waiting on the MergeMarshall queue and the master baseline failures.\n- **Your decision on the Python rule authoring:** whether to start group 1, the quality pack in bifrost-packs, and whether you agree that groups 2 and 3 are placed public and premium.",
     "completion": {
       "stop_reason": "EndTurn",

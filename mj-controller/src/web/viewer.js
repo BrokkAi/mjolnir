@@ -405,8 +405,7 @@ function applyRoute() {
     if (!session
       || (route.subagentParentId && !childSessionIds(virtualParent, route.childKind).includes(session.id))
       || (session.detail !== false
-        && !session.capabilities?.open
-        && !isTransitioningSession(session)
+        && !canViewConversation(session)
         && !isLoadingConversationSession(session))) {
       navigate(route.subagentParentId
         ? childWorkspaceRoute(route.subagentParentId, route.childKind)
@@ -953,8 +952,10 @@ function renderSettings() {
 // ---------------------------------------------------------------------------
 
 const dismissedLaunchFailures = new Set();
+const dismissedRuntimeNotices = new Set();
 
 function renderLaunchFailures() {
+  const noticeKey = notice => `${viewerState.cursor?.incarnation}:${notice.id}`;
   const notices = (snapshot.launch_failures || []).filter(
     failure => route.name === 'dashboard' && failure.workspace_id === selectedWorkspaceId() && !dismissedLaunchFailures.has(failure.id),
   );
@@ -969,7 +970,22 @@ function renderLaunchFailures() {
     card.append(dismiss);
     return card;
   });
-  document.querySelector('#launch-failures').replaceChildren(...failureCards);
+  const runtimeCards = (snapshot.notices || []).filter(
+    notice => !dismissedRuntimeNotices.has(noticeKey(notice)),
+  ).map(notice => {
+    const key = noticeKey(notice);
+    const card = el('div', 'card');
+    card.setAttribute('role', 'status');
+    card.append(el('p', '', notice.text));
+    const dismiss = el('button', 'secondary', 'Dismiss notice');
+    dismiss.onclick = () => {
+      dismissedRuntimeNotices.add(key);
+      renderLaunchFailures();
+    };
+    card.append(dismiss);
+    return card;
+  });
+  document.querySelector('#launch-failures').replaceChildren(...failureCards, ...runtimeCards);
 }
 
 function renderWorkspaces() {
@@ -1075,6 +1091,16 @@ function isTransitioningSession(session) {
   return Boolean(session.operation && session.operation.kind !== 'checkpoint');
 }
 
+/// A failed Move has a status view even after its transcript worker stops.
+function canViewConversation(session) {
+  return Boolean(session && (session.capabilities?.open
+    || isTransitioningSession(session) || session.move_recovery?.failure_notice));
+}
+
+function isMoveFailureStatus(session) {
+  return !session?.capabilities?.open && Boolean(session?.move_recovery?.failure_notice);
+}
+
 /// A live session can briefly lose its conversation projection just after a
 /// lifecycle operation hands it back to the running worker. This is not a
 /// lifecycle transition (and therefore must not make ordinary checkpoints or
@@ -1089,7 +1115,8 @@ function isLoadingConversationSession(session) {
     && session.operation?.kind !== 'checkpoint'
     && session.lifecycle === 'live'
     && !session.has_error
-    && (conversationMode === 'loading' || conversationMode?.startsWith('transition:')),
+    && (conversationMode === 'loading' || conversationMode?.startsWith('transition:')
+      || conversationMode?.startsWith('move-failure:')),
   );
 }
 
@@ -1496,14 +1523,20 @@ function sessionCard(session) {
   return card;
 }
 
+function pendingFormCount(session) {
+  return session.detail === false
+    ? session.pending_elicitation_count || 0
+    : (session.pending_elicitations || []).length;
+}
+
+/// A child's open form is an approval only a person can give, and the child
+/// has no card in the main list, so its parent's card says so.
 function attentionParts(session) {
   const parts = [];
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
   if (session.has_error) parts.push(['!', 'Error']);
-  const pending = session.detail === false
-    ? session.pending_elicitation_count || 0
-    : (session.pending_elicitations || []).length;
-  if (pending) parts.push(['?', 'Input needed']);
+  if (pendingFormCount(session)) parts.push(['?', 'Input needed']);
+  else if (waitingChildCount(session)) parts.push(['?', 'Sub-agent input needed']);
   const queued = session.detail === false
     ? session.queued_prompt_count || 0
     : (session.queued_prompts || []).length;
@@ -1534,7 +1567,7 @@ function sessionMenuActions(session) {
 function updateSessionCard(card, session) {
   card._session = session;
   const can = session.capabilities || {};
-  const openable = can.open === true || isTransitioningSession(session);
+  const openable = canViewConversation(session);
   // A stopped sub-agent has no live conversation to open; the controller says
   // its stored one can be read.
   const readable = !openable && can.read_history === true;
@@ -1556,7 +1589,7 @@ function updateSessionCard(card, session) {
   renderSessionTitle(card._heading, session);
   card._attention.replaceChildren(
     ...attention.map(([glyph, label]) => {
-      const node = el('span', `session-attention-item ${label === 'Error' || label === 'Input needed' ? 'alert' : ''}`, glyph);
+      const node = el('span', `session-attention-item ${['Error', 'Input needed', 'Sub-agent input needed'].includes(label) ? 'alert' : ''}`, glyph);
       node.setAttribute('aria-label', label);
       node.setAttribute('role', 'img');
       node.title = label;
@@ -2154,73 +2187,21 @@ function newResourceAllocationError(draft) {
   const target = snapshot?.targets.find(item => item.id === draft?.targetId);
   const kind = targetResourceKind(draft?.targetId);
   if (kind === 'container') return containerAllocationFromDraft(draft, target).error;
-  if (kind === 'aws-ec2') {
-    if (draft.resourceLoading) return 'Loading EC2 size choices…';
-    if (draft.resourceError) return draft.resourceError;
-    return draft.resourceAllocation?.kind === 'aws-ec2' ? '' : 'Choose an EC2 size before continuing.';
-  }
   return '';
 }
 
 function setNewTargetSizing(draft, targetId) {
-  draft.resourceRequestController?.abort();
-  draft.resourceRequestController = null;
-  draft.resourceRequestTargetId = null;
-  draft.resourceLoading = false;
-  draft.resourceError = '';
   const target = snapshot?.targets.find(item => item.id === targetId);
   if (targetResourceKind(targetId) === 'container') {
     const allocation = target?.default_resource_allocation;
     draft.resourceAllocation = allocation?.kind === 'container' ? { ...allocation } : null;
     draft.resourceCpuText = allocation?.kind === 'container' ? String(allocation.cpus) : '';
     draft.resourceMemoryText = allocation?.kind === 'container' ? memoryGiBText(allocation.memory_bytes) : '';
-  } else if (targetResourceKind(targetId) === 'aws-ec2') {
-    const choices = draft.resourceOptionsByTarget[targetId];
-    draft.resourceAllocation = choices?.default_allocation ? { ...choices.default_allocation } : null;
-    draft.resourceCpuText = '';
-    draft.resourceMemoryText = '';
   } else {
     draft.resourceAllocation = null;
     draft.resourceCpuText = '';
     draft.resourceMemoryText = '';
   }
-}
-
-function ensureNewTargetResourceOptions(draft) {
-  const targetId = draft.targetId;
-  if (draft.resourceOptionsByTarget[targetId]
-    || (draft.resourceLoading && draft.resourceRequestTargetId === targetId)) return;
-  draft.resourceRequestController?.abort();
-  const controller = new AbortController();
-  draft.resourceRequestController = controller;
-  draft.resourceRequestTargetId = targetId;
-  draft.resourceLoading = true;
-  draft.resourceError = '';
-  request(`/api/targets/${encodeURIComponent(targetId)}/resource-options`, { signal: controller.signal })
-    .then(result => {
-      if (newDraft !== draft || draft.targetId !== targetId || controller.signal.aborted) return;
-      draft.resourceOptionsByTarget[targetId] = result;
-      draft.resourceAllocation = result.default_allocation ? { ...result.default_allocation } : null;
-      draft.resourceError = result.options?.length
-        ? ''
-        : 'This EC2 target has no available instance sizes.';
-    })
-    .catch(error => {
-      if (controller.signal.aborted || error?.name === 'AbortError' || newDraft !== draft) return;
-      draft.resourceError = error.message || 'Could not load EC2 size choices.';
-    })
-    .finally(() => {
-      if (draft.resourceRequestController === controller) {
-        draft.resourceRequestController = null;
-        draft.resourceRequestTargetId = null;
-        draft.resourceLoading = false;
-        const controls = document.querySelector('#new-resource-controls');
-        if (newDraft === draft && controls && visibleSteps()[draft.step]?.key === 'target') {
-          renderNewTargetSizingControls(draft, controls);
-          syncNewSizingState(draft);
-        }
-      }
-    });
 }
 
 function syncNewSizingState(draft) {
@@ -2311,47 +2292,6 @@ function renderNewTargetSizingControls(draft, host) {
     const warning = el('p', 'move-warning', containerAllocationFromDraft(draft, target).warning);
     warning.id = 'new-resource-warning';
     host.append(warning);
-  } else if (kind === 'aws-ec2') {
-    if (draft.resourceLoading) {
-      host.append(el('p', 'dim', 'Loading EC2 size choices…'));
-      return;
-    }
-    if (draft.resourceError) {
-      host.append(el('p', 'error', draft.resourceError));
-      if (!draft.resourceOptionsByTarget[draft.targetId]) {
-        host.append(projectButton('Retry size choices', () => {
-          draft.resourceError = '';
-          ensureNewTargetResourceOptions(draft);
-          renderNewTargetSizingControls(draft, host);
-          syncNewSizingState(draft);
-        }, 'new-resource-retry'));
-      }
-      return;
-    }
-    const choices = draft.resourceOptionsByTarget[draft.targetId]?.options || [];
-    if (!choices.length) {
-      host.append(el('p', 'error', 'This EC2 target has no available instance sizes.'));
-      return;
-    }
-    const field = el('label', 'field');
-    field.append(el('span', '', 'EC2 instance size'));
-    const select = el('select');
-    select.id = 'new-resource-aws';
-    const selectedType = draft.resourceAllocation?.kind === 'aws-ec2'
-      ? draft.resourceAllocation.instance_type
-      : '';
-    if (!selectedType) select.append(new Option('Choose an instance size', ''));
-    for (const option of choices) {
-      const title = `${option.instance_type} · ${option.vcpus} vCPU · ${memoryGiBText(option.memory_bytes)} GiB`;
-      select.append(new Option(title, option.instance_type));
-    }
-    select.value = selectedType;
-    select.onchange = () => {
-      draft.resourceAllocation = choices.find(option => option.instance_type === select.value) || null;
-      syncNewSizingState(draft);
-    };
-    field.append(select);
-    host.append(el('h2', '', 'EC2 size'), field);
   }
 }
 
@@ -2389,11 +2329,6 @@ function freshDraft() {
     resourceCpuText: '',
     resourceMemoryText: '',
     rememberContainerSize: false,
-    resourceOptionsByTarget: {},
-    resourceRequestController: null,
-    resourceRequestTargetId: null,
-    resourceLoading: false,
-    resourceError: '',
   };
   draft.subagents = rememberedDelegationPolicy(draft.profileId);
   draft.oracle = rememberedOracleChoice(draft.profileId);
@@ -2425,7 +2360,7 @@ function selectNewProfile(draft, profileId) {
 // Mirrors HarnessKind::supports_delegation_tools.
 function subagentChoiceApplies(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind === 'claude' || kind === 'codex' || kind === 'dsh';
+  return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'opencode';
 }
 
 // Every top-level session's message-only server carries ask_oracle, whatever its harness.
@@ -2581,9 +2516,6 @@ function renderNewForm() {
   const steps = visibleSteps();
   newDraft.step = Math.min(newDraft.step, steps.length - 1);
   const step = steps[newDraft.step];
-  if (step.key === 'target' && targetResourceKind(newDraft.targetId) === 'aws-ec2') {
-    ensureNewTargetResourceOptions(newDraft);
-  }
   if (step.key === 'project' && !newDraft.catalogStep) {
     newDraft.catalogStep = true;
     refreshProjectCatalog(newDraft);
@@ -2661,7 +2593,6 @@ function renderNewForm() {
           newDraft.targetId = value;
           newDraft.projectDirectory = newDraft.projectDirectories[value] ?? snapshot.targets.find(t => t.id === value)?.recent_project_directories?.[0] ?? '';
           setNewTargetSizing(newDraft, value);
-          if (targetResourceKind(value) === 'aws-ec2') ensureNewTargetResourceOptions(newDraft);
           // Changing the target changes which project question is asked, and
           // invalidates anything the previous project answer was checked for.
           newDraft.preflighted = false;
@@ -2739,9 +2670,7 @@ function renderNewForm() {
         ['Where to run', newDraft.targetId],
         ...(newDraft.resourceAllocation?.kind === 'container'
           ? [['Container size', `${newDraft.resourceAllocation.cpus} CPU · ${memoryGiBText(newDraft.resourceAllocation.memory_bytes)} GiB memory`]]
-          : newDraft.resourceAllocation?.kind === 'aws-ec2'
-            ? [['EC2 size', newDraft.resourceAllocation.instance_type]]
-            : []),
+          : []),
         targetIsBare(newDraft.targetId)
           ? ['Project files', newDraft.projectDirectory]
           : ['Project', newDraft.bundleId],
@@ -3572,7 +3501,7 @@ async function commitNew() {
   const target = snapshot?.targets.find(item => item.id === draft.targetId);
   const resourceAllocation = kind === 'container'
     ? containerAllocationFromDraft(draft, target).allocation
-    : kind === 'aws-ec2' ? draft.resourceAllocation : null;
+    : null;
   if (resourceAllocation) body.resource_allocation = resourceAllocation;
   if (kind === 'container') body.remember_container_size = draft.rememberContainerSize === true;
   if (newDraft.title.trim()) body.title = newDraft.title.trim();
@@ -4379,6 +4308,11 @@ function updateResumeCard(card, session, rebuild = false) {
     if (recovery.checkpoint_retained && !move.explanation) body.append(el('p', 'dim', 'A verified recovery checkpoint is retained.'));
   }
   const queuePinned = move.queuePinned;
+  if (recovery?.failure_notice) {
+    const view = button('View Move failure', 'secondary');
+    view.onclick = () => navigate({ name: 'conversation', workspaceId: session.workspace_id, sessionId: session.id });
+    body.append(view);
+  }
   if (move.explanation) body.append(el('p', 'dim', move.explanation));
   if (move.retry) {
     const moveRow = el('div', 'row');
@@ -5498,6 +5432,18 @@ function workingChildCount(session) {
     .length;
 }
 
+/// Children with an open form, which only a person can answer, counting a
+/// child whose own reviewer holds one. Validation rejects ownership cycles;
+/// `seen` keeps a malformed snapshot finite anyway.
+function waitingChildCount(session, seen = new Set()) {
+  if (!session || seen.has(session.id)) return 0;
+  seen.add(session.id);
+  return (session.subagent_session_ids || [])
+    .map(id => sessionById(id))
+    .filter(child => child && (pendingFormCount(child) || waitingChildCount(child, seen)))
+    .length;
+}
+
 function sessionInWorkspace(id, workspace) {
   const session = sessionById(id);
   return session?.workspace_id === workspace ? session : undefined;
@@ -5682,6 +5628,7 @@ function confirmSessionDestruction(session) {
     dialog.append(el('h2', '', 'Destroy session?'));
     dialog.append(el('p', '', session.title || session.id));
     dialog.append(el('p', '', 'Permanently remove this session, its environment, and its recovery archive. Work held only in the environment will be lost. This also destroys its sub-agents.'));
+    dialog.append(el('p', '', 'If environment cleanup fails, the session is still removed and a warning reports resources that may remain.'));
     const label = el('label');
     const branch = el('input');
     branch.type = 'checkbox';
@@ -6124,7 +6071,7 @@ function refreshOpenConversationDetail(id) {
   errorNode.textContent = 'Refreshing session details…';
   ensureSessionDetail(id).then(session => {
     if (route.name !== 'conversation' || route.sessionId !== id || currentSession !== id) return;
-    if (!session?.capabilities?.open && !isTransitioningSession(session)) {
+    if (!canViewConversation(session) && !isLoadingConversationSession(session)) {
       navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
       return;
     }
@@ -6182,8 +6129,7 @@ function presentSnapshot(detailChangedIds = []) {
       return true;
     }
     if (!session
-      || (!session.capabilities?.open
-        && !isTransitioningSession(session)
+      || (!canViewConversation(session)
         && !isLoadingConversationSession(session))) {
       navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
       return true;
@@ -7419,13 +7365,15 @@ async function searchHistory(query) {
       // Saying the answer is partial is the whole reason the bound reports it.
       paletteMatches.push({
         insert: composerText(),
-        label: `More matches than ${paletteMatches.length} — narrow the search`,
+        label: `Stopped after ${paletteMatches.length} matches — narrow the search`,
         hint: '',
       });
     }
     paletteSelected = 0;
     if (!paletteMatches.length) {
-      commandPalette.replaceChildren(el('p', 'dim palette-row', 'No earlier prompts match.'));
+      // The daemon's trigram index matches substrings of three characters or more.
+      const hint = [...query].length < 3 ? 'Type at least 3 characters.' : 'No earlier prompts match.';
+      commandPalette.replaceChildren(el('p', 'dim palette-row', hint));
       commandPalette.classList.remove('hidden');
       return;
     }
@@ -7646,8 +7594,7 @@ function sessionReviewStatusConfig(snapshot, session) {
 function reviewStatusLine(review, open) {
   const trigger = review?.trigger;
   const armed = trigger === "push" ? "Review trigger is before push"
-    : trigger === "turn" ? "Reviewing every completed turn"
-      : "Automatic review is off; /review reviews one turn";
+    : "Automatic review is off; /review reviews commits";
   const count = review?.count ?? review?.reviewers?.length ?? 0;
   const status = count === 0 ? `${armed}; no reviewers`
     : `${armed}; ${count} reviewer${count === 1 ? '' : 's'}`;
@@ -7765,9 +7712,9 @@ async function runLocalCommand(text) {
         return true;
       }
       if (scope === 'on' || scope === 'off') {
-        // Arming review is configuration, not a session gesture.
+        // Review runs when reviewers are configured: not a session gesture.
         error.textContent =
-          'automatic review is configured in config.toml: [review] trigger';
+          'review runs before push when reviewers are set in Settings › Code Review';
         setComposerText('');
         return true;
       }
@@ -8100,12 +8047,21 @@ function paintEntry(node, entry, unansweredPrompt) {
 /// The prompt an unanswered-turn row offers to put back, or null.
 ///
 /// The text comes from the newest user row before the warning, which is the
-/// prompt that turn was running.
+/// prompt that turn was running. When Mjolnir submitted that prompt (the
+/// server marks the row `generated`), there is nothing of the person's to put
+/// back, and an earlier request would be unrelated work.
 function unansweredPromptFor(entry, lastUserText) {
   if (entry.role === 'user') return null;
   const text = (entry.lines || []).join('\n');
   if (!text.includes(PROMPT_UNANSWERED_MARKER)) return null;
   return lastUserText || null;
+}
+
+/// The prompt text a later warning in this turn may offer back. A user row
+/// starts the turn; Mjolnir's own prompts (`generated`) leave nothing to offer.
+function turnPromptText(entry, previous) {
+  if (entry.role !== 'user') return previous;
+  return entry.generated ? null : (entry.lines || []).join('\n');
 }
 
 function renderEntries(entries, replace) {
@@ -8118,7 +8074,7 @@ function renderEntries(entries, replace) {
   let appended = false;
   let lastUserText = null;
   for (const entry of entries) {
-    if (entry.role === 'user') lastUserText = (entry.lines || []).join('\n');
+    lastUserText = turnPromptText(entry, lastUserText);
     const unansweredPrompt = unansweredPromptFor(entry, lastUserText);
     const identity = entry.stable_id || entry.id;
     let node = entryNodes.get(identity);
@@ -8173,7 +8129,9 @@ function syncConversationMode(session) {
   const transition = isTransitioningSession(session);
   const loading = !transition && isLoadingConversationSession(session);
   const operationId = session?.operation?.id || session?.state || session?.lifecycle || '';
-  const next = transition ? `transition:${operationId}` : loading ? 'loading' : 'conversation';
+  const statusOnly = isMoveFailureStatus(session);
+  const next = transition ? `transition:${operationId}` : loading ? 'loading'
+    : statusOnly ? `move-failure:${session.move_recovery.operation_id}` : 'conversation';
   if (next === conversationMode) return;
   conversationMode = next;
   conversationGeneration += 1;
@@ -8186,10 +8144,29 @@ function syncConversationMode(session) {
 }
 
 function renderConversationTransition(session) {
+  const moveFailure = document.querySelector('#conversation-move-failure');
+  const recovery = session?.move_recovery;
+  const notice = recovery?.failure_notice;
+  const signature = JSON.stringify([session?.id, recovery, session?.lifecycle, session?.capabilities?.resume]);
+  if (moveFailure._signature !== signature) {
+    moveFailure._signature = signature;
+    moveFailure.hidden = !notice;
+    moveFailure.replaceChildren();
+    if (notice) {
+      moveFailure.append(el('p', 'error', notice));
+      const guidance = resumeMoveRecovery(session);
+      if (guidance.retry) {
+        const retry = button('Retry move', 'secondary');
+        retry.onclick = () => navigate({ name: 'move', workspaceId: session.workspace_id, sessionId: session.id });
+        moveFailure.append(retry);
+      }
+    }
+  }
   const transition = isTransitioningSession(session);
   const loading = !transition && isLoadingConversationSession(session);
-  const unavailable = transition || loading;
-  conversationTransition.hidden = !unavailable;
+  const statusOnly = isMoveFailureStatus(session);
+  const unavailable = transition || loading || statusOnly;
+  conversationTransition.hidden = !transition && !loading;
   feedScroll.hidden = unavailable;
   jumpToLatest.hidden = unavailable;
   elicitations.hidden = unavailable;
@@ -8201,16 +8178,16 @@ function renderConversationTransition(session) {
   );
   document.querySelector('#prompt-form').hidden = unavailable;
   cancelTurnButton.classList.toggle('hidden', unavailable || !session?.capabilities?.interrupt_turn);
-  if (!unavailable) return;
+  if (!transition && !loading) return;
   conversationTransitionTitle.textContent = loading ? 'Loading conversation' : session.title || session.id;
   conversationTransitionStage.textContent = loading ? 'Waiting for the conversation…' : sessionActivityLabel(session);
-  const notice = loading
+  const transitionNotice = loading
     ? ''
     : session.operation?.notice
       || session.configuration_issue
       || (session.has_error ? 'The operation needs recovery. Use the available action to try again.' : '');
-  conversationTransitionNotice.textContent = notice;
-  conversationTransitionNotice.hidden = !notice;
+  conversationTransitionNotice.textContent = transitionNotice;
+  conversationTransitionNotice.hidden = !transitionNotice;
   conversationTransitionCancel.dataset.id = session.id;
   conversationTransitionCancel.disabled = !session.capabilities?.cancel_operation
     || pendingActions.has(`cancel:${session.id}`);
@@ -8224,7 +8201,7 @@ async function loadConversation(delta = false) {
   if (!currentSession) return;
   const current = sessionById(currentSession);
   if (!current?.capabilities?.open || isTransitioningSession(current)) {
-    if (isTransitioningSession(current) || isLoadingConversationSession(current)) {
+    if (canViewConversation(current) || isLoadingConversationSession(current)) {
       renderConversationTransition(current);
     }
     return;
@@ -8330,7 +8307,7 @@ async function openConversation(id) {
     errorNode.textContent = '';
   }
   if (!session) return;
-  if (!session.capabilities?.open && !isTransitioningSession(session)) {
+  if (!canViewConversation(session)) {
     navigate(route.subagentParentId
       ? childWorkspaceRoute(route.subagentParentId, route.childKind)
       : { name: 'dashboard', workspaceId: selectedWorkspaceId() });
@@ -8666,13 +8643,26 @@ function renderConversationHeader(session) {
   const working = children.filter(id => sessionById(id)?.chat_phase === 'running').length
     + new Set(native.filter(a => a.state === 'running').map(a => a.stable_id || a.session_id)).size;
   const total = children.length + native.length;
+  // A child's approval is not shown in this conversation, so say it is waiting.
+  const waiting = waitingChildCount(session);
   for (const button of [subagentsButton, subagentsDesktopButton]) {
     if (!button) continue;
-    button.textContent = `Subagents · ${working}`;
-    button.title = `${total} retained agents`;
+    button.textContent = waiting
+      ? `Subagents · ${working} · ${waiting} need${waiting === 1 ? 's' : ''} you`
+      : `Subagents · ${working}`;
+    button.title = waiting
+      ? `${total} retained agents; ${waiting} waiting for your answer`
+      : `${total} retained agents`;
+    button.classList.toggle('alert', waiting > 0);
+    button.setAttribute('aria-label', waiting
+      ? `Open sub-agent workspace; ${waiting} waiting for your answer`
+      : 'Open sub-agent workspace');
+    // Inside a sub-agent context the button opens this child's own children
+    // only when one of them waits for the person, such as a reviewer of the
+    // child's work; otherwise it stays hidden there.
     button.classList.toggle(
       'hidden',
-      total === 0 || Boolean(route.subagentParentId),
+      total === 0 || (Boolean(route.subagentParentId) && waiting === 0),
     );
   }
   // Reviewers stay reachable once any exist, so a finished review's

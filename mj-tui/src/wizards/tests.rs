@@ -1600,6 +1600,7 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
+                aws: None,
                 codex_profile: None,
                 environment: Default::default(),
                 ..mj_core::config::HarnessProfile::new(kind, PathBuf::from("/profiles/harness"))
@@ -5176,78 +5177,6 @@ fn container_fields_are_underlined_before_focus_and_clickable_on_small_terminals
 }
 
 #[test]
-fn ec2_dropdown_selects_instances_preserves_refresh_and_rejects_removed_selection() {
-    let aws = TargetTemplate::AwsEc2 {
-        aws_profile: None,
-        region: "us-east-1".into(),
-        launch_template: "hel".into(),
-        launch_template_version: None,
-        ssh_user: "ubuntu".into(),
-        address_source: mj_core::config::AwsAddressSource::PublicIp,
-        identity_file: None,
-        ssh_args: Vec::new(),
-    };
-    let mut configuration = config();
-    configuration.targets = BTreeMap::from([("aws".into(), aws)]);
-    let mut dashboard = DashboardState::new(configuration, State::default(), BTreeMap::new());
-    ready_open_new_wizard(&mut dashboard);
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert!(new_wizard(&dashboard).resource_allocation.is_none());
-    let loading = captured_drawn(&mut dashboard, 80, 24).join("\n");
-    assert!(loading.contains("Loading instance types"), "{loading}");
-    let options = [8, 16]
-        .into_iter()
-        .map(|vcpus| SessionResourceAllocation::AwsEc2 {
-            instance_type: format!("family.{vcpus}"),
-            vcpus,
-            memory_bytes: vcpus * (4 << 30),
-        })
-        .collect::<Vec<_>>();
-    dashboard.apply_aws_resource_options("aws", Ok(options.clone()));
-    ready_key(&mut dashboard, key(KeyCode::Tab));
-    assert_eq!(
-        new_wizard(&dashboard).form.borrow().focused(),
-        Some(WizardControl::ResourceInstance)
-    );
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    let popup = captured_drawn(&mut dashboard, 80, 24).join("\n");
-    assert!(popup.contains("Instance types"), "{popup}");
-    ready_key(&mut dashboard, key(KeyCode::Down));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert_eq!(
-        new_wizard(&dashboard).resource_allocation,
-        Some(options[1].clone())
-    );
-    assert!(
-        !new_wizard(&dashboard)
-            .resource_editor
-            .instances
-            .is_open(WizardControl::ResourceInstance)
-    );
-    dashboard.apply_aws_resource_options("aws", Ok(options.clone()));
-    assert_eq!(
-        new_wizard(&dashboard).resource_allocation,
-        Some(options[1].clone())
-    );
-    dashboard.apply_aws_resource_options("aws", Ok(vec![options[0].clone()]));
-    dashboard.apply_aws_resource_options("aws", Ok(vec![options[0].clone()]));
-    assert!(new_wizard(&dashboard).resource_allocation.is_none());
-    assert!(
-        new_wizard(&dashboard)
-            .sizing_error
-            .as_ref()
-            .unwrap()
-            .contains("unavailable")
-    );
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    ready_key(&mut dashboard, key(KeyCode::Enter));
-    assert_eq!(
-        new_wizard(&dashboard).resource_allocation,
-        Some(options[0].clone())
-    );
-}
-
-#[test]
 fn container_memory_errors_keep_the_draft_and_refuse_submission_above_host_limits() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
@@ -6297,7 +6226,7 @@ fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
         draft
             .unavailable_reason()
             .unwrap()
-            .contains("Claude, Codex, or DSH")
+            .contains("Claude, Codex, DSH, or OpenCode")
     );
     // DSH lists Mjolnir and None only; unconfigured Mjolnir stays disabled.
     config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Dsh;

@@ -1,0 +1,345 @@
+{
+  "id": "L2308",
+  "title": "policy-suite-blocker",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "03d88f749e7d46f3a97278488fba5dd3",
+    "session_title": "eval41 3867 haikumax",
+    "reply_position": 6734,
+    "captured_at": "2026-10-17T18:21:05.614Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3867: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(`ls /workspace/*/bifrost` finds it). Direct unresolved contract questions to the series lead.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes\nand is checked out detached at this exact commit: 1e66264f1fb7b0d749f302ac4515f99e9a29acc1\nDo not fetch from origin or any other remote.\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nHistory rule. Work only from the base commit above. Do not log, show, diff, check\nout or otherwise read any commit, branch or tag that is not an ancestor of the base,\nand do not use gh, the GitHub API or the web for this issue, its comments, timeline\nor pull requests: the issue text in this brief is complete.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\nIf the build cache wrapper stalls, report the evidence to the judge.\nDo not bypass the mbx cargo shim, redirect target/, set CARGO_TARGET_DIR,\nor change shared cache settings.\n\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories\n[... 14058 bytes omitted from the middle of this message ...]\never invoke Python/pip/uv/Poetry/setup.py/backends.\n\nIssue remains OPEN. #3866 shared consumer checkpoint 15d0d24fd is still local pending certification/publication; canonical Python discovery/version dispatch, durable invalidation and policy/CLI/MCP parity are not certified. #3284/#3275 owns established configuration correlation; external bifrost-lsp grammar/editor publication also remains with its owner. Configured installed-METADATA enrichment still needs explicit component ownership and shared diagnostic publication. New readers add no disk memo; existing source-root memo repair remains #3673. Public seams and exact remaining work are recorded in .agents/plans/3867-python-packaging-evidence.md and documented in the Python language reference. Removed my claim/assignment while handing off shared blockers; no full acceptance checkboxes were marked complete.\n\n---\nComment by DavidBakerEffendi:\nShared-consumer handoff from #3866: draft https://github.com/BrokkAi/bifrost-dev/pull/4276, head b49ce7c22, includes selected SQL dependency-file publication (migration 140), canonical dependency_evidence RQL/CodeQuery/RQLP results, retained citations and regenerated Python models. Details/coordination receipt: https://github.com/BrokkAi/bifrost-dev/issues/2442#issuecomment-5951862893.\n\nThe agreed acquisition envelope is reused; display coordinates and slice digest live in a separate location companion. ID span hashing is portable u64 LE with slash-normalized paths. Current native publisher/analyzer integration certifies Rust; your ecosystem should reuse the SQL consumer seam and add its own upstream native-input registration/adapter and ecosystem-correct matcher. Queries must not run acquisition. Cargo-only version_ranges never interprets npm/Go/Python ranges, and missing providers remain explicit in mixed workspaces. Both Clippy gates and 20 focused Cargo/store/query-policy/schema tests passed on 65b948103; broader post-sync testing is offloaded to the draft CI. #3866 stays open for external correlation/editor acceptance.\n"
+        },
+        {
+          "id": "agent:5414",
+          "role": "assistant",
+          "text": "I'll resume the validation first. The witness build was blocked in the shared wrapper when I stopped, so I'll check whether that wait has cleared and confirm the repository state."
+        },
+        {
+          "id": "agent:5436",
+          "role": "assistant",
+          "text": "The wrapper is still blocked after about forty-five minutes, and the repository is clean at the two commits. Before deciding whether to wait or stop, I'll look for read-only evidence: whether the inflight lock file is still being touched, and what the mbx binary's own help documents about its scheduler. I won't run anything that changes shared state."
+        },
+        {
+          "id": "agent:5467",
+          "role": "assistant",
+          "text": "The inflight lock file was touched again at 16:11, so another party is actively using that same rustc unit, and the scheduler's inflight directory has grown past 77,000 entries. Clearing that needs the host's mbx administrators or the other session, and the brief rules out bypassing the shim or changing shared cache state. I'll wait in bounded intervals and record whether it clears, and I'll stop with an explanation if it does not."
+        },
+        {
+          "id": "agent:5506",
+          "role": "assistant",
+          "text": "It is still blocked at about forty-nine minutes, and the inflight file has not been touched since 16:11. While I wait, I re-derived the witness's expected uv instance counts from the reader code, and they agree with the assertions: three unowned candidates per version and three owned instances each from the runtime and optional references. I'll keep the bounded wait going."
+        },
+        {
+          "id": "agent:5537",
+          "role": "assistant",
+          "text": "The wrapper's state changed from `S` to `Sl`, and the inflight file was touched at 16:19. That may mean it has acquired the lock. I'll check whether the build is moving."
+        },
+        {
+          "id": "agent:5558",
+          "role": "assistant",
+          "text": "The wrapper resumed. It has started the real rustc for `brokk_bifrost_analysis` in the test profile, which is the first step of the long test build. I'll keep waiting in bounded intervals."
+        },
+        {
+          "id": "agent:5577",
+          "role": "assistant",
+          "text": "The analysis test-profile rustc has run for about five minutes. I'll keep waiting."
+        },
+        {
+          "id": "agent:5592",
+          "role": "assistant",
+          "text": "The build has moved on to the flow, RQL, and semantic-packs crates. I'll keep waiting."
+        },
+        {
+          "id": "agent:5613",
+          "role": "assistant",
+          "text": "The test binary is built, and nextest is now running the six witness tests. I'll wait for the results."
+        },
+        {
+          "id": "agent:5629",
+          "role": "assistant",
+          "text": "All six witness tests passed on the first run, and the log ends with exit 0. I'll confirm which six tests ran, that the compiled test file is the corrected version, and that the build emitted no warnings from the changed code."
+        },
+        {
+          "id": "agent:5652",
+          "role": "assistant",
+          "text": "The witness tests are confirmed: six of six passed, and the file they compiled is the final version, with its last write before the test binary was compiled. Next I'll run the full policy suite, which the testing guidance names as the gate for policy and dependency-evidence changes. It reuses the binary I just built."
+        },
+        {
+          "id": "agent:5687",
+          "role": "assistant",
+          "text": "The notification is the wrapper's own return, not the suite's end; the nextest log shows 1876 tests starting. I'll check the log for its exit line before drawing conclusions."
+        },
+        {
+          "id": "agent:5705",
+          "role": "assistant",
+          "text": "The policy suite found a real regression. The `expect` I added to the store dispatch panics for TypeScript workspaces, and the failing tests all build TypeScript analyzers. My store dispatch maps the storage key back to a `Language` through `from_config_label`, and I had not checked that TypeScript's storage key round-trips through it. I'll verify the label mapping before changing anything."
+        },
+        {
+          "id": "agent:5742",
+          "role": "assistant",
+          "text": "Confirmed from source: `Language::TypeScript.config_label()` is `typescript` at `model.rs` line 125, while the store keys TypeScript revisions as `typescript:ts`. So `from_config_label(\"typescript:ts\")` returns `None`, and my `expect` panics. I'll check the failure messages in the run, to confirm that the TypeScript panic is the only cause before I change anything."
+        },
+        {
+          "id": "agent:5773",
+          "role": "assistant",
+          "text": "All 39 failures trace to the same `expect` at `dependency_file_evidence.rs:32`, and the other failures are downstream effects of the poisoned store mutex and the panicking CLI run. I'll stop the current run, since it is my own process and it will only repeat this failure, and then fix the store dispatch."
+        },
+        {
+          "id": "agent:5802",
+          "role": "assistant",
+          "text": "The exit code 144 means my shell was killed, because the `pgrep -f` pattern matched the text of this very command. I'll check what is still running, using exact process names this time, before doing anything else."
+        },
+        {
+          "id": "agent:5821",
+          "role": "assistant",
+          "text": "`cargo-nextest` is gone and the log ends with \"test run failed\". An `mbx nextest` wrapper with a four-minute elapsed time is still listed, and I did not start it, so I'll inspect its children before touching anything."
+        },
+        {
+          "id": "agent:5843",
+          "role": "assistant",
+          "text": "Nothing from this session is still running, and the stopped run left no children behind. Next I'll make the fix. I'll print the current dispatch code in the store file so the replacements match exactly."
+        },
+        {
+          "id": "agent:5865",
+          "role": "assistant",
+          "text": "The mapping that failed is `Language::from_config_label`, which normalizes labels and does not know the storage key. I'll replace it with one explicit table of published languages and their storage keys, used in both directions. First I need to confirm that `Language` is `Copy`, since the table lookups return values."
+        },
+        {
+          "id": "agent:5895",
+          "role": "assistant",
+          "text": "`Language` is `Copy` and `PartialEq`, so the table can be used directly. I'll apply the fix in three edits: the table and dispatch helper, the publication entry point, and the overlay path."
+        },
+        {
+          "id": "agent:5914",
+          "role": "assistant",
+          "text": "The table is in place and formatting passes. I'll rerun the full policy suite in the background, which rebuilds the store change and then runs all tests."
+        },
+        {
+          "id": "agent:5931",
+          "role": "assistant",
+          "text": "The completion notice is again the wrapper returning, so I'll follow the run through its log."
+        },
+        {
+          "id": "agent:5948",
+          "role": "assistant",
+          "text": "The rebuild is progressing, and the scheduler is not blocking this time. I'll keep waiting for the test results."
+        },
+        {
+          "id": "agent:5973",
+          "role": "assistant",
+          "text": "While the rebuild continues, I'll check the whole diff for any other use of `from_config_label` that could hit the same mismatch."
+        },
+        {
+          "id": "agent:5988",
+          "role": "assistant",
+          "text": "No changed code uses the label lookup now, and the remaining uses are pre-existing. I'll keep waiting for the run."
+        },
+        {
+          "id": "agent:6009",
+          "role": "assistant",
+          "text": "The rebuilt suite is passing its early tests, and the previous panic has not recurred. The full run has 1876 tests, so I'll keep waiting."
+        },
+        {
+          "id": "agent:6032",
+          "role": "assistant",
+          "text": "388 tests have passed with none failing so far. One test, `rust_log_injection_re...`, is running past 180 seconds, which the nextest config flags as slow. I'll keep watching it, since it could hit the termination threshold under load."
+        },
+        {
+          "id": "agent:6059",
+          "role": "assistant",
+          "text": "One failure has appeared. I'll identify it and read its output before doing anything else."
+        },
+        {
+          "id": "agent:6078",
+          "role": "assistant",
+          "text": "The failure is a latency guard. The test asserts that a cold Go lifecycle policy run finishes within an interactive budget, and it measured 6.9 seconds on a host whose load is near 95. Go publication returns early in my change, so this looks load-sensitive rather than caused by the change. I'll read the guard to confirm its threshold and what it times."
+        },
+        {
+          "id": "agent:6111",
+          "role": "assistant",
+          "text": "The guard requires each cold, warm, and edited CLI run to finish within five seconds, and the measurement was taken under heavy host load. I'll confirm later by rerunning that single test alone, rather than changing the threshold. I'll keep monitoring the full run."
+        },
+        {
+          "id": "agent:6154",
+          "role": "assistant",
+          "text": "The full policy suite finished with 1875 passing and one failing, which is the Go latency guard. The count of two fail lines is the same failure printed twice. I'll confirm the failing test names from the summary."
+        },
+        {
+          "id": "agent:6176",
+          "role": "assistant",
+          "text": "Only one test failed, `cli_reruns_and_one_file_edit_stay_in_the_interactive_latency_class`, and the rest of the suite passed. Go publication returns early in my change, so this should be load-sensitive. I'll run that single test alone to check, since the binary is already built."
+        },
+        {
+          "id": "agent:6203",
+          "role": "assistant",
+          "text": "It fails alone too, at load near 190, so the single run does not settle it. I'll read the measured times from this run to see which phase is slow."
+        },
+        {
+          "id": "agent:6221",
+          "role": "assistant",
+          "text": "Alone, the cold run took about 8 seconds, and the host load is about 190. Before deciding whether this is load or my change, I'll check whether the nextest config reserves the machine for this latency guard, since AGENTS.md requires that for timing guards."
+        },
+        {
+          "id": "agent:6251",
+          "role": "assistant",
+          "text": "The config reserves the machine for this guard, but the reservation only covers this container's own tests. The other sessions on the host drive the load, and the config comments document this exact guard failing under saturation. I'll settle the cause with the base comparison I already planned. Meanwhile I'll check whether the semantic JS/TS dependency tests exercise the store publication path, since that decides whether they need a run."
+        },
+        {
+          "id": "agent:6292",
+          "role": "assistant",
+          "text": "The semantic JS/TS tests call the pure discovery function directly, so they do not exercise the store path. The policy suite already covers JavaScript and TypeScript through the store, so I'll skip that large target. I'll run the remaining validations as one sequential background script, with a separate log and exit code for each step."
+        },
+        {
+          "id": "agent:6321",
+          "role": "assistant",
+          "text": "The validation sequence is running. In the meantime I'll review the store-fix diff and commit it on its own, since it corrects a regression my checkpoint introduced."
+        },
+        {
+          "id": "agent:6341",
+          "role": "assistant",
+          "text": "The diff is limited to the storage-key table and its two lookups. I'll commit it on its own with a plain-language message, since it fixes a regression my checkpoint introduced."
+        },
+        {
+          "id": "agent:6361",
+          "role": "assistant",
+          "text": "The fix is committed as `3d0d3f8c6e`, and the working tree is clean. The before-run script I prepared earlier used `git stash`, which no longer applies because the changes are committed. I'll rewrite it to restore base content for the two production crates with `git checkout` from the base commit, then restore HEAD afterward. It will also run the latency guard, so the base comparison covers both tests. It must not start until the current validation sequence finishes."
+        },
+        {
+          "id": "agent:6400",
+          "role": "assistant",
+          "text": "The analysis library test build has started. I'll wait in bounded intervals."
+        },
+        {
+          "id": "agent:6434",
+          "role": "assistant",
+          "text": "The analysis library build is progressing slowly because host load is near 290. I'll keep waiting."
+        },
+        {
+          "id": "agent:6464",
+          "role": "assistant",
+          "text": "The analysis test binary has been compiling for about half an hour. I'll confirm it is actively compiling rather than stuck in the wrapper again."
+        },
+        {
+          "id": "agent:6481",
+          "role": "assistant",
+          "text": "An `mbx-rustc` wrapper is in state `S` for about twenty-seven minutes. I'll check its wait channel and whether it has a rustc child running."
+        },
+        {
+          "id": "agent:6498",
+          "role": "assistant",
+          "text": "It is the same stall again: the wrapper is blocked on `locks_lock_inode_wait` with no rustc child. I'll identify which crate it is building and which inflight file it is waiting on, using read-only checks."
+        },
+        {
+          "id": "agent:6520",
+          "role": "assistant",
+          "text": "The stalled wrapper is compiling `brokk_bifrost_analysis` for the library test binary, and it is waiting on an inflight lock that has no visible holder. This is the same shared-scheduler pattern as before, and it blocks the rest of the sequence, which runs serially. I'll record the regression and current status in the ExecPlan now, so the state is saved whichever way the wait ends."
+        },
+        {
+          "id": "agent:6551",
+          "role": "assistant",
+          "text": "The plan entries are in the right sections. I'll commit this living-document update so the record is saved."
+        },
+        {
+          "id": "agent:6566",
+          "role": "assistant",
+          "text": "The build is still queued behind the same scheduler lock after about thirty-one minutes, and the plan is committed at `d02c7d5824`. I'll keep waiting for a bounded period, since the earlier stall cleared on its own. If it has not cleared by about 18:20Z, I will stop and explain the external dependency."
+        },
+        {
+          "id": "agent:6633",
+          "role": "assistant",
+          "text": "The wrapper has now been blocked for about fifty-six minutes. I'll wait until my stated deadline of about 18:20Z before stopping."
+        },
+        {
+          "id": "agent:6661",
+          "role": "assistant",
+          "text": "The deadline has passed. The queued validation is still blocked after about an hour, with no visible lock holder. Before I stop, I'll save the evidence where it survives. Everything under `/tmp` is ephemeral, but the workspace is checkpointed, so I'll check whether `.agents/scratch/` is git-ignored for raw logs."
+        },
+        {
+          "id": "agent:6696",
+          "role": "assistant",
+          "text": "`.agents/scratch/` is git-ignored, so I can keep raw logs there without committing them. I'll copy the current evidence and scripts into it, and start a background copier that keeps the queued validation's logs there until the sequence finishes."
+        },
+        {
+          "id": "agent:6715",
+          "role": "assistant",
+          "text": "The evidence is mirrored, the copier is running, and the working tree is clean. I'll get the full commit hashes for the report, and confirm the final state of the fix once more."
+        },
+        {
+          "id": "agent:6734",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nStatus: not finished, and blocked on an external action. The TypeScript regression I found in the checkpoint is fixed, and the witness passes. The rest of the validation is queued behind a shared build-scheduler lock that this session cannot clear, so I am stopping here.\n\n**1. Cause of the regression (confirmed)**\n\n- The checkpoint looked up TypeScript publication by storage key with `Language::from_config_label`. TypeScript's config label is `typescript` (`crates/bifrost-core/src/analyzer/model.rs`, line 125), while its revisions are stored as `typescript:ts`. The lookup returned no language, and the `expect` in `crates/bifrost-analysis/src/analyzer/store/dependency_file_evidence.rs` panicked.\n- The first full policy run showed 39 failures, all at that line. The log is mirrored at `.agents/scratch/3867/policy-suite.log`.\n\n**2. Changes and reasons**\n\n- Base: `1e66264f1fb7b0d749f302ac4515f99e9a29acc1`.\n- Checkpoint: `aeae41942a0ad943c34777d838df0ba2006ab09f`.\n- Fix: `3d0d3f8c6e5cfc0c9cf2914170627ae14951da5f`. One explicit table maps each published language to its storage key, and both lookups use it.\n- ExecPlan updates: `eef3e9404a816e3a5dfbd2ad7abdaa1a768728a6` and `d02c7d5824b4261dc96d81464251880f06a5ef45`.\n- HEAD is `d02c7d5824`. The working tree is clean.\n\n**3. Validation**\n\n- Witness `python_file_evidence`: 6 of 6 passed.\n- Full `suite_bench_policy`: 1875 of 1876 passed after the fix. The one failure is `go_typestate_lifecycle::cli_reruns_and_one_file_edit_stay_in_the_interactive_latency_class`, a five-second bound. Run alone, its cold run took 8.0 seconds at host load near 190. Go publication returns early in my change, so I believe the failure is load, but a base run has not confirmed it.\n- Not run yet: the analysis library tests, the RQL tests, the cross-language reach gate, and both clippy gates. The script is `/tmp/3867/validate-seq.sh`, and it is still queued.\n- Earlier checks on the checkpoint passed: both library checks with no warnings, rustfmt, and the pack drift check.\n\n**4. Before and after evidence**\n\n- Before the fix: 39 TypeScript failures, logged above.\n- Base comparison: not run. `/tmp/3867/before-run.sh` restores the base production sources for two crates, runs the witness and the latency guard, and restores HEAD. It needs the same scheduler.\n\n**5. Limitations and findings**\n\n- The shared build wrapper for the analysis test profile has waited since about 17:19Z. It is blocked on an inflight lock file, last touched at 17:31Z. `/proc/locks` shows no visible holder, so the holder is probably another session on this host. An earlier stall cleared on its own after about forty minutes.\n- Copies of the logs and scripts are in the git-ignored `.agents/scratch/3867/`. A background copier keeps them current until the queued sequence finishes.\n- Still open from the checkpoint report: pep440_rs 0.7.3 excludes a pre-release of a bound that is itself a pre-release, read from source and not probed. Store configuration capture follows symlinks, a pre-existing pattern. Publication passes no cancellation token. Requirements parsing is line based, not structured. Configuration binding in #3284 and installed METADATA remain out of scope. The issue stays open.\n\n**6. Decisions needed (I am stopping)**\n\n- Someone with access to the host's mbx scheduler needs to check the inflight lock and the process holding it, then tell me to resume. I will not bypass the shim or change shared cache state.\n- After the base comparison, decide whether the latency guard should be rerun on a quieter host or accepted as load-sensitive.\n\n★ Insight ─────────────────────────────────────\n- Storage keys and config labels are different namespaces here. TypeScript revisions use `typescript:ts`, so any lookup by label needs an explicit table.\n- The full policy suite caught a failure that the Python witness could not, because the witness only covers Python. Running the broad gate was worth it.\n- A lock held by a process I cannot see can stall the build indefinitely. The fix is outside this repository, so the right move was to report it and stop.\n─────────────────────────────────────────────────"
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "",
+    "assistant_text_tail": "es HEAD. It needs the same scheduler.\n\n**5. Limitations and findings**\n\n- The shared build wrapper for the analysis test profile has waited since about 17:19Z. It is blocked on an inflight lock file, last touched at 17:31Z. `/proc/locks` shows no visible holder, so the holder is probably another session on this host. An earlier stall cleared on its own after about forty minutes.\n- Copies of the logs and scripts are in the git-ignored `.agents/scratch/3867/`. A background copier keeps them current until the queued sequence finishes.\n- Still open from the checkpoint report: pep440_rs 0.7.3 excludes a pre-release of a bound that is itself a pre-release, read from source and not probed. Store configuration capture follows symlinks, a pre-existing pattern. Publication passes no cancellation token. Requirements parsing is line based, not structured. Configuration binding in #3284 and installed METADATA remain out of scope. The issue stays open.\n\n**6. Decisions needed (I am stopping)**\n\n- Someone with access to the host's mbx scheduler needs to check the inflight lock and the process holding it, then tell me to resume. I will not bypass the shim or change shared cache state.\n- After the base comparison, decide whether the latency guard should be rerun on a quieter host or accepted as load-sensitive.\n\n★ Insight ─────────────────────────────────────\n- Storage keys and config labels are different namespaces here. TypeScript revisions use `typescript:ts`, so any lookup by label needs an explicit table.\n- The full policy suite caught a failure that the Python witness could not, because the witness only covers Python. Running the broad gate was worth it.\n- A lock held by a process I cannot see can stall the build indefinitely. The fix is outside this repository, so the right move was to report it and stop.\n─────────────────────────────────────────────────",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [
+      6734
+    ],
+    "user_position": 21,
+    "input_rationale": "The final report says the work is not finished and the agent is stopping. Section 6 asks for an external action (inspect the shared mbx lock holder) and a later decision on the latency guard. The 'Still open' hit in the case is a list of the agent's own checkpoint caveats.",
+    "label": "required_final",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "user_action",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "request_message_ids": [
+      "agent:6734"
+    ]
+  },
+  "context": {
+    "after": []
+  }
+}

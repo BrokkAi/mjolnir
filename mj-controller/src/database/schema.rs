@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 111;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 123;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -427,7 +427,7 @@ const ACCOUNTING_MIGRATION_SQL: &str = "
             ) STRICT;
 ";
 
-fn migrate_schema(connection: &Connection) -> Result<()> {
+pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     let state = read_schema_state(connection)?;
     let version = state.revision;
     if version > SCHEMA_VERSION {
@@ -2075,6 +2075,307 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         transaction.commit()?;
     }
 
+    // Breaking: older daemons reject answered_through in persisted outcome JSON.
+    if version < 113 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 113 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (113, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 113;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: older daemons cannot decode durable per-finding
+    // `override_review` or `set_review_baseline` requests, and never clear the
+    // declined findings when a baseline moves, so a later daemon would tell
+    // reviewers to skip findings of a scope that no longer exists.
+    if version < 114 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE turn_review_state ADD COLUMN declined_findings TEXT;
+             UPDATE schema_compatibility SET minimum_compatible_version = 114 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (114, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 114;
+             COMMIT;",
+        )?;
+    }
+
+    // Compatible: retire obsolete turn orchestration without changing columns
+    // or the push-group format. Older readers can still read and write rows.
+    if version < 115 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE turn_review_state
+             SET active_group = NULL, active = NULL, pending_forward = NULL,
+                 child_session_id = NULL, pending_followup = 0, forward_attempts = 0
+             WHERE pending_forward IS NOT NULL
+                OR (active_group IS NOT NULL
+                    AND coalesce(json_extract(active_group, '$.scope'), 'turn_delta') <> 'pushable_commits');
+             UPDATE turn_review_state SET pending_followup = 0;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (115, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 115;
+             COMMIT;",
+        )?;
+    }
+
+    // Compatible: limits `prompt_history` to prompts of top-level sessions
+    // that still exist, and adds a full-text index over it. The migration
+    // deletes the spawn instructions recorded for sub-agent children and the
+    // prompts of destroyed sessions. Triggers then keep both rules for every
+    // writer: a prompt is stored only while its session exists and is not a
+    // child, registering a child removes what was stored for it, and
+    // destroying a session removes its prompts. Writers are serialized, so a
+    // prompt racing a destroy lands either before it, and is removed, or
+    // after it, and is ignored.
+    // It also adds a nullable `command_id` with a unique index per session;
+    // older writers list their columns and leave it empty, which the index
+    // allows. Older readers ignore the index. Older writers' inserts, deletes and
+    // destroys fire the same triggers, so the table and the index follow their
+    // writes; every shipped build links a bundled SQLite compiled with FTS5, so
+    // they can run them. Fewer rows for older builds is a behaviour difference,
+    // not lost data they rely on. The compatibility floor stays where it is.
+    // A later migration that recreates `prompt_history`, `sessions` or
+    // `subagent_sessions`, as revision 77 recreated `prompt_history`, drops
+    // the triggers on that table and must create them again.
+    if version < 116 {
+        connection.execute_batch("BEGIN IMMEDIATE;")?;
+        // A prompt sent as a command is stored once per command, so a retried
+        // command does not record its prompt again.
+        if !legacy_schema::table_has_column(connection, "prompt_history", "command_id")? {
+            connection.execute_batch("ALTER TABLE prompt_history ADD COLUMN command_id TEXT;")?;
+        }
+        connection.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS prompt_history_command
+                 ON prompt_history(session_id, command_id) WHERE command_id IS NOT NULL;
+             DELETE FROM prompt_history
+                 WHERE session_id IN (SELECT child_session_id FROM subagent_sessions)
+                    OR session_id NOT IN (SELECT session_id FROM sessions);
+             CREATE TRIGGER IF NOT EXISTS prompt_history_top_level_only
+                 BEFORE INSERT ON prompt_history
+                 WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = new.session_id)
+                   OR EXISTS (SELECT 1 FROM subagent_sessions
+                              WHERE child_session_id = new.session_id)
+                 BEGIN SELECT RAISE(IGNORE); END;
+             CREATE TRIGGER IF NOT EXISTS prompt_history_child_registered
+                 AFTER INSERT ON subagent_sessions BEGIN
+                     DELETE FROM prompt_history WHERE session_id = new.child_session_id;
+                 END;
+             CREATE TRIGGER IF NOT EXISTS prompt_history_session_destroyed
+                 AFTER DELETE ON sessions BEGIN
+                     DELETE FROM prompt_history WHERE session_id = old.session_id;
+                 END;
+             CREATE VIRTUAL TABLE IF NOT EXISTS prompt_history_text USING fts5(
+                 text, content='prompt_history', content_rowid='history_id',
+                 tokenize='trigram');
+             CREATE TRIGGER IF NOT EXISTS prompt_history_text_insert
+                 AFTER INSERT ON prompt_history BEGIN
+                     INSERT INTO prompt_history_text(rowid, text)
+                         VALUES (new.history_id, new.text);
+                 END;
+             CREATE TRIGGER IF NOT EXISTS prompt_history_text_delete
+                 AFTER DELETE ON prompt_history BEGIN
+                     INSERT INTO prompt_history_text(prompt_history_text, rowid, text)
+                         VALUES ('delete', old.history_id, old.text);
+                 END;
+             CREATE TRIGGER IF NOT EXISTS prompt_history_text_update
+                 AFTER UPDATE OF text ON prompt_history BEGIN
+                     INSERT INTO prompt_history_text(prompt_history_text, rowid, text)
+                         VALUES ('delete', old.history_id, old.text);
+                     INSERT INTO prompt_history_text(rowid, text)
+                         VALUES (new.history_id, new.text);
+                 END;
+             INSERT INTO prompt_history_text(prompt_history_text) VALUES ('rebuild');
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (116, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 116;
+             COMMIT;",
+        )?;
+    }
+
+    // Compatible: deletes only the `worker_restart_intents` rows of sessions
+    // that are `stopped` and hold no target, so no worker can exist to
+    // restart. A sub-agent's close left them behind. Older builds read and
+    // write these rows per session, only while restarting or observing that
+    // session's worker; a stopped session without a target has neither, and
+    // a restart that finds no row begins a new one. No column, constraint or
+    // stored value changes, so the compatibility floor stays where it is.
+    if version < 117 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             DELETE FROM worker_restart_intents
+                 WHERE session_id IN (
+                     SELECT session_id FROM sessions
+                     WHERE state = 'stopped'
+                       AND NOT EXISTS (SELECT 1 FROM session_targets
+                                       WHERE session_targets.session_id = sessions.session_id));
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (117, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 117;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: no table changes, but a sub-agent's prompt outcome now carries
+    // what its worker observed (`work_facts`), stored in the materialized
+    // session's `last_turn_outcome_json`, which a revision-117 daemon decodes
+    // with `deny_unknown_fields` and would refuse; and a finished child's report
+    // carries the facts in `mailbox_outbox.event_json`. A revision-117 daemon must
+    // not write or read this store once either exists.
+    if version < 118 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 118 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (118, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 118;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: older daemons cannot honor the accepted credential prohibition
+    // and could restore GitHub authentication when resuming or syncing a session.
+    if version < 119 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE sessions ADD COLUMN no_github_credentials INTEGER NOT NULL DEFAULT 0;
+             UPDATE schema_compatibility SET minimum_compatible_version = 119 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (119, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 119;
+             COMMIT;",
+        )?;
+    }
+
+    // Compatible: adds an index only. Reading a parent's child messages joined
+    // the outbox to each child by `target_session_id` with no index, scanning
+    // every outbox row per child (27 s for a parent with 2,209 children).
+    // Older builds read and write the same rows and SQLite maintains the index
+    // for them, so the compatibility floor stays where it is.
+    if version < 120 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE INDEX IF NOT EXISTS mailbox_outbox_target
+                 ON mailbox_outbox(target_session_id);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (120, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 120;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: rows that belong to a session which is gone (deleted, or
+    // destroyed with data loss) are removed by triggers in the transaction
+    // that removes the session, and an insert for a gone session is ignored,
+    // so no ordering of writers can leave one behind. A revision-120 build
+    // reads an enqueued event back after inserting it; when a trigger ignores
+    // that insert the read fails and rolls back the build's whole write, so
+    // older builds must not write this store.
+    if version < 121 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TRIGGER IF NOT EXISTS session_rows_deleted AFTER DELETE ON sessions BEGIN
+                     DELETE FROM mailbox_outbox WHERE target_session_id = OLD.session_id;
+                     DELETE FROM github_watch_items WHERE creator_session_id = OLD.session_id;
+                     DELETE FROM github_watch_classifications WHERE session_id = OLD.session_id;
+                     DELETE FROM github_watch_classification_failures WHERE session_id = OLD.session_id;
+                 END;
+             CREATE TRIGGER IF NOT EXISTS session_rows_destroyed
+                 AFTER UPDATE OF state ON sessions
+                 WHEN NEW.state = 'destroyed-with-data-loss' BEGIN
+                     DELETE FROM mailbox_outbox WHERE target_session_id = NEW.session_id;
+                     DELETE FROM github_watch_items WHERE creator_session_id = NEW.session_id;
+                     DELETE FROM github_watch_classifications WHERE session_id = NEW.session_id;
+                     DELETE FROM github_watch_classification_failures WHERE session_id = NEW.session_id;
+                 END;
+             CREATE TRIGGER IF NOT EXISTS mailbox_outbox_live_target BEFORE INSERT ON mailbox_outbox
+                 WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.target_session_id AND state <> 'destroyed-with-data-loss')
+                 BEGIN SELECT RAISE(IGNORE); END;
+             CREATE TRIGGER IF NOT EXISTS github_watch_items_live_creator
+                 BEFORE INSERT ON github_watch_items
+                 WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.creator_session_id AND state <> 'destroyed-with-data-loss')
+                 BEGIN SELECT RAISE(IGNORE); END;
+             CREATE TRIGGER IF NOT EXISTS github_watch_classifications_live_session
+                 BEFORE INSERT ON github_watch_classifications
+                 WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.session_id AND state <> 'destroyed-with-data-loss')
+                 BEGIN SELECT RAISE(IGNORE); END;
+             CREATE TRIGGER IF NOT EXISTS github_watch_classification_failures_live_session
+                 BEFORE INSERT ON github_watch_classification_failures
+                 WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.session_id AND state <> 'destroyed-with-data-loss')
+                 BEGIN SELECT RAISE(IGNORE); END;
+             DELETE FROM mailbox_outbox WHERE target_session_id NOT IN (
+                 SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss');
+             DELETE FROM github_watch_items WHERE creator_session_id NOT IN (
+                 SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss');
+             DELETE FROM github_watch_classifications WHERE session_id NOT IN (
+                 SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss');
+             DELETE FROM github_watch_classification_failures WHERE session_id NOT IN (
+                 SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss');
+             UPDATE schema_compatibility SET minimum_compatible_version = 121 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (121, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 121;
+             COMMIT;",
+        )?;
+    }
+
+    // Breaking: physical worker ownership survives logical session deletion.
+    // Older writers can erase that evidence and remove a live worker's files.
+    if version < 122 {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute_batch(include_str!("environments.sql"))?;
+        super::environments::backfill_environments(&transaction)?;
+        super::environments::backfill_move_environments(&transaction)?;
+        transaction.execute(
+            "UPDATE schema_compatibility SET minimum_compatible_version=122 WHERE singleton=1",
+            [],
+        )?;
+        transaction.execute("INSERT INTO schema_migrations(version,applied_at) VALUES (122,strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [])?;
+        transaction.pragma_update(None, "user_version", 122)?;
+        transaction.commit()?;
+    }
+
+    // Breaking: old readers show cleared drafts and old writers bypass revision ordering.
+    if version < 123 {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute_batch(
+            "CREATE TABLE detached_drafts_v123 (
+                 draft_id TEXT PRIMARY KEY CHECK(length(trim(draft_id)) > 0),
+                 workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id),
+                 session_id TEXT REFERENCES session_contexts(session_id),
+                 source TEXT NOT NULL CHECK(length(trim(source)) > 0),
+                 owner_pid INTEGER CHECK(owner_pid IS NULL OR owner_pid > 0),
+                 saved_at TEXT NOT NULL,
+                 revision INTEGER CHECK(revision IS NULL OR revision > 0),
+                 text TEXT NOT NULL CHECK(length(text) > 0 OR revision IS NOT NULL),
+                 recovered_at TEXT
+             ) STRICT;
+             INSERT INTO detached_drafts_v123(
+                 draft_id, workspace_id, session_id, source, owner_pid,
+                 saved_at, text, recovered_at, revision
+             ) SELECT draft_id, workspace_id, session_id, source, owner_pid,
+                      saved_at, text, recovered_at, NULL
+                 FROM detached_drafts;
+             DROP TABLE detached_drafts;
+             ALTER TABLE detached_drafts_v123 RENAME TO detached_drafts;
+             CREATE INDEX detached_drafts_workspace_recent
+                 ON detached_drafts(workspace_id, saved_at DESC);
+             CREATE UNIQUE INDEX detached_drafts_terminal_revision
+                 ON detached_drafts(source, session_id)
+                 WHERE revision IS NOT NULL;",
+        )?;
+        transaction.execute(
+            "UPDATE schema_compatibility SET minimum_compatible_version=123 WHERE singleton=1",
+            [],
+        )?;
+        transaction.execute("INSERT INTO schema_migrations(version,applied_at) VALUES (123,strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [])?;
+        transaction.pragma_update(None, "user_version", 123)?;
+        transaction.commit()?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2504,8 +2805,52 @@ pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible
     forget_verified_schema(path);
 }
 
+/// Revision 121's triggers name tables that historical fixtures drop or
+/// reshape, so a fixture older than 121 removes them first.
+#[cfg(test)]
+pub(super) fn drop_environment_schema(connection: &Connection) {
+    for (table, column) in [
+        ("session_moves", "source_environment_id"),
+        ("retained_move_sources", "environment_id"),
+    ] {
+        if legacy_schema::table_has_column(connection, table, column).unwrap() {
+            connection
+                .execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column};"))
+                .unwrap();
+        }
+    }
+    connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS environment_report_registered;
+        DROP TRIGGER IF EXISTS environment_report_updated;
+        DROP TRIGGER IF EXISTS reclaimed_environment_owner_deleted;
+        DROP TRIGGER IF EXISTS reclaimed_environment_binding_deleted;
+        DROP TABLE IF EXISTS environment_reports;
+        DROP TABLE IF EXISTS environment_bindings;
+        DROP TABLE IF EXISTS environment_workers;
+        DROP TABLE IF EXISTS environments;",
+        )
+        .unwrap();
+}
+
+#[cfg(test)]
+pub(super) fn drop_session_row_triggers(connection: &Connection) {
+    drop_environment_schema(connection);
+    connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS session_rows_deleted;
+             DROP TRIGGER IF EXISTS session_rows_destroyed;
+             DROP TRIGGER IF EXISTS mailbox_outbox_live_target;
+             DROP TRIGGER IF EXISTS github_watch_items_live_creator;
+             DROP TRIGGER IF EXISTS github_watch_classifications_live_session;
+             DROP TRIGGER IF EXISTS github_watch_classification_failures_live_session;",
+        )
+        .unwrap();
+}
+
 #[cfg(test)]
 pub(super) fn restore_github_v84_schema(connection: &Connection) {
+    drop_session_row_triggers(connection);
     if !legacy_schema::table_has_column(connection, "github_watch_items", "timeline_at").unwrap() {
         return;
     }
@@ -2549,6 +2894,28 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
 /// Historical fixtures must remove review columns introduced afterward.
 #[cfg(test)]
 pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
+    if version < 122 {
+        drop_environment_schema(connection);
+    }
+    if version < 121 {
+        drop_session_row_triggers(connection);
+    }
+    if version < 119
+        && legacy_schema::table_has_column(connection, "sessions", "no_github_credentials").unwrap()
+    {
+        connection
+            .execute_batch("ALTER TABLE sessions DROP COLUMN no_github_credentials;")
+            .unwrap();
+    }
+    restore_pre116_prompt_history(connection, version);
+    if version < 114
+        && legacy_schema::table_has_column(connection, "turn_review_state", "declined_findings")
+            .unwrap()
+    {
+        connection
+            .execute_batch("ALTER TABLE turn_review_state DROP COLUMN declined_findings;")
+            .unwrap();
+    }
     if version < 109 {
         for column in ["pending_followup", "forward_attempts"] {
             if legacy_schema::table_has_column(connection, "turn_review_state", column).unwrap() {
@@ -2577,9 +2944,100 @@ pub(super) fn restore_review_state_schema(connection: &Connection, version: i64)
     }
 }
 
+/// Historical fixtures must remove revision 116's prompt-history triggers and
+/// index. Revision 77 recreates `prompt_history`, and SQLite refuses that
+/// rename while triggers on other tables still name the dropped table.
+#[cfg(test)]
+pub(super) fn restore_pre116_prompt_history(connection: &Connection, version: i64) {
+    if version < 116 {
+        connection
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS prompt_history_top_level_only;
+                 DROP TRIGGER IF EXISTS prompt_history_child_registered;
+                 DROP TRIGGER IF EXISTS prompt_history_session_destroyed;
+                 DROP TRIGGER IF EXISTS prompt_history_text_insert;
+                 DROP TRIGGER IF EXISTS prompt_history_text_delete;
+                 DROP TRIGGER IF EXISTS prompt_history_text_update;
+                 DROP TABLE IF EXISTS prompt_history_text;
+                 DROP INDEX IF EXISTS prompt_history_command;",
+            )
+            .unwrap();
+        if legacy_schema::table_has_column(connection, "prompt_history", "command_id").unwrap() {
+            connection
+                .execute_batch("ALTER TABLE prompt_history DROP COLUMN command_id;")
+                .unwrap();
+        }
+    }
+}
+
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+
+    #[test]
+    fn terminal_draft_migration_preserves_archives_and_admits_tombstones() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        create_baseline_schema(&connection).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER stop_before_terminal_drafts BEFORE INSERT ON schema_migrations
+                 WHEN NEW.version > 122 BEGIN SELECT RAISE(ABORT, 'fixture migration boundary'); END;",
+            )
+            .unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        if !connection.is_autocommit() {
+            connection.execute_batch("ROLLBACK").unwrap();
+        }
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            122
+        );
+        connection
+            .execute_batch(
+                "DROP TRIGGER stop_before_terminal_drafts;
+                 INSERT INTO workspaces(workspace_id,name,name_key,created_at,last_opened_at)
+                     VALUES ('workspace','Workspace','workspace','now','now');
+                 INSERT INTO session_contexts(session_id,bundle_id,created_at,workspace_id)
+                     VALUES ('session','project','now','workspace');
+                 INSERT INTO detached_drafts(
+                     draft_id,workspace_id,session_id,source,owner_pid,saved_at,text,recovered_at
+                 ) VALUES ('archive','workspace','session','terminal',123,'then','old archive','recovered');",
+            )
+            .unwrap();
+
+        migrate_schema(&connection).unwrap();
+
+        let archive: (String, i64, String, Option<i64>) = connection
+            .query_row(
+                "SELECT text, owner_pid, recovered_at, revision FROM detached_drafts
+                  WHERE draft_id='archive'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            archive,
+            ("old archive".into(), 123, "recovered".into(), None)
+        );
+        connection
+            .execute(
+                "INSERT INTO detached_drafts(
+                     draft_id,workspace_id,session_id,source,owner_pid,saved_at,text,revision
+                 ) VALUES ('tombstone','workspace','session','terminal',123,'now','',1)",
+                [],
+            )
+            .unwrap();
+        let foreign_key_errors: i64 = connection
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_errors, 0);
+    }
 
     #[test]
     fn removed_plan_review_tables_raise_the_floor_and_preserve_turn_reviews() {
@@ -2610,6 +3068,11 @@ mod reader_tests {
         ).unwrap();
         migrate_schema(&connection).unwrap();
         let state = read_schema_state(&connection).unwrap();
+        assert!(
+            state
+                .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION - 1)
+                .is_err()
+        );
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         let revisions = connection
@@ -2800,8 +3263,8 @@ mod reader_tests {
         drop(statement);
         assert_eq!(touched, ["bundle", "moved", "project"]);
         let schema = read_schema_state(&connection).unwrap();
-        assert_eq!(schema.revision, 112);
-        assert_eq!(schema.minimum_compatible, Some(111));
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         connection
             .execute(
                 "UPDATE sessions SET session_title_override=title WHERE session_id='bundle'",
@@ -2966,7 +3429,7 @@ mod reader_tests {
         let upgraded = open_writer(&path).unwrap();
         let schema = read_schema_state(&upgraded).unwrap();
         assert!(schema.ensure_supported_by(63).is_err());
-        upgraded.execute("INSERT INTO retained_move_sources VALUES ('move-one','session-one','{}','[]','now')", []).unwrap();
+        upgraded.execute("INSERT INTO retained_move_sources(operation_id,session_id,source_json,exclusions_json,created_at) VALUES ('move-one','session-one','{}','[]','now')", []).unwrap();
         drop(upgraded);
         let reopened = open_writer(&path).unwrap();
         let count: i64 = reopened
@@ -3128,6 +3591,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("github-migration.sqlite3");
         drop(open_writer(&path).unwrap());
+        save_session_to(&path, &super::super::tests::session("creator", "project")).unwrap();
         stamp_schema_version(&path, 84);
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch(
@@ -3330,10 +3794,13 @@ mod reader_tests {
         create_baseline_schema(&connection).unwrap();
         migrate_schema(&connection).unwrap();
         connection
-            .execute(
+            .execute_batch(
                 "INSERT INTO session_contexts(session_id, bundle_id, created_at)
-                 VALUES ('old-session', 'project', '2026-01-01T00:00:00Z')",
-                [],
+                     VALUES ('old-session', 'project', '2026-01-01T00:00:00Z');
+                 INSERT INTO sessions(session_id, title, harness_kind, last_profile,
+                                      target_template_id, state, updated_at)
+                     VALUES ('old-session', 'Keep history', 'codex', 'codex', 'local',
+                             'error', '2026-01-01T00:00:00Z');",
             )
             .unwrap();
         connection
@@ -3470,6 +3937,9 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 122 {
+            drop_environment_schema(&connection);
+        }
         if version < 111 {
             connection
                 .execute_batch(
@@ -3621,11 +4091,14 @@ mod reader_tests {
         let mut session = super::super::tests::session("existing", "project");
         save_session_to(&path, &session).unwrap();
         let connection = Connection::open(&path).unwrap();
+        drop_environment_schema(&connection);
         connection
             .execute_batch(
-                "ALTER TABLE sessions DROP COLUMN oracle_choice;
+                "ALTER TABLE sessions DROP COLUMN no_github_credentials;
+             ALTER TABLE sessions DROP COLUMN oracle_choice;
              ALTER TABLE sessions DROP COLUMN oracle;
              DROP TABLE oracle_preference;
+             ALTER TABLE turn_review_state DROP COLUMN declined_findings;
              DELETE FROM schema_migrations WHERE version >= 111;
              UPDATE schema_compatibility SET minimum_compatible_version = 110 WHERE singleton = 1;
              PRAGMA user_version = 110;",
@@ -4034,6 +4507,41 @@ mod reader_tests {
     }
 
     #[test]
+    fn outcome_facts_migration_raises_the_floor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let record = super::super::tests::session("facts-upgrade", "project");
+        save_session_to(&path, &record).unwrap();
+        stamp_schema_version(&path, 117);
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        // A revision-117 build is refused: its decoder of a stored outcome
+        // rejects the field a sub-agent's worker adds.
+        state.ensure_supported_by(117).unwrap_err();
+        assert!(state.ensure_supported_by(118).is_err());
+        state.ensure_supported_by(SCHEMA_VERSION).unwrap();
+    }
+
+    #[test]
+    fn github_credential_policy_survives_migration_and_refuses_older_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let mut record = super::super::tests::session("credential-upgrade", "project");
+        save_session_to(&path, &record).unwrap();
+        stamp_schema_version(&path, 118);
+        let connection = open_writer(&path).unwrap();
+        let schema = read_schema_state(&connection).unwrap();
+        assert!(schema.ensure_supported_by(118).is_err());
+        drop(connection);
+        assert!(!load_state_from(&path).unwrap().sessions[&record.id].no_github_credentials);
+        record.no_github_credentials = true;
+        save_session_to(&path, &record).unwrap();
+        assert!(load_state_from(&path).unwrap().sessions[&record.id].no_github_credentials);
+    }
+
+    #[test]
     fn mailbox_reset_migration_seeds_existing_frontiers_and_preserves_compatibility() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
@@ -4082,6 +4590,208 @@ mod reader_tests {
                 .exists([&record.id])
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn prompt_history_keeps_top_level_prompts_and_its_index_follows_previous_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let connection = open_writer(&path).unwrap();
+        drop_environment_schema(&connection);
+        // Rewind to revision 115, then store what a revision-115 build kept:
+        // a top-level prompt, a child's spawn instructions and a destroyed
+        // session's prompt.
+        restore_pre116_prompt_history(&connection, 115);
+        connection
+            .execute_batch(
+                "ALTER TABLE sessions DROP COLUMN no_github_credentials;
+                 DELETE FROM schema_migrations WHERE version >= 116;
+                 UPDATE schema_compatibility SET minimum_compatible_version = 114;
+                 PRAGMA user_version = 115;",
+            )
+            .unwrap();
+        let session = |id: &str| {
+            format!(
+                "INSERT INTO session_contexts(session_id, bundle_id, created_at)
+                     VALUES ('{id}', 'project', 'now');
+                 INSERT INTO sessions(session_id, title, harness_kind, last_profile,
+                                      target_template_id, state, updated_at)
+                     VALUES ('{id}', '{id}', 'codex', 'codex', 'local', 'error', 'now');"
+            )
+        };
+        let prompt = |id: &str, ordinal: i64, text: &str| {
+            format!(
+                "INSERT INTO prompt_history(session_id, event_ordinal, submitted_at, text)
+                     VALUES ('{id}', {ordinal}, 'now', '{text}');"
+            )
+        };
+        connection
+            .execute_batch(&format!(
+                "{}{}{}
+                 INSERT INTO subagent_sessions(child_session_id, parent_session_id,
+                                               request_key, record_json)
+                     VALUES ('child', 'top', 'child', '{{}}');
+                 INSERT INTO session_contexts(session_id, bundle_id, created_at)
+                     VALUES ('destroyed', 'project', 'now');
+                 {}{}{}",
+                session("top"),
+                session("child"),
+                session("other"),
+                prompt("top", 1, "Fix the Parser"),
+                prompt("child", 1, "parser instructions for a child"),
+                prompt("destroyed", 1, "parser prompt of a destroyed session"),
+            ))
+            .unwrap();
+        drop(connection);
+        forget_verified_schema(&path);
+
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        state
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+            .expect("the store is readable at the compatibility floor");
+        let matching = |query: &str| -> Vec<String> {
+            connection
+                .prepare(
+                    "SELECT p.text FROM prompt_history_text f
+                     JOIN prompt_history p ON p.history_id = f.rowid
+                     WHERE prompt_history_text MATCH ?1 ORDER BY f.rowid",
+                )
+                .unwrap()
+                .query_map([query], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let stored = || -> i64 {
+            connection
+                .query_row("SELECT count(*) FROM prompt_history", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(matching("\"the parser\""), ["Fix the Parser"]);
+        assert_eq!(
+            stored(),
+            1,
+            "child and destroyed-session prompts are deleted"
+        );
+
+        // The writes a revision-115 build makes, in plain SQL.
+        connection
+            .execute_batch(&format!(
+                "{}{}
+                 UPDATE prompt_history SET text = 'renamed prompt'
+                     WHERE session_id = 'top' AND event_ordinal = 1;",
+                prompt("child", 2, "parser follow-up for a child"),
+                prompt("top", 2, "parser follow-up"),
+            ))
+            .unwrap();
+        assert_eq!(matching("\"parser\""), ["parser follow-up"]);
+        assert_eq!(matching("\"renamed\""), ["renamed prompt"]);
+        assert_eq!(stored(), 2, "a child's prompt is never stored");
+
+        // A prompt stored before its session became a child goes when it does.
+        connection
+            .execute_batch(&format!(
+                "{}{}
+                 INSERT INTO subagent_sessions(child_session_id, parent_session_id,
+                                               request_key, record_json)
+                     VALUES ('late', 'top', 'late', '{{}}');",
+                session("late"),
+                prompt("late", 1, "parser instructions stored early"),
+            ))
+            .unwrap();
+        assert_eq!(matching("\"parser\""), ["parser follow-up"]);
+
+        // Destroying a session removes its prompts and their index entries.
+        connection
+            .execute_batch(&format!(
+                "{}
+                 DELETE FROM sessions WHERE session_id = 'other';",
+                prompt("other", 1, "parser prompt of another session"),
+            ))
+            .unwrap();
+        assert_eq!(matching("\"parser\""), ["parser follow-up"]);
+        assert_eq!(stored(), 2);
+        // Hard-won: a58ad7eb8: a stale chat's abandoned prompt was stored after its session was destroyed
+        connection
+            .execute_batch(&format!(
+                "{}{}",
+                prompt("other", 2, "parser prompt after destroy"),
+                prompt("destroyed", 2, "parser prompt with only a context"),
+            ))
+            .unwrap();
+        assert_eq!(stored(), 2, "a destroyed session's prompt is not stored");
+        connection
+            .execute(
+                "INSERT INTO prompt_history_text(prompt_history_text) VALUES ('integrity-check')",
+                [],
+            )
+            .expect("the index agrees with prompt_history");
+    }
+
+    #[test]
+    fn stopped_targetless_sessions_lose_their_worker_restart_intents_and_others_keep_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let connection = open_writer(&path).unwrap();
+        drop_environment_schema(&connection);
+        // Rewind to revision 116 and store what a revision-116 build left:
+        // intents of a closed child, of a stopped session that still names a
+        // container, of a failed child and of a live session.
+        connection
+            .execute_batch(
+                "ALTER TABLE sessions DROP COLUMN no_github_credentials;
+                 DELETE FROM schema_migrations WHERE version >= 117;
+                 UPDATE schema_compatibility SET minimum_compatible_version = 114;
+                 PRAGMA user_version = 116;",
+            )
+            .unwrap();
+        for (id, state, phase, target) in [
+            ("closed-child", "stopped", "swapping", false),
+            ("kept-container", "stopped", "awaiting_readiness", true),
+            ("failed-child", "error", "awaiting_readiness", false),
+            ("live", "running", "swapping", false),
+        ] {
+            connection
+                .execute_batch(&format!(
+                    "INSERT INTO session_contexts(session_id, bundle_id, created_at)
+                         VALUES ('{id}', 'project', 'now');
+                     INSERT INTO sessions(session_id, title, harness_kind, last_profile,
+                                          target_template_id, state, updated_at)
+                         VALUES ('{id}', '{id}', 'codex', 'codex', 'local', '{state}', 'now');
+                     INSERT INTO worker_restart_intents(session_id, operation_id, target_json,
+                                                        desired_build, phase)
+                         VALUES ('{id}', 'op-{id}', '{{}}', '', '{phase}');"
+                ))
+                .unwrap();
+            if target {
+                connection
+                    .execute(
+                        "INSERT INTO session_targets(session_id, kind, resource_id)
+                         VALUES (?1, 'local-podman', 'container')",
+                        [id],
+                    )
+                    .unwrap();
+            }
+        }
+        drop(connection);
+        forget_verified_schema(&path);
+
+        let connection = open_writer(&path).unwrap();
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        state
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
+            .expect("a revision-116 build still reads and writes the store");
+        let remaining: Vec<String> = connection
+            .prepare("SELECT session_id FROM worker_restart_intents ORDER BY session_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(remaining, ["failed-child", "kept-container", "live"]);
     }
 
     #[test]
@@ -4156,6 +4866,8 @@ mod reader_tests {
                     advance_test_schema(&path, SCHEMA_VERSION + 1, SCHEMA_VERSION);
                 }
                 let raw = Connection::open(&path).unwrap();
+                drop_environment_schema(&raw);
+                drop_environment_schema(&raw);
                 raw.execute_batch(alteration).unwrap();
                 let before: i64 = raw
                     .query_row("PRAGMA schema_version", [], |row| row.get(0))
@@ -4275,8 +4987,30 @@ mod reader_tests {
                 |row| row.get::<_, bool>(0),
             )
             .unwrap());
+        connection.execute_batch("CREATE TRIGGER stop_before_stored_answers BEFORE INSERT ON schema_migrations WHEN NEW.version=113 BEGIN SELECT RAISE(ABORT,'stored answers migration'); END;").unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection
+            .execute_batch("ROLLBACK; DROP TRIGGER stop_before_stored_answers;")
+            .unwrap();
+        let before_answers = read_schema_state(&connection).unwrap();
+        assert_eq!(before_answers.revision, 112);
+        assert_eq!(before_answers.minimum_compatible, Some(111));
+        before_answers.ensure_supported_by(112).unwrap();
         migrate_schema(&connection).unwrap();
         let schema = read_schema_state(&connection).unwrap();
+        assert_eq!(schema.revision, SCHEMA_VERSION);
+        assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(matches!(
+            schema
+                .ensure_supported_by(112)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: MINIMUM_COMPATIBLE_VERSION
+            }
+        ));
         let error = schema.ensure_supported_by(98).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<StoreSchemaMismatch>().unwrap().reason,

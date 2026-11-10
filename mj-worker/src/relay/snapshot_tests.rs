@@ -549,6 +549,7 @@ mod tests {
             RelayRequest::Attach {
                 after_ordinal: 0,
                 after_digest: "a".repeat(64),
+                known_state_digest: None,
             },
         ));
         assert!(matches!(

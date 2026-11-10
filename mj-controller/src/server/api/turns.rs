@@ -137,9 +137,27 @@ pub(super) async fn submit_prompt(
             () = held.withdrawn() => return Err(withdrawn_prompt()),
         }
     }
+    // Recording and submitting hold an upgrade admission, so a handoff waits
+    // for the prompt instead of ending the daemon between them.
+    let _admission = crate::upgrade::activity("API prompt submission")
+        .map_err(|_| ApiFailure::unavailable("the daemon is shutting down"))?;
+    // A caller that names its command can retry it; one that does not sends
+    // a new command each time, so its record gets an identity of its own.
+    let history_command = match &command_id {
+        Some(command_id) => command_id.clone(),
+        None => mj_client::session::new_command_id("api-history")
+            .map_err(|error| ApiFailure::unavailable(format!("{error:#}")))?,
+    };
+    // The prompt is held while it is recorded, even for a session that was
+    // ready at once, so an interrupt during the write withdraws it. A
+    // withdrawn prompt stays in the history, as an abandoned draft does.
+    let held = hold.unwrap_or_else(|| state.held_prompts.hold(&session_id));
+    backend
+        .record_user_prompt(session_id.clone(), history_command, text.clone())
+        .await;
     // Taking the hold back and an interrupt withdrawing it are one decision,
     // so a prompt is either submitted or withdrawn, never both.
-    if hold.is_some_and(|held| !held.release()) {
+    if !held.release() {
         return Err(withdrawn_prompt());
     }
     Ok(backend.prompt_with_id(session_id, text, command_id).await?)
@@ -542,6 +560,24 @@ pub(super) struct DestroyRequest {
     pub(super) delete_branch: bool,
 }
 
+/// The safe recent notices outlive their session record. Absence here says
+/// nothing about completion: an accepted Destroy can still be running.
+pub(super) async fn session_notices(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Json<Vec<mj_client::daemon::RuntimeNotice>> {
+    Json(
+        state
+            .snapshot_rx
+            .borrow()
+            .notices
+            .iter()
+            .filter(|notice| notice.session_id == session_id)
+            .cloned()
+            .collect(),
+    )
+}
+
 /// Submit an exact worker-published control without selecting a newer target.
 pub(super) async fn turn_control(
     State(state): State<ServerState>,
@@ -582,10 +618,8 @@ pub(super) async fn interrupt_turn(
     send_action(&state, ControllerAction::InterruptTurn { session_id }).await
 }
 
-/// Start a one-off review of the turn the session just finished. The
-/// controller answers once the review has opened; a review that cannot start
-/// (the session is still working, prompts are queued, a sub-agent's turn, no
-/// usable reviewer) is refused with the reason, as 409.
+/// Review committed work through the push gate. Refusals, including tracked
+/// uncommitted changes or an unsupported harness, reach the caller as 409.
 pub(super) async fn start_review(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,

@@ -1210,7 +1210,7 @@ mod tests {
                 push: self.host.path().to_path_buf(),
             };
             for command in
-                targets::clone_commands(&bundle, &self.workspace.to_string_lossy(), |args| {
+                targets::clone_commands(&bundle, &self.workspace.to_string_lossy(), None, |args| {
                     CommandSpec::new(args[0].clone(), args[1..].to_vec())
                 })
             {
@@ -1505,27 +1505,52 @@ mod tests {
             branch: None,
             no_later_history: true,
         };
-        let origin = |selection: &mj_core::remote_git::ExactCheckout| {
+        // A sub-agent works in its parent's workspace and records no checkout
+        // of its own, so it asks the parent how that workspace began.
+        let origin = |selection: &mj_core::remote_git::ExactCheckout, session_id: &str| {
             let mut session = session.clone();
             session.checkout = Some(selection.clone());
+            let mut child = session.clone();
+            child.id = "child-session".into();
+            child.checkout = None;
             let mut state = mj_core::state::State::default();
             state.sessions.insert(EXACT_SESSION.into(), session);
+            state.sessions.insert(child.id.clone(), child);
+            state.subagents.insert(
+                "child-session".into(),
+                mj_core::subagent::SubagentMetadata {
+                    kind: mj_core::subagent::SubagentKind::Worker,
+                    child_session_id: "child-session".into(),
+                    parent_session_id: EXACT_SESSION.into(),
+                    task_name: "inspect".into(),
+                    profile_id: "codex".into(),
+                    model: None,
+                    effort: None,
+                    working_directory: PathBuf::new(),
+                    request_key: "request-1".into(),
+                    created_at: "2026-11-07T00:00:00Z".into(),
+                    noticed_turn: None,
+                    reported_finish: None,
+                    handback_tool: false,
+                },
+            );
             let controller = Controller {
                 config: config.clone(),
                 state,
             };
             let layout = controller
-                .session_export_layout(EXACT_SESSION, &ProcessExecutor)
+                .session_export_layout(session_id, &ProcessExecutor)
                 .unwrap();
             assert_eq!(layout.repositories.len(), 1);
             layout.repositories[0].origin_override.clone()
         };
-        assert_eq!(
-            origin(&selection).as_deref(),
-            Some("https://github.com/example/project.git")
-        );
+        let source = "https://github.com/example/project.git";
+        assert_eq!(origin(&selection, EXACT_SESSION).as_deref(), Some(source));
+        // Hard-won: #1464: a sub-agent's explicit checkpoint read its own empty checkout record and demanded an origin its parent's trimmed workspace lacks.
+        assert_eq!(origin(&selection, "child-session").as_deref(), Some(source));
         // A normal exact checkout keeps its origin remote, which capture reads.
         selection.no_later_history = false;
-        assert_eq!(origin(&selection), None);
+        assert_eq!(origin(&selection, EXACT_SESSION), None);
+        assert_eq!(origin(&selection, "child-session"), None);
     }
 }

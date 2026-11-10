@@ -804,7 +804,7 @@ impl DurableRelay {
         };
         if authorization_changed {
             self.turn_context
-                .set_authorization_context(self.snapshot.assessment_context.clone());
+                .set_authorization_context(self.snapshot.authorization_context());
         }
         if matches!(
             event.observation,

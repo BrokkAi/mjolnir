@@ -4,6 +4,7 @@ use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe, tes
 use mj_core::config::HarnessKind;
 use mj_core::state::SessionRecord;
 
+// Hard-won: #1450 review: autonomous outcomes must preserve turn identity and queued work.
 #[test]
 fn child_progress_uses_the_published_turn_and_report_together() {
     let mut committed = crate::database::CommittedState {
@@ -17,6 +18,8 @@ fn child_progress_uses_the_published_turn_and_report_together() {
         wait_revisions: Default::default(),
     };
     let turn = mj_core::state::MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: "task".into(),
@@ -46,7 +49,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
     );
     let progress = child_progress(&committed, "child");
     assert_eq!(progress.finished_span, Some((8, 12)));
-    assert_eq!(progress.answered_ordinal, Some(7));
+    assert!(progress.answer.as_ref().unwrap().answers(7));
     assert!(
         progress.awaiting_prompt(None),
         "an older completed turn cannot answer the new prompt"
@@ -56,6 +59,18 @@ fn child_progress_uses_the_published_turn_and_report_together() {
         Some("interrupted")
     );
     assert_eq!(progress.report_dir.as_deref(), Some("/reports/child"));
+    let mut harness = committed.turns.get("child").unwrap().clone();
+    let outcome = harness.state.2.as_mut().unwrap();
+    outcome.command_id = "harness-turn-20".into();
+    outcome.accepted_ordinal = None;
+    outcome.turn_start_position = Some(20);
+    committed
+        .turns
+        .insert_shared("child".into(), harness.clone());
+    assert!(child_progress(&committed, "child").awaiting_prompt(None));
+    harness.state.2.as_mut().unwrap().answered_through = Some(14);
+    committed.turns.insert_shared("child".into(), harness);
+    assert!(child_progress(&committed, "child").awaiting_prompt(None));
     assert_eq!(child_progress(&committed, "other").failed_turn, None);
 }
 
@@ -136,16 +151,27 @@ fn models_probe(offers: &[(&str, &[&str])]) -> Arc<crate::server_runtime::profil
 struct RecordingExports {
     parent: SessionRecord,
     registered: std::sync::Mutex<Option<crate::controller::RegisterSubagentRequest>>,
-    override_call: std::sync::Mutex<Option<(String, String)>>,
+    override_call: std::sync::Mutex<Option<(String, Vec<mj_core::subagent::ReviewOverride>)>>,
+    base_call: std::sync::Mutex<Option<(String, String, Option<String>)>>,
 }
 
 impl ExportRuntime for RecordingExports {
+    fn set_review_baseline(
+        &self,
+        session_id: String,
+        commit: String,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value>> {
+        *self.base_call.lock().unwrap() = Some((session_id, commit, path));
+        Box::pin(async { Ok(serde_json::json!({"accepted": true})) })
+    }
+
     fn override_review(
         &self,
         session_id: String,
-        reason: String,
+        overrides: Vec<mj_core::subagent::ReviewOverride>,
     ) -> BoxFuture<'_, Result<serde_json::Value>> {
-        *self.override_call.lock().unwrap() = Some((session_id, reason));
+        *self.override_call.lock().unwrap() = Some((session_id, overrides));
         Box::pin(async { Ok(serde_json::json!({"accepted": true})) })
     }
 
@@ -192,7 +218,11 @@ impl RecordingExports {
             .expect("the spawn reached registration")
     }
 
-    fn override_call(&self) -> Option<(String, String)> {
+    fn base_call(&self) -> Option<(String, String, Option<String>)> {
+        self.base_call.lock().unwrap().clone()
+    }
+
+    fn override_call(&self) -> Option<(String, Vec<mj_core::subagent::ReviewOverride>)> {
         self.override_call.lock().unwrap().clone()
     }
 }
@@ -239,6 +269,7 @@ async fn selection_backend_refusing(
         parent: parent_record("parent-1", "parent"),
         registered: std::sync::Mutex::new(None),
         override_call: std::sync::Mutex::new(None),
+        base_call: std::sync::Mutex::new(None),
     });
     let backend = Arc::new(
         ApiBackend::new(
@@ -270,6 +301,7 @@ fn spawn_with() -> mj_core::subagent::SubagentToolRequest {
         request_id: "request-1".into(),
         created_at_ms: 0,
         action: mj_core::subagent::SubagentToolAction::Spawn {
+            no_github_credentials: false,
             task_type: mj_core::subagent::SubagentTaskType::Straightforward,
             task_name: "audit deps".into(),
             instructions: "check the lockfile".into(),
@@ -351,7 +383,7 @@ async fn legacy_list_profiles_is_refused() {
 }
 
 #[tokio::test]
-async fn override_review_dispatch_forwards_parent_and_reason_to_export() {
+async fn override_review_dispatch_forwards_parent_and_pairs_to_export() {
     let (backend, exports) = selection_backend(SAME_MODELS, None).await;
     let result = backend
         .execute_subagent_tool(
@@ -361,7 +393,10 @@ async fn override_review_dispatch_forwards_parent_and_reason_to_export() {
                 request_id: "override-review".into(),
                 created_at_ms: 0,
                 action: mj_core::subagent::SubagentToolAction::OverrideReview {
-                    reason: "finding is unreasonable".into(),
+                    overrides: vec![mj_core::subagent::ReviewOverride {
+                        finding: "F".into(),
+                        reason: "finding is unreasonable".into(),
+                    }],
                 },
             },
         )
@@ -369,7 +404,41 @@ async fn override_review_dispatch_forwards_parent_and_reason_to_export() {
     assert!(!result.is_error, "{}", result.message);
     assert_eq!(
         exports.override_call(),
-        Some(("parent-1".into(), "finding is unreasonable".into()))
+        Some((
+            "parent-1".into(),
+            vec![mj_core::subagent::ReviewOverride {
+                finding: "F".into(),
+                reason: "finding is unreasonable".into(),
+            }]
+        ))
+    );
+}
+
+#[tokio::test]
+async fn set_review_baseline_dispatch_forwards_parent_commit_and_path_to_export() {
+    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
+    let result = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "set-review-baseline".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::SetReviewBaseline {
+                    commit: "abc1234".into(),
+                    path: Some("/workspace/linked".into()),
+                },
+            },
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.message);
+    assert_eq!(
+        exports.base_call(),
+        Some((
+            "parent-1".into(),
+            "abc1234".into(),
+            Some("/workspace/linked".into())
+        ))
     );
 }
 
@@ -576,6 +645,14 @@ impl SessionHandleBackend for FakeSession {
         _bundle_id: String,
         _scope: mj_core::storage::HistoryScope,
         _query: String,
+        _after: Option<mj_core::storage::HistoryCursor>,
+        _limit: usize,
+    ) -> mj_client::session::BoxFuture<'_, Result<mj_core::storage::PromptHistoryPage>> {
+        Box::pin(async { Ok(Default::default()) })
+    }
+
+    fn session_prompts(
+        &self,
     ) -> mj_client::session::BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -820,6 +897,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         review: None,
         no_project_memory: false,
         no_github_events: false,
+        no_github_credentials: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -993,8 +1071,15 @@ impl SessionHandleBackend for ConfigSession {
         bundle: String,
         scope: mj_core::storage::HistoryScope,
         query: String,
-    ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
-        self.inner.search_prompts(bundle, scope, query)
+        after: Option<mj_core::storage::HistoryCursor>,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<mj_core::storage::PromptHistoryPage>> {
+        self.inner
+            .search_prompts(bundle, scope, query, after, limit)
+    }
+
+    fn session_prompts(&self) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
+        self.inner.session_prompts()
     }
 
     fn config_result(&self, id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
@@ -1448,6 +1533,8 @@ fn a_worker_refusal_is_read_without_the_log_lines_beside_it() {
 
 fn finished_turn(command_id: &str) -> mj_core::state::MaterializedTurnOutcome {
     mj_core::state::MaterializedTurnOutcome {
+        work_facts: None,
+        answered_through: None,
         diagnostic: None,
         usage: None,
         command_id: command_id.into(),
@@ -1701,7 +1788,8 @@ async fn a_child_hands_back_one_report_per_turn() {
         }
     };
 
-    let first = hand_back("child-1", "the full report").await;
+    let worker_report = "é".repeat(mj_core::subagent::MAX_HANDBACK_CHARS);
+    let first = hand_back("child-1", &worker_report).await;
     assert!(!first.is_error, "{}", first.message);
     assert!(
         first.message.contains("\"delivered\": true"),
@@ -1713,7 +1801,7 @@ async fn a_child_hands_back_one_report_per_turn() {
         recorded
             .handback
             .map(|handback| (handback.command_id, handback.message)),
-        Some(("task".to_owned(), "the full report".to_owned()))
+        Some(("task".to_owned(), worker_report))
     );
 
     let second = hand_back("child-1", "a second report").await;
@@ -1733,7 +1821,11 @@ async fn a_child_hands_back_one_report_per_turn() {
 
     // A report past the cap is refused, and the refusal says where the
     // details go, so the child can retry with a short report.
-    let long = hand_back("child-1", &"x".repeat(20_000)).await;
+    let long = hand_back(
+        "child-1",
+        &"é".repeat(mj_core::subagent::MAX_HANDBACK_CHARS + 1),
+    )
+    .await;
     assert!(long.is_error, "{}", long.message);
     assert!(
         long.message.contains("report directory") && long.message.contains("4000"),
@@ -1749,49 +1841,64 @@ async fn a_child_hands_back_one_report_per_turn() {
         stranger.message
     );
 
-    let mut reviewer = parent_record("reviewer-1", "helper");
-    reviewer.title = "review".into();
-    let mut relation = crate::database::load_subagent("child-1").unwrap().unwrap();
-    relation.kind = mj_core::subagent::SubagentKind::Reviewer;
-    relation.child_session_id = reviewer.id.clone();
-    relation.request_key = "reviewer-request".into();
-    crate::database::save_subagent_session(&reviewer, &relation).unwrap();
-    let backend = Arc::new(ApiBackend::new(
-        SessionControl::new(FakeControl(FakeSession {
-            session_id: reviewer.id.clone(),
-            accepted_ordinal: 1,
-            submitted: mpsc::unbounded_channel().0,
-            view: Some(view),
-        })),
-        running_states(),
-        Arc::new(NoExports),
-    ));
-    let title = "- [P1] Preserve the complete finding — src/lib.rs:1\n";
-    let message = format!("{title}{}", "é".repeat(20_000 - title.chars().count()));
-    assert_eq!(message.chars().count(), 20_000);
-    let accepted = backend
-        .execute_subagent_tool(
-            reviewer.id.clone(),
-            mj_core::subagent::SubagentToolRequest {
-                originating_command_id: None,
-                request_id: "reviewer-report".into(),
-                created_at_ms: 0,
-                action: mj_core::subagent::SubagentToolAction::Handback {
-                    message: message.clone(),
+    for (id, kind) in [
+        ("reviewer-1", mj_core::subagent::SubagentKind::Reviewer),
+        ("oracle-1", mj_core::subagent::SubagentKind::Oracle),
+    ] {
+        let advisor = parent_record(id, "helper");
+        let mut relation = crate::database::load_subagent("child-1").unwrap().unwrap();
+        relation.kind = kind;
+        relation.child_session_id = advisor.id.clone();
+        relation.request_key = format!("{id}-request");
+        crate::database::save_subagent_session(&advisor, &relation).unwrap();
+        let backend = Arc::new(ApiBackend::new(
+            SessionControl::new(FakeControl(FakeSession {
+                session_id: advisor.id.clone(),
+                accepted_ordinal: 1,
+                submitted: mpsc::unbounded_channel().0,
+                view: Some(view.clone()),
+            })),
+            running_states(),
+            Arc::new(NoExports),
+        ));
+        let hand_back = |message: String| {
+            backend.execute_subagent_tool(
+                advisor.id.clone(),
+                mj_core::subagent::SubagentToolRequest {
+                    originating_command_id: None,
+                    request_id: format!("{id}-report"),
+                    created_at_ms: 0,
+                    action: mj_core::subagent::SubagentToolAction::Handback { message },
                 },
-            },
-        )
-        .await;
-    assert!(!accepted.is_error, "{}", accepted.message);
-    let report = crate::database::load_subagent_report(&reviewer.id)
-        .unwrap()
-        .handback
-        .unwrap();
-    assert_eq!(report.message, message);
-    assert!(matches!(
-        mj_review::verdict::review_output_verdict(&report.message),
-        mj_core::review::verdict::ReviewVerdict::Findings { .. }
-    ));
+            )
+        };
+        // Refusal must not consume this turn's handback; the boundary-sized
+        // Unicode report must then reach the durable record without truncation.
+        let too_long = hand_back("é".repeat(65_537)).await;
+        assert!(too_long.is_error, "{kind:?}: {}", too_long.message);
+        assert!(too_long.message.contains("65536"), "{}", too_long.message);
+        assert!(
+            crate::database::load_subagent_report(id)
+                .unwrap()
+                .handback
+                .is_none()
+        );
+        let title = "- [P1] Preserve the complete finding — src/lib.rs:1\n";
+        let message = format!("{title}{}", "é".repeat(65_536 - title.chars().count()));
+        let accepted = hand_back(message.clone()).await;
+        assert!(!accepted.is_error, "{kind:?}: {}", accepted.message);
+        let report = crate::database::load_subagent_report(id)
+            .unwrap()
+            .handback
+            .unwrap();
+        assert_eq!(report.message, message);
+        if kind == mj_core::subagent::SubagentKind::Reviewer {
+            assert!(matches!(
+                mj_review::verdict::review_output_verdict(&report.message),
+                mj_core::review::verdict::ReviewVerdict::Findings { .. }
+            ));
+        }
+    }
 }
 
 /// Found in a live run: a parent waited right after spawning, the store had
@@ -1823,7 +1930,11 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
                 last_completed_ordinal: answered.map(|ordinal| ordinal + 1),
                 report: ReportState::Fallback,
                 awaited_ordinal: awaited,
-                answered_ordinal: answered,
+                answer: answered.map(|ordinal| {
+                    let mut turn = finished_turn("task");
+                    turn.accepted_ordinal = Some(ordinal);
+                    turn
+                }),
                 failed_turn: failed.map(|(state, reason)| (state, reason.to_owned())),
                 login_failure: None,
                 provider_failure: None,
@@ -1895,7 +2006,11 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         last_completed_ordinal: Some(21),
         report: ReportState::Fallback,
         awaited_ordinal: Some(20),
-        answered_ordinal: Some(20),
+        answer: Some({
+            let mut turn = finished_turn("task");
+            turn.accepted_ordinal = Some(20);
+            turn
+        }),
         failed_turn: Some((
             "failed",
             "Your access token could not be refreshed. Please log out and sign in again.".into(),
@@ -1958,9 +2073,19 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
             }),
             failure: None,
             outcomes: vec![mj_core::credentials::CredentialSyncOutcome {
+                unchanged_login: Some(
+                    mj_core::credentials::read_credential_file(
+                        HarnessKind::Codex,
+                        &home.path().join("auth.json"),
+                    )
+                    .unwrap()
+                    .0,
+                ),
                 session_id: "child-1".into(),
                 outcome: Ok(Vec::new()),
+                step_failures: Vec::new(),
             }],
+            partial: false,
         },
         &profile,
     );
@@ -2018,6 +2143,8 @@ struct ParkingExports {
     unparks: std::sync::atomic::AtomicUsize,
     unpark_failure: Option<String>,
     defer_unpark: std::sync::atomic::AtomicBool,
+    /// What the review host would answer for the child.
+    awaiting_review: std::sync::atomic::AtomicBool,
     protocol: u32,
 }
 
@@ -2043,6 +2170,7 @@ impl ParkingExports {
             unparks: Default::default(),
             unpark_failure: unpark_failure.map(str::to_owned),
             defer_unpark: Default::default(),
+            awaiting_review: Default::default(),
             protocol: if modern_worker {
                 mj_core::relay::RELAY_PROTOCOL_VERSION
             } else {
@@ -2074,6 +2202,12 @@ impl ParkingExports {
 }
 
 impl ExportRuntime for ParkingExports {
+    fn child_awaits_review(&self, _: String) -> BoxFuture<'_, bool> {
+        Box::pin(async {
+            self.awaiting_review
+                .load(std::sync::atomic::Ordering::SeqCst)
+        })
+    }
     fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
         Box::pin(load_startup_status(session_id))
     }
@@ -2179,6 +2313,9 @@ struct ScriptedSession {
     /// Syncs refused the way the session actor refuses while a lifecycle
     /// operation such as a park holds it.
     reserved_syncs: Arc<std::sync::atomic::AtomicUsize>,
+    /// The session reports itself disconnected until this instant, the way a
+    /// restarted worker looks while a large session loads.
+    connected_after: Option<tokio::time::Instant>,
 }
 
 impl SessionHandleBackend for ScriptedSession {
@@ -2187,8 +2324,15 @@ impl SessionHandleBackend for ScriptedSession {
         bundle_id: String,
         scope: mj_core::storage::HistoryScope,
         query: String,
-    ) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
-        self.inner.search_prompts(bundle_id, scope, query)
+        after: Option<mj_core::storage::HistoryCursor>,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<mj_core::storage::PromptHistoryPage>> {
+        self.inner
+            .search_prompts(bundle_id, scope, query, after, limit)
+    }
+
+    fn session_prompts(&self) -> BoxFuture<'_, Result<Vec<mj_core::storage::PromptHistoryEntry>>> {
+        self.inner.session_prompts()
     }
 
     fn config_result(&self, command_id: String) -> BoxFuture<'_, Result<Option<Option<String>>>> {
@@ -2201,7 +2345,14 @@ impl SessionHandleBackend for ScriptedSession {
         self.inner.session_id()
     }
     fn view(&self) -> ManagedSessionView {
-        self.inner.view()
+        let mut view = self.inner.view();
+        if self
+            .connected_after
+            .is_some_and(|at| tokio::time::Instant::now() < at)
+        {
+            view.connected = false;
+        }
+        view
     }
     fn is_stopped(&self) -> bool {
         false
@@ -2359,6 +2510,7 @@ fn message_backend_for_session(
         failures: Arc::new(std::sync::Mutex::new(failures.iter().copied().collect())),
         on_failure,
         reserved_syncs: Arc::default(),
+        connected_after: None,
     };
     let backend = Arc::new(ApiBackend::new(
         SessionControl::new(ScriptedControl(session)),
@@ -2394,6 +2546,7 @@ fn reserved_parking_backend(
         failures: Arc::default(),
         on_failure: Arc::new(|| {}),
         reserved_syncs: Arc::new(std::sync::atomic::AtomicUsize::new(reserved_syncs)),
+        connected_after: None,
     };
     let backend = Arc::new(ApiBackend::new(
         SessionControl::new(ScriptedControl(session)),
@@ -3474,7 +3627,8 @@ async fn outbox_fails_queued_parent_message_for_protocol_33_and_reports_it() {
         assert!(!answer.is_error, "{}", answer.message);
         let response: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
         let child = &response["agents"][0];
-        assert_eq!(child["state"], "failed", "{response}");
+        // The message failed; the child, which started and has no stored turn, is running.
+        assert_eq!(child["state"], "running", "{response}");
         assert_eq!(
             child["message_deliveries"][0],
             serde_json::json!({
@@ -3797,8 +3951,9 @@ async fn replayed_child_input_reuses_durable_acceptance_without_a_second_prompt(
     assert!(delivered.try_recv().is_err());
 }
 
+// Hard-won: #1381: a failed message delivery rewrote the healthy child's state to failed.
 #[test]
-fn pending_child_inputs_hide_old_reports_and_delivery_failures_are_observable() {
+fn pending_child_inputs_hide_old_reports_and_a_failed_delivery_leaves_the_child_state_alone() {
     use super::subagent_input::InputProgress;
     let mut snapshot = ready_view("model").snapshot.unwrap();
     snapshot
@@ -3813,28 +3968,46 @@ fn pending_child_inputs_hide_old_reports_and_delivery_failures_are_observable() 
             },
         });
     let old_report = || ("completed".into(), Some("old report".into()), true);
+    let mut record = parent_record("child", "helper");
+    record.state = SessionState::Running;
     let pending = InputProgress::from_snapshot(&snapshot);
     assert_eq!(
-        pending.status("child", old_report()),
+        pending.status("child", Some(&record), old_report()),
         ("running".into(), None, false)
     );
     let mut entry = serde_json::json!({});
     pending.annotate("child", &mut entry);
     assert_eq!(entry["pending_messages"], serde_json::json!(["input"]));
     assert_eq!(entry["pending_inputs"], entry["pending_messages"]);
+    // A child that cannot be given work is not about to run because a message
+    // is queued for it.
+    for state in [
+        SessionState::Error,
+        SessionState::Lost,
+        SessionState::Stopped,
+    ] {
+        record.state = state;
+        assert_eq!(
+            pending.status("child", Some(&record), old_report()),
+            old_report()
+        );
+    }
+    assert_eq!(pending.status("child", None, old_report()), old_report());
+    record.state = SessionState::Running;
     snapshot.subagent_requests.clear();
     snapshot.subagent_completions.push(mj_core::subagent::SubagentCompletion::from(&mj_core::subagent::SubagentToolResult {
         request_id: "input".into(), completed_at_ms: 2, is_error: true,
         message: serde_json::json!({"child_session_id":"child","status":"failed","created_at_ms":1,"error":"login refused"}).to_string(),
     }));
     let failed = InputProgress::from_snapshot(&snapshot);
+    // The delivery failed; the child is exactly what it was.
     assert_eq!(
-        failed.status("child", old_report()),
-        (
-            "failed".into(),
-            Some("Message input: login refused".into()),
-            true
-        )
+        failed.status("child", Some(&record), old_report()),
+        old_report()
+    );
+    assert_eq!(
+        failed.last_failed_delivery("child"),
+        Some(("input", "login refused"))
     );
     failed.annotate("child", &mut entry);
     assert_eq!(entry["message_deliveries"][0]["error"], "login refused");
@@ -3844,10 +4017,12 @@ fn pending_child_inputs_hide_old_reports_and_delivery_failures_are_observable() 
         request_id: "later".into(), completed_at_ms: 4, is_error: false,
         message: serde_json::json!({"child_session_id":"child","status":"submitted","created_at_ms":3,"turn_id":12}).to_string(),
     }));
+    let recovered = InputProgress::from_snapshot(&snapshot);
     assert_eq!(
-        InputProgress::from_snapshot(&snapshot).status("child", old_report()),
+        recovered.status("child", Some(&record), old_report()),
         old_report()
     );
+    assert_eq!(recovered.last_failed_delivery("child"), None);
 }
 
 #[tokio::test]
@@ -4139,6 +4314,62 @@ async fn delayed_handback_uses_worker_origin_instead_of_current_turn() {
     assert_eq!(report.handback.unwrap().command_id, "original-turn");
 }
 
+#[tokio::test]
+async fn harness_handback_uses_worker_turn_identity() {
+    if !isolated_parked_test("harness_handback_uses_worker_turn_identity") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut view = ready_view("model");
+    view.snapshot.as_mut().unwrap().materialized.active_turn =
+        Some(mj_core::state::MaterializedTurn {
+            command_id: "newer-turn".into(),
+            accepted_ordinal: Some(10),
+            turn_start_position: 11,
+            started_at_ms: 10,
+            steered_into: None,
+        });
+    let (submitted, _) = mpsc::unbounded_channel();
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 12,
+            submitted,
+            view: Some(view),
+        })),
+        running_states(),
+        ParkingExports::new(SessionState::Running, None),
+    ));
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: Some("harness-turn-7".into()),
+        request_id: "delayed-report".into(),
+        created_at_ms: 1,
+        action: mj_core::subagent::SubagentToolAction::Handback {
+            message: "original report".into(),
+        },
+    };
+    let result = backend
+        .execute_subagent_tool_durable("child-1".into(), request)
+        .await
+        .unwrap();
+    assert!(!result.result.is_error, "{}", result.result.message);
+    let report = crate::database::load_subagent_report("child-1").unwrap();
+    assert_eq!(report.handback.unwrap().command_id, "harness-turn-7");
+    let mut session = mj_core::state::MaterializedSession::empty("child-1");
+    session.applied_event_ordinal = 9;
+    session.applied_event_digest = format!("{:064x}", 9);
+    let mut outcome = finished_turn("harness-turn-7");
+    outcome.accepted_ordinal = None;
+    outcome.turn_start_position = Some(7);
+    outcome.completed_ordinal = 9;
+    session.last_turn_outcome = Some(outcome);
+    crate::database::save_materialized_session(&session).unwrap();
+    let progress = load_child_progress("child-1").unwrap();
+    assert!(matches!(progress.report, ReportState::Delivered(_)));
+    assert_eq!(progress.finished_span, Some((7, 9)));
+}
+
 /// The prompts that reached the child's relay, by text.
 fn delivered_prompts(
     delivered: &mut mpsc::UnboundedReceiver<(String, RelayCommand)>,
@@ -4177,6 +4408,119 @@ fn isolated_parked_test(test: &str) -> bool {
     .isolated_store(directory.path())
     .run();
     false
+}
+
+/// A sub-agent that asked for review and then handed back and parked still
+/// receives the verdict: the review host enqueues it to start the child's
+/// worker again, and it is enqueued that way for no top-level session.
+#[tokio::test]
+async fn a_review_verdict_for_a_parked_sub_agent_starts_it_and_reaches_its_relay() {
+    if !isolated_parked_test(
+        "a_review_verdict_for_a_parked_sub_agent_starts_it_and_reaches_its_relay",
+    ) {
+        return;
+    }
+    use crate::review_host::ReviewEnvironment;
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let verdict = |key: &str| mj_core::mailbox::MailboxEvent {
+        key: key.into(),
+        source: "review".into(),
+        wake: true,
+        created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::ReviewVerdict {
+            review_id: "review-1".into(),
+            repository: "/workspace/app".into(),
+            base_commit: "aaaaaaa".into(),
+            head_commit: "bbbbbbb".into(),
+            tree: "ccccccc".into(),
+            verdict: mj_core::review::verdict::ReviewVerdict::Clean,
+        },
+    };
+    let environment = crate::review_host::ControllerEnvironment::default();
+    environment
+        .enqueue_verdict("parent-1", &verdict("push-review:parent"))
+        .unwrap();
+    environment
+        .enqueue_verdict("child-1", &verdict("push-review:child"))
+        .unwrap();
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    let unpark_of = |target: &str| {
+        pending
+            .iter()
+            .find(|row| row.target_session_id == target)
+            .unwrap()
+            .unpark
+    };
+    assert!(!unpark_of("parent-1"));
+    assert!(unpark_of("child-1"));
+
+    let exports = ParkingExports::with_modern_worker(SessionState::Parked, None, true);
+    let mut remote = crate::session_manager::spawn_remote_session_manager().unwrap();
+    remote
+        .targets
+        .send_replace(vec![crate::session_manager::RelaySessionTarget {
+            session_id: "child-1".into(),
+            spec: crate::targets::CommandSpec::new("true", Vec::<String>::new()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+    let mut view = ready_view("model");
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.materialized.session_id = "child-1".into();
+    snapshot.operational.session_id = "child-1".into();
+    remote
+        .publisher
+        .publish("child-1".into(), view)
+        .await
+        .unwrap();
+    remote
+        .control
+        .wait_for_session("child-1", Duration::from_secs(5))
+        .await
+        .unwrap();
+    let row = pending
+        .iter()
+        .find(|row| row.target_session_id == "child-1")
+        .unwrap()
+        .clone();
+    let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(&row.event_json).unwrap();
+    let state: Arc<dyn ExportRuntime> = exports.clone();
+    let sessions = remote.control.clone();
+    let delivery = tokio::spawn(async move {
+        crate::mailbox_outbox::deliver_mailbox_event(
+            state,
+            &sessions,
+            &row.target_session_id,
+            event,
+            row.unpark,
+        )
+        .await
+    });
+    let command = tokio::time::timeout(Duration::from_secs(2), remote.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let crate::session_manager::RemoteSessionRequest::Submit { command, reply, .. } = command
+    else {
+        panic!("the verdict must be submitted to the child relay")
+    };
+    assert_eq!(exports.unparks(), 1, "the parked child starts first");
+    let RelayCommand::DeliverMailboxEvent { event } = command else {
+        panic!("the verdict arrives as a mailbox event")
+    };
+    assert_eq!(event.key, "push-review:child");
+    assert_eq!(
+        event.body,
+        mj_core::mailbox::MailboxEventBody::PlainText {
+            text: "Review clean for commits aaaaaaa..bbbbbbb in /workspace/app. Tree ccccccc is recorded as reviewed.\nReview finished; this is the final result. No reviewers are still running.".into(),
+        }
+    );
+    reply.send(Ok(3)).unwrap();
+    assert_eq!(
+        delivery.await.unwrap().unwrap(),
+        crate::mailbox_outbox::MailboxEventDelivery::Accepted(3)
+    );
 }
 
 /// #1161: a child that handed back is parked, and the parent's next
@@ -4278,6 +4622,549 @@ async fn queued_input_keeps_its_command_when_wake_admission_loses_to_handoff() {
     };
     assert_eq!(prompt, [ContentBlock::from("continue after handoff")]);
     assert!(delivered.try_recv().is_err(), "input must arrive once");
+}
+
+/// Like `parking_backend`, with the child's session disconnected for
+/// `unready_for` of tokio time, as a restarted worker's is while it loads.
+fn slow_starting_backend(
+    exports: Arc<ParkingExports>,
+    unready_for: Duration,
+) -> (
+    Arc<ApiBackend>,
+    mpsc::UnboundedReceiver<(String, RelayCommand)>,
+) {
+    let (submitted, delivered) = mpsc::unbounded_channel();
+    let mut view = ready_view("model");
+    view.snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(exports.protocol);
+    let session = ScriptedSession {
+        inner: FakeSession {
+            session_id: "child-1".into(),
+            accepted_ordinal: 9,
+            submitted,
+            view: Some(view),
+        },
+        failures: Arc::default(),
+        on_failure: Arc::new(|| {}),
+        reserved_syncs: Arc::default(),
+        connected_after: Some(tokio::time::Instant::now() + unready_for),
+    };
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(ScriptedControl(session)),
+        running_states(),
+        exports,
+    ));
+    (backend, delivered)
+}
+
+fn send_message_request(
+    request_id: &str,
+    created_at_ms: i64,
+    message: &str,
+) -> mj_core::subagent::SubagentToolRequest {
+    mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: request_id.into(),
+        created_at_ms,
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: "child-1".into(),
+            message: message.into(),
+        },
+    }
+}
+
+// Hard-won: #1395: a wake slower than the 60 s attach window was reported as a failed delivery.
+#[tokio::test(start_paused = true)]
+async fn a_wake_that_is_ready_after_the_attach_window_delivers_the_message_once() {
+    if !isolated_parked_test(
+        "a_wake_that_is_ready_after_the_attach_window_delivers_the_message_once",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let exports = ParkingExports::new(SessionState::Parked, None);
+    let (backend, mut delivered) = slow_starting_backend(exports.clone(), Duration::from_secs(61));
+    let answer = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            send_message_request("slow-wake", mj_core::clock::epoch_millis(), "carry on"),
+        )
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    assert_eq!(exports.unparks(), 1, "the accepted wake is not repeated");
+    assert_eq!(exports.child_state(), SessionState::Running);
+    assert_eq!(delivered_prompts(&mut delivered), ["carry on"]);
+}
+
+// Hard-won: #1445: the 30-minute window ran from the request's creation, so a request that sat in the queue while the daemon was away expired on pickup.
+#[tokio::test(start_paused = true)]
+async fn a_request_that_waited_in_the_queue_gets_its_full_window_from_pickup() {
+    if !isolated_parked_test("a_request_that_waited_in_the_queue_gets_its_full_window_from_pickup")
+    {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let two_hours_ms = 2 * 60 * 60 * 1000;
+    let exports = ParkingExports::new(SessionState::Running, None);
+    // Ready at once.
+    let (backend, mut delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
+    let created = mj_core::clock::epoch_millis() - two_hours_ms;
+    let answer = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            send_message_request("old-ready", created, "first"),
+        )
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    assert_eq!(delivered_prompts(&mut delivered), ["first"]);
+    // Ready only after ten minutes of waiting, well inside a window that
+    // starts at pickup and long after one that starts at creation.
+    let (backend, mut delivered) = slow_starting_backend(exports, Duration::from_secs(10 * 60));
+    let answer = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            send_message_request("old-slow", created, "second"),
+        )
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    assert_eq!(delivered_prompts(&mut delivered), ["second"]);
+}
+
+// Hard-won: #1381: an expired delivery to a busy child rewrote the child's state to failed.
+#[tokio::test(start_paused = true)]
+async fn an_expired_delivery_leaves_a_busy_child_running_and_is_reported_beside_its_real_state() {
+    if !isolated_parked_test(
+        "an_expired_delivery_leaves_a_busy_child_running_and_is_reported_beside_its_real_state",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 9;
+    conversation.applied_event_digest = format!("{:064x}", 9);
+    conversation.execution = MaterializedExecutionState::Running { started_at_ms: 1 };
+    crate::database::save_materialized_session(&conversation).unwrap();
+    let exports = ParkingExports::new(SessionState::Running, None);
+    // The child stays busy for three hours: far past the window.
+    let (busy, mut delivered) =
+        slow_starting_backend(exports.clone(), Duration::from_secs(3 * 60 * 60));
+    let started = tokio::time::Instant::now();
+    let expired = busy
+        .execute_subagent_tool(
+            "parent-1".into(),
+            send_message_request("follow-up", mj_core::clock::epoch_millis(), "also run X"),
+        )
+        .await;
+    assert!(expired.is_error, "{}", expired.message);
+    assert!(
+        expired.message.contains("within 30 minutes"),
+        "{}",
+        expired.message
+    );
+    assert!(started.elapsed() >= Duration::from_secs(30 * 60));
+    assert!(delivered_prompts(&mut delivered).is_empty());
+
+    // The parent's view of its children carries that failed delivery.
+    let mut parent = ready_view("model");
+    parent
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .subagent_completions
+        .push(mj_core::subagent::SubagentCompletion::from(&expired));
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(FakeSession {
+            session_id: "parent-1".into(),
+            accepted_ordinal: 1,
+            submitted: mpsc::unbounded_channel().0,
+            view: Some(parent),
+        })),
+        running_states(),
+        exports.clone(),
+    ));
+    let listing = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "observe".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            },
+        )
+        .await;
+    assert!(!listing.is_error, "{}", listing.message);
+    let listing: serde_json::Value = serde_json::from_str(&listing.message).unwrap();
+    let child = &listing["agents"][0];
+    assert_eq!(child["state"], "running", "{child}");
+    assert_eq!(child["message_deliveries"][0]["status"], "failed");
+
+    // The report says so once, with the child's own state.
+    for _ in 0..2 {
+        backend.reconcile_parent_reports("parent-1").await.unwrap();
+    }
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 1, "one report per failed delivery");
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&events[0].event_json).unwrap();
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = &event.body else {
+        panic!("wrong event: {event:?}");
+    };
+    assert_eq!((report.state.as_str(), report.finished), ("running", false));
+    let rendered = mj_core::mailbox::render_mailbox_event(&event);
+    assert!(rendered.contains("State: running"), "{rendered}");
+    assert!(
+        rendered.contains(
+            "Message follow-up failed: child was not ready for queued message within 30 minutes"
+        ),
+        "{rendered}"
+    );
+
+    // The child's record ending is news, and reaches the parent although the
+    // failed delivery is still the newest one.
+    exports.set_child_state(SessionState::Error);
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 2, "the child's error was not reported");
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&events[1].event_json).unwrap();
+    let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = &event.body else {
+        panic!("wrong event: {event:?}");
+    };
+    assert_eq!(report.state, "error");
+
+    // A cleanly stopped child is never news, so reconciling skips its record
+    // and still says why when asked about it.
+    exports.set_child_state(SessionState::Stopped);
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    assert_eq!(
+        crate::database::pending_mailbox_events(10).unwrap().len(),
+        2
+    );
+    assert!(matches!(
+        backend
+            .reconcile_child_report("parent-1", "child-1", 1)
+            .await
+            .unwrap(),
+        ChildReport::NotNews("the child is stopping or stopped")
+    ));
+    exports.set_child_state(SessionState::Running);
+
+    // The child can still be given a message, and gets it.
+    assert!(exports.child_state().can_receive_child_work());
+    let (ready, mut delivered) = parking_backend(exports, &[], Arc::new(|| {}));
+    let answer = ready
+        .execute_subagent_tool(
+            "parent-1".into(),
+            send_message_request("retry", mj_core::clock::epoch_millis(), "also run X"),
+        )
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    assert_eq!(delivered_prompts(&mut delivered), ["also run X"]);
+}
+
+// Hard-won: #1378: a failed turn of a child that can still be prompted was indistinguishable from an unrecoverable child.
+#[tokio::test]
+async fn a_failed_turn_says_the_child_is_still_usable_but_an_errored_child_does_not() {
+    if !isolated_parked_test(
+        "a_failed_turn_says_the_child_is_still_usable_but_an_errored_child_does_not",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 9;
+    conversation.applied_event_digest = format!("{:064x}", 9);
+    let mut turn = finished_turn("task");
+    turn.outcome = mj_core::state::TurnOutcomeKind::Rejected {
+        message: "ACP prompt returned no session updates".into(),
+        reason: None,
+    };
+    conversation.last_turn_outcome = Some(turn);
+    crate::database::save_materialized_session(&conversation).unwrap();
+
+    let (backend, exports) = report_backend(active_parent_view("working"));
+    let list = || async {
+        let listing = backend
+            .execute_subagent_tool(
+                "parent-1".into(),
+                mj_core::subagent::SubagentToolRequest {
+                    originating_command_id: None,
+                    request_id: "observe".into(),
+                    created_at_ms: 0,
+                    action: mj_core::subagent::SubagentToolAction::ListAgents,
+                },
+            )
+            .await;
+        assert!(!listing.is_error, "{}", listing.message);
+        serde_json::from_str::<serde_json::Value>(&listing.message).unwrap()["agents"][0].clone()
+    };
+    // Parked after the failed turn: send_message wakes it.
+    let child = list().await;
+    assert_eq!(child["state"], "failed", "{child}");
+    assert_eq!(child["promptable"], true, "{child}");
+
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 1);
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&events[0].event_json).unwrap();
+    assert!(
+        mj_core::mailbox::render_mailbox_event(&event)
+            .contains("Still usable: send_message resumes this child."),
+    );
+
+    // A child whose record is in error cannot be prompted, so it is not told so.
+    exports.set_child_state(SessionState::Error);
+    let child = list().await;
+    assert_eq!(child["state"], "error", "{child}");
+    assert!(child.get("promptable").is_none(), "{child}");
+}
+
+fn observed_work() -> mj_core::work_facts::WorkFacts {
+    use mj_core::work_facts::*;
+    WorkFacts {
+        observed_at_ms: u64::try_from(mj_core::clock::epoch_millis()).unwrap() - 5_000,
+        processes: Observed::Known(ProcessFacts {
+            unattributed: 0,
+            running: 1,
+            shown: vec![RunningProcess {
+                pid: 41301,
+                elapsed_secs: 250,
+                command: "sleep 600".into(),
+                detached: true,
+            }],
+            omitted: 0,
+            identities: vec![ProcessIdentity {
+                pid: 41301,
+                start: "boot:1".into(),
+            }],
+        }),
+        worktree: Observed::Known(WorktreeFacts {
+            directory: "/work/task".into(),
+            head: Some(HeadCommit {
+                sha: "1a2b3c4d5e6f".into(),
+                subject: Observed::Known("Fix parser".into()),
+            }),
+            branch: Some("task".into()),
+            changed: 1,
+            modified: 0,
+            untracked: 1,
+            shown: vec![ChangedPath {
+                status: "?".into(),
+                path: "notes.txt".into(),
+            }],
+            omitted: 0,
+        }),
+    }
+}
+
+async fn finish_report_and_listing(
+    facts: Option<mj_core::work_facts::WorkFacts>,
+) -> (
+    Option<mj_core::mailbox::SubagentFinishedReport>,
+    serde_json::Value,
+    Arc<ApiBackend>,
+) {
+    finish_report_and_listing_of(facts, false).await
+}
+
+/// A finished child whose last outcome carries `facts` (or none, as from an
+/// older worker), reconciled, and what `list_agents` then says of it. The
+/// outcome is a completed prompt when `completed`, and a rejected one (a turn
+/// that never completed) otherwise.
+async fn finish_report_and_listing_of(
+    facts: Option<mj_core::work_facts::WorkFacts>,
+    completed: bool,
+) -> (
+    Option<mj_core::mailbox::SubagentFinishedReport>,
+    serde_json::Value,
+    Arc<ApiBackend>,
+) {
+    store_parent_and_child("child-1");
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 9;
+    conversation.applied_event_digest = format!("{:064x}", 9);
+    let mut turn = finished_turn("task");
+    if !completed {
+        turn.outcome = mj_core::state::TurnOutcomeKind::Rejected {
+            message: "ACP prompt returned no session updates".into(),
+            reason: None,
+        };
+    }
+    turn.work_facts = facts;
+    conversation.last_turn_outcome = Some(turn);
+    crate::database::save_materialized_session(&conversation).unwrap();
+    if completed {
+        // A completed prompt is a finish once the child has handed back.
+        assert!(
+            crate::database::record_subagent_handback(
+                "child-1",
+                &mj_core::subagent::SubagentHandback {
+                    command_id: "task".into(),
+                    message: "done".into(),
+                    recorded_at_ms: 1,
+                },
+            )
+            .unwrap()
+        );
+    }
+    let (backend, _exports) = report_backend(active_parent_view("working"));
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    let report = events.first().map(|event| {
+        let event: mj_core::mailbox::MailboxEvent =
+            serde_json::from_str(&event.event_json).unwrap();
+        let mj_core::mailbox::MailboxEventBody::SubagentFinished { report } = event.body else {
+            panic!("wrong event");
+        };
+        *report
+    });
+    let listing = backend
+        .execute_subagent_tool(
+            "parent-1".into(),
+            mj_core::subagent::SubagentToolRequest {
+                originating_command_id: None,
+                request_id: "observe".into(),
+                created_at_ms: 0,
+                action: mj_core::subagent::SubagentToolAction::ListAgents,
+            },
+        )
+        .await;
+    assert!(!listing.is_error, "{}", listing.message);
+    let listing: serde_json::Value = serde_json::from_str(&listing.message).unwrap();
+    (report, listing["agents"][0].clone(), backend)
+}
+
+/// The finish report carries what the child's worker saw, the same lines
+/// appear under `list_agents`, and both come from the one recorded value.
+#[tokio::test]
+async fn a_finish_report_carries_what_the_worker_observed_and_list_agents_repeats_it() {
+    if !isolated_parked_test(
+        "a_finish_report_carries_what_the_worker_observed_and_list_agents_repeats_it",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let observed = observed_work();
+    let (report, child, _backend) = finish_report_and_listing(Some(observed.clone())).await;
+    assert_eq!(report.unwrap().facts.as_ref(), Some(&observed));
+    let lines = observed.render_lines();
+    let listed: Vec<String> =
+        serde_json::from_value(child["facts"]["finish"]["lines"].clone()).unwrap();
+    assert_eq!(listed, lines);
+    assert!(
+        child["facts"]["finish"]["observed_secs_ago"]
+            .as_u64()
+            .unwrap()
+            >= 5,
+        "{child}"
+    );
+}
+
+/// An outcome without facts says so, and why: a completed prompt without them
+/// is from a worker that predates the capture, and an ending that was not a
+/// completed prompt took no observation. The report is not held for them.
+#[tokio::test]
+async fn an_outcome_without_facts_is_reported_as_unavailable_with_the_reason() {
+    if !isolated_parked_test("an_outcome_without_facts_is_reported_as_unavailable_with_the_reason")
+    {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (report, child, _backend) = finish_report_and_listing_of(None, true).await;
+    let text = report.unwrap().facts.unwrap().render_lines().join("\n");
+    assert!(
+        text.contains("unavailable (the child's worker predates this version)"),
+        "{text}"
+    );
+    // list_agents has nothing recorded to show.
+    assert!(child.get("facts").is_none(), "{child}");
+}
+
+#[tokio::test]
+async fn an_ending_that_was_not_a_completed_prompt_took_no_observation() {
+    if !isolated_parked_test("an_ending_that_was_not_a_completed_prompt_took_no_observation") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (report, _child, _backend) = finish_report_and_listing_of(None, false).await;
+    let text = report.unwrap().facts.unwrap().render_lines().join("\n");
+    assert!(
+        text.contains("the turn ended without completing, so its worker took no observation"),
+        "{text}"
+    );
+}
+
+/// Whether to use a finish's recorded facts follows from its completed turn,
+/// not from the kind of finish identity. A finished child whose last message
+/// delivery failed has a terminal identity, and its report still carries the
+/// facts recorded for its completed turn instead of saying its worker was not
+/// asked.
+#[tokio::test]
+async fn a_finished_child_whose_last_delivery_failed_is_reported_with_its_recorded_facts() {
+    if !isolated_parked_test(
+        "a_finished_child_whose_last_delivery_failed_is_reported_with_its_recorded_facts",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.applied_event_ordinal = 9;
+    conversation.applied_event_digest = format!("{:064x}", 9);
+    let mut turn = finished_turn("task");
+    turn.outcome = mj_core::state::TurnOutcomeKind::Rejected {
+        message: "ACP prompt returned no session updates".into(),
+        reason: None,
+    };
+    turn.work_facts = Some(observed_work());
+    conversation.last_turn_outcome = Some(turn);
+    crate::database::save_materialized_session(&conversation).unwrap();
+    // The parent's newest message to the child failed to deliver.
+    let mut parent = active_parent_view("working");
+    let snapshot = parent.snapshot.as_mut().unwrap();
+    snapshot
+        .subagent_completions
+        .push(mj_core::subagent::SubagentCompletion::from(
+            &mj_core::subagent::SubagentToolResult {
+                request_id: "m1".into(),
+                completed_at_ms: 2,
+                is_error: true,
+                message: serde_json::json!({
+                    "child_session_id": "child-1", "created_at_ms": 1,
+                    "status": "failed", "error": "the child's session was gone",
+                })
+                .to_string(),
+            },
+        ));
+    let (backend, _exports) = report_backend(parent);
+
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+
+    let relation = crate::database::load_subagent("child-1").unwrap().unwrap();
+    assert!(
+        matches!(
+            relation.reported_finish,
+            Some(mj_core::subagent::SubagentFinishIdentity::Terminal { .. })
+        ),
+        "the failed delivery gave the finish a terminal identity: {:?}",
+        relation.reported_finish
+    );
+    let events = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&events[0].event_json).unwrap();
+    let text = mj_core::mailbox::render_mailbox_event(&event);
+    assert!(text.contains("pid 41301"), "{text}");
+    assert!(!text.contains("without a completed turn"), "{text}");
 }
 
 /// A restart that fails leaves the child parked, so the parent can try
@@ -4495,6 +5382,35 @@ async fn report_reconcile_fails_while_the_parent_queue_connects_and_a_retry_reco
     );
 }
 
+// A child that handed back while its review is still open is pending, so a
+// later reconciliation (a sibling finishing) must not report it early.
+#[tokio::test]
+async fn report_reconcile_holds_a_finished_child_until_its_review_closes() {
+    if !isolated_parked_test("report_reconcile_holds_a_finished_child_until_its_review_closes") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    record_finished_child("child-1", "task-1", "report after the verdict", 3, 9, 7);
+    let (backend, exports) = report_backend(active_parent_view("working"));
+    exports
+        .awaiting_review
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+    exports
+        .awaiting_review
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].event_json.contains("report after the verdict"));
+}
+
 /// A person may rename a child after the parent spawned it. The parent's
 /// listing and the child's report show the name the session list shows, beside
 /// the task name and the id the parent acts on.
@@ -4666,7 +5582,9 @@ async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_ou
         let RelayCommand::DeliverMailboxEvent { event } = command else {
             panic!("expected mailbox event")
         };
-        if protocol < mj_core::relay::RELAY_SUBAGENT_FINISHED_PROTOCOL {
+        // A recovered finish carries the facts its worker observed, which
+        // only a worker at the work-facts protocol can read.
+        if protocol < mj_core::relay::RELAY_FINISH_FACTS_PROTOCOL {
             let mj_core::mailbox::MailboxEventBody::PlainText { text } = event.body else {
                 panic!("older worker needs plain text")
             };
@@ -4907,6 +5825,7 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
             .outcome
             .is_some()
     );
+    // The child's completion task stores the facts of the final finish.
     let backend = backend_for(view);
     backend.reconcile_parent_reports("parent-1").await.unwrap();
     backend.reconcile_parent_reports("parent-1").await.unwrap();
@@ -5193,6 +6112,7 @@ async fn oracle_backend(exports: Arc<OracleExports>) -> Arc<ApiBackend> {
         failures: Default::default(),
         on_failure: Arc::new(|| {}),
         reserved_syncs: Arc::default(),
+        connected_after: None,
     };
     Arc::new(
         ApiBackend::new(
@@ -5531,13 +6451,24 @@ async fn the_oracle_is_hidden_from_the_primarys_ordinary_child_tools() {
 #[test]
 fn an_oracle_report_names_ask_oracle_for_the_rest_and_never_send_message() {
     let progress = ChildProgress::settled(ReportState::Delivered("answer".into()));
-    let long = "x".repeat(mj_core::subagent::MAX_HANDBACK_CHARS + 10);
+    let long = "x".repeat(mj_core::subagent::MAX_ADVISOR_HANDBACK_CHARS + 10);
     let truncated = super::wait_agent_entry("c1", "completed", Some(long), true, &progress, true);
     assert_eq!(truncated["oracle"], true);
     assert_eq!(truncated["truncated"], true);
     let output = truncated["output"].as_str().unwrap();
     assert!(output.contains("10 more characters") && output.contains("ask_oracle"));
     assert!(!output.contains("send_message"), "{output}");
+    let complete = "é".repeat(65_536);
+    let delivered = super::wait_agent_entry(
+        "c1",
+        "completed",
+        Some(complete.clone()),
+        true,
+        &progress,
+        true,
+    );
+    assert_eq!(delivered["output"], complete);
+    assert!(delivered.get("truncated").is_none(), "{delivered}");
     let mut answered = super::wait_agent_entry(
         "c1",
         "completed",

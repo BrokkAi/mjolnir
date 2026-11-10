@@ -128,6 +128,15 @@ pub(crate) fn register_subagent_with_startup(
             &tx,
             &subagent.parent_session_id,
         )?;
+        let parent_state = tx.query_row(
+            "SELECT state FROM sessions WHERE session_id=?1",
+            [&subagent.parent_session_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        ensure!(
+            super::values::stored_session_state(&parent_state).can_receive_child_work(),
+            "parent is no longer accepting child work"
+        );
         if subagent.kind == mj_core::subagent::SubagentKind::Oracle {
             let mut statement = tx.prepare(
                 "SELECT s.state FROM subagent_sessions c
@@ -145,7 +154,11 @@ pub(crate) fn register_subagent_with_startup(
                 return Err(OracleAlreadyLive.into());
             }
         }
-        insert_session(&tx, &session)?;
+        super::state_io::insert_session_with_parent(
+            &tx,
+            &session,
+            Some(&subagent.parent_session_id),
+        )?;
         super::usage::record_child_accounting(&tx, &subagent)?;
         tx.execute(
             "INSERT INTO subagent_sessions(
@@ -207,6 +220,43 @@ pub fn list_subagents(parent_session_id: &str) -> Result<Vec<mj_core::subagent::
     )?;
     statement
         .query_map([parent_session_id], |row| row.get::<_, String>(0))?
+        .map(|row| serde_json::from_str(&row?).context("decode sub-agent record"))
+        .collect()
+}
+
+/// A parent's child session ids in registration order, read from the index
+/// without decoding any record.
+pub fn list_subagent_ids(parent_session_id: &str) -> Result<Vec<String>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT child_session_id FROM subagent_sessions
+         WHERE parent_session_id = ?1 ORDER BY rowid",
+    )?;
+    statement
+        .query_map([parent_session_id], |row| row.get(0))?
+        .map(|row| row.map_err(Into::into))
+        .collect()
+}
+
+/// The parent's records for the given children, in registration order. A
+/// parent can hold thousands of children; a caller that needs a few decodes
+/// only those.
+pub fn list_subagents_among(
+    parent_session_id: &str,
+    child_session_ids: &[String],
+) -> Result<Vec<mj_core::subagent::SubagentRecord>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT record_json FROM subagent_sessions
+         WHERE parent_session_id = ?1
+           AND child_session_id IN (SELECT value FROM json_each(?2))
+         ORDER BY rowid",
+    )?;
+    let ids = serde_json::to_string(child_session_ids)?;
+    statement
+        .query_map(rusqlite::params![parent_session_id, ids], |row| {
+            row.get::<_, String>(0)
+        })?
         .map(|row| serde_json::from_str(&row?).context("decode sub-agent record"))
         .collect()
 }
@@ -610,6 +660,28 @@ pub(super) fn save_resumed_session_to(
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
 ) -> Result<()> {
+    save_resumed_session_in_environment_to(path, session, container_size, None)
+}
+
+pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &str) -> Result<()> {
+    let session = session.clone();
+    let environment_id = environment_id.to_owned();
+    submit_database_write("restore resumed environment", move |_| {
+        save_resumed_session_in_environment_to(
+            &database_path(),
+            &session,
+            None,
+            Some(&environment_id),
+        )
+    })
+}
+
+fn save_resumed_session_in_environment_to(
+    path: &Path,
+    session: &SessionRecord,
+    container_size: Option<(&str, HostContainerSize)>,
+    environment_id: Option<&str>,
+) -> Result<()> {
     validate_session_record(session)?;
     let mut connection = open(path)?;
     let tx = connection.transaction()?;
@@ -623,6 +695,21 @@ pub(super) fn save_resumed_session_to(
         "session {} context changed before resume publication",
         session.id
     );
+    if let Some(environment_id) = environment_id {
+        let owner: String = tx.query_row(
+            "SELECT owner_session_id FROM environments WHERE environment_id=?1",
+            [environment_id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            owner == session.id,
+            "resume rollback does not own the selected environment"
+        );
+        tx.execute(
+            "UPDATE environment_bindings SET environment_id=?2 WHERE session_id=?1",
+            params![session.id, environment_id],
+        )?;
+    }
     update_lifecycle_fields(&tx, session)?;
     tx.execute(
         "UPDATE sessions SET native_session_id = ?2, container_cpus = ?3,
@@ -1350,7 +1437,7 @@ pub(super) fn validate_session_record(session: &SessionRecord) -> Result<()> {
 }
 
 /// Remove one operational session while retaining its relational history
-/// context and prompt history.
+/// context. A database trigger removes its prompt history with it.
 pub fn delete_session(session_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     submit_database_write("delete_session", move |_| {

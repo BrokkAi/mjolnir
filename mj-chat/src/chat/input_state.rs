@@ -699,6 +699,11 @@ impl ChatState {
                     let (key, value) = args
                         .split_once(char::is_whitespace)
                         .map_or((args, None), |(key, value)| (key, Some(value.trim())));
+                    if !self.config_key_user_settable(key) {
+                        self.clear_input();
+                        self.set_notice(self.policy_config_notice());
+                        return ChatAction::None;
+                    }
                     let values = self.config_values(key);
                     if values.is_empty() {
                         self.clear_input();
@@ -810,7 +815,7 @@ impl ChatState {
                     self.clear_input();
                     let review = self.review_config();
                     return match args.trim().to_ascii_lowercase().as_str() {
-                        // Bare `/review` reviews the turn that just finished,
+                        // Bare `/review` reviews committed work,
                         // whether or not automatic review is armed.
                         "" => ChatAction::StartTurnReview,
                         // Arming is configuration, not a session gesture: a
@@ -818,7 +823,7 @@ impl ChatState {
                         // machine-wide setting from inside one conversation.
                         "on" | "off" => {
                             self.set_notice(
-                                "automatic review is configured in config.toml: [review] trigger",
+                                "review runs before push when reviewers are set in Settings › Code Review",
                             );
                             ChatAction::None
                         }

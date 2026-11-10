@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use mj_core::config::{TargetTemplate, atomic_write, data_dir};
+use mj_core::config::{Config, TargetTemplate, atomic_write, data_dir};
 use mj_core::state::{SessionState, State, TargetLocator};
 
 use crate::targets::{
@@ -23,6 +23,7 @@ use super::git_cache;
 use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
 use super::worker_binary::{bridge_readiness_stage, start_worker_durably, worker_probe_diagnosis};
 use super::{Controller, execute_checked, now};
+use crate::launch_timing::LaunchPhaseTimer;
 
 const INHERITED_GIT_SETTINGS: &[&str] = &[
     "diff.algorithm",
@@ -82,6 +83,23 @@ pub(super) fn container_start_gate(
     })))
 }
 
+/// Take a start slot of the container's gate. A child that has to queue shows
+/// the wait as its own stage, from the moment it begins waiting until it is
+/// admitted, so the queue is visible and is not mistaken for a stalled stage.
+async fn admit_container_start<'a>(
+    gate: &'a tokio::sync::Semaphore,
+    executor: &impl CommandExecutor,
+) -> Option<tokio::sync::SemaphorePermit<'a>> {
+    match gate.try_acquire() {
+        Ok(permit) => Some(permit),
+        Err(tokio::sync::TryAcquireError::Closed) => None,
+        Err(tokio::sync::TryAcquireError::NoPermits) => {
+            let _waiting = ProvisionStageGuard::new(executor, ProvisionStage::WaitingForStartSlot);
+            gate.acquire().await.ok()
+        }
+    }
+}
+
 /// Whether starting a child worker can be tried again.
 ///
 /// Only a worker that provably never published its control socket qualifies:
@@ -109,6 +127,37 @@ pub(super) enum ProvisioningFailureDisposition {
     Preserve,
 }
 
+struct RepositorySetup {
+    plan: targets::CommandPlan,
+    managed_checkout: Option<super::worktree::PreparedManagedCheckout>,
+}
+
+struct PreparedWorkerPayload {
+    backend: targets::TargetLocator,
+    worker_root: String,
+    launch: Option<mj_core::worker_launch::WorkerLaunchConfig>,
+}
+
+impl PreparedWorkerPayload {
+    fn prepare_harness(
+        self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<(targets::TargetLocator, String)> {
+        let _timing = LaunchPhaseTimer::new(session_id, "prepare harness after checkout");
+        if let Some(launch) = self.launch {
+            let syncing = StagedExecutor::new(executor, ProvisionStage::Syncing);
+            super::worker_binary::prepare_installed_managed_harness(
+                &syncing,
+                &self.backend,
+                &self.worker_root,
+                &launch,
+            )?;
+        }
+        Ok((self.backend, self.worker_root))
+    }
+}
+
 impl Controller {
     pub async fn provision_session_controlled_with_commit(
         &mut self,
@@ -122,11 +171,14 @@ impl Controller {
             "provision session controlled with commit",
             executor,
             async {
+                let _total = LaunchPhaseTimer::new(session_id, "provision session");
                 crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
+                let credentials = LaunchPhaseTimer::new(session_id, "resolve GitHub credentials");
                 let github_token = self
                     .github_token_for_session(session_id)
                     .await
                     .context("resolve GitHub credentials for session")?;
+                drop(credentials);
                 let repositories = self
                     .provision_session_target_with_failure_disposition(
                         session_id,
@@ -137,11 +189,12 @@ impl Controller {
                     )
                     .await?;
                 let setup = execute_concurrent_lanes(
-                    || execute_repository_setup(&repositories, executor),
+                    || execute_repository_setup(session_id, &repositories, executor),
                     || self.install_worker_payload(session_id, executor),
-                );
+                )
+                .and_then(|((), payload)| payload.prepare_harness(session_id, executor));
                 let result = match setup {
-                    Ok(((), (backend, worker_root))) => {
+                    Ok((backend, worker_root)) => {
                         self.connect_and_start_worker(
                             session_id,
                             executor,
@@ -317,7 +370,12 @@ impl Controller {
                                 &root,
                             )?;
                         } else {
-                            targets::close_plan(&backend, session_id)?.execute(executor)?;
+                            super::environment::retire_session_environment(
+                                &previous,
+                                &self.config,
+                                executor,
+                                super::BranchDisposition::Delete,
+                            )?;
                         }
                     }
                     if !child {
@@ -393,7 +451,7 @@ impl Controller {
                         // part that does not survive a crowd.
                         let gate = container_start_gate(&backend);
                         let _admitted = match &gate {
-                            Some(gate) => gate.acquire().await.ok(),
+                            Some(gate) => admit_container_start(gate, executor).await,
                             None => None,
                         };
                         self.connect_and_start_worker(
@@ -460,9 +518,13 @@ impl Controller {
         let target_cleanup = match session.target.as_ref() {
             Some(locator) => (|| -> Result<()> {
                 let backend = backend_locator(locator, &session, &self.config)?;
-                targets::close_plan(&backend, session_id)?
-                    .execute(target_cleanup_executor)
-                    .map(|_| ())
+                let _ = backend;
+                super::environment::retire_session_environment(
+                    &session,
+                    &self.config,
+                    target_cleanup_executor,
+                    super::BranchDisposition::Delete,
+                )
             })(),
             None => Ok(()),
         };
@@ -509,7 +571,7 @@ impl Controller {
                 true,
             )
             .await?;
-        match execute_repository_setup(&repositories, executor) {
+        match execute_repository_setup(session_id, &repositories, executor) {
             Ok(()) => Ok(()),
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
                 Err(self.rollback_failed_new_session(session_id, error)?)
@@ -525,8 +587,9 @@ impl Controller {
         github_token: Option<&str>,
         failure_disposition: ProvisioningFailureDisposition,
         remember_launch_choices: bool,
-    ) -> Result<targets::CommandPlan> {
+    ) -> Result<RepositorySetup> {
         crate::worker_lifecycle::run(session_id, "provision session target with failure disposition", executor, async {
+        let _target_timing = LaunchPhaseTimer::new(session_id, "plan checkout and provision target");
         let session = self
             .state
             .sessions
@@ -535,9 +598,6 @@ impl Controller {
             .clone();
         if session.state != SessionState::Provisioning {
             bail!("session {session_id} is not provisioning");
-        }
-        if let Some(plan) = self.adopt_prepared_ec2_destination(session_id, github_token)? {
-            return Ok(plan);
         }
         let preparation = (|| {
             let selected = self
@@ -579,11 +639,18 @@ impl Controller {
                 .profiles
                 .get(&session.last_profile)
                 .context("harness profile disappeared during provisioning")?;
-            super::worker_binary::preflight_worker_binary(template, executor)?;
-            super::worker_binary::preflight_harness(template, profile, executor)?;
-            self.prepare_managed_raw_worktree(session_id, executor)
+            {
+                let _timing = LaunchPhaseTimer::new(session_id, "preflight worker binary");
+                super::worker_binary::preflight_worker_binary(template, executor)?;
+            }
+            {
+                let _timing = LaunchPhaseTimer::new(session_id, "preflight harness");
+                super::worker_binary::preflight_harness(template, profile, executor)?;
+            }
+            let _timing = LaunchPhaseTimer::new(session_id, "plan managed checkout");
+            self.plan_managed_raw_worktree(session_id, executor)
         })();
-        let created_worktree = match preparation {
+        let managed_checkout = match preparation {
             Ok(created) => created,
             Err(error) if failure_disposition == ProvisioningFailureDisposition::Discard => {
                 return Err(self.fail_new_session_with_cleanup(session_id, error, executor)?);
@@ -605,25 +672,13 @@ impl Controller {
                 .targets
                 .get(&session.target_template_id)
                 .context("target template disappeared during provisioning")?;
-            if matches!(template, TargetTemplate::AwsEc2 { .. }) {
-                for resource in &session.additional_mounts {
-                    ensure!(
-                        resource.source.is_dir(),
-                        "attached resource source is not a directory: {}",
-                        resource.source.display()
-                    );
-                }
-            }
+
             let mut target = backend_target(
                 template,
                 session.resource_allocation.as_ref(),
                 ContainerOverrides::for_session(&session),
             )?;
-            let mut runtime_mounts = if matches!(target, targets::TargetTemplate::AwsEc2(_)) {
-                Vec::new()
-            } else {
-                session.additional_mounts.clone()
-            };
+            let mut runtime_mounts = session.additional_mounts.clone();
             // The mounts this container runs with, not the ones the session
             // stores: a forced downgrade belongs to the host the container
             // lands on, so it is decided here every time and never written
@@ -641,8 +696,10 @@ impl Controller {
                 Some(backend_session_bundle(&session, &self.config, executor)?)
             };
             let container_github_token =
-                github_token.filter(|_| configure_github_token_environment(&mut target));
-            if container_github_token.is_some()
+                github_token.filter(|_| {
+                    !session.no_github_credentials && configure_github_token_environment(&mut target)
+                });
+            if (container_github_token.is_some() || session.no_github_credentials)
                 && let Some(bundle) = bundle.as_mut()
             {
                 use_github_https_urls(bundle);
@@ -659,6 +716,15 @@ impl Controller {
                 .map(|op| targets::move_resource_name(session_id, &op.operation_id))
                 .unwrap_or_else(|| targets::resource_name(session_id))?;
             let moving_workspace = resource_name != targets::resource_name(session_id)?;
+            // Reserve physical ownership before creation, including a target
+            // whose creation or locator discovery later fails. Rollback uses
+            // the same owner and writer inventory as ordinary teardown.
+            let reserved_target = super::backend::locator_after_provision_named(
+                template,&target,session_id,None,executor,&resource_name)?;
+            self.state.sessions.get_mut(session_id).context("session disappeared before target reservation")?.target = Some(reserved_target);
+            self.persist_session_state(session_id)?;
+            let reserved_environment = crate::database::session_environment(session_id)?.context("target reservation has no environment")?;
+
             let tool_cache = super::tool_cache::prepare(
                 &self.config,
                 &session.target_template_id,
@@ -682,7 +748,7 @@ impl Controller {
                         session_id,
                         bundle,
                         &mut runtime_mounts,
-                        container_github_token,
+                        github_token,
                         executor,
                     )
                 });
@@ -712,6 +778,7 @@ impl Controller {
                             &runtime_mounts,
                             session.container_workspace.as_deref(),
                             &resource_name,
+                            session.no_github_credentials.then_some(github_token).flatten(),
                         )
                     })
             };
@@ -735,12 +802,11 @@ impl Controller {
             }
 
             let started = Instant::now();
-            let result = provision_target_creation_named(
+            let result = provision_target_creation_plan(
                 &provision,
                 &target,
-                session_id,
                 executor,
-                &resource_name,
+                |_| None,
                 |outputs| {
                     super::backend::locator_after_provision_named(
                         template,
@@ -753,18 +819,9 @@ impl Controller {
                 },
             )
             .map(|(locator, remainder)| (locator, remainder, bundle, build_cache));
-            if result.is_err()
-                && let Some(cache) = &prepared_cache
-            {
-                if let Some(locator) =
-                    provisioned_locator_named(&target, session_id, None, &resource_name)
-                {
-                    let _ = targets::close_plan(&locator, session_id)
-                        .and_then(|plan| plan.execute(executor).map(|_| ()));
-                } else {
-                    let _ = cache.cleanup(executor);
-                }
-            }
+            let result = result.map_err(|error| {
+                error.context(failed_environment_creation_cleanup(&reserved_environment, &self.config, executor))
+            });
             tracing::debug!(
                 session_id,
                 elapsed_ms = started.elapsed().as_millis(),
@@ -774,7 +831,7 @@ impl Controller {
         })();
         let result = match result {
             Err(error)
-                if created_worktree
+                if managed_checkout.is_some()
                     && failure_disposition == ProvisioningFailureDisposition::Discard =>
             {
                 return Err(self.fail_new_session_with_cleanup(session_id, error, executor)?);
@@ -883,7 +940,7 @@ impl Controller {
             }
         }
         self.persist_session_state(session_id)?;
-        result
+        result.map(|plan| RepositorySetup { plan, managed_checkout })
 
         }).await
     }
@@ -925,13 +982,24 @@ impl Controller {
         &self,
         session_id: &str,
         executor: &impl CommandExecutor,
-    ) -> Result<(targets::TargetLocator, String)> {
+    ) -> Result<PreparedWorkerPayload> {
+        let _timing = LaunchPhaseTimer::new(session_id, "prepare worker payload");
         // Worker/profile installation is independent of repository cloning.
         let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
         let (backend, worker_root) = self.worker_placement(session_id)?;
-        self.prepare_worker_files(session_id, &backend, &worker_root, syncing)?;
+        let launch = self.stage_worker_files_for(
+            session_id,
+            &backend,
+            &worker_root,
+            syncing,
+            super::worker_binary::WorkerFilePreparation::Install,
+        )?;
         install_attached_resources(&self.state, session_id, &backend, &worker_root, syncing)?;
-        Ok((backend, worker_root))
+        Ok(PreparedWorkerPayload {
+            backend,
+            worker_root,
+            launch,
+        })
     }
 
     async fn connect_and_start_worker(
@@ -945,6 +1013,7 @@ impl Controller {
         crate::worker_lifecycle::run(session_id, "connect and start worker", executor, async {
             let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
             if initialize_workspace {
+                let _timing = LaunchPhaseTimer::new(session_id, "initialize workspace");
                 install_inherited_git_settings(executor, backend, session_id)?;
                 self.initialize_network_workspaces(session_id, backend, syncing)?;
             }
@@ -961,6 +1030,8 @@ impl Controller {
             let readiness_stage = bridge_readiness_stage(profile);
             let reconnect = &targets::reconnect_plan(backend, session_id)?.commands[0];
             let readiness = async {
+                let _timing =
+                    LaunchPhaseTimer::new(session_id, "start worker and await native session");
                 let mut relay = {
                     let _starting = ProvisionStageGuard::new(executor, ProvisionStage::Starting);
                     start_worker_durably(
@@ -1227,14 +1298,40 @@ pub(super) fn execute_concurrent_lanes<A: Send, B: Send>(
 }
 
 fn execute_repository_setup(
-    plan: &targets::CommandPlan,
+    session_id: &str,
+    setup: &RepositorySetup,
     executor: &(impl CommandExecutor + Sync),
 ) -> Result<()> {
+    let _timing = LaunchPhaseTimer::new(session_id, "materialize checkout");
+    if let Some(checkout) = &setup.managed_checkout {
+        let _cloning = ProvisionStageGuard::new(executor, ProvisionStage::Cloning);
+        checkout.execute(executor)?;
+    }
+    let plan = &setup.plan;
     if plan.commands.is_empty() {
         return Ok(());
     }
     let _cloning = ProvisionStageGuard::new(executor, ProvisionStage::Cloning);
     plan.execute_concurrent(executor).map(|_| ())
+}
+
+fn failed_environment_creation_cleanup(
+    environment: &crate::database::EnvironmentRecord,
+    config: &Config,
+    executor: &impl CommandExecutor,
+) -> String {
+    match super::environment::retire_owned_environment(
+        environment.clone(),
+        config,
+        executor,
+        super::BranchDisposition::Delete,
+        super::CheckoutDisposition::Remove,
+    ) {
+        Ok(_) => "cleanup succeeded: reserved session environment".into(),
+        Err(error) => {
+            format!("cleanup FAILED: {error:#}; reserved resources remain recorded for Destroy")
+        }
+    }
 }
 
 /// Run a provisioning plan and discover the locator it produced, tearing the
@@ -1282,22 +1379,20 @@ fn provision_target_creation(
     executor: &(impl CommandExecutor + Sync),
     discover: impl FnOnce(&[CommandOutput]) -> Result<TargetLocator>,
 ) -> Result<(TargetLocator, targets::CommandPlan)> {
-    provision_target_creation_named(
+    provision_target_creation_plan(
         plan,
         target,
-        session_id,
         executor,
-        &targets::resource_name(session_id)?,
+        |outputs| cleanup_failed_provision(target, session_id, outputs.first(), executor),
         discover,
     )
 }
 
-fn provision_target_creation_named(
+fn provision_target_creation_plan(
     plan: &targets::CommandPlan,
     target: &targets::TargetTemplate,
-    session_id: &str,
     executor: &(impl CommandExecutor + Sync),
-    name: &str,
+    cleanup: impl FnOnce(&[CommandOutput]) -> Option<String>,
     discover: impl FnOnce(&[CommandOutput]) -> Result<TargetLocator>,
 ) -> Result<(TargetLocator, targets::CommandPlan)> {
     let Some((creation, remainder)) = plan.split_at_target_creation() else {
@@ -1324,17 +1419,9 @@ fn provision_target_creation_named(
     })?;
     discover(&outputs)
         .map(|locator| (locator, remainder))
-        .map_err(|error| {
-            match cleanup_failed_provision_named(
-                target,
-                session_id,
-                outputs.first(),
-                executor,
-                name,
-            ) {
-                Some(note) => error.context(note),
-                None => error,
-            }
+        .map_err(|error| match cleanup(&outputs) {
+            Some(note) => error.context(note),
+            None => error,
         })
 }
 
@@ -1360,6 +1447,7 @@ fn cleanup_failed_provision(
     )
 }
 
+#[cfg(test)]
 fn cleanup_failed_provision_named(
     target: &targets::TargetTemplate,
     session_id: &str,
@@ -1424,10 +1512,11 @@ fn cleanup_failed_provision_named(
 ///
 /// Every target but AWS is named before its plan runs; an EC2 instance
 /// reports its own ID in the launch response.
+#[cfg(test)]
 fn provisioned_locator_named(
     target: &targets::TargetTemplate,
     session_id: &str,
-    create_output: Option<&CommandOutput>,
+    _create_output: Option<&CommandOutput>,
     name: &str,
 ) -> Option<targets::TargetLocator> {
     let container_id = || Some(name.to_owned());
@@ -1473,17 +1562,6 @@ fn provisioned_locator_named(
             ssh: ssh.clone(),
             workspace: targets::workspace_for(target, session_id).ok()?,
             worker_id: None,
-        },
-        targets::TargetTemplate::AwsEc2(aws) => targets::TargetLocator::AwsEc2 {
-            profile: aws.profile.clone(),
-            region: aws.region.clone(),
-            instance_id: serde_json::from_slice::<serde_json::Value>(&create_output?.stdout)
-                .ok()?
-                .pointer("/Instances/0/InstanceId")?
-                .as_str()?
-                .to_owned(),
-            ssh: aws.ssh.clone(),
-            workspace: targets::workspace_for(target, session_id).ok()?,
         },
     })
 }

@@ -10,13 +10,6 @@ pub trait ReviewEnvironment: Send + Sync {
     /// reviewed under `profile`.
     fn check(&self, session_id: &str, profile: &str) -> Result<(), String>;
 
-    /// Whether this session is a Mjolnir-managed sub-agent. Its changes are
-    /// included in the parent's automatic turn review; explicit commit reviews
-    /// are still allowed. Blocking: it reads the controller's database.
-    fn is_subagent(&self, _session_id: &str) -> bool {
-        false
-    }
-
     /// Refuses a session whose project source cannot be reviewed even before
     /// asking the worker to capture a delta. Blocking: production reads the
     /// accepted project snapshot from the controller database.
@@ -59,7 +52,8 @@ pub trait ReviewEnvironment: Send + Sync {
 
     /// Records how far this session has been reviewed. Blocking: the host
     /// routes it through its ordered persistence lane rather than calling it
-    /// on the Tokio task that owns review state.
+    /// on the Tokio task that owns review state. Newly settled findings and
+    /// their partial mailbox messages commit together while peers remain.
     fn save_state(&self, session_id: &str, state: &TurnReviewState) -> Result<(), String>;
 
     /// Clears the in-flight flag of every review a restart interrupted, and
@@ -73,16 +67,6 @@ pub trait ReviewEnvironment: Send + Sync {
         Ok(Vec::new())
     }
 
-    fn pending_followups(&self) -> Result<Vec<String>, String> {
-        Ok(Vec::new())
-    }
-
-    fn mark_followup(&self, session_id: &str) -> Result<(), String> {
-        let mut state = self.load_state(session_id)?;
-        state.pending_followup = true;
-        self.save_state(session_id, &state)
-    }
-
     fn enqueue_verdict(
         &self,
         _session_id: &str,
@@ -93,6 +77,20 @@ pub trait ReviewEnvironment: Send + Sync {
 
     fn reviewer_children(&self) -> Result<Vec<ReviewerChildRelation>, String> {
         Ok(Vec::new())
+    }
+
+    /// What the store holds about one reviewer child: whether its session has
+    /// ended, and the handback it recorded, if any. Blocking: production reads
+    /// the controller's database.
+    fn reviewer_child_standing(&self, _child: &str) -> Result<ChildStanding, String> {
+        Ok(ChildStanding::default())
+    }
+
+    /// Whether the store still has this session's record. A destroyed
+    /// session has none, and nothing about its reviews can be saved again.
+    /// Blocking: production reads the controller's database.
+    fn session_exists(&self, _session_id: &str) -> Result<bool, String> {
+        Ok(true)
     }
 
     /// Holds the session against background work for as long as a review
@@ -122,6 +120,25 @@ pub struct ReviewerChildRelation {
     pub parent_session_id: String,
     pub request_key: String,
     pub child_session_id: String,
+}
+
+/// What the store holds about a reviewer child, read at one moment.
+#[derive(Clone, Debug, Default)]
+pub struct ChildStanding {
+    /// Why its session can no longer run, or `None` while it still can.
+    pub ended: Option<String>,
+    /// The report it handed back, whether or not the review has taken it yet.
+    pub handback: Option<mj_core::subagent::SubagentHandback>,
+}
+
+impl ChildStanding {
+    /// The handback text, when the report answers the turn `command_id`
+    /// names: the same rule delegation applies to a finished reviewer turn.
+    pub(super) fn answer_to(self, command_id: &str) -> Option<String> {
+        self.handback
+            .filter(|handback| handback.answers(command_id))
+            .map(|handback| handback.message)
+    }
 }
 
 /// Keeps background work off a session while a review needs its worker.
@@ -209,7 +226,12 @@ impl ReviewEnvironment for ControllerEnvironment {
         event: &mj_core::mailbox::MailboxEvent,
     ) -> Result<(), String> {
         let json = serde_json::to_string(event).map_err(|error| error.to_string())?;
-        crate::database::enqueue_mailbox_event(&event.key, session_id, &json, true, false)
+        // A sub-agent that handed back and parked while its review ran is
+        // woken by the verdict; a top-level session is never parked.
+        let unpark = crate::database::load_subagent(session_id)
+            .map_err(|error| format!("{error:#}"))?
+            .is_some();
+        crate::database::enqueue_mailbox_event(&event.key, session_id, &json, true, unpark)
             .map(|_| ())
             .map_err(|error| format!("{error:#}"))
     }
@@ -236,6 +258,32 @@ impl ReviewEnvironment for ControllerEnvironment {
             })
             .collect())
     }
+
+    fn reviewer_child_standing(&self, child: &str) -> Result<ChildStanding, String> {
+        let ended = match crate::database::load_session_record(child)
+            .map_err(|error| format!("{error:#}"))?
+        {
+            None => Some("removed".to_owned()),
+            Some(record) if crate::session_manager::session_has_ended(record.state) => {
+                Some(match record.last_error {
+                    Some(cause) => format!("{}: {cause}", record.state.as_str()),
+                    None => record.state.as_str().to_owned(),
+                })
+            }
+            Some(_) => None,
+        };
+        let handback = crate::database::load_subagent_report(child)
+            .map_err(|error| format!("{error:#}"))?
+            .handback;
+        Ok(ChildStanding { ended, handback })
+    }
+
+    fn session_exists(&self, session_id: &str) -> Result<bool, String> {
+        crate::database::load_session_record(session_id)
+            .map(|record| record.is_some())
+            .map_err(|error| format!("{error:#}"))
+    }
+
     fn register_child(
         &self,
         session_id: &str,
@@ -253,6 +301,7 @@ impl ReviewEnvironment for ControllerEnvironment {
         launch.fast_mode = reviewer.main.fast_mode.then_some(true);
         controller
             .register_subagent(crate::controller::RegisterSubagentRequest {
+                no_github_credentials: false,
                 kind: mj_core::subagent::SubagentKind::Reviewer,
                 reviewer_launch: Some(launch),
                 parent_session_id: session_id.to_owned(),
@@ -289,6 +338,11 @@ impl ReviewEnvironment for ControllerEnvironment {
     ) -> mj_client::session::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             let runtime = self.runtime().await?;
+            // A child that is already gone is closed; retrying an unknown
+            // session would never end.
+            if runtime.session_record(child).is_none() {
+                return Ok(());
+            }
             runtime
                 .suspend_session(child.to_owned())
                 .await
@@ -301,12 +355,12 @@ impl ReviewEnvironment for ControllerEnvironment {
             crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;
         let Some(reviewer) = controller.config.profiles.get(profile) else {
             return Err(format!(
-                "turn review needs a reviewer: [review] profile {profile:?} is not a profile in config.toml"
+                "code review needs a reviewer: [review] profile {profile:?} is not a profile in config.toml"
             ));
         };
         if !reviewer.enabled {
             return Err(format!(
-                "turn review needs an enabled reviewer: [review] profile {profile:?} is disabled"
+                "code review needs an enabled reviewer: [review] profile {profile:?} is disabled"
             ));
         }
         validate_review_profile(
@@ -314,10 +368,6 @@ impl ReviewEnvironment for ControllerEnvironment {
             controller.state.sessions.get(session_id),
             profile,
         )
-    }
-
-    fn is_subagent(&self, session_id: &str) -> bool {
-        crate::database::load_subagent(session_id).is_ok_and(|record| record.is_some())
     }
 
     fn resolve<'a>(
@@ -370,14 +420,6 @@ impl ReviewEnvironment for ControllerEnvironment {
 
     fn active_groups(&self) -> Result<Vec<(String, TurnReviewState)>, String> {
         crate::database::active_review_groups().map_err(|error| format!("{error:#}"))
-    }
-
-    fn pending_followups(&self) -> Result<Vec<String>, String> {
-        crate::database::pending_review_followups().map_err(|error| format!("{error:#}"))
-    }
-
-    fn mark_followup(&self, session_id: &str) -> Result<(), String> {
-        crate::database::mark_review_followup(session_id).map_err(|error| format!("{error:#}"))
     }
 
     fn hold_background_work<'a>(

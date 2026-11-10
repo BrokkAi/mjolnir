@@ -204,6 +204,11 @@ struct QuotaBoard {
     refresh: Option<tokio::sync::mpsc::Sender<()>>,
 }
 
+struct SurfaceNotice {
+    notice: RuntimeNotice,
+    public: bool,
+}
+
 pub struct RuntimeState {
     attachments: Mutex<BTreeMap<String, Attachment>>,
     phone_status: Mutex<WebViewerStatus>,
@@ -250,7 +255,7 @@ pub struct RuntimeState {
     worker_upgrade_observer: WorkerUpgradeObserver,
     /// Recent background notices, newest last, with the id of the next one.
     /// Bounded: a surface that never attaches must not make this grow.
-    notices: Mutex<VecDeque<RuntimeNotice>>,
+    notices: Mutex<VecDeque<SurfaceNotice>>,
     next_notice_id: AtomicU64,
     /// Dashboard requests made on the person's behalf (`mj ui`).
     ui_requests: Mutex<ui_requests::UiRequestBoard>,
@@ -559,6 +564,9 @@ struct ActiveLifecycle {
     kind: LifecycleKind,
     started_at_epoch_seconds: u64,
     active_stages: BTreeMap<ProvisionStage, (usize, u64)>,
+    /// When a stage last started or finished: the one record of whether this
+    /// operation is making progress. Set by `change_lifecycle_stage` only.
+    last_stage_change: tokio::time::Instant,
     /// The workspace a resume is claiming before its durable record changes.
     /// Workspace deletion consults this so it cannot race the claim.
     resume_workspace_id: Option<String>,
@@ -583,6 +591,14 @@ enum LifecyclePhase {
 impl ActiveLifecycle {
     fn is_running(&self) -> bool {
         !matches!(self.phase, LifecyclePhase::Completed(_))
+    }
+
+    /// The stages this operation is in, oldest stage first.
+    fn stage_labels(&self) -> Vec<String> {
+        self.active_stages
+            .keys()
+            .map(|stage| stage.label())
+            .collect()
     }
 
     fn pending_upgrade_failed(&self) -> bool {
@@ -774,6 +790,7 @@ use support::*;
 mod activity_cleanup;
 pub(crate) mod delegation;
 mod diagnostics;
+mod previous_daemon;
 mod process;
 pub use process::*;
 mod serve;

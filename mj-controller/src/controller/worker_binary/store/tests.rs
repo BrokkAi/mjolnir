@@ -59,9 +59,18 @@ fn concurrent_sessions_share_one_verified_upload_and_swaps_leave_other_links_unc
     let old = source(temp.path(), "old");
     let new = source(temp.path(), "new");
     let executor = Transfers::default();
+    let others: Vec<_> = (0..2)
+        .map(|n| {
+            let id = format!("{n:032}");
+            (target(temp.path(), &id), id)
+        })
+        .collect();
     std::thread::scope(|scope| {
         scope.spawn(|| install(&executor, &a, first, &old));
         scope.spawn(|| install(&executor, &b, second, &old));
+        for (locator, id) in &others {
+            scope.spawn(|| install(&executor, locator, id, &old));
+        }
     });
     // A repeated install and a normal promotion can both name the inode that
     // is already installed. Plain mv reports these two hard links as an error.
@@ -246,6 +255,7 @@ fn a_filesystem_without_hard_links_still_installs_verified_private_copies() {
     );
 }
 
+// Hard-won: 7f871fd03: the wait deadline expired during setup before the installer reached the held store gate.
 #[test]
 fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner() {
     use std::sync::mpsc;
@@ -257,13 +267,38 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
         fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
             if command.purpose == "stage replacement Mjolnir worker" {
                 self.reached.send(()).unwrap();
-                let _ = self
-                    .release
+                // Keep the original deadlock watchdog, but fail on expiry:
+                // never release the gate as though the waiter had finished.
+                self.release
                     .lock()
                     .unwrap()
-                    .recv_timeout(Duration::from_secs(2));
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("deadline test waiter did not finish before the deadlock watchdog");
             }
             targets::ProcessExecutor.execute(command)
+        }
+    }
+    #[derive(Default)]
+    struct DeadlineAtWait(OnceLock<targets::CancellableProcessExecutor>);
+    impl CommandExecutor for DeadlineAtWait {
+        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+            match self.0.get() {
+                Some(executor) => executor.execute(command),
+                None => targets::ProcessExecutor.execute(command),
+            }
+        }
+
+        fn cancellation_requested(&self) -> bool {
+            self.0.get().is_some_and(|executor| executor.is_cancelled())
+        }
+
+        fn stage_started(&self, stage: targets::ProvisionStage) {
+            if stage == targets::ProvisionStage::WaitingForWorkerStore {
+                // Expire only once queued, without racing setup or a clock.
+                self.0.get_or_init(|| {
+                    targets::CancellableProcessExecutor::with_timeout(Duration::ZERO)
+                });
+            }
         }
     }
     let temp = tempfile::tempdir().unwrap();
@@ -279,9 +314,13 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
         release: std::sync::Mutex::new(release_rx),
     };
     std::thread::scope(|scope| {
-        let running = scope.spawn(|| install(&owner, &a, first, &bytes));
-        reached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let executor = targets::CancellableProcessExecutor::with_timeout(Duration::from_millis(50));
+        // Drop the sender on a setup panic too, so scope can join the owner.
+        let release = release_tx;
+        let owner_bytes = &bytes;
+        let running = scope.spawn(move || install(&owner, &a, first, owner_bytes));
+        // If setup fails, dropping the owner's sender wakes this receive.
+        reached_rx.recv().unwrap();
+        let executor = DeadlineAtWait::default();
         let result = install_worker_binary(
             &executor,
             &b,
@@ -289,15 +328,116 @@ fn a_waiting_installer_observes_its_deadline_without_cancelling_the_store_owner(
             &WorkerInstall::Host(bytes.clone()),
             "hel",
         );
-        let _ = release_tx.send(());
+        release.send(()).unwrap();
         running.join().unwrap();
         assert_eq!(
             result.unwrap_err().to_string(),
-            "timed out after 0.05 s while wait for the shared Mjolnir worker binary"
+            "timed out after 0 s while wait for the shared Mjolnir worker binary"
         );
         assert!(temp.path().join(first).join("hel").exists());
         assert!(!temp.path().join(second).join("hel").exists());
     });
+}
+
+#[test]
+fn published_builds_install_without_waiting_on_each_other_or_on_an_upload_or_collection() {
+    use std::sync::mpsc;
+    struct Overlap {
+        published_digest: String,
+        expected: usize,
+        arrived: AtomicUsize,
+        overlapped: AtomicUsize,
+        collects: AtomicUsize,
+        reached: std::sync::Mutex<mpsc::Sender<()>>,
+        release: std::sync::Mutex<mpsc::Receiver<()>>,
+    }
+    impl CommandExecutor for Overlap {
+        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+            match command.purpose.as_str() {
+                // Another build's upload stays in flight for the whole test.
+                "stage replacement Mjolnir worker" => {
+                    self.reached.lock().unwrap().send(()).unwrap();
+                    let _ = self
+                        .release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(20));
+                }
+                // Every link of the published build must be in flight at once;
+                // serialized installs would leave each one alone here until its
+                // deadline.
+                "link shared Mjolnir worker into session"
+                    if command
+                        .args
+                        .iter()
+                        .any(|arg| arg.contains(&self.published_digest)) =>
+                {
+                    self.arrived.fetch_add(1, Ordering::SeqCst);
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while self.arrived.load(Ordering::SeqCst) < self.expected
+                        && Instant::now() < deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    if self.arrived.load(Ordering::SeqCst) >= self.expected {
+                        self.overlapped.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                "collect unused Mjolnir worker binaries" => {
+                    self.collects.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+            targets::ProcessExecutor.execute(command)
+        }
+    }
+    const SESSIONS: usize = 6;
+    let temp = tempfile::tempdir().unwrap();
+    let published = source(temp.path(), "published");
+    let uploading = source(temp.path(), "uploading");
+    let seed = "cccccccccccccccccccccccccccccccc";
+    install(
+        &targets::ProcessExecutor,
+        &target(temp.path(), seed),
+        seed,
+        &published,
+    );
+    let sessions: Vec<_> = (0..SESSIONS)
+        .map(|n| {
+            let id = format!("d{n:031}");
+            (target(temp.path(), &id), id)
+        })
+        .collect();
+    let uploader = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let uploader_target = target(temp.path(), uploader);
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let executor = Overlap {
+        published_digest: mj_core::worker_launch::worker_executable_digest(&published).unwrap(),
+        expected: SESSIONS,
+        arrived: AtomicUsize::new(0),
+        overlapped: AtomicUsize::new(0),
+        collects: AtomicUsize::new(0),
+        reached: std::sync::Mutex::new(reached_tx),
+        release: std::sync::Mutex::new(release_rx),
+    };
+    std::thread::scope(|scope| {
+        let upload = scope.spawn(|| install(&executor, &uploader_target, uploader, &uploading));
+        reached_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let installs: Vec<_> = sessions
+            .iter()
+            .map(|(locator, id)| scope.spawn(|| install(&executor, locator, id, &published)))
+            .collect();
+        for install in installs {
+            install.join().unwrap();
+        }
+        // The upload is still held: nobody queued behind it.
+        let _ = release_tx.send(());
+        upload.join().unwrap();
+    });
+    assert_eq!(executor.overlapped.load(Ordering::SeqCst), SESSIONS);
+    // Only the upload collects; cached installs skip while it owns the store.
+    assert_eq!(executor.collects.load(Ordering::SeqCst), 1);
 }
 
 // Hard-won: shared-store review: a foreign collector can unlink a fallback source before cp opens it.
@@ -467,6 +607,8 @@ fn cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_cop
     sample.filesystems.truncate(1);
     sample.filesystems[0].paths = vec![temp.path().to_string_lossy().into_owned()];
     crate::target_storage::record_samples(&[sample], 1);
+    // The first install above claimed this interval's collection.
+    forget_collections();
     let executor = Transfers::default();
     install(&executor, &locator, id, &bytes);
     let profile = temp.path().join("empty-profile");
@@ -523,4 +665,54 @@ fn cached_installs_collect_and_link_on_full_targets_but_uploads_and_fallback_cop
     let error = install_worker_binary(&NoLinks, &locator, id, &WorkerInstall::Host(bytes), "hel")
         .unwrap_err();
     assert!(crate::target_storage::is_storage_full(&error), "{error:#}");
+}
+
+/// A wait behind a held gate is its own stage, open from the first failed
+/// attempt until the gate is taken, so a lifecycle watching for stalls can
+/// tell a queue from a stuck command. A free gate reports nothing.
+#[test]
+fn a_wait_behind_a_held_store_gate_is_reported_as_a_queue_stage() {
+    #[derive(Default)]
+    struct Stages(Mutex<Vec<(bool, targets::ProvisionStage)>>);
+    impl CommandExecutor for Stages {
+        fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+            unreachable!("waiting for a gate runs no command: {command:?}");
+        }
+        fn stage_started(&self, stage: targets::ProvisionStage) {
+            self.0.lock().unwrap().push((true, stage));
+        }
+        fn stage_finished(&self, stage: targets::ProvisionStage) {
+            self.0.lock().unwrap().push((false, stage));
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let locator = target(temp.path(), "33333333333333333333333333333333");
+    let gate = store_gate(&locator, "queue-stage-test");
+    let stages = Stages::default();
+    drop(lock_gate(&stages, &gate, "free", "take a free gate").unwrap());
+    assert!(stages.0.lock().unwrap().is_empty());
+
+    let held = gate.try_lock("holder", "hold the gate").unwrap();
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| {
+            drop(lock_gate(&stages, &gate, "waiter", "wait for the gate").unwrap());
+        });
+        while stages.0.lock().unwrap().is_empty() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            *stages.0.lock().unwrap(),
+            vec![(true, targets::ProvisionStage::WaitingForWorkerStore)],
+            "the stage is open while the gate is held"
+        );
+        drop(held);
+        waiter.join().unwrap();
+    });
+    assert_eq!(
+        *stages.0.lock().unwrap(),
+        vec![
+            (true, targets::ProvisionStage::WaitingForWorkerStore),
+            (false, targets::ProvisionStage::WaitingForWorkerStore)
+        ]
+    );
 }

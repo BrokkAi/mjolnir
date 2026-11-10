@@ -195,18 +195,36 @@ impl RuntimeState {
             } else {
                 // A destroy is waited for by a stop or handoff, up to a bound;
                 // other lifecycles hold the handoff until they finish.
+                // The operation's own id is also what a failure reports as its
+                // reference, so a person holding "the suspension did not finish"
+                // can find the daemon-log entry that says why.
+                let operation_reference = new_command_id("lifecycle")?;
+                // The wait notice asks the lifecycle registry for the stage
+                // when it renders; the gate keeps no copy.
+                let describer: Arc<dyn crate::upgrade::Describe> = Arc::new(LifecycleHold {
+                    state: Arc::downgrade(self),
+                    session_id: session_id.clone(),
+                    operation_id: operation_reference.clone(),
+                    kind,
+                });
                 let admitted = if let Some(label) = deferrable_admission {
-                    crate::upgrade::activity_unless_draining(label)?
+                    crate::upgrade::activity_unless_draining_described(label, describer)?
                 } else if kind == LifecycleKind::StartupCleanup {
-                    crate::upgrade::activity_unless_draining("failed startup cleanup")?
+                    crate::upgrade::activity_unless_draining_described(
+                        "failed startup cleanup",
+                        describer,
+                    )?
                 } else if kind == LifecycleKind::ForceDestroy {
                     crate::upgrade::destroy_activity(&session_id)?
                 } else if kind == LifecycleKind::Unpark {
-                    crate::upgrade::activity_unless_draining("subagent unpark admission")?
+                    crate::upgrade::activity_unless_draining_described(
+                        "subagent unpark admission",
+                        describer,
+                    )?
                 } else if child_close {
-                    crate::upgrade::activity("subagent close admission")?
+                    crate::upgrade::activity_described("subagent close admission", describer)?
                 } else {
-                    crate::upgrade::activity("session lifecycle")?
+                    crate::upgrade::activity_described("session lifecycle", describer)?
                 };
                 let upgrade_work = Arc::new(Mutex::new(Some(admitted)));
                 let control = control.unwrap_or_default();
@@ -220,10 +238,6 @@ impl RuntimeState {
                 }
                 let cancelled = control.cancelled.clone();
                 let (result_tx, result_rx) = tokio::sync::watch::channel(None);
-                // The operation's own id is also what a failure reports as its
-                // reference, so a person holding "the suspension did not finish"
-                // can find the daemon-log entry that says why.
-                let operation_reference = new_command_id("lifecycle")?;
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
@@ -236,6 +250,7 @@ impl RuntimeState {
                         kind,
                         started_at_epoch_seconds: epoch_seconds(),
                         active_stages: BTreeMap::new(),
+                        last_stage_change: tokio::time::Instant::now(),
                         resume_workspace_id,
                         resume_destination: None,
                         notice: None,
@@ -275,8 +290,13 @@ impl RuntimeState {
                                         && intent.operation_id == intent_id
                                 })
                                 .and_then(|intent| intent.container_upgrade)
+                                && let Err(error) = plan.retire_backup_for_destroy(&operation_id, &ProcessExecutor)
                             {
-                                plan.retire_backup_for_destroy(&operation_id, &ProcessExecutor)?;
+                                if kind != LifecycleKind::ForceDestroy {
+                                    return Err(error);
+                                }
+                                tracing::warn!(session_id = %operation_id, error = format!("{error:#}"), "Destroy could not remove retained container upgrade resources");
+                                cleanup_state.push_public_notice(&operation_id, format!("Cleanup of retained container upgrade resources failed during Destroy for session {operation_id}. Resources may remain; details are in the daemon logs."));
                             }
                             cleanup_state
                                 .release_restart_intent(&operation_id, &intent_id)
@@ -570,6 +590,33 @@ impl RuntimeState {
                 || (active.restart_intent.is_some()
                     && matches!(active.phase, LifecyclePhase::Completed(Err(_))))
         });
+    }
+}
+
+/// Names a lifecycle's hold on the upgrade gate. It reads the session, kind and
+/// stage from the lifecycle registry each time, so it can never disagree with it.
+struct LifecycleHold {
+    state: std::sync::Weak<RuntimeState>,
+    session_id: String,
+    operation_id: String,
+    kind: LifecycleKind,
+}
+
+impl crate::upgrade::Describe for LifecycleHold {
+    fn describe(&self) -> crate::upgrade::HoldDetail {
+        let stages = self
+            .state
+            .upgrade()
+            .map(|state| state.lifecycle_stage_labels(&self.session_id, &self.operation_id))
+            .unwrap_or_default();
+        crate::upgrade::HoldDetail {
+            subject: format!(
+                "{} {}",
+                self.kind.label(),
+                mj_core::state::short_id(&self.session_id)
+            ),
+            stage: (!stages.is_empty()).then(|| stages.join(" + ")),
+        }
     }
 }
 

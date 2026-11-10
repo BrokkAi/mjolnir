@@ -175,10 +175,9 @@ pub(crate) fn hold_image_pull<'a>(
 /// Run `work` with nothing downloading this target's image underneath it.
 ///
 /// For a container target this waits for a background download of the same
-/// image on the same host, and reports the wait as the "Pull image" stage with
-/// a notice saying what it is waiting for. Nothing extra is reported in the
-/// ordinary case where no download is running, and a target that runs no image
-/// just runs `work`.
+/// image on the same host. Contention is reported as queue time; once this
+/// caller owns the lock, `work` runs under the "Pull image" stage. A target
+/// that runs no image just runs `work`.
 pub(crate) fn with_image_ready<T>(
     target: &TargetTemplate,
     executor: &impl CommandExecutor,
@@ -189,9 +188,6 @@ pub(crate) fn with_image_ready<T>(
     };
     let image = container.image.clone();
     let lock = image_pull_mutex(&host, &image);
-    // The stage guard is created inside `on_wait`, so it exists only on the
-    // waiting path, and dropped as soon as the wait is over: the stage
-    // describes the wait, not the work that follows it.
     let mut waiting = None;
     let guard = hold_image_pull(
         &lock,
@@ -199,14 +195,16 @@ pub(crate) fn with_image_ready<T>(
         || {
             waiting = Some(ProvisionStageGuard::new(
                 executor,
-                ProvisionStage::PullingImage,
+                ProvisionStage::WaitingForImagePull,
             ));
             executor.notify_notice(&format!("Waiting for image {image} to finish downloading"));
         },
     )?;
     drop(waiting);
+    let pulling = ProvisionStageGuard::new(executor, ProvisionStage::PullingImage);
     let result = work();
     drop(guard);
+    drop(pulling);
     result
 }
 
@@ -217,48 +215,96 @@ mod tests {
 
     /// A Create issued while the daemon is downloading the image waits for
     /// that download instead of starting a second one, and says so once.
+    // Hard-won: 0703826: EC2 warming bypassed the gate used by session launches.
     #[test]
     fn a_create_waits_for_the_in_flight_pull_of_its_image() {
-        let lock = Arc::new(ImagePullLock::in_process());
-        let released = Arc::new(AtomicBool::new(false));
-        let waits = Arc::new(AtomicUsize::new(0));
+        use mj_core::config::ImagePullPolicy;
+        use mj_core::targets::{CommandOutput, CommandSpec, ContainerTemplate};
+        use std::sync::mpsc;
 
-        let downloader = {
-            let lock = lock.clone();
-            let released = released.clone();
-            std::thread::spawn(move || {
-                let guard = lock.local.lock().unwrap();
-                // Long enough that the waiter has to block on it.
-                std::thread::sleep(Duration::from_millis(400));
-                released.store(true, Ordering::Release);
-                drop(guard);
-            })
-        };
-
-        // Make sure the downloader holds the lock before the launch tries.
-        while lock.local.try_lock().is_ok() {
-            std::thread::sleep(Duration::from_millis(10));
+        struct Download {
+            started: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+            ready: Arc<AtomicBool>,
+        }
+        impl CommandExecutor for Download {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                if command.args.first().is_some_and(|arg| arg == "pull") {
+                    self.started.send(())?;
+                    self.release.recv()?;
+                    self.ready.store(true, Ordering::Release);
+                }
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: if self.ready.load(Ordering::Acquire) {
+                        b"sha256:preloaded\n".to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        struct Launch {
+            release: Mutex<Option<mpsc::Sender<()>>>,
+            waits: AtomicUsize,
+        }
+        impl CommandExecutor for Launch {
+            fn execute(&self, _: &CommandSpec) -> Result<CommandOutput> {
+                unreachable!("the launch must reach its image gate before running commands")
+            }
+            fn notify_notice(&self, notice: &str) {
+                assert!(notice.contains("Waiting for image"));
+                self.waits.fetch_add(1, Ordering::Release);
+                if let Some(release) = self.release.lock().unwrap().take() {
+                    release.send(()).unwrap();
+                }
+            }
         }
 
-        let guard = hold_image_pull(
-            &lock,
-            || false,
-            || {
-                waits.fetch_add(1, Ordering::Release);
-            },
+        let image = "ghcr.io/example/preload-coordination:1";
+        let (started, began) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let ready = Arc::new(AtomicBool::new(false));
+        let executor = Download {
+            started,
+            release: released,
+            ready: ready.clone(),
+        };
+        let refresh = mj_core::targets::image_refresh(
+            ImageHost::LocalPodman,
+            image,
+            None,
+            ImagePullPolicy::Missing,
         )
-        .expect("the launch takes the lock once the download finishes");
+        .unwrap();
+        let downloader = std::thread::spawn(move || {
+            crate::pollers::refresh_host_image(&refresh, &executor, &|_| {})
+        });
+        began.recv().unwrap();
+        let launch = Launch {
+            release: Mutex::new(Some(release)),
+            waits: AtomicUsize::new(0),
+        };
+        let target = TargetTemplate::LocalPodman(ContainerTemplate {
+            image: image.into(),
+            pull_policy: ImagePullPolicy::Missing,
+            extra_run_args: Vec::new(),
+            workspace_storage: Default::default(),
+            build_cache: None,
+        });
+        let result = with_image_ready(&target, &launch, || Ok(ready.load(Ordering::Acquire)));
+        // Release the fixture even if the gate regresses and lets work start
+        // early, so a failed assertion never leaves a blocked downloader.
+        if let Some(release) = launch.release.lock().unwrap().take() {
+            release.send(()).unwrap();
+        }
+        downloader.join().unwrap().unwrap();
         assert!(
-            released.load(Ordering::Acquire),
-            "the launch proceeded while the download still held the lock"
+            result.unwrap(),
+            "the launch ran before the preload finished"
         );
-        assert_eq!(
-            waits.load(Ordering::Acquire),
-            1,
-            "the wait should be announced exactly once"
-        );
-        drop(guard);
-        downloader.join().expect("the download thread finishes");
+        assert_eq!(launch.waits.load(Ordering::Acquire), 1);
     }
 
     /// A cancelled Create stops waiting instead of sitting behind a

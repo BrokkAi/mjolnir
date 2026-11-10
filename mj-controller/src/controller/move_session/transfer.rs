@@ -151,6 +151,9 @@ fn rsync_probe() -> Vec<String> {
 /// Rsync's remote shell is the existing locator command, including its SSH
 /// session lease and container namespace. The remote endpoint sees only Move
 /// staging. Partial files belong to this operation and survive retry.
+///
+/// If the SSH server turns the transport away, the whole transfer runs again
+/// (see [`retry_refused_transport`]).
 fn copy_workspace(
     executor: &(impl CommandExecutor + Sync),
     backend: &targets::TargetLocator,
@@ -160,35 +163,98 @@ fn copy_workspace(
 ) -> Result<()> {
     std::fs::create_dir_all(local)?;
     let local_path = format!("{}/", local.display());
-    let mut args: Vec<String> = RSYNC_TRANSFER_OPTIONS.map(String::from).into();
     let base = targets::locator_command(backend, rsync_remote_arguments(remote));
-    let lease = base.open_ssh_session(executor)?;
-    let wrapper = if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
-        let remote_path = format!("{}/", remote.display());
-        args.extend(if upload {
-            [local_path, remote_path]
-        } else {
-            [remote_path, local_path]
-        });
-        None
-    } else {
-        let directory = rsync_shell(lease.command())?;
-        let path = directory.path().join("move-rsync-shell");
-        args.extend(["--rsh".into(), path.to_string_lossy().into_owned()]);
-        args.extend(if upload {
-            [local_path, "move:./".into()]
-        } else {
-            ["move:./".into(), local_path]
-        });
-        Some(directory)
-    };
-    let result = super::super::execute_checked(
+    let command = CommandSpec::new("rsync", Vec::<String>::new())
+        .purpose("transfer Move workspace with resumable files");
+    let output = retry_refused_transport(
         executor,
-        CommandSpec::new("rsync", args).purpose("transfer Move workspace with resumable files"),
-    );
-    drop(wrapper);
-    drop(lease);
-    result.map(|_| ())
+        base.ssh_destination.as_deref(),
+        &command.purpose,
+        |walk| {
+            let mut args: Vec<String> = RSYNC_TRANSFER_OPTIONS.map(String::from).into();
+            // Rsync reads this ssh's stdout as its own protocol and appends its
+            // server arguments to the remote line, so the session carries no
+            // start marker.
+            let session = base.open_ssh_session_without_marker(executor, walk)?;
+            let wrapper = if matches!(backend, targets::TargetLocator::LocalBare { .. }) {
+                let remote_path = format!("{}/", remote.display());
+                args.extend(if upload {
+                    [local_path.clone(), remote_path]
+                } else {
+                    [remote_path, local_path.clone()]
+                });
+                None
+            } else {
+                let directory = rsync_shell(session.command())?;
+                let path = directory.path().join("move-rsync-shell");
+                args.extend(["--rsh".into(), path.to_string_lossy().into_owned()]);
+                args.extend(if upload {
+                    [local_path.clone(), "move:./".into()]
+                } else {
+                    ["move:./".into(), local_path.clone()]
+                });
+                Some(directory)
+            };
+            let mut attempt = command.clone();
+            attempt.args = args;
+            let output = executor.execute(&attempt);
+            drop(wrapper);
+            Ok((output?, session.into_parts().1))
+        },
+    )?;
+    super::super::check_output(&command, output).map(|_| ())
+}
+
+/// Run a transfer whose `ssh` transport an SSH server may turn away, and run
+/// it again when it does.
+///
+/// Rsync's `ssh` carries no start marker (its stdout is the rsync protocol),
+/// so a refusal is read from the `ssh` messages rsync relays on stderr, and
+/// rsync exits with a status of its own (12). A transfer is idempotent and
+/// resumes from its partial files, so running it again is safe even when
+/// the stderr reading was a hangup in the middle. `attempt` leases the session
+/// from the walk it is given, runs the transfer and returns its output with the
+/// lease; the lease records what the refusal means, and the next attempt
+/// leases the next shard, or waits and tries the same way as every other
+/// refused SSH command. A refusal that outlasts the retry bound fails the transfer
+/// with the error naming its causes. Returns the last output.
+fn retry_refused_transport(
+    executor: &impl CommandExecutor,
+    destination: Option<&str>,
+    purpose: &str,
+    mut attempt: impl FnMut(
+        &mut targets::SshWalk,
+    ) -> Result<(targets::CommandOutput, Option<targets::SshSessionLease>)>,
+) -> Result<targets::CommandOutput> {
+    let mut retry = targets::SshRefusalRetry::new();
+    loop {
+        let (output, lease) = attempt(retry.walk())?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let refusal = lease
+            .as_ref()
+            .filter(|_| output.status != 0)
+            .and_then(|lease| {
+                let refusal = targets::ssh_refusal_in_stderr(&stderr)?;
+                Some((refusal, lease.note_refusal(refusal)))
+            });
+        drop(lease);
+        let Some((refusal, walks_on)) = refusal else {
+            return Ok(output);
+        };
+        let delay = retry
+            .next(
+                refusal,
+                walks_on,
+                destination.unwrap_or_default(),
+                purpose,
+                &stderr,
+            )
+            .with_context(|| format!("{purpose} failed"))?;
+        ensure!(
+            targets::sleep_unless_cancelled(delay, &|| executor.cancellation_requested()),
+            "operation cancelled while {purpose}"
+        );
+    }
 }
 
 /// Keep the staging path in the locator's quoted argv, never in rsync's
@@ -344,17 +410,6 @@ impl Controller {
                         .any(|session| session.target.is_some() && session.target == source.target),
                     "retained source is still referenced by an active session"
                 );
-                if let Some(locator) = &source.target {
-                    let backend =
-                        super::super::backend::backend_locator(locator, source, &self.config)?;
-                    targets::retire_move_target_plan(&backend, session_id)?.execute(executor)?;
-                    self.release_retired_move_target(
-                        source,
-                        &backend,
-                        self.state.sessions.get(session_id),
-                        executor,
-                    );
-                }
                 if let mj_core::state::Checkout::ManagedWorktree {
                     worktree: checkout, ..
                 } = source.checkout()
@@ -371,57 +426,19 @@ impl Controller {
                         }),
                         "retained checkout is still referenced by a session"
                     );
-                    super::super::worktree::retire_managed_worktree(executor, checkout)?;
                 }
+                let environment = crate::database::retained_move_environment(operation_id)?
+                    .context("retained Move source has no recorded environment owner")?;
+                super::super::environment::retire_owned_environment(
+                    environment,
+                    &self.config,
+                    executor,
+                    super::super::BranchDisposition::Keep,
+                    super::super::CheckoutDisposition::Remove,
+                )?;
                 crate::database::forget_retained_move_source(operation_id)
             },
         )
-    }
-
-    /// Release the mbx build state of a target a Move has just retired,
-    /// keeping whatever the placement the session goes on running in,
-    /// `live`, can still build in. When that placement cannot be resolved,
-    /// nothing is released: a stale target costs disk until mbx ages it out,
-    /// while a wrong release costs a live session its build output.
-    fn release_retired_move_target(
-        &self,
-        retired: &mj_core::state::SessionRecord,
-        backend: &targets::TargetLocator,
-        live: Option<&mj_core::state::SessionRecord>,
-        executor: &impl CommandExecutor,
-    ) {
-        let Some(release) = super::super::mbx::release::BuildStateRelease::for_target(
-            retired,
-            backend,
-            &self.config,
-        ) else {
-            return;
-        };
-        let live_backend = match live
-            .and_then(|live| live.target.as_ref().map(|target| (live, target)))
-        {
-            None => None,
-            Some((live, target)) => {
-                match super::super::backend::backend_locator(target, live, &self.config) {
-                    Ok(backend) => Some((live, backend)),
-                    Err(error) => {
-                        tracing::warn!(
-                            session_id = %retired.id,
-                            error = format!("{error:#}"),
-                            "the Move's live target could not be resolved, so the retired target's build state is kept"
-                        );
-                        return;
-                    }
-                }
-            }
-        };
-        if let Some(release) = release.excluding(
-            live_backend
-                .as_ref()
-                .map(|(live, backend)| (*live, backend)),
-        ) {
-            release.run(executor);
-        }
     }
 
     /// Each repository of a Move's workspace transfer, under the id the source
@@ -649,13 +666,12 @@ impl Controller {
             1,
             &mut assessment,
         );
-        let target = &self.config.targets[selection
-            .target_template_id
-            .as_ref()
-            .context("Move target missing")?];
-        if matches!(target, mj_core::config::TargetTemplate::AwsEc2 { .. }) {
-            return Ok(assessment);
-        }
+        let target = self.config.ensure_target_enabled(
+            selection
+                .target_template_id
+                .as_deref()
+                .context("Move target missing")?,
+        )?;
         if matches!(target, mj_core::config::TargetTemplate::LocalBare)
             && matches!(layout.backend, targets::TargetLocator::LocalBare { .. })
         {
@@ -775,7 +791,7 @@ impl Controller {
                     &mut assessment,
                 );
             }
-        } else if !matches!(target, mj_core::config::TargetTemplate::AwsEc2 { .. }) {
+        } else {
             let path = match target {
                 mj_core::config::TargetTemplate::SshBare {
                     workspace_prefix, ..
@@ -801,44 +817,6 @@ impl Controller {
             );
         }
         Ok(assessment)
-    }
-
-    pub(super) fn assess_prepared_destination(
-        &self,
-        operation: &MoveOperation,
-        assessment: &mut WorkspaceAssessment,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<()> {
-        let destination = operation
-            .prepared_destination
-            .as_ref()
-            .context("EC2 Move destination missing")?;
-        let backend = super::destination::prepared_backend(
-            destination
-                .target()
-                .context("EC2 Move target not checked")?,
-            &destination.runtime,
-            &operation.selection.session_id,
-        )?;
-        let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
-        super::super::execute_checked(
-            executor,
-            targets::locator_command(&backend, rsync_probe())
-                .purpose("check prepared EC2 Move transport"),
-        )?;
-        let targets::TargetLocator::AwsEc2 { workspace, .. } = &backend else {
-            bail!("prepared target is not EC2");
-        };
-        storage_probe(
-            executor,
-            targets::locator_command(&backend, storage_arguments(Path::new(workspace)))
-                .purpose("check prepared EC2 Move staging and workspace space"),
-            "Destination",
-            "destination",
-            2,
-            assessment,
-        );
-        operation.selection.workspace.validate(assessment)
     }
 
     pub(super) fn new_workspace_transfer(
@@ -1100,26 +1078,16 @@ impl Controller {
             executor.notify_notice(&format!("Excluded files remain in the stopped source. Inspect with mj move-sources --session {id}; remove with mj move-sources --session {id} --cleanup {} --yes", operation.operation_id));
         } else {
             // Operate on the saved resource identity, never on the destination.
-            // cleanup_stopped_target persists, so use the target/checkout
-            // primitives directly and leave the active session row untouched.
-            let source = &transfer.source;
-            if let Some(locator) = &source.target {
-                let backend =
-                    super::super::backend::backend_locator(locator, source, &self.config)?;
-                targets::retire_move_target_plan(&backend, id)?.execute(executor)?;
-                self.release_retired_move_target(
-                    source,
-                    &backend,
-                    self.state.sessions.get(id),
-                    executor,
-                );
-            }
-            if let mj_core::state::Checkout::ManagedWorktree {
-                worktree: checkout, ..
-            } = source.checkout()
-            {
-                super::super::worktree::retire_managed_worktree(executor, checkout)?;
-            }
+            // The accepted source owner survives publication of the destination.
+            let environment = crate::database::move_source_environment(&operation.operation_id)?
+                .context("Move source has no recorded environment owner")?;
+            super::super::environment::retire_owned_environment(
+                environment,
+                &self.config,
+                executor,
+                super::super::BranchDisposition::Keep,
+                super::super::CheckoutDisposition::Remove,
+            )?;
         }
         if transfer.controller_stage.exists() {
             std::fs::remove_dir_all(&transfer.controller_stage)?;
@@ -1162,28 +1130,14 @@ impl Controller {
                 if let Some(locator) = &current.target
                     && Some(locator) != prepared.as_ref()
                 {
-                    let backend =
-                        super::super::backend::backend_locator(locator, current, &self.config)?;
-                    targets::retire_move_target_plan(&backend, id)?.execute(executor)?;
+                    super::super::environment::retire_session_environment(
+                        current,
+                        &self.config,
+                        executor,
+                        super::super::BranchDisposition::Keep,
+                    )?;
                     // The source becomes the session again, so it is the
                     // placement whose build state must survive.
-                    self.release_retired_move_target(
-                        current,
-                        &backend,
-                        Some(&transfer.source),
-                        executor,
-                    );
-                }
-                let source_checkout = transfer.source.checkout();
-                let source_worktree = match source_checkout {
-                    mj_core::state::Checkout::ManagedWorktree { worktree, .. } => Some(worktree),
-                    _ => None,
-                };
-                if let Ok(mj_core::state::Checkout::ManagedWorktree { worktree, .. }) =
-                    self.state.checkout(id)
-                    && Some(worktree) != source_worktree
-                {
-                    super::super::worktree::retire_managed_worktree(executor, worktree)?;
                 }
                 let mut source = (*transfer.source).clone();
                 source.state = SessionState::Error;
@@ -1191,7 +1145,10 @@ impl Controller {
                     "{error:#}; source environment retained for Move retry"
                 ));
                 source.updated_at = now();
-                crate::database::save_resumed_session(&source, None)?;
+                let environment =
+                    crate::database::move_source_environment(&operation.operation_id)?
+                        .context("Move rollback lost its source environment")?;
+                crate::database::restore_resumed_session(&source, &environment.id)?;
                 self.state.sessions.insert(id.clone(), source);
                 Ok(error)
             },
@@ -1202,6 +1159,76 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: 049656544: retained-source cleanup deleted a referenced checkout before refusing.
+    #[cfg(unix)]
+    #[test]
+    fn retained_source_reference_refusal_preserves_checkout_and_worker_files() {
+        use crate::controller::test_support::{
+            IsolatedTest, committed_repository, managed_worktree_session,
+            resume_compatibility_config, test_name,
+        };
+        const TEST: &str = "retained_source_reference_refusal_preserves_checkout_and_worker_files";
+        const CHILD: &str = "MJ_TEST_RETAINED_SOURCE_REFERENCE";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(module_path!(), TEST))
+                .isolated_store(directory.path())
+                .env(CHILD, "1")
+                .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let repository = committed_repository();
+        let directory = tempfile::tempdir().unwrap();
+        let id = "11111111111111111111111111111111";
+        let mut source = managed_worktree_session(repository.path(), id);
+        source.target_template_id = "local-bare".into();
+        source.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: directory.path().join(id),
+        });
+        std::fs::create_dir_all(directory.path().join(id)).unwrap();
+        std::fs::write(directory.path().join(id).join("worker-evidence"), "keep").unwrap();
+        let checkout = source
+            .managed_worktree
+            .as_ref()
+            .unwrap()
+            .worktree_root
+            .clone();
+        std::fs::write(checkout.join("work-in-progress"), "keep").unwrap();
+        crate::database::save_session(&source).unwrap();
+        let mut operation = super::super::tests::source_recovery_operation(&source);
+        operation.workspace_transfer = Some(WorkspaceTransfer {
+            assessment: Default::default(),
+            source: Box::new(source.clone()),
+            source_stage: directory.path().join("source-stage"),
+            controller_stage: directory.path().join("controller-stage"),
+            phase: WorkspaceTransferPhase::Ready,
+        });
+        crate::database::save_move_operation(&operation).unwrap();
+        crate::database::retain_move_source(&operation).unwrap();
+        let mut destination = source.clone();
+        destination.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: directory.path().join("destination").join(id),
+        });
+        crate::database::save_session(&destination).unwrap();
+        let controller = Controller {
+            config: resume_compatibility_config(),
+            state: crate::database::load_state().unwrap(),
+        };
+        let error = controller
+            .cleanup_retained_move_source(id, &operation.operation_id, &targets::ProcessExecutor)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("retained checkout is still referenced"),
+            "{error:#}"
+        );
+        assert!(checkout.join("work-in-progress").exists());
+        assert!(directory.path().join(id).join("worker-evidence").exists());
+        assert_eq!(crate::database::retained_move_sources(id).unwrap().len(), 1);
+    }
 
     // Needs a POSIX shell.
     #[cfg(unix)]
@@ -1492,6 +1519,87 @@ mod tests {
                 std::fs::remove_file(destination.join("large file")).unwrap();
             }
         }
+    }
+
+    /// Rsync exits 12 whatever its `ssh` transport reports, and its `ssh`
+    /// carries no start marker, so the refusals are read from the stderr it
+    /// relays. A session the server refuses (`MaxSessions`) runs the whole
+    /// transfer again on the next shard at once; a connection dropped before
+    /// authentication runs it again on the same shard, after a wait; a
+    /// failure that shows no refusal is final.
+    // Hard-won: 75da0c2b0: a refused SSH session failed the whole Move, because the rsync transport was untagged and never retried.
+    #[cfg(unix)]
+    #[test]
+    fn a_move_transfer_the_ssh_server_refused_runs_again_on_the_next_shard() {
+        use mj_core::targets::{
+            CommandOutput, SshSessions, SshSharingForTest, set_ssh_connection_sharing_for_test,
+            set_ssh_retry_backoff_for_test,
+        };
+        const SESSION_REFUSED: &str = "mux_client_request_session: session request failed: \
+            Session open refused by peer\nrsync: connection unexpectedly closed \
+            (0 bytes received so far) [Receiver]\nrsync error: error in rsync protocol data \
+            stream (code 12)";
+        const DROPPED: &str = "kex_exchange_identification: Connection closed by 10.0.0.1 port 22\n\
+            rsync error: error in rsync protocol data stream (code 12)";
+        let sockets = tempfile::tempdir_in("/tmp").unwrap();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
+            sockets.path().to_path_buf(),
+        )));
+        set_ssh_retry_backoff_for_test(Some(std::time::Duration::from_millis(5)));
+        let ssh = targets::SshTarget {
+            destination: "move-refused-host".into(),
+            ssh_args: Vec::new(),
+        };
+        let run = |replies: &[(i32, &str)]| {
+            let mut shards = Vec::new();
+            let mut replies = replies.iter();
+            let output = retry_refused_transport(
+                &targets::ProcessExecutor,
+                Some(&ssh.destination),
+                "transfer Move workspace with resumable files",
+                |walk| {
+                    let lease = SshSessions::lease_probe(&ssh, walk);
+                    let name = lease.control_path().unwrap().file_name().unwrap();
+                    shards.push(
+                        name.to_string_lossy()
+                            .rsplit('-')
+                            .next()
+                            .unwrap()
+                            .to_owned(),
+                    );
+                    let &(status, stderr) = replies.next().expect("an unexpected extra attempt");
+                    Ok((
+                        CommandOutput {
+                            status,
+                            stdout: Vec::new(),
+                            stderr: stderr.as_bytes().to_vec(),
+                        },
+                        Some(lease),
+                    ))
+                },
+            );
+            (output.unwrap().status, shards)
+        };
+        let refused = run(&[
+            (12, SESSION_REFUSED),
+            (12, DROPPED),
+            (12, SESSION_REFUSED),
+            (0, ""),
+        ]);
+        let failed = run(&[(
+            12,
+            "rsync: write failed on \"/data/x\": No space left on device",
+        )]);
+        set_ssh_retry_backoff_for_test(None);
+        set_ssh_connection_sharing_for_test(None);
+
+        assert_eq!(refused.0, 0);
+        assert_eq!(
+            refused.1,
+            ["0", "1", "1", "2"],
+            "a refused session walks on; a dropped connection retries its shard"
+        );
+        assert_eq!(failed, (12, vec!["0".to_owned()]), "no refusal, no retry");
     }
 
     // Needs a POSIX shell and rsync.

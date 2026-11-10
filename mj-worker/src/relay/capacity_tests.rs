@@ -32,6 +32,7 @@ fn finish(relay: &mut DurableRelay, id: &str, text: &str, stop: &str) {
         .record_command_completed(
             id,
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: stop.into(),
                 usage: None,
@@ -95,6 +96,7 @@ fn server_retry_requires_a_jev_verdict_and_retries_with_backoff() {
         .unwrap();
     relay
         .record_observation(RelayObservation::HarnessTurnSettled {
+            autonomous: None,
             origin: None,
             prompt_in_flight: false,
         })
@@ -192,6 +194,7 @@ fn text_only_capacity_message_and_structured_errors_wait_for_jev() {
         .record_command_completed(
             "structured-prompt",
             RelayCommandOutcome::Prompt {
+                work_facts: None,
                 stop_reason: "error".into(),
                 diagnostic: Some(mj_core::diagnostic::TurnDiagnostic::from_acp(
                     &agent_client_protocol::Error::new(-32603, "failed")
@@ -295,7 +298,9 @@ fn autonomous_provider_failure_arms_one_retry_and_survives_restart() {
             )),
         )))
         .unwrap();
-    relay.settle_harness_turn(Some("test".into())).unwrap();
+    relay
+        .settle_harness_turn(Some("test".into()), "end_turn")
+        .unwrap();
     relay.prepare_pending_assessment().unwrap();
     let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
     assert!(evidence.completion.is_some());
@@ -617,7 +622,7 @@ fn a_routine_checkpoint_keeps_a_journaled_retry_assessment() {
     start(&mut relay, "original-prompt");
     finish(&mut relay, "original-prompt", "temporary failure", "error");
     let context = mj_transcript::turn_context::TurnContext::default();
-    context.reset("Implement");
+    context.reset(None, "Implement");
     let evidence = context.evidence(
         HarnessKind::Codex,
         mj_core::activity::verdict::TurnPhase::Running,

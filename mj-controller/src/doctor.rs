@@ -1,6 +1,5 @@
 //! Actionable host and configuration prerequisite checks.
 
-#[cfg(unix)]
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -31,6 +30,7 @@ use mj_core::credentials::login_command;
 use mj_core::local_git::{MINIMUM_GIT_VERSION, parse_git_version};
 
 mod catalog;
+mod github;
 pub use catalog::{Catalogs, LARGE_CATALOG, catalog_checks, catalog_profile_ids};
 
 // Only the image for the Apple container smoke test when the config has no
@@ -224,6 +224,7 @@ pub fn run_with_config_path(
     let offered = offered.as_ref().map_err(|gap| *gap);
     checks.extend(podman);
     checks.extend(docker);
+    checks.extend(local_bare_github_checks(config, executor));
     checks.extend(ssh_bare_checks(config, executor));
     checks.extend(ssh_podman_checks(config, executor, options.smoke));
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
@@ -234,7 +235,6 @@ pub fn run_with_config_path(
     checks.extend(build_cache_release_check(
         &crate::controller::recent_release_failures(),
     ));
-    checks.extend(aws_checks(config, executor));
     checks.extend(worker_binary_checks(offered));
     checks.extend(ssh_bare_worker_checks(config, executor));
     checks.push(daemon_build_check());
@@ -256,16 +256,11 @@ fn git_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<
         for (id, target) in &config.targets {
             if let TargetTemplate::SshBare { ssh, .. } = target {
                 let ssh = RuntimeSshTarget::from(ssh);
-                let mut command = ssh_validation_command(
+                let command = strict_ssh_validation_command(
                     &ssh,
                     vec!["git".into(), "--version".into()],
                     "check remote Git version",
                 );
-                // Like the connectivity probe, doctor must not accept a new
-                // host key, even when the target normally uses accept-new.
-                command
-                    .args
-                    .splice(0..0, ["-o".into(), "StrictHostKeyChecking=yes".into()]);
                 checks.push(git_version_check(
                     &format!("git.ssh-bare.{id}"),
                     &ssh.destination,
@@ -276,6 +271,20 @@ fn git_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<
         }
     }
     checks
+}
+
+/// [`ssh_validation_command`] that, like the connectivity probe, never accepts
+/// a new host key, even when the target normally uses accept-new.
+fn strict_ssh_validation_command(
+    ssh: &RuntimeSshTarget,
+    remote_args: Vec<String>,
+    purpose: &'static str,
+) -> CommandSpec {
+    let mut command = ssh_validation_command(ssh, remote_args, purpose);
+    command
+        .args
+        .splice(0..0, ["-o".into(), "StrictHostKeyChecking=yes".into()]);
+    command
 }
 
 fn git_version_check(
@@ -354,21 +363,7 @@ fn build_cache_checks(
                     id,
                     title,
                     format!(
-                        "Host mbx {version} is compatible with Mjolnir's mbx {} for targets {targets}.",
-                        crate::controller::MBX_VERSION
-                    ),
-                ),
-                crate::controller::DoctorHostMbxStatus::TooOld(version) => DoctorCheck::warning(
-                    id,
-                    title,
-                    format!(
-                        "Host mbx {version} is older than the minimum supported version {}; sessions on targets {targets} run without the shared build cache.",
-                        crate::controller::MBX_VERSION
-                    ),
-                    format!(
-                        "Upgrade mbx on {} to {} or newer from Settings › Setup › Machines, then rerun `mj doctor`.",
-                        host.host,
-                        crate::controller::MBX_VERSION
+                        "Host mbx {version} is compatible with the shared build cache for targets {targets}."
                     ),
                 ),
                 crate::controller::DoctorHostMbxStatus::Unknown(error) => DoctorCheck::warning(
@@ -653,6 +648,7 @@ pub fn render_human(checks: &[DoctorCheck], output: &mut impl Write) -> Result<(
 }
 
 pub fn setup_instructions(platform: InstructionsPlatform) -> String {
+    let github_rewrites = github::rewrite_commands().join("\n");
     match platform {
         InstructionsPlatform::Linux => format!(
             "# Mjolnir setup instructions for Linux\n\n\
@@ -671,6 +667,17 @@ package include it. The worker installs the pinned harness version itself.\n\
 Node-based harnesses reuse Node.js 22 or newer with npm and npx when present;\n\
 otherwise Mjolnir installs its own pinned Node.js and needs curl. Kimi and Grok\n\
 need curl and Bash. Mjolnir does not install those shell prerequisites.\n\n\
+## GitHub access on bare targets\n\n\
+A bare target (local or SSH) runs Git as that host's own account, so the host\n\
+needs its own way to reach GitHub without a person present. Either add a GitHub\n\
+SSH key to the host and trust GitHub's host key (check `ssh -T git@github.com`\n\
+there), or use HTTPS: run `gh auth login` and `gh auth setup-git` on the host,\n\
+then send SSH GitHub URLs over HTTPS:\n\n\
+```console\n\
+{github_rewrites}\n\
+```\n\n\
+`mj doctor` reports `github.*` checks per bare target. A target that never uses\n\
+GitHub can ignore them.\n\n\
 ## Linux container-runtime postconditions\n\n{}\n\n{}",
             crate::targets::PODMAN_DOCUMENTATION,
             crate::targets::DOCKER_DOCUMENTATION
@@ -705,6 +712,17 @@ The worker installs the pinned harness version itself. Node-based harnesses\n\
 reuse Node.js 22 or newer with npm and npx when present; otherwise Mjolnir\n\
 installs its own pinned Node.js and needs curl. Kimi and Grok need curl and\n\
 Bash. Mjolnir does not install those shell prerequisites.\n\n\
+## GitHub access on bare targets\n\n\
+A bare target (local or SSH) runs Git as that host's own account, so the host\n\
+needs its own way to reach GitHub without a person present. Either add a GitHub\n\
+SSH key to the host and trust GitHub's host key (check `ssh -T git@github.com`\n\
+there), or use HTTPS: run `gh auth login` and `gh auth setup-git` on the host,\n\
+then send SSH GitHub URLs over HTTPS:\n\n\
+```console\n\
+{github_rewrites}\n\
+```\n\n\
+`mj doctor` reports `github.*` checks per bare target. A target that never uses\n\
+GitHub can ignore them.\n\n\
 ## Podman\n\n\
 A local Podman target on macOS uses a rootless `podman machine`. Install\n\
 Podman and create the machine:\n\n\
@@ -928,12 +946,145 @@ fn harness_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
     config
         .profiles
         .iter()
-        .map(|(id, profile)| {
+        .flat_map(|(id, profile)| {
             let mut check = harness_profile_check(id, profile, executor);
             check.detail = format!("{} {}", profile_summary(profile), check.detail);
-            check
+            let scope = aws_scope_check(id, profile, &config.targets, executor);
+            std::iter::once(check).chain(scope)
         })
         .collect()
+}
+
+/// What AWS credentials a Bedrock profile's sessions receive. Without a
+/// `[profiles.<id>.aws]` role they receive the controller host's own
+/// credentials; with one, credentials limited to the role, which is tested
+/// here with a real `AssumeRole` call so a broken trust policy or policy
+/// shows up before a session fails to start. A target the role cannot apply
+/// to (raw local, EC2, or one that sets its own AWS credentials) is reported
+/// by itself with the reason, whether or not another target is scoped.
+fn aws_scope_check(
+    id: &str,
+    profile: &HarnessProfile,
+    targets: &BTreeMap<String, TargetTemplate>,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorCheck> {
+    use crate::aws_credentials::{CredentialsWithheld, SessionHost, credentials_withheld};
+    if !profile.enabled {
+        return Vec::new();
+    }
+    let check_id = format!("harness.{id}.aws-scope");
+    let title = format!("AWS credentials for profile {id}");
+    if !crate::aws_credentials::is_bedrock(profile) {
+        // Sessions run, without scoping; they are not refused.
+        let Some(role) = &profile.aws else {
+            return Vec::new();
+        };
+        return vec![DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "[profiles.{id}.aws] names {}, but {}, so it has no effect. Sessions run without role-scoped credentials.",
+                role.role_arn,
+                CredentialsWithheld::NotBedrock.why_a_role_cannot_apply()
+            ),
+            format!(
+                "Remove `[profiles.{id}.aws]`, or configure Bedrock (the AWS credential chain) for this profile."
+            ),
+        )];
+    }
+    // The same question launch and the sync ask, per configured target.
+    let mut receiving = Vec::new();
+    let mut withheld = Vec::new();
+    for (target_id, template) in targets {
+        let environment = mj_core::state::TargetRuntimeSettings::from(template).environment;
+        match credentials_withheld(profile, SessionHost::from(template), &environment) {
+            None => receiving.push(target_id.as_str()),
+            Some(reason) => withheld.push((target_id.as_str(), reason)),
+        }
+    }
+    let Some(role) = &profile.aws else {
+        if receiving.is_empty() {
+            return Vec::new();
+        }
+        return vec![DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "Sessions on {} receive the controller host's own AWS credentials, unscoped: anything running in a session can use everything those credentials allow.",
+                receiving.join(", ")
+            ),
+            format!(
+                "Create an IAM role for sessions that the host's AWS login may assume, and set `[profiles.{id}.aws] role_arn = \"arn:aws:iam::<account>:role/<name>\"`. Sessions then receive short-lived credentials limited to that role and to a Bedrock-only session policy."
+            ),
+        )];
+    };
+    let mut checks = withheld
+        .iter()
+        .map(|(target_id, reason)| {
+            DoctorCheck::warning(
+                format!("{check_id}.{target_id}"),
+                format!("AWS credentials for profile {id} on target {target_id}"),
+                format!(
+                    "[profiles.{id}.aws] names {}, but it has no effect on sessions on target {target_id}: {}. Those sessions run with that target's own AWS identity, not role-scoped credentials.",
+                    role.role_arn,
+                    reason.why_a_role_cannot_apply()
+                ),
+                "Run this profile's Bedrock sessions on a container or SSH target without AWS credentials in its environment, or use the target's own identity deliberately and give it only the access sessions need.",
+            )
+        })
+        .collect::<Vec<_>>();
+    if receiving.is_empty() {
+        return checks;
+    }
+    let source = match crate::aws_credentials::selected_source(profile) {
+        Ok(source) => source,
+        Err(error) => {
+            checks.push(DoctorCheck::fixable(
+                check_id,
+                title,
+                format!("The profile's AWS identity could not be selected: {error:#}"),
+                "Fix the profile's Codex configuration or AWS_PROFILE setting.",
+            ));
+            return checks;
+        }
+    };
+    checks.push(match crate::aws_assume_role::probe(&source, executor) {
+        Ok(credentials) => {
+            let until = credentials
+                .expires_at_epoch_millis()
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map_or_else(String::new, |at| {
+                    format!(" Those credentials last until {at}.")
+                });
+            DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "The host's AWS login assumed {} for a probe session that exists only for this check, named like a real session (mj-<32 hex digits>); sessions on {} receive credentials limited to it.{until}",
+                    role.role_arn,
+                    receiving.join(", ")
+                ),
+            )
+        }
+        Err(error) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!("{error:#}"),
+            format!(
+                "Make the controller's AWS login (profile {}) able to assume the role: allow sts:AssumeRole on it, and name the login in the role's trust policy{}. Sessions on this profile are refused until then.",
+                source
+                    .environment
+                    .get("AWS_PROFILE")
+                    .map_or("default", String::as_str),
+                if role.source_identity {
+                    " with sts:SetSourceIdentity allowed (source_identity is on)"
+                } else {
+                    ""
+                }
+            ),
+        ),
+    });
+    checks
 }
 
 /// The readiness of one profile: its home, and whether it can authenticate.
@@ -1231,7 +1382,7 @@ fn subagent_policy_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
 fn subagent_policy_check(config: &Config) -> DoctorCheck {
     let subagents = &config.subagents;
     let detail = format!(
-        "Claude, Codex, and DSH sessions may opt in, up to {} sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.",
+        "Claude, Codex, DSH, and OpenCode sessions may opt in, up to {} sub-agents at once per session. Sub-agents may use any enabled profile that offers the configured model and effort.",
         subagents.max_concurrent
     );
     DoctorCheck::ready("subagents.policy", "Sub-agent policy", detail)
@@ -1869,6 +2020,8 @@ fn ssh_identity_file(ssh: &RuntimeSshTarget) -> Option<&str> {
 }
 
 /// One check per `ssh-bare` target: can Hel reach the host noninteractively?
+/// A reachable host also gets its GitHub access check; an unreachable one has
+/// one problem, not two.
 fn ssh_bare_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
     let Ok(config) = config else {
         return Vec::new();
@@ -1876,35 +2029,79 @@ fn ssh_bare_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) ->
     config
         .targets
         .iter()
-        .filter_map(|(id, target)| match target {
+        .flat_map(|(id, target)| match target {
             TargetTemplate::SshBare { ssh, .. } => {
-                Some(ssh_bare_check(id, &RuntimeSshTarget::from(ssh), executor))
+                let ssh = RuntimeSshTarget::from(ssh);
+                let (check, reachable) = ssh_bare_check(id, &ssh, executor);
+                let mut checks = vec![check];
+                if reachable {
+                    checks.push(github::github_access_check(
+                        format!("github.ssh-bare.{id}"),
+                        format!("GitHub access from target {id}"),
+                        github::BareHost::Ssh(&ssh),
+                        executor,
+                    ));
+                }
+                checks
             }
-            _ => None,
+            _ => Vec::new(),
         })
         .collect()
 }
 
+/// One GitHub access check per local bare target, run on this machine.
+fn local_bare_github_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    // `localhost` is usually a default target rather than a saved one.
+    config
+        .clone()
+        .with_local_targets()
+        .targets
+        .into_iter()
+        .filter(|(_, target)| matches!(target, TargetTemplate::LocalBare))
+        .map(|(id, _)| {
+            github::github_access_check(
+                format!("github.local-bare.{id}"),
+                format!("GitHub access from target {id}"),
+                github::BareHost::Local,
+                executor,
+            )
+        })
+        .collect()
+}
+
+/// The SSH access check, and whether the host answered.
 fn ssh_bare_check(
     id: &str,
     ssh: &RuntimeSshTarget,
     executor: &impl CommandExecutor,
-) -> DoctorCheck {
+) -> (DoctorCheck, bool) {
     let check_id = format!("runtime.ssh-bare.{id}");
     let title = format!("SSH access for target {id}");
     match ssh_connectivity(ssh, executor) {
-        SshConnectivity::Reachable => DoctorCheck::ready(
-            check_id,
-            title,
-            format!(
-                "`ssh {} true` succeeds noninteractively from this host.",
-                ssh.destination
+        SshConnectivity::Reachable => (
+            DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "`ssh {} true` succeeds noninteractively from this host.",
+                    ssh.destination
+                ),
             ),
+            true,
         ),
         SshConnectivity::Failed {
             detail,
             remediation,
-        } => DoctorCheck::fixable(check_id, title, detail, remediation),
+        } => (
+            DoctorCheck::fixable(check_id, title, detail, remediation),
+            false,
+        ),
     }
 }
 
@@ -2765,159 +2962,6 @@ fn podman_failure_detail(error: &anyhow::Error) -> String {
 /// as an unreachable SSH host, has no specific fix here.
 fn podman_remediation_match(error: &anyhow::Error) -> Option<&'static str> {
     failed_podman_postcondition(error).map(PodmanPostcondition::remediation)
-}
-
-const AWS_CLI_INSTALL_URL: &str =
-    "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html";
-
-/// One check per `aws-ec2` target: the AWS CLI, its credentials, and the
-/// configured launch template.
-fn aws_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
-    let Ok(config) = config else {
-        return Vec::new();
-    };
-    config
-        .targets
-        .iter()
-        .filter_map(|(id, target)| match target {
-            TargetTemplate::AwsEc2 {
-                aws_profile,
-                region,
-                launch_template,
-                ..
-            } => Some(aws_target_check(
-                id,
-                aws_profile.as_deref(),
-                region,
-                launch_template,
-                executor,
-            )),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The profile and region every AWS probe carries, applied exactly the way
-/// provisioning applies them in `targets`.
-fn aws_global_args<'a>(profile: Option<&'a str>, region: &'a str) -> Vec<String> {
-    vec![
-        "--profile".to_owned(),
-        profile.unwrap_or("default").to_owned(),
-        "--region".to_owned(),
-        region.to_owned(),
-    ]
-}
-
-fn aws_target_check(
-    id: &str,
-    profile: Option<&str>,
-    region: &str,
-    launch_template: &str,
-    executor: &impl CommandExecutor,
-) -> DoctorCheck {
-    let check_id = format!("runtime.aws-ec2.{id}");
-    let title = format!("AWS EC2 target {id}");
-    let profile_label = profile.unwrap_or("default");
-
-    let version = CommandSpec::new("aws", ["--version"]).purpose("check AWS CLI installation");
-    match executor.execute(&version) {
-        Err(error) => {
-            return DoctorCheck::fixable(
-                check_id,
-                title,
-                format!("The `aws` command is not available: {error}"),
-                format!("Install the AWS CLI and put `aws` on PATH: {AWS_CLI_INSTALL_URL}"),
-            );
-        }
-        Ok(output) if output.status != 0 => {
-            return DoctorCheck::fixable(
-                check_id,
-                title,
-                format!(
-                    "`aws --version` failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-                format!("Reinstall the AWS CLI: {AWS_CLI_INSTALL_URL}"),
-            );
-        }
-        Ok(_) => {}
-    }
-
-    let mut identity_args = aws_global_args(profile, region);
-    identity_args.extend(["sts".to_owned(), "get-caller-identity".to_owned()]);
-    identity_args.extend(["--output".to_owned(), "json".to_owned()]);
-    let identity =
-        CommandSpec::new("aws", identity_args).purpose("check AWS credentials for a doctor target");
-    match executor.execute(&identity) {
-        Err(error) => {
-            return DoctorCheck::fixable(
-                check_id,
-                title,
-                format!("Could not run `aws sts get-caller-identity`: {error}"),
-                format!(
-                    "Configure credentials with `aws configure --profile {profile_label}`, or sign in with `aws sso login --profile {profile_label}`."
-                ),
-            );
-        }
-        Ok(output) if output.status != 0 => {
-            return DoctorCheck::fixable(
-                check_id,
-                title,
-                format!(
-                    "AWS credentials for profile {profile_label} are not usable: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-                format!(
-                    "Configure credentials with `aws configure --profile {profile_label}`, or sign in with `aws sso login --profile {profile_label}`."
-                ),
-            );
-        }
-        Ok(_) => {}
-    }
-
-    // Launch templates are addressed by id when they carry the `lt-` prefix
-    // and by name otherwise, the same split provisioning uses.
-    let by_id = launch_template.starts_with("lt-");
-    let mut template_args = aws_global_args(profile, region);
-    template_args.extend(["ec2".to_owned(), "describe-launch-templates".to_owned()]);
-    template_args.extend([
-        if by_id {
-            "--launch-template-ids".to_owned()
-        } else {
-            "--launch-template-names".to_owned()
-        },
-        launch_template.to_owned(),
-    ]);
-    template_args.extend(["--output".to_owned(), "json".to_owned()]);
-    let template =
-        CommandSpec::new("aws", template_args).purpose("check the configured AWS launch template");
-    let template_remediation = format!(
-        "Create the launch template in {region}, or point this target at an existing one; `aws --profile {profile_label} --region {region} ec2 describe-launch-templates` lists them."
-    );
-    match executor.execute(&template) {
-        Err(error) => DoctorCheck::fixable(
-            check_id,
-            title,
-            format!("Could not query launch template {launch_template}: {error}"),
-            template_remediation,
-        ),
-        Ok(output) if output.status != 0 => DoctorCheck::fixable(
-            check_id,
-            title,
-            format!(
-                "Launch template {launch_template} was not found in {region}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            template_remediation,
-        ),
-        Ok(_) => DoctorCheck::ready(
-            check_id,
-            title,
-            format!(
-                "The AWS CLI is installed, profile {profile_label} has valid credentials, and launch template {launch_template} exists in {region}."
-            ),
-        ),
-    }
 }
 
 /// Whether the running daemon is this build.

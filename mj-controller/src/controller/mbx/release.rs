@@ -208,19 +208,34 @@ impl BuildStateRelease {
     /// target: an SSH workspace, or a container that mounted the shared build
     /// cache. `None` for a target another session owns, one that never had
     /// build state Mjolnir can name, and a container that ran without the cache.
+    #[cfg(test)]
     pub(in crate::controller) fn for_target(
         session: &SessionRecord,
         backend: &targets::TargetLocator,
         config: &Config,
     ) -> Option<Self> {
-        let (host, root) = workspace_root(session, backend)?;
+        Self::for_environment(
+            &session.id,
+            &crate::database::EnvironmentPlacement::from_session(session),
+            backend,
+            config,
+        )
+    }
+
+    pub(in crate::controller) fn for_environment(
+        session_id: &str,
+        placement: &crate::database::EnvironmentPlacement,
+        backend: &targets::TargetLocator,
+        config: &Config,
+    ) -> Option<Self> {
+        let (host, root) = environment_workspace_root(session_id, placement, backend)?;
         let (store, preferred_mbx) = match backend {
             targets::TargetLocator::SshBare { .. } => (Store::Native, None),
             _ => {
-                let cache = session.build_cache.as_ref()?;
+                let cache = placement.build_cache.as_ref()?;
                 if host.key() != cache.host {
                     tracing::warn!(
-                        session_id = %session.id,
+                        session_id = %session_id,
                         recorded = %cache.host,
                         actual = %host.key(),
                         "the build cache was recorded on another host, so its state is not released"
@@ -235,11 +250,18 @@ impl BuildStateRelease {
                 )
             }
         };
-        let bundle = session.project_bundle(config)?;
-        let workspaces = bundle
-            .repositories
+        let repositories = placement.repositories.clone().or_else(|| {
+            config.bundles.get(&placement.bundle_id).map(|bundle| {
+                bundle
+                    .repositories
+                    .iter()
+                    .map(|repository| repository.destination.clone())
+                    .collect()
+            })
+        })?;
+        let workspaces = repositories
             .iter()
-            .map(|repository| mj_core::target_path::join(&root, &repository.destination))
+            .map(|destination| mj_core::target_path::join(&root, destination))
             .collect::<Vec<_>>();
         let legacy_mbx_root = match (&store, &host) {
             (Store::Shared { .. }, CacheHost::Local) => {
@@ -443,7 +465,18 @@ fn workspace_root(
     session: &SessionRecord,
     backend: &targets::TargetLocator,
 ) -> Option<(CacheHost, PathBuf)> {
-    let checkout = session.checkout();
+    environment_workspace_root(
+        &session.id,
+        &crate::database::EnvironmentPlacement::from_session(session),
+        backend,
+    )
+}
+
+fn environment_workspace_root(
+    session_id: &str,
+    placement: &crate::database::EnvironmentPlacement,
+    backend: &targets::TargetLocator,
+) -> Option<(CacheHost, PathBuf)> {
     if targets::is_borrowed(backend) {
         return None;
     }
@@ -452,8 +485,8 @@ fn workspace_root(
         // session's alone: a shared directory would release every session in
         // it.
         targets::TargetLocator::SshBare { ssh, workspace, .. }
-            if checkout.project_directory().is_none()
-                && targets::verify_session_workspace(workspace, &session.id).is_ok() =>
+            if placement.project_directory.is_none()
+                && targets::verify_session_workspace(workspace, session_id).is_ok() =>
         {
             Some((CacheHost::Ssh(ssh.clone()), PathBuf::from(workspace)))
         }
@@ -464,8 +497,8 @@ fn workspace_root(
         | targets::TargetLocator::SshPodman { .. }
         | targets::TargetLocator::SshDocker { .. }
         | targets::TargetLocator::SshAppleContainer { .. } => {
-            let workspace = session.container_workspace.clone()?;
-            (workspace == targets::new_container_workspace(&session.id).ok()?).then_some(())?;
+            let workspace = placement.container_workspace.clone()?;
+            (workspace == targets::new_container_workspace(session_id).ok()?).then_some(())?;
             Some((host_for_locator(backend)?, workspace))
         }
         _ => None,

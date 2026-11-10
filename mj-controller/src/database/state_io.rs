@@ -513,6 +513,14 @@ pub(super) fn parse_materialized_execution(
 /// Only a flow that authors the whole record — creation, import, resume, or
 /// orphan adoption — may use this.
 pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    insert_session_with_parent(tx, session, None)
+}
+
+pub(super) fn insert_session_with_parent(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    parent: Option<&str>,
+) -> Result<()> {
     let previous_error = super::events::previous_session_error(tx, &session.id)?;
     let canonical_bundle =
         super::projects::session_project_id(tx, &session.id, &session.bundle_id)?;
@@ -555,8 +563,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              container_cpus, container_memory, archived, draft_input, create_managed_worktree,
              subagents, container_workspace, build_cache_json, launch_base,
              target_runtime_json, launch_branch, publication_json, checkout_json, project_json,
-             review_json, no_project_memory, no_mailbox, oracle, oracle_choice
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)
+             review_json, no_project_memory, no_mailbox, oracle, oracle_choice, no_github_credentials
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -593,7 +601,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              no_project_memory = excluded.no_project_memory,
              no_mailbox = excluded.no_mailbox,
              oracle = excluded.oracle,
-             oracle_choice = excluded.oracle_choice",
+             oracle_choice = excluded.oracle_choice,
+             no_github_credentials = excluded.no_github_credentials",
         params![
             session.id,
             session.title,
@@ -648,6 +657,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
             session.no_github_events,
             session.oracle,
             session.oracle_choice.as_ref().map(serde_json::to_string).transpose()?,
+            session.no_github_credentials,
         ],
     )?;
     tx.execute(
@@ -655,7 +665,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
          ON CONFLICT(session_id) DO NOTHING",
         [session.id.as_str()],
     )?;
-    replace_targets(tx, session)?;
+    replace_targets_with_parent(tx, session, parent)?;
     replace_mounts(tx, &session.id, &session.additional_mounts)?;
     replace_checkpoint(tx, session)?;
     super::events::record_session_fault_transition(tx, session, previous_error)?;
@@ -702,6 +712,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         review: _,
         no_project_memory: _,
         no_github_events: _,
+        no_github_credentials: _,
         // A Move can change it along with the profile the session runs on.
         subagents,
         oracle,
@@ -790,6 +801,15 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
 }
 
 pub(super) fn replace_targets(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    replace_targets_with_parent(tx, session, None)
+}
+
+fn replace_targets_with_parent(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    parent: Option<&str>,
+) -> Result<()> {
+    super::environments::capture_session_environment(tx, session, parent)?;
     tx.execute(
         "DELETE FROM session_targets WHERE session_id = ?1",
         [session.id.as_str()],
@@ -821,11 +841,18 @@ pub(super) fn replace_checkpoint(tx: &Transaction<'_>, session: &SessionRecord) 
     Ok(())
 }
 
-pub(super) fn insert_target(
-    tx: &Transaction<'_>,
-    session_id: &str,
-    target: &TargetLocator,
-) -> Result<()> {
+pub(super) struct StoredTargetValues<'a> {
+    pub kind: &'static str,
+    pub host: Option<&'a str>,
+    pub resource: Option<&'a str>,
+    pub address: Option<&'a str>,
+    pub workspace: Option<Vec<u8>>,
+    pub worker_id: Option<&'a str>,
+    pub workspace_storage: Option<String>,
+    pub borrowed_from: Option<&'a str>,
+}
+
+pub(super) fn stored_target_values(target: &TargetLocator) -> Result<StoredTargetValues<'_>> {
     let (kind, host, resource, address, workspace, worker_id, workspace_storage, borrowed_from) =
         match target {
             TargetLocator::LocalBare { worker_root } => (
@@ -949,6 +976,33 @@ pub(super) fn insert_target(
                 borrowed_from.as_deref(),
             ),
         };
+    Ok(StoredTargetValues {
+        kind,
+        host,
+        resource,
+        address,
+        workspace,
+        worker_id,
+        workspace_storage,
+        borrowed_from,
+    })
+}
+
+pub(super) fn insert_target(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    target: &TargetLocator,
+) -> Result<()> {
+    let StoredTargetValues {
+        kind,
+        host,
+        resource,
+        address,
+        workspace,
+        worker_id,
+        workspace_storage,
+        borrowed_from,
+    } = stored_target_values(target)?;
     tx.execute(
         "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
@@ -976,6 +1030,18 @@ fn load_targets_selected(
     state: &mut State,
     id: Option<&str>,
 ) -> Result<()> {
+    for (session_id, target) in read_targets(connection, id)? {
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            session.target = Some(target);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn read_targets(
+    connection: &Connection,
+    id: Option<&str>,
+) -> Result<BTreeMap<String, TargetLocator>> {
     let predicate = if id.is_some() {
         " WHERE session_id=?1"
     } else {
@@ -988,78 +1054,76 @@ fn load_targets_selected(
         .map(|id| vec![id as &dyn rusqlite::ToSql])
         .unwrap_or_default();
     let rows = statement.query_map(arguments.as_slice(), |row| {
-        let session_id: String = row.get(0)?;
-        let kind: String = row.get(1)?;
-        let host: Option<String> = row.get(2)?;
-        let resource: Option<String> = row.get(3)?;
-        let address: Option<String> = row.get(4)?;
-        let workspace = row.get_ref(5)?.blob_or_null()?.map(blob_to_path);
-        let worker_id: Option<String> = row.get(6)?;
-        let workspace_storage = row
-            .get::<_, Option<String>>(7)?
-            .map(|serialized| {
-                serde_json::from_str(&serialized).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
-                })
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let borrowed_from: Option<String> = row.get(8)?;
-        let target = match kind.as_str() {
-            "local-bare" => TargetLocator::LocalBare {
-                worker_root: workspace.unwrap(),
-            },
-            "local-podman" => TargetLocator::LocalPodman {
-                borrowed_from,
-                container_id: resource.unwrap(),
-                workspace_storage,
-            },
-            "local-docker" => TargetLocator::LocalDocker {
-                borrowed_from,
-                container_id: resource.unwrap(),
-            },
-            "apple-container" => TargetLocator::AppleContainer {
-                borrowed_from,
-                container_id: resource.unwrap(),
-            },
-            "aws-ec2" => TargetLocator::AwsEc2 {
-                instance_id: resource.unwrap(),
-                address,
-            },
-            "ssh-bare" => TargetLocator::SshBare {
-                host: host.unwrap(),
-                workspace: workspace.unwrap(),
-                worker_id,
-            },
-            "ssh-docker" => TargetLocator::SshDocker {
-                borrowed_from,
-                host: host.unwrap(),
-                container_id: resource.unwrap(),
-            },
-            "ssh-apple-container" => TargetLocator::SshAppleContainer {
-                borrowed_from,
-                host: host.unwrap(),
-                container_id: resource.unwrap(),
-            },
-            "ssh-podman" => TargetLocator::SshPodman {
-                borrowed_from,
-                host: host.unwrap(),
-                container_id: resource.unwrap(),
-                workspace_storage,
-            },
-            _ => unreachable!("target kind constrained by schema"),
-        };
-        Ok((session_id, target))
+        Ok((row.get(0)?, decode_target(row, 1)?))
     })?;
-    for row in rows {
-        let (session_id, target) = row?;
-        // A session skipped for an unsupported harness has no entry to attach
-        // its target, mounts, or checkpoint to.
-        if let Some(session) = state.sessions.get_mut(&session_id) {
-            session.target = Some(target);
-        }
-    }
-    Ok(())
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
+pub(super) fn decode_target(
+    row: &rusqlite::Row<'_>,
+    start: usize,
+) -> rusqlite::Result<TargetLocator> {
+    let kind: String = row.get(start)?;
+    let host: Option<String> = row.get(start + 1)?;
+    let resource: Option<String> = row.get(start + 2)?;
+    let address: Option<String> = row.get(start + 3)?;
+    let workspace = row.get_ref(start + 4)?.blob_or_null()?.map(blob_to_path);
+    let worker_id: Option<String> = row.get(start + 5)?;
+    let workspace_storage = row
+        .get::<_, Option<String>>(start + 6)?
+        .map(|serialized| {
+            serde_json::from_str(&serialized).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(start + 6, Type::Text, Box::new(error))
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let borrowed_from: Option<String> = row.get(start + 7)?;
+    let target = match kind.as_str() {
+        "local-bare" => TargetLocator::LocalBare {
+            worker_root: workspace.unwrap(),
+        },
+        "local-podman" => TargetLocator::LocalPodman {
+            borrowed_from,
+            container_id: resource.unwrap(),
+            workspace_storage,
+        },
+        "local-docker" => TargetLocator::LocalDocker {
+            borrowed_from,
+            container_id: resource.unwrap(),
+        },
+        "apple-container" => TargetLocator::AppleContainer {
+            borrowed_from,
+            container_id: resource.unwrap(),
+        },
+        "aws-ec2" => TargetLocator::AwsEc2 {
+            instance_id: resource.unwrap(),
+            address,
+        },
+        "ssh-bare" => TargetLocator::SshBare {
+            host: host.unwrap(),
+            workspace: workspace.unwrap(),
+            worker_id,
+        },
+        "ssh-docker" => TargetLocator::SshDocker {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+        },
+        "ssh-apple-container" => TargetLocator::SshAppleContainer {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+        },
+        "ssh-podman" => TargetLocator::SshPodman {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+            workspace_storage,
+        },
+        _ => unreachable!("target kind constrained by schema"),
+    };
+    Ok(target)
 }
 
 /// Rewrite a session's attached directories.
@@ -1235,7 +1299,8 @@ const SESSION_QUERY: &str =
                 , c.workspace_id, s.create_managed_worktree, s.subagents,
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
                 s.launch_branch, s.publication_json, s.checkout_json, s.project_json,
-                s.review_json, s.no_project_memory, s.no_mailbox, s.oracle, s.oracle_choice
+                s.review_json, s.no_project_memory, s.no_mailbox, s.oracle, s.oracle_choice,
+                s.no_github_credentials
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
 fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
@@ -1352,6 +1417,7 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
         no_project_memory: row.get(34)?,
         // Keep the shipped no_mailbox column for the GitHub target opt-out.
         no_github_events: row.get(35)?,
+        no_github_credentials: row.get(38)?,
         target_template_id: row.get(5)?,
         resource_allocation: row
             .get::<_, Option<String>>(14)?

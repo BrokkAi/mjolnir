@@ -460,15 +460,6 @@ fn split_at_utf8_midpoint(text: &str) -> (&str, &str) {
     text.split_at(midpoint)
 }
 
-/// Fold the archived transcript into user turns with their agent, tool, and
-/// plan events. Thoughts and system notices carry no durable state, so they
-/// are dropped rather than summarized. Harness startup can also report tool
-/// failures before the first prompt; those are operational diagnostics rather
-/// than part of a user turn and are left out of the handoff.
-fn turns_from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Result<Vec<Turn>> {
-    turns_from_entries(TranscriptSummary::from_snapshot(snapshot).entries, false)
-}
-
 fn turns_from_entries(
     entries: impl IntoIterator<Item = mj_transcript::summary::SummaryEntry>,
     allow_leading_continuation: bool,
@@ -532,13 +523,17 @@ fn turns_from_entries(
     Ok(turns)
 }
 
-/// Render the most recent user turns with the exact turn grouping and markup
-/// used by compaction. Selection happens after transcript events are grouped.
+/// Render the most recent user turns for classification, using compaction's
+/// grouping and tool summaries. Raw tool calls and terminal output are omitted
+/// even for the newest tools; compaction itself retains those for handoff.
 pub fn render_recent_turns(snapshot: &CanonicalSessionSnapshot, count: usize) -> String {
     if count == 0 {
         return String::new();
     }
-    match turns_from_snapshot(snapshot) {
+    match turns_from_entries(
+        TranscriptSummary::from_snapshot_keeping(snapshot, 0).entries,
+        false,
+    ) {
         Ok(turns) => {
             let start = turns.len().saturating_sub(count);
             render_turns(&turns[start..], 0)

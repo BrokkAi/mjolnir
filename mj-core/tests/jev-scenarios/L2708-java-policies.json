@@ -1,0 +1,330 @@
+{
+  "id": "L2708",
+  "title": "Java policies",
+  "category": "still-open-user-question",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "05d9cf1a40f2a74086d14d7010497284",
+    "session_title": "bifrost via claude4",
+    "reply_position": 268910,
+    "captured_at": "2026-11-05T14:49:10.698Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:9",
+          "role": "user",
+          "text": "i want you to perform a gap analysis vs CodeQL for java, and then close that gap, primarily for policies but also any engine pieces we need to add for those policies. coordinate with mj session 0bf0983d553751026807d97d54857ede who owns the java native engine transition, and ask 61f0abcccf634f1496fc07478093eb5d to review your plans for new engine work before implementing"
+        },
+        {
+          "id": "user:273",
+          "role": "user",
+          "text": "If you need to run either CodeQL or Bifrost against large repos, please do so on EC2 since this host is crowded"
+        },
+        {
+          "id": "user:14959",
+          "role": "user",
+          "text": "The auto-mode permission check blocked `gh pr ready 7231` as \"merge without review\". The reviewer session 61f0abcc and the store coordinator 0bf0983d both approved #7231 (M2, Java structural facts) at head 3ef9481a8c. Marking ready hands it to the MergeMarshall queue. Earlier today I marked #7199, #7223, packs#122 and packs#123 ready the same way. More PRs will reach this step soon (#7268, #7215, #7219, M3, M4, step B). How should I handle the ready step?\n\nReady step: You mark ready (Recommended)"
+        },
+        {
+          "id": "user:14990",
+          "role": "user",
+          "text": "how do i add the pr rule?"
+        },
+        {
+          "id": "user:15000",
+          "role": "user",
+          "text": "in the meantime: i explicitly allow this"
+        },
+        {
+          "id": "user:16043",
+          "role": "user",
+          "text": "what other languages have we performed a similar gap analysis for?"
+        },
+        {
+          "id": "user:16357",
+          "role": "user",
+          "text": "instruct 079c08c976523d24c1ac528115c341da to follow the same approach for C# that you're using for Java, including having 61f0abcccf634f1496fc07478093eb5d review its product change plans"
+        },
+        {
+          "id": "user:17852",
+          "role": "user",
+          "text": "A local release build (`cargo build --release --locked --bin bifrost`) in the M8a-2 lane failed to link twice with unchanged source. mold/clang reported undefined monomorphized crossbeam `Sender::release` symbols for moka `ReadOp`/`WriteOp<FieldSlotIndexCacheKey, …>`. Other lanes built release binaries fine about an hour ago, so a stale mbx cache artifact is likely but unproven. Your CLAUDE.md says to check with you before touching cargo builds or the cache. How should I handle it?\n\nLink failure: Diagnose the mbx cache"
+        },
+        {
+          "id": "user:17914",
+          "role": "user",
+          "text": "if there's an mbx bug, file it and send it to a56c857ed0fb213ff88fca0051521b5d to fix"
+        },
+        {
+          "id": "user:17929",
+          "role": "user",
+          "text": "(file in upstream of ~/Projects/mr-boxington)"
+        },
+        {
+          "id": "user:33277",
+          "role": "user",
+          "text": "In the six wave-1 Java taint tests (path, SSRF, LDAP, XPath, XSLT, JNDI), only 11 of 646 CodeQL alerts have both source and sink in the JDK. Most start from servlet request getters (javax/jakarta.servlet, from CodeQL models-as-data) or Spring request-mapping parameters (defined in QL). The default placement for both is the private premium repo, so public Java taint rules would find almost nothing on web apps. CLAUDE.md allows public placement for content required by a popular open benchmark, with your classification decision. Where should these source models go?\n\nPlacement: Servlet public, rest premium (Recommended)"
+        },
+        {
+          "id": "user:35824",
+          "role": "user",
+          "text": "Claude Code requests permission:\ndate; ls -la --time-style=full-iso /tmp/java-parity/m9-e1/followup-nextest.log /tmp/java-parity/m9-e1/followup-jdk-report.json | awk '{print $7, $9}'; cp /home/jonathan/Projects/bifrost/.mj/clones/05d9cf1a40f2a74086d14d7010497284/.mj/lanes/4365-m9-e1/target/measure/bifrost-semantic-pack /tmp/java-parity/bin/bifrost-semantic-pack-e1-2eda68dc23 && grep -c 'kind_argument_qualifier_unsupported' /tmp/java-parity/bin/bifrost-semantic-pack-e1-2eda68dc23\n\nPermission: Yes"
+        },
+        {
+          "id": "user:41414",
+          "role": "user",
+          "text": "Approve the policy vocabulary for branch-conditioned taint sanitizers (bifrost-dev #7578; shared by Java and Go parity)? It extends the existing `(sanitizer ...)` entry and its catalog JSON form; it adds no new entry kind. A conditional sanitizer uses `:when`, `:sanitizes` and optional `:requires` in place of `:input` and `:output`; the validator enforces one shape or the other. Policies that don't use the new fields keep their identities.\n\nVocabulary: Approve as proposed (Recommended)"
+        },
+        {
+          "id": "user:41473",
+          "role": "user",
+          "text": "One addition to the guard-sanitizer vocabulary you approved: a `:requires` form meaning \"this operand equals this constant value\", spelled `(argument :index 1 :equals \"..\")`. It is needed for Java's `contains(\"..\")` traversal check and Go's `strings.HasPrefix(rel, \"..\")` after filepath.Rel, where the check means something only for the literal `\"..\"`. It is decided structurally from the decoded literal (the Java support just added in #7547), like `:constant true`. Add it to v1?\n\n:equals form: Add `:equals` to v1 (Recommended)"
+        },
+        {
+          "id": "user:83597",
+          "role": "user",
+          "text": "we have quota again. where were we?"
+        },
+        {
+          "id": "user:152701",
+          "role": "user",
+          "text": "/mnt/optane is back"
+        },
+        {
+          "id": "user:197017",
+          "role": "user",
+          "text": "what's next after M3? can we do more in parallel?"
+        },
+        {
+          "id": "user:197178",
+          "role": "user",
+          "text": "yes"
+        },
+        {
+          "id": "user:208368",
+          "role": "user",
+          "text": "continue"
+        },
+        {
+          "id": "user:240221",
+          "role": "user",
+          "text": "i explicitly authorize you to close it"
+        },
+        {
+          "id": "user:253554",
+          "role": "user",
+          "text": "confirmed"
+        },
+        {
+          "id": "agent:267154",
+          "role": "assistant",
+          "text": "The trace was inconclusive. It found four possible exits where the sink could be dropped (`taint_policy.rs:6038`, `:6150`, `:6296` and `:15017`), but no product surface shows which one line 57 takes. I'll read the report's description of those exits, then decide between instrumenting them and bisecting."
+        },
+        {
+          "id": "agent:267212",
+          "role": "assistant",
+          "text": "The read-only trace didn't find the cause. It found four places in `taint_policy.rs` where a matched sink can be dropped before it becomes a finding:\n- no semantic call is found for the site;\n- the receiver binding check returns `ExactNonMatch`;\n- the semantic call has no receiver, so the site is skipped with `MissingOperand`;\n- the sink is admitted but lost later, in taint flow.\n\nAll four were already in the code at the 0.15.0 base, so the regression most likely comes from a changed input rather than a changed check. For example, the native Java route may no longer supply a receiver for zero-argument calls. That is possible, not confirmed.\n\nRather than bisecting 4,137 commits, I chose one instrumented build. Child afffe19a is adding temporary, env-gated diagnostics at those four exits in a scratch worktree, `.mj/lanes/parity-instr`, and will not commit them. Then it builds once and reruns the gate. Its output will show which exit each zero-argument receiver sink takes, and what the semantic call looks like for line 57 compared with line 77. The build cache should reuse everything except the policy crate.\n\nStill pending:\n- PR #9951 is in the merge queue; I'll close its plan after it lands.\n- Three GitHub writes need your decision; drafts are in `/tmp/java-parity/9783/`."
+        },
+        {
+          "id": "agent:267306",
+          "role": "assistant",
+          "text": "The selector itself is where the site is lost. In the policy run, the `File.exists` sink selector selects **0** rows. The same selector, run as a direct query, returns line 57. One-argument calls such as `setReadable(true)` select 1 row each and become bound endpoints.\n\nSo the loss is inside the policy's compiled selector, before sink admission. The trace flagged one candidate: `selector_compiler.rs` drops receiver-only call-binding rows. I'll read that code myself; it is a short, specific read."
+        },
+        {
+          "id": "agent:267613",
+          "role": "assistant",
+          "text": "I'll make the experimental edit in the scratch worktree. It won't be committed; the real fix goes on its own branch after the experiment confirms it."
+        },
+        {
+          "id": "agent:267644",
+          "role": "assistant",
+          "text": "While the experiment runs, I'll read the routed guidance the real fix will need. That is the cache-identity rules for a policy change that alters retained findings, and the RQL and policy guidance."
+        },
+        {
+          "id": "agent:267694",
+          "role": "assistant",
+          "text": "The filter came from b1b77f63a0, \"Fix retained taint findings under incomplete selector discovery (#3732)\". I'll look at which tests that commit added."
+        },
+        {
+          "id": "agent:267735",
+          "role": "assistant",
+          "text": "The #3712 fixture shape fits: a Java source with a modeled sink, a `Gap.java` that makes discovery incomplete, and a `require-model` taint policy. A new case `policy-selector-incompleteness/receiver-only-sink` can follow it. It would have a zero-argument receiver sink, a one-argument control, and the gap file, so the test fails without the fix.\n\nI'll wait for the experiment before filing the issue or starting the branch. If accepting receiver rows doesn't restore the 13 sites, the diagnosis is wrong."
+        },
+        {
+          "id": "agent:267786",
+          "role": "assistant",
+          "text": "Confirmed. With exact receiver rows accepted, the native route goes from 40 TP and 19 misses to **53 TP and 6 misses**. All 13 zero-argument receiver sinks change from miss to TP. There are no new extras and no sites lost, and the default route is unchanged. That is better than 0.15.0's native figure of 51.\n\nI'll file the issue and fix it on its own branch from master."
+        },
+        {
+          "id": "agent:267818",
+          "role": "assistant",
+          "text": "#10014 is filed, labelled and assigned. Now the branch: a lane from current master, with the code change and the epoch token done by me. A child then writes the golden case and runs the validation."
+        },
+        {
+          "id": "agent:267925",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- This regression came from an interaction, not from a changed line. The per-row filter from #3732 already rejected receiver-only rows. It only mattered once discovery was incomplete, and in this corpus unrelated stub files make every selector incomplete. That is why reading the history of the filter found nothing.\n- The \"individually usable row\" rule exists so that one bad row doesn't erase every proven row (#3732, #5245). The fix keeps that rule. A receiver row must still carry the same site proof as a positional row; the only thing that changes is that receiver identity counts in place of argument identity.\n`─────────────────────────────────────────────────`\n\nI found and fixed the cause of the native path-injection regression, tracked as **#10014**. When selector discovery is incomplete, the policy keeps only rows that identify their operand on their own, and an exact receiver row didn't count. A zero-argument call has only that receiver row, so sinks like `((File) source()).exists()` selected nothing. In the CodeQL CWE-022 test, unrelated stub files make discovery incomplete for every selector.\n\n- **Experiment:** I rebuilt the native binary with the fix and reran packs#145's gate. It went from 40 TP / 0 extras / 19 misses to **53 TP / 0 extras / 6 misses**: exactly the 13 zero-argument receiver sinks were recovered. No site was lost, and the default route is unchanged.\n- **Branch:** `10014-receiver-taint-rows` (commit 5f4f89c73e). It has the fix in `usable_taint_row` and the policy epoch token `-10014-receiver-taint-rows`.\n- **Running:**\n  - Child b857b9d3 is adding a Java golden case to `policy-selector-incompleteness`. It will show the case fails without the fix, check the native route, and run the full policy-integration suite, comparing every failure with master.\n  - Child 308e8847 is checking whether the 6 remaining native misses are David's #10000, overloaded JDK constructors resolving as exhaustive with zero targets. The misses include `new File(\"\")`, `new BufferedReader(...)` and `Files.write` with an Iterable.\n\nStill pending:\n- PR #9951 is in the merge queue; I'll close its plan after it lands.\n- Your decision on the three blocked GitHub writes, drafted in `/tmp/java-parity/9783/`."
+        },
+        {
+          "id": "user:268076",
+          "role": "user",
+          "text": "i explicitly approve the github writes"
+        },
+        {
+          "id": "agent:268078",
+          "role": "assistant",
+          "text": "You approved the three writes, so I'm posting them now: the #9783 scope comment, the #9964 link edit and the #8500 outcome comment."
+        },
+        {
+          "id": "agent:268111",
+          "role": "assistant",
+          "text": "All three GitHub writes are done:\n- **#9783:** the scope-change comment is posted ([comment](https://github.com/BrokkAi/bifrost-dev/issues/9783#issuecomment-6660767765)). It says the implementation ended at Milestone 2 and points to follow-ups #9964–#9966.\n- **#9964:** the description now names #9965 as the reader cutover that depends on it.\n- **#8500:** the outcome comment is posted ([comment](https://github.com/BrokkAi/bifrost-dev/issues/8500#issuecomment-6660769476)). It covers what landed in #9825, what moved to #9783, the lessons, and the compiler-root owner targets still open there.\n\nStill running:\n- Child b857b9d3 is adding the golden case for the #10014 fix and running validation.\n- Child 308e8847 is checking whether the remaining native path-injection misses are #10000.\n\nAfter #9951 lands, I'll close its plan in a separate change."
+        },
+        {
+          "id": "agent:268178",
+          "role": "assistant",
+          "text": "On the native route the constructors work. `new File(\"\")`, `InputStreamReader`, `BufferedReader` and `FileReader` each resolve exhaustively to one target with an exact binding. So the remaining native misses are **not** #10000, which is a default-route defect.\n\nThe 6 remaining native misses split into three different problems:\n- **`new File(\"\").renameTo(x)`** (lines 69, 83): dispatch is `unproven`/`Open` with 0 targets, although the receiver's constructor binds exactly. `((File) source()).renameTo(null)` at line 71 binds fine.\n- **`Files.write` Iterable overloads** (lines 137, 138): dispatch resolves to 1 target, but the binding still ends `callee_unresolved`.\n- **`TaintedPath.java`:** the calls bind, but `getInputStream` and `readLine` stay `unproven`/`Open`. This matches David's #9998 (JDK and servlet instance calls stay unproven). Where the flow actually breaks is unknown.\n\nI'll check the `Files.write` lines to see what separates the working byte[] call from the failing ones."
+        },
+        {
+          "id": "agent:268329",
+          "role": "assistant",
+          "text": "On the native route, the constructors are not the problem. Each one in the path-injection chain resolves to exactly one target, so the 6 remaining native misses are not #10000; that is a default-route defect. They are three separate problems, and two already have issues:\n- **`Files.write` with an `Iterable`** (2 misses): this matches open issue **#7708**, which nobody is assigned to. The `Iterable<CharSequence>` argument reaches overload checking with its type arguments stripped, so it can't be shown to fit `Iterable<? extends CharSequence>`. The `byte[]` overload and the varargs calls bind fine, which supports this.\n- **`new File(\"\").renameTo(x)`** (2 misses): #7618 described these exact two lines and was closed on 2026-10-28 with a fix. They still fail on master, and they also failed on 0.15.0. Child 94b2db8d is checking whether the fix regressed or never covered this form, using a minimal repro with the existing binary.\n- **`TaintedPath.java`** (2 misses): every call binds, but `getInputStream` and `readLine` stay `unproven`/`Open`. That fits David's #9998. Where the taint flow breaks is still unknown.\n\nChild b857b9d3 is still writing the golden case for #10014 and running the full policy-integration validation. When it reports, I'll get the pre-push review and open that PR."
+        },
+        {
+          "id": "agent:268426",
+          "role": "assistant",
+          "text": "#9951 has landed, so #9783 Milestone 2 is on master. Next is the plan closeout, as a separate change. I'll start a branch from master and read the closing rules in `.agents/PLANS.md`, the plan's Decision Log, and the design chapter section."
+        },
+        {
+          "id": "agent:268534",
+          "role": "assistant",
+          "text": "While the review runs, I'll draft the PR description and the \"Outcomes & Retrospective\" comment that `.agents/PLANS.md` asks to be posted on #9783."
+        },
+        {
+          "id": "agent:268549",
+          "role": "assistant",
+          "text": "The #9783 plan closeout is committed on branch `9783-close-plan` (48b2482359). It is docs only:\n- The plan file and its open-core row are deleted.\n- The \"External JVM owner targets\" section of the design chapter gains the decisions that are still true and that the code does not show: a reference without a proposal keeps its previous answer; on-demand and `java.lang` winners wait for #9964; the readers move in #9965; the compiler-parent fallback stays until there is equivalence evidence (#9966).\n\nThe open-core check passes on the branch and on master. The pre-push review is running. When it comes back clean, I'll push, open the PR and mark it ready.\n\n`.agents/PLANS.md` also requires posting the plan's \"Outcomes & Retrospective\" summary on #9783. I've drafted it at `/tmp/java-parity/9783/outcomes-comment.md` and will try to post it.\n\n**Your decision:** should I close #9783? Its implementation is finished, and the remaining work is tracked in #9964–#9966. Closing an issue is an external write, so I'm asking first.\n\nStill running:\n- Child b857b9d3: the #10014 golden test and validation.\n- Child 94b2db8d: rechecking whether the #7618 fix regressed for `new File(\"\").renameTo(...)`."
+        },
+        {
+          "id": "agent:268646",
+          "role": "assistant",
+          "text": "PR #10019 is ready at 48b2482359, up to date with master. Next is the closing step that posts the outcomes summary on #9783."
+        },
+        {
+          "id": "agent:268735",
+          "role": "assistant",
+          "text": "#9951 has landed, and the closeout of the #9783 plan is now PR #10019. It is up to date with master, reviewed clean and marked ready. It deletes the plan and adds the remaining decisions to the design chapter.\n\n**Blocked, needs your decision:** posting the \"Outcomes & Retrospective\" summary on #9783 was denied by the permission system. `.agents/PLANS.md` lists this as a closing step. The draft is at `/tmp/java-parity/9783/outcomes-comment.md`. Please tell me:\n- whether I may post that comment;\n- whether I should close #9783. Its implementation is done, and the remaining work is tracked in #9964, #9965 and #9966.\n\n**#10014 golden test:** the first fixture failed my check that the test must fail without the fix. It passed identically with and without the fix on the default route, so it didn't reach the defect. The child stopped there as instructed. A new child, 1bf926f1, will find out why: either the filter wasn't applied, or the `zero()` call produced a different kind of row. Then it will move the fixture to the native route, or to the kind of incompleteness the CodeQL case had, and finish validation. The PR waits for a test that actually pins the defect.\n\nAlso still running: child 94b2db8d is checking whether #7618's fix for `new File(\"\").renameTo(...)` regressed."
+        },
+        {
+          "id": "agent:268825",
+          "role": "assistant",
+          "text": "The #7618 recheck found a regression, and it was an accepted one:\n- The #7618 fix (d2b670f1ac, PR #7650) worked.\n- Commit 19f1d19a96 later re-blessed direct `new java.io.File(\"\").renameTo(...)` from bound to `callee_unresolved`. My #7804 notes record that the coordinator accepted this as a bounded precision cost, to be restored through #8500's owner targets.\n- #8500's PR (#9825) has landed, yet on the native route at 8d2800ded9 every direct call on an external object creation still fails. That includes the fully qualified `new java.io.File(\"\")` control.\n\nI'll read the report's decisive evidence before filing it, so the restoration is tracked explicitly."
+        },
+        {
+          "id": "agent:268910",
+          "role": "assistant",
+          "text": "`★ Insight ─────────────────────────────────────`\n- An accepted precision cost needs its own tracking issue. #7804's re-bless was approved on the understanding that #8500's owner targets would restore the call. That condition was written only in a comment on #8500, so when #9825 landed without restoring it, nothing failed or reopened. #10021 now makes the restoration something that can be checked.\n- Every one of the 6 remaining native path-injection misses now has an issue: #10021 (2), #7708 (2) and #9998 (2). The gate result can be read as a list of specific engine defects rather than one unexplained score.\n`─────────────────────────────────────────────────`\n\nThe `new File(\"\").renameTo(...)` misses come from an accepted cost that was never paid back:\n- #7618's fix (PR #7650) worked.\n- Commit 19f1d19a96, from the #7804 work on 2026-11-01, re-blessed that case to `callee_unresolved`. That was accepted as a temporary cost, to be restored by #8500's owner targets.\n- #8500's PR (#9825) landed without restoring it. Every direct call on an external object creation still fails on the native route, including `new File(\"\").exists()` and the fully qualified form.\n\nI filed this as **#10021**, with the history, the probable code location, and acceptance criteria tied to the existing cast golden. Each remaining native path-injection miss now maps to an issue:\n\n| Misses | Cause | Issue |\n| --- | --- | --- |\n| 13 (fixed on branch) | exact receiver rows dropped under incomplete discovery | #10014 (mine) |\n| 2 | calls on an external object creation | #10021 (new) |\n| 2 | `Iterable<CharSequence>` loses its type arguments before overload checking | #7708 (open, unassigned) |\n| 2 | `getInputStream` and `readLine` stay unproven/open | #9998 (David's) |\n\nI've asked the coordinator whether I should take #10021 and #7708 (plans to them first), or whether they're queued elsewhere.\n\nStill in progress:\n- **#10014:** child 1bf926f1 is reworking the golden case so it fails without the fix.\n- **PR #10019:** the #9783 plan closeout is ready in the merge queue.\n\n**Still needs your decision:** whether I may post the #9783 outcomes comment and close #9783. The draft is at `/tmp/java-parity/9783/outcomes-comment.md`."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": true,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "i explicitly approve the github writes",
+    "assistant_text_tail": "en #9825 landed without restoring it, nothing failed or reopened. #10021 now makes the restoration something that can be checked.\n- Every one of the 6 remaining native path-injection misses now has an issue: #10021 (2), #7708 (2) and #9998 (2). The gate result can be read as a list of specific engine defects rather than one unexplained score.\n`─────────────────────────────────────────────────`\n\nThe `new File(\"\").renameTo(...)` misses come from an accepted cost that was never paid back:\n- #7618's fix (PR #7650) worked.\n- Commit 19f1d19a96, from the #7804 work on 2026-11-01, re-blessed that case to `callee_unresolved`. That was accepted as a temporary cost, to be restored by #8500's owner targets.\n- #8500's PR (#9825) landed without restoring it. Every direct call on an external object creation still fails on the native route, including `new File(\"\").exists()` and the fully qualified form.\n\nI filed this as **#10021**, with the history, the probable code location, and acceptance criteria tied to the existing cast golden. Each remaining native path-injection miss now maps to an issue:\n\n| Misses | Cause | Issue |\n| --- | --- | --- |\n| 13 (fixed on branch) | exact receiver rows dropped under incomplete discovery | #10014 (mine) |\n| 2 | calls on an external object creation | #10021 (new) |\n| 2 | `Iterable<CharSequence>` loses its type arguments before overload checking | #7708 (open, unassigned) |\n| 2 | `getInputStream` and `readLine` stay unproven/open | #9998 (David's) |\n\nI've asked the coordinator whether I should take #10021 and #7708 (plans to them first), or whether they're queued elsewhere.\n\nStill in progress:\n- **#10014:** child 1bf926f1 is reworking the golden case so it fails without the fix.\n- **PR #10019:** the #9783 plan closeout is ready in the merge queue.\n\n**Still needs your decision:** whether I may post the #9783 outcomes comment and close #9783. The draft is at `/tmp/java-parity/9783/outcomes-comment.md`.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "required",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "mjolnir": "manual Still open batch labeling",
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)",
+    "next": "The open request is recorded in the reply sequence.",
+    "request_positions": [
+      268735,
+      268910
+    ],
+    "user_position": 268076,
+    "input_rationale": "Posting the outcomes comment and closing #9783 are external writes the agent explicitly holds for the user's approval (the permission system denied the comment). The user answered 'post and close'.",
+    "label": "required_final",
+    "triggers": [
+      "needs you"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": "approval_gate",
+    "request_message_ids": [
+      "agent:268735",
+      "agent:268910"
+    ]
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-11-05T14:50:57.492Z",
+        "kind": "user",
+        "text": "post and close"
+      },
+      {
+        "at": "2026-11-05T14:51:32.544Z",
+        "kind": "agent",
+        "text": "I posted the outcomes comment on #9783 ([comment](https://github.com/BrokkAi/bifrost-dev/issues/9783#issuecomment-6661034037)) and closed the issue as completed. I also removed its `agent-in-progress`"
+      },
+      {
+        "at": "2026-11-05T14:53:59.234Z",
+        "kind": "system",
+        "text": "Mailbox events:   - Child task 10014-golden-round2 finished: completed     State: completed     Report directory: /home/jonathan/Projects/bifrost/.mj/clones/05d9cf1a40f2a74086d14d7010497284/.mj/agents"
+      },
+      {
+        "at": "2026-11-05T14:53:59.235Z",
+        "kind": "system",
+        "text": "Agent continued on its own"
+      },
+      {
+        "at": "2026-11-05T14:54:05.291Z",
+        "kind": "agent",
+        "text": "Round 2 found why the fixture misses. The `zero()` row *is* a non-terminal receiver row on both routes. But the sink selector's discovery is Complete, so the filter never runs. The run is inconclusive"
+      },
+      {
+        "at": "2026-11-05T14:55:46.602Z",
+        "kind": "agent",
+        "text": "`★ Insight ─────────────────────────────────────` - The policy compiler handles incomplete discovery in two layers. First, `admits_existing_incomplete_call_bindings` admits every row when the incomple"
+      }
+    ]
+  }
+}

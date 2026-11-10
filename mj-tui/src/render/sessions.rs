@@ -356,6 +356,7 @@ fn drawn_session_rows_in_range(
                             unreachable,
                             disk_full,
                             attention,
+                            dashboard.waiting_child_kind(&session.id),
                             operation,
                             now_epoch_seconds,
                             target,
@@ -380,6 +381,7 @@ fn drawn_session_rows_in_range(
                             unreachable,
                             disk_full,
                             attention,
+                            dashboard.waiting_child_kind(&session.id),
                             operation,
                             now_epoch_seconds,
                             target,
@@ -552,6 +554,7 @@ pub(crate) fn expanded_session_lines(
     unreachable: bool,
     disk_full: bool,
     attention: AttentionLevel,
+    waiting_child: Option<mj_core::subagent::SubagentKind>,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
@@ -587,6 +590,7 @@ pub(crate) fn expanded_session_lines(
         unreachable,
         disk_full,
         attention,
+        waiting_child,
         operation,
         now_epoch_seconds,
         target,
@@ -632,7 +636,7 @@ const MIN_NAME_CELLS_WITH_CPU: usize = 8;
 
 /// The CPU text a row shows, or `None` below the display threshold (1.0%).
 fn cpu_row_label(cpu: Option<crate::session_view::CpuShare>) -> Option<String> {
-    cpu.filter(|share| share.permille >= 10)
+    cpu.filter(|share| share.included || share.permille >= 10)
         .map(|share| share.label())
 }
 
@@ -695,6 +699,7 @@ pub(crate) fn session_activity_line(
     unreachable: bool,
     disk_full: bool,
     attention: AttentionLevel,
+    waiting_child: Option<mj_core::subagent::SubagentKind>,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
@@ -745,9 +750,13 @@ pub(crate) fn session_activity_line(
         label.to_owned()
     } else if attention == AttentionLevel::Waiting {
         // Waiting with no question or review of its own: one of its Mjolnir
-        // sub-agents is waiting on a question (see
-        // `DashboardState::attention_level`).
-        "Sub-agent question".to_owned()
+        // children holds an open form (see `DashboardState::attention_level`).
+        // Reviewers live in their own workspace, so the row says which.
+        match waiting_child {
+            Some(mj_core::subagent::SubagentKind::Reviewer) => "Reviewer question",
+            _ => "Sub-agent question",
+        }
+        .to_owned()
     } else if detail.is_some_and(|detail| {
         matches!(
             detail.activity.state().last_known(),
@@ -871,6 +880,7 @@ pub(crate) fn compact_session_lines(
     unreachable: bool,
     disk_full: bool,
     attention: AttentionLevel,
+    waiting_child: Option<mj_core::subagent::SubagentKind>,
     operation: Option<&SessionOperationDisplay>,
     now_epoch_seconds: u64,
     target: &str,
@@ -907,6 +917,7 @@ pub(crate) fn compact_session_lines(
         unreachable,
         disk_full,
         attention,
+        waiting_child,
         operation,
         now_epoch_seconds,
         target,
@@ -1618,18 +1629,37 @@ pub(crate) fn render_sessions(
         .selected_visible_index()
         .filter(|index| *index < row_heights.len());
     let viewport = usize::from(rows_area.height);
+    // When the last row is taller than the pane, no page fits it and the
+    // clamp allows an offset past it. The list always keeps its last row.
     let mut offset = mj_chat::components::clamp_offset_to_last_page(
         dashboard.sessions_scroll.get(),
         row_heights,
         viewport,
-    );
+    )
+    .min(row_heights.len().saturating_sub(1));
+    // A moved selection, or none at all, ends the wheel's hold on the offset.
+    let wheel_scrolled = {
+        let mut held = dashboard.sessions_wheel_scrolled_from.borrow_mut();
+        if selected.is_none() || held.as_deref() != dashboard.selected_session_id() {
+            *held = None;
+        }
+        held.is_some()
+    };
+    let mut reveal_selected = true;
     if let Some(selected) = selected {
+        let content = usize::from(layout.presentation(selected, minimized).height());
         if take_selection_recenter(dashboard, Focus::Sessions) {
             offset = mj_chat::components::centered_offset(selected, row_heights, viewport);
+        } else if wheel_scrolled {
+            // The wheel moved the list, not the selection, so the selected row
+            // may be off screen. The table below must not scroll to it either:
+            // that would put its rows out of step with the hit areas, so it
+            // only marks a selection that already fits, whole, where it is.
+            reveal_selected = selected >= offset
+                && row_heights[offset..selected].iter().sum::<usize>() + content <= viewport;
         } else if selected < offset {
             offset = selected;
         } else {
-            let content = usize::from(layout.presentation(selected, minimized).height());
             offset = offset_showing_selected(offset, selected, content, row_heights, viewport);
         }
     }
@@ -1655,7 +1685,7 @@ pub(crate) fn render_sessions(
     );
     let mut state = TableState::default().with_selected(
         selected
-            .filter(|selected| *selected < end)
+            .filter(|selected| reveal_selected && *selected < end)
             .and_then(|selected| selected.checked_sub(offset)),
     );
     frame.render_stateful_widget(table, rows_area, &mut state);

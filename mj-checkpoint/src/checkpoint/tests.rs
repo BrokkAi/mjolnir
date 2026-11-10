@@ -1803,6 +1803,8 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
     fs::create_dir_all(&memory_root).unwrap();
     fs::write(memory_root.join("MEMORY.md"), "remember this").unwrap();
     mj_core::worker_launch::WorkerLaunchConfig {
+        cpu_accounting: Default::default(),
+        no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
@@ -2693,7 +2695,13 @@ fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
     )
     .unwrap();
     let reviewed = format!("refs/mj/reviewed/{tree}");
-    for (name, object) in [(baseline, &point), (&start, &head), (&reviewed, &head)] {
+    let overridden = format!("refs/mj/overridden/{tree}");
+    for (name, object) in [
+        (baseline, &point),
+        (&start, &head),
+        (&reviewed, &head),
+        (&overridden, &head),
+    ] {
         git(&source, &["update-ref", name, object]);
     }
     export_checkpoint(&spec).unwrap();
@@ -2735,7 +2743,7 @@ fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
     // while commit refs whose objects remain locally available are recreated.
     restore_single_repository_into_checkout(&spec.output_path, &destination, &SystemGit).unwrap();
     assert_eq!(git(&destination, &["for-each-ref", baseline]), "");
-    for name in [&start, &reviewed] {
+    for name in [&start, &reviewed, &overridden] {
         assert_eq!(git(&destination, &["rev-parse", name]), head);
     }
     // Move transports workspace files separately and disables repository
@@ -2748,9 +2756,11 @@ fn raw_checkpoint_restores_review_refs_and_declares_the_new_schema() {
         git(&source, &["update-ref", "-d", name]);
     }
     restore_into(temp.path(), &spec, false);
-    for (name, object) in [(baseline, &point), (&start, &head), (&reviewed, &head)] {
+    for (name, object) in [(&start, &head), (&reviewed, &head)] {
         assert_eq!(git(&source, &["rev-parse", name]), *object);
     }
+    // The old pin was not archived, so no restore brings it back.
+    assert_eq!(git(&source, &["for-each-ref", baseline]), "");
     let foreign = crate::archive::record_review_point(
         &SystemGit,
         &source,

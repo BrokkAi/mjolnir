@@ -493,6 +493,7 @@ mod tests {
                 command: None,
                 command_id: "prompt-1".into(),
                 outcome: RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
@@ -814,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn child_question_outbox_survives_cancellation_replay_and_reused_ids() {
+    fn child_question_outbox_survives_cancellation_replay_and_reused_ids_and_skips_approvals() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("questions.sqlite");
         for id in ["session-1", "parent"] {
@@ -826,29 +827,33 @@ mod tests {
             "mode":"form", "sessionId":"session-1", "message":"Which architecture?",
             "requestedSchema":{"type":"object", "properties":{"choice":{"type":"string", "title":"Architecture", "enum":["Thin callers", "Thick callers"]}}}
         })).unwrap();
+        let mut reused = question.clone();
+        reused.message = "Which database?".into();
         let mut permission = question.clone();
+        permission.id = "tool-permission-1".into();
         permission.message = "May I run this command?".into();
         permission.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip: true });
+        let mut secret = question.clone();
+        secret.message = "Paste the token".into();
+        secret.fields[0].secret = true;
+        let mut plan = question.clone();
+        plan.id = format!("{}1", mj_core::acp::PLAN_REVIEW_ID_PREFIX);
+        plan.message = "Approve this plan?".into();
         let observations = || {
-            vec![
-                RelayObservation::ElicitationRequested {
-                    request: question.clone(),
-                },
-                RelayObservation::ElicitationResolved {
-                    elicitation_id: question.id.clone(),
+            let mut observations = Vec::new();
+            // A restarted harness may reuse the same question id. A parent
+            // cannot grant approvals, so they stay with the person.
+            for request in [&question, &reused, &permission, &secret, &plan] {
+                observations.push(RelayObservation::ElicitationRequested {
+                    request: request.clone(),
+                });
+                observations.push(RelayObservation::ElicitationResolved {
+                    elicitation_id: request.id.clone(),
                     action: "cancel".into(),
                     reply: None,
-                },
-                // A restarted harness may reuse the same question id.
-                RelayObservation::ElicitationRequested {
-                    request: permission.clone(),
-                },
-                RelayObservation::ElicitationResolved {
-                    elicitation_id: permission.id.clone(),
-                    action: "cancel".into(),
-                    reply: None,
-                },
-            ]
+                });
+            }
+            observations
         };
         // A top-level form remains local.
         page(&path, observations(), false).unwrap();
@@ -873,7 +878,7 @@ mod tests {
                 .unwrap()
                 .events
                 .len(),
-            4,
+            10,
             "outbox failure rolls back its API events too"
         );
         connection
@@ -886,7 +891,7 @@ mod tests {
             .unwrap();
         assert!(
             current.pending_elicitations.is_empty(),
-            "both forms resolved in this same projection page"
+            "every form resolved in this same projection page"
         );
         apply_projection_event_to(
             &path,
@@ -939,10 +944,13 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("Which architecture?"))
         );
+        assert!(texts.iter().any(|text| text.contains("Which database?")));
         assert!(
-            texts
+            !texts
                 .iter()
-                .any(|text| text.contains("May I run this command?"))
+                .any(|text| text.contains("May I run this command?")
+                    || text.contains("Paste the token")
+                    || text.contains("Approve this plan?"))
         );
         assert_eq!(
             super::super::subagent_questions::reconcile_pending_subagent_questions_with(
@@ -963,7 +971,7 @@ mod tests {
         )
         .unwrap();
         let connection = open(&path).unwrap();
-        assert_eq!(connection.query_row("SELECT count(*) FROM api_events WHERE json_extract(body,'$.type')='input_required'", [], |r| r.get::<_,u64>(0)).unwrap(), 4);
+        assert_eq!(connection.query_row("SELECT count(*) FROM api_events WHERE json_extract(body,'$.type')='input_required'", [], |r| r.get::<_,u64>(0)).unwrap(), 10);
         assert_eq!(
             connection
                 .query_row("SELECT count(*) FROM mailbox_outbox", [], |r| r
@@ -1170,6 +1178,7 @@ mod tests {
             unreachable!()
         };
         *outcome = RelayCommandOutcome::Prompt {
+            work_facts: None,
             diagnostic: None,
             stop_reason: "provider_error".into(),
             usage: None,
@@ -1454,6 +1463,7 @@ mod tests {
                     command_id: "prompt-1".into(),
                     command: Some(RelayCommandKind::Prompt),
                     outcome: RelayCommandOutcome::Prompt {
+                        work_facts: None,
                         stop_reason: "Cancelled".into(),
                         usage: None,
                         diagnostic: None,
@@ -1467,6 +1477,7 @@ mod tests {
                     command_id: "prompt-1".into(),
                     command: Some(RelayCommandKind::Prompt),
                     outcome: RelayCommandOutcome::Prompt {
+                        work_facts: None,
                         stop_reason: "QuotaLimit".into(),
                         usage: None,
                         diagnostic: None,

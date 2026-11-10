@@ -1,0 +1,114 @@
+{
+  "id": "L2404",
+  "title": "usage graph assumptions",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "75cf5b309cbc1457f457f1ee469f2c9f",
+    "session_title": "bifrost via claude4",
+    "reply_position": 157,
+    "captured_at": "2026-10-21T10:44:12.523Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "how should we fix #6229 / how badly does it run into deeply-embedded assumptions that are massively painful to change?"
+        },
+        {
+          "id": "agent:157",
+          "role": "assistant",
+          "text": "**Short answer:** two of the four requests are cheap and hit nothing deep; one (implicit calls) is a language-rule table that mostly fits the existing fact model, but it inherits every receiver-typing gap we already have; two sub-cases (derive output, Drop) and the std-pack question are the genuinely painful parts. Persistence is real work but not a fight with an embedded assumption. Details and evidence below, then a recommended order.\n\n## What the code actually assumes\n\n**1. \"An edge is a byte range in a file.\"** Confirmed. `EdgeSite { file, range, ast_id: Option, enclosing }` at `crates/bifrost-analysis/src/analyzer/resolution/reference_vocabulary.rs:20`, and `FactReferenceSiteMetadata::new` asserts an ordered range (`resolution/batch.rs:131`). But this is survivable for implicit calls: nearly every implicit call has a triggering node with a real range (the `binary_expression` operator, the `try_expression`, the `for_expression`, the `*` in a unary expression, the `index_expression`, the format-macro argument). Anchoring the implicit call at that node keeps the edge model unchanged. Only Drop at scope exit and derive-generated methods lack a natural token.\n\n**2. \"A reference is a spelled name.\"** The lowering publishes `PositionedIdentifierFact { name, namespace, qualifier }`, and Rust already synthesizes non-textual references: `ResolutionSiteKind::SyntheticReference` for the trait `Self` lower bound (`crates/bifrost-rust/src/resolution.rs:4655`) and for macro tuple selectors (`:9370`). So \"emit `eq` with the LHS operand's type slot as qualifier, at the `==` node\" is a shape the facts model takes today. The catch is in the projector: `LoweredSemanticSite::published_site_metadata` deliberately omits metadata for `SyntheticReference`, so the projector turns such a site into a `MissingSiteMetadata` gap and withholds the edge (`store_bridge/fact_reference_edges.rs:3407-3450`). An implicit-call site needs a *new* site kind that does publish metadata, not reuse of `SyntheticReference`. That is a contained change.\n\n**3. \"Rust's member surface is open, and trait dispatch is a gap.\"** Confirmed. Every `impl Trait for T` header pushes `UnsupportedHierarchyTraversal` (`resolution.rs:2387`), every `trait_item` does too (`:1159`), and `declare_open_member_surfaces` (`:7762`) marks every qualified lookup open. However the relation itself is recorded: `ResolutionDeclaredTypeRelationKind::TraitImplementation` with the trait as target (`:2401`). So \"which workspace impls implement `PartialEq`\" is answerable from facts. What is withheld is the *closure* proof, which QS does not need.\n\n**4. \"`unresolved_names = None` disqualifies the whole pass.\"** Confirmed, and the collapse point is narrow. `None` arises in exactly two places: an incomplete binding on a synthetic site with no metadata (`fact_reference_edges.rs:3437`), and an unresolved site whose classifier cannot read an identifier at the byte range (`:3757`). Both come from reading the name *from source text* instead of from the identifier fact that already holds it. The batch is per fragment, so the scope is already a file; the whole-pass collapse happens at `native_graph.rs:373` (`None => unresolved_names_complete = false`). Note the contract comment at `:1596-1612` says names-not-declarations is deliberate (lazy catalog, heap rule), so the fix is to stop producing `None`, not to change the contract.\n\n**5. \"Resolved bindings are not persisted.\"** Confirmed. The store holds lowering facts (`resolution_sites`, `resolution_gaps`, `resolution_binding_projections`, which are type-slot projections, not resolver output; see `store/resolution.rs:1991`). The resolver runs per operation. Nothing forbids persisting resolved edges; the schema rules (rows, no opaque blobs) fit a `(blob, site, target identity, proof)` table.\n\n**6. \"Derive is a gap on the struct, not a set of methods.\"** Confirmed: `GeneratedItemSurface` at `resolution.rs:972`. No declaration exists for a derived `cmp`, so no node can ever carry an inbound edge for it.\n\n**7. Std pack.** `RoutePrefixClass::Std` is a name-table c\n[... 2992 bytes omitted from the middle of this message ...]\ns receiver is untyped, we can publish candidate edges to *every* workspace impl of that trait method (from the `TraitImplementation` relations) and let QS consume unproven edges. That turns most of the receiver-typing problem from \"blocked\" into \"imprecise\", which is the right trade for test selection.\n`─────────────────────────────────────────────────`\n\n## Recommendation\n\nIn this order, each as its own PR:\n\n1. **Kill `None`** by reading names from identifier facts at `fact_reference_edges.rs:3437` and `:3757`. Also fixes #6090's remaining `ForwardMetadataIncomplete` family.\n2. **Structured completeness in `UsageGraphResult`**: `unresolved_names: Vec<String>`, `unproven_targets: Vec<DeclarationId>`, and a per-node `inbound: Complete | MayBeMissing(reason)` computed from those two lists over the result's nodes.\n3. **Implicit-call sites** in Rust lowering with a new metadata-publishing site kind and a `ReferenceKind` value QS can filter on. Table: `==`/`!=` -> `PartialEq`, `<` etc. -> `PartialOrd`, arithmetic -> `ops::*`, `[]` -> `Index`, `*` -> `Deref`, `?` -> `Try`/`From`, `for` -> `IntoIterator`/`Iterator::next`, `{}`/`{:?}`/`to_string` -> `Display`/`Debug::fmt`. Untyped receiver -> ambiguous candidate edges to all workspace impls.\n4. **Derive as intrinsic summaries** (edges, not declarations).\n5. **Persistence**, only after a release-build measurement shows it is still the bottleneck, and after adding timing scopes inside `NativeWorkspaceUsageGraphAccumulator` so the 19 unattributed seconds are explained.\n6. Tell QS now: Drop and generic callers stay open (#3854, #6217); std gaps are not closed by the pack today (likely); consume unproven and ambiguous edges.\n\nAnswer to the question's second half: the only things that fight a deep assumption are synthesizing declarations for derived impls (avoidable) and Drop (not avoidable, already an open issue). Everything else fits the fact model and the edge model as they are."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "how should we fix #6229 / how badly does it run into deeply-embedded assumptions that are massively painful to change?",
+    "assistant_text_tail": "s receiver is untyped, we can publish candidate edges to *every* workspace impl of that trait method (from the `TraitImplementation` relations) and let QS consume unproven edges. That turns most of the receiver-typing problem from \"blocked\" into \"imprecise\", which is the right trade for test selection.\n`─────────────────────────────────────────────────`\n\n## Recommendation\n\nIn this order, each as its own PR:\n\n1. **Kill `None`** by reading names from identifier facts at `fact_reference_edges.rs:3437` and `:3757`. Also fixes #6090's remaining `ForwardMetadataIncomplete` family.\n2. **Structured completeness in `UsageGraphResult`**: `unresolved_names: Vec<String>`, `unproven_targets: Vec<DeclarationId>`, and a per-node `inbound: Complete | MayBeMissing(reason)` computed from those two lists over the result's nodes.\n3. **Implicit-call sites** in Rust lowering with a new metadata-publishing site kind and a `ReferenceKind` value QS can filter on. Table: `==`/`!=` -> `PartialEq`, `<` etc. -> `PartialOrd`, arithmetic -> `ops::*`, `[]` -> `Index`, `*` -> `Deref`, `?` -> `Try`/`From`, `for` -> `IntoIterator`/`Iterator::next`, `{}`/`{:?}`/`to_string` -> `Display`/`Debug::fmt`. Untyped receiver -> ambiguous candidate edges to all workspace impls.\n4. **Derive as intrinsic summaries** (edges, not declarations).\n5. **Persistence**, only after a release-build measurement shows it is still the bottleneck, and after adding timing scopes inside `NativeWorkspaceUsageGraphAccumulator` so the 19 unattributed seconds are explained.\n6. Tell QS now: Drop and generic callers stay open (#3854, #6217); std gaps are not closed by the pack today (likely); consume unproven and ambiguous edges.\n\nAnswer to the question's second half: the only things that fight a deep assumption are synthesizing declarations for derived impls (avoidable) and Drop (not avoidable, already an open issue). Everything else fits the fact model and the edge model as they are.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "The reply answers the feasibility question and gives a recommended order. The 'stay open' items are known engine gaps with existing issues, not a request to the user, and no decision or action is asked.",
+    "label": "none",
+    "triggers": [
+      "still open"
+    ],
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-21T10:46:11.731Z",
+        "kind": "system",
+        "text": "model set to opus"
+      },
+      {
+        "at": "2026-10-21T10:46:14.596Z",
+        "kind": "system",
+        "text": "effort set to xhigh"
+      },
+      {
+        "at": "2026-10-21T10:46:29.451Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-10-21T10:46:31.440Z",
+        "kind": "system",
+        "text": "Switched from claude4 / localhost to claude4 / localhost in place; the workspace and environment were kept. Queued work was discarded; ready and idle. The interrupted prompt was not replayed."
+      },
+      {
+        "at": "2026-10-21T10:48:01.728Z",
+        "kind": "user",
+        "text": "ok, you have the ball on implementation  talk to 0bf0983d553751026807d97d54857ede if you get to the point of needing schema changes (sounds like that depends on #5)  how close does that get QS to bein"
+      },
+      {
+        "at": "2026-10-21T10:48:01.730Z",
+        "kind": "system",
+        "text": "Mailbox events:   - New issue brokkai/bifrost-dev#6233 Rust stdlib semantic pack never activates in CLI policy runs: discovery supplies no toolchain artifact digest"
+      }
+    ]
+  }
+}

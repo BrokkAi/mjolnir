@@ -311,7 +311,7 @@ export GIT_TERMINAL_PROMPT=0
 export GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15'
 git_remote() {
     if [ "$has_token" = 1 ]; then
-        git -c credential.helper= -c 'credential.helper=!f() { if [ "$1" = get ]; then printf "%s\n" username=x-access-token "password=$GH_TOKEN"; fi; }; f' "$@"
+        git -c credential.https://github.com.helper= -c 'credential.https://github.com.helper=!f() { if [ "$1" = get ]; then printf "%s\n" username=x-access-token "password=$GH_TOKEN"; fi; }; f' "$@"
     else
         git "$@"
     fi

@@ -106,6 +106,7 @@ impl DurableRelay {
     /// operations stay compiled on Windows so their tests still build there.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn prepare_pending_assessment(&mut self) -> Result<()> {
+        self.reclassify_assessment_with_generated_authorization()?;
         if let Some(mut a) = self.snapshot.assessment.clone().filter(|a| {
             a.current()
                 && matches!(
@@ -120,11 +121,7 @@ impl DurableRelay {
                 e.background_commands != facts.background_commands
                     || e.queued_commands != facts.queued_commands
             }) {
-                a.revision = self.snapshot.latest_ordinal + 1;
-                a.status = mj_core::assessment::Status::Pending;
-                a.evidence = None;
-                a.action = None;
-                a.verdict = None;
+                a.classify_again(self.snapshot.latest_ordinal + 1);
                 self.store_assessment(a)?;
             }
         }
@@ -163,21 +160,15 @@ impl DurableRelay {
             .background_commands()
             .into_iter()
             .take(mj_core::activity::verdict::IN_FLIGHT_TOOLS)
-            .map(|command| {
-                let mut text = command.command;
-                text.truncate(
-                    text.floor_char_boundary(mj_core::activity::verdict::TOOL_TITLE_BYTES),
-                );
-                mj_core::activity::verdict::BackgroundEvidence {
-                    id: command.id,
-                    command: text,
-                    started_s_ago: now.saturating_sub(command.started_at_ms).max(0) as u64 / 1000,
-                }
+            .map(|command| mj_core::activity::verdict::BackgroundEvidence {
+                command: mj_core::activity::verdict::tool_title(&command.command),
+                id: command.id,
+                started_s_ago: now.saturating_sub(command.started_at_ms).max(0) as u64 / 1000,
             })
             .collect();
         crate::acp::verdict_client::bound_authorization(
             &mut evidence,
-            self.snapshot.assessment_context.clone(),
+            self.snapshot.authorization_context(),
         );
         a.evidence = Some(evidence);
         self.store_assessment(a)
@@ -208,11 +199,37 @@ impl DurableRelay {
         tracing::info!(target: "mj_jev", session = %self.snapshot.session_id,
             revision = a.revision, phase = "replied",
             "asking Jev again about leftover processes after a worker restart");
-        a.revision = self.snapshot.latest_ordinal + 1;
-        a.status = mj_core::assessment::Status::Pending;
-        a.evidence = None;
-        a.action = None;
-        a.verdict = None;
+        a.classify_again(self.snapshot.latest_ordinal + 1);
+        self.store_assessment(a)
+    }
+
+    /// An assessment classified by an earlier worker can rest on a user
+    /// message that today's rules attribute to Mjolnir, such as another
+    /// session's message. Its verdict and action are not the person's to rely
+    /// on, so the turn is classified again on the corrected history, the same
+    /// way a seeded history does it.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn reclassify_assessment_with_generated_authorization(&mut self) -> Result<()> {
+        let Some(mut a) = self.snapshot.assessment.clone().filter(|a| {
+            a.current()
+                && !matches!(
+                    a.action,
+                    Some(
+                        mj_core::assessment::Action::RetryProvider
+                            | mj_core::assessment::Action::RecoverQuota
+                    )
+                )
+                && a.evidence
+                    .as_ref()
+                    .and_then(|e| e.authorization.as_ref())
+                    .is_some_and(mj_core::assessment::ContextHistory::has_generated_prompts)
+        }) else {
+            return Ok(());
+        };
+        a.classify_again(self.snapshot.latest_ordinal + 1);
+        a.failures = 0;
+        a.retry_at_ms = None;
+        a.reason = "authorization_evidence_changed".into();
         self.store_assessment(a)
     }
 
@@ -507,6 +524,72 @@ mod tests {
     use mj_core::activity::{ActivityState, safe_to_replace};
     use mj_core::config::HarnessKind;
 
+    // Hard-won: 97731d30a: an assessment classified with a peer message as user authorization kept its action.
+    #[test]
+    fn an_assessment_resting_on_a_now_generated_prompt_is_classified_again() {
+        use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
+        use mj_core::assessment::{Action, Status};
+        use mj_core::continuation::EvidenceMessage;
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), "reclassify-test", "test").unwrap();
+        relay.set_turn_verdict_harness(HarnessKind::Claude);
+        submit_relay(&mut relay, "user-turn", prompt("Fix the build."));
+        relay.claim_pending_commands(true).unwrap();
+        finish_prompt(&mut relay, "user-turn");
+        relay.prepare_pending_assessment().unwrap();
+        let assessed = |relay: &DurableRelay, peer: bool| {
+            let mut assessment = relay.snapshot.assessment.clone().unwrap();
+            let mut evidence = relay.turn_context.evidence(
+                HarnessKind::Claude,
+                TurnPhase::Replied,
+                &relay.activity_facts(),
+                0,
+            );
+            let mut messages = vec![EvidenceMessage {
+                id: "user:user-turn".into(),
+                role: "user".into(),
+                text: "Fix the build.".into(),
+            }];
+            if peer {
+                messages.push(EvidenceMessage {
+                    id: "user:session-message-turn-peer-1".into(),
+                    role: "user".into(),
+                    text: "Please also push it.".into(),
+                });
+            }
+            messages.push(EvidenceMessage {
+                id: "agent:reply".into(),
+                role: "assistant".into(),
+                text: "Fixed; pushing next.".into(),
+            });
+            evidence.authorization = Some(mj_core::assessment::ContextHistory {
+                messages,
+                ..Default::default()
+            });
+            assessment.evidence = Some(evidence);
+            assessment.action = Some(Action::Continue);
+            assessment.status = Status::Assessed;
+            assessment
+        };
+        let clean = assessed(&relay, false);
+        relay.store_assessment(clean).unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        assert_eq!(
+            relay.snapshot.assessment.as_ref().unwrap().status,
+            Status::Assessed
+        );
+
+        let mut stale = assessed(&relay, true);
+        stale.question_message = Some("agent:reply".into());
+        relay.store_assessment(stale).unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        let a = relay.snapshot.assessment.as_ref().unwrap();
+        assert_eq!(a.status, Status::Pending);
+        assert_eq!(a.action, None);
+        assert_eq!(a.reason, "authorization_evidence_changed");
+        assert_eq!(a.question_message, None);
+    }
+
     #[test]
     fn question_target_is_stored_only_for_current_input_gate_assessment() {
         use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
@@ -634,7 +717,7 @@ mod tests {
         relay.background_work = BackgroundWorkPolicy::AirTasks;
         relay
             .turn_context
-            .reset("How many tickets fell out of s21?");
+            .reset(None, "How many tickets fell out of s21?");
         relay.record_session_update(serde_json::from_value(serde_json::json!({
             "sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"One ticket so far: #3486."}
         })).unwrap()).unwrap();
@@ -826,7 +909,7 @@ mod settled_task_tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
-        relay.acp_ready = true;
+        relay.set_acp_ready(true);
         relay
             .record_observation(RelayObservation::SessionConfigured {
                 config_options: vec![],
@@ -881,7 +964,7 @@ mod settled_task_tests {
         drop(relay);
         std::fs::remove_file(dir.path().join(RELAY_STATE_FILE)).unwrap();
         let mut relay = claude_relay(dir.path());
-        relay.acp_ready = true;
+        relay.set_acp_ready(true);
         assert!(
             relay
                 .snapshot
@@ -983,6 +1066,7 @@ mod settled_task_tests {
                 crate::acp::AirTaskUpdate::Finished {
                     task_id: "a".into(),
                     settled: true,
+                    failed: false,
                 },
             )
             .unwrap();
@@ -1012,7 +1096,7 @@ mod settled_task_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
         relay.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
-        relay.acp_ready = true;
+        relay.set_acp_ready(true);
         relay.snapshot.native_session_id = Some("root".into());
 
         // claude-agent-acp 0.97.0's autonomousTurnStarted payload canStop=true although
@@ -1047,7 +1131,7 @@ mod settled_task_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
         // A configured harness session; otherwise nothing is ever quiet.
-        relay.acp_ready = true;
+        relay.set_acp_ready(true);
         relay.set_air_tasks(vec![task("srv")]).unwrap();
         relay
             .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
@@ -1061,7 +1145,9 @@ mod settled_task_tests {
                 .unwrap(),
             )
             .unwrap();
-        relay.settle_harness_turn(Some("test".into())).unwrap();
+        relay
+            .settle_harness_turn(Some("test".into()), "end_turn")
+            .unwrap();
         relay.prepare_pending_assessment().unwrap();
         let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
         assert_eq!(
@@ -1158,12 +1244,12 @@ mod settled_task_tests {
             relay
                 .record_observation(RelayObservation::SessionRestarted)
                 .unwrap();
-            relay.acp_ready = true;
+            relay.set_acp_ready(true);
             relay
         };
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
-        relay.acp_ready = true;
+        relay.set_acp_ready(true);
         relay.set_air_tasks(vec![task("srv")]).unwrap();
         relay
             .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
@@ -1177,7 +1263,9 @@ mod settled_task_tests {
                 .unwrap(),
             )
             .unwrap();
-        relay.settle_harness_turn(Some("test".into())).unwrap();
+        relay
+            .settle_harness_turn(Some("test".into()), "end_turn")
+            .unwrap();
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
         relay
@@ -1236,7 +1324,7 @@ mod settled_task_tests {
     fn a_verdict_stays_with_its_own_turn_in_the_published_state() {
         use crate::relay::test_support::{prompt, submit_relay};
         use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, TextContent};
-        use mj_core::activity::verdict::{Decision, TurnCompletion};
+        use mj_core::activity::verdict::Decision;
         use mj_core::assessment::{Action, Failure, Input, Judgment, Verdict, Work};
         use mj_core::relay::RelayCommandOutcome;
         let verdict = |work| Verdict {
@@ -1267,7 +1355,7 @@ mod settled_task_tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
-        relay.acp_ready = true;
+        relay.set_acp_ready(true);
         relay
             .record_observation(RelayObservation::SessionConfigured {
                 config_options: vec![],
@@ -1277,10 +1365,11 @@ mod settled_task_tests {
         relay.claim_pending_commands(true).unwrap();
         relay.set_air_tasks(vec![task("build")]).unwrap();
         say(&mut relay, "The build is running in the background.");
-        let completed = relay
+        relay
             .record_command_completed(
                 "api-turn-20",
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "end_turn".into(),
                     usage: None,
@@ -1303,6 +1392,7 @@ mod settled_task_tests {
                 crate::acp::AirTaskUpdate::Finished {
                     task_id: "build".into(),
                     settled: true,
+                    failed: false,
                 },
             )
             .unwrap();
@@ -1313,7 +1403,10 @@ mod settled_task_tests {
             })
             .unwrap();
         say(&mut relay, "The build passed.");
-        relay.settle_harness_turn(Some("end_turn".into())).unwrap();
+        relay
+            .settle_harness_turn(Some("end_turn".into()), "end_turn")
+            .unwrap();
+        let completion = relay.operational_state().turn_completion;
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, identity) = relay.pending_replied_verdict().unwrap();
         assert!(
@@ -1337,14 +1430,12 @@ mod settled_task_tests {
         assert!(assessment.turn_id.starts_with("harness-turn-"));
         assert_eq!(assessment.action, Some(Action::Uncertain));
         assert_eq!(
-            state.turn_completion,
-            Some(TurnCompletion {
-                command_id: "api-turn-20".into(),
-                completed_ordinal: completed,
-                decision: Decision::KeepCurrent,
-            }),
-            "the prompt's completion identity, with no verdict copied into it"
+            state.turn_completion, completion,
+            "assessment keeps the harness settlement identity"
         );
+        let completion = state.turn_completion.unwrap();
+        assert_eq!(completion.command_id, assessment.turn_id);
+        assert_eq!(completion.decision, Decision::KeepCurrent);
     }
 
     // Hard-won: 1ee54bfa: a disabled continuation left its unconsumed Continue verdict holding `mj wait` open.
@@ -1382,6 +1473,7 @@ mod settled_task_tests {
             .record_command_completed(
                 "original-prompt",
                 RelayCommandOutcome::Prompt {
+                    work_facts: None,
                     diagnostic: None,
                     stop_reason: "EndTurn".into(),
                     usage: None,
@@ -1433,6 +1525,7 @@ mod settled_task_tests {
                 crate::acp::AirTaskUpdate::Finished {
                     task_id: "b".into(),
                     settled: false,
+                    failed: false,
                 },
             )
             .unwrap();
@@ -1444,6 +1537,7 @@ mod settled_task_tests {
                 crate::acp::AirTaskUpdate::Finished {
                     task_id: "a".into(),
                     settled: true,
+                    failed: false,
                 },
             )
             .unwrap();

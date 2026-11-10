@@ -675,6 +675,7 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
         recorded_at_ms: entry.recorded_at_ms,
         tool_ended_at_ms: entry.tool_ended_at_ms,
         mailbox_events: Vec::new(),
+        generated: entry.role == ChatRole::User && !entry.is_user_authored(),
         lines: source
             .into_iter()
             .map(|line| {
@@ -1222,6 +1223,7 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
         label,
         recorded_at_ms,
         tool_ended_at_ms,
+        generated,
         lines,
         mailbox_events,
         glyph,
@@ -1236,6 +1238,7 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
         && previous.label == *label
         && previous.recorded_at_ms == *recorded_at_ms
         && previous.tool_ended_at_ms == *tool_ended_at_ms
+        && previous.generated == *generated
         && previous.lines == *lines
         && previous.mailbox_events == *mailbox_events
         && previous.glyph == *glyph
@@ -1397,6 +1400,26 @@ mod tests {
             assert_eq!(entry.tool_ended_at_ms, Some(91_000), "{status}");
         }
         assert_eq!(tool("in_progress").tool_ended_at_ms, None);
+    }
+
+    // The viewer's "put back in composer" reads this flag instead of repeating
+    // the id rules.
+    // Hard-won: 8b08e8bc1: handback reminders and peer-session messages counted as user authorization
+    #[test]
+    fn browser_marks_prompts_mjolnir_submitted_as_generated() {
+        let user = |stable_id: &str| {
+            let mut item = item(
+                2,
+                TranscriptBody::User {
+                    content: vec![json!({"type":"text", "text":"Please also update the docs"})],
+                },
+            );
+            Arc::make_mut(&mut item).stable_id = stable_id.into();
+            browser_entry(&materialized_chat_entry(&item, 2))
+        };
+        assert!(!user("user:prompt-1").generated);
+        assert!(user("user:handback-reminder-5").generated);
+        assert!(user("user:session-message-turn-r1").generated);
     }
 
     fn assert_projection(

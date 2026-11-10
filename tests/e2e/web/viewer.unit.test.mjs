@@ -439,6 +439,35 @@ test('rolled-back launch errors remain visible only in their workspace and can b
   assert.equal(notices.children.length, 0);
 });
 
+// Hard-won: 27c51a34c: session deletion hid incomplete target cleanup from the browser.
+test('cleanup warnings remain visible after their session is removed and can be dismissed', () => {
+  const notices = makeNode();
+  const context = vm.createContext({
+    snapshot: { sessions: [], notices: [
+      { id: 7, session_id: 'removed', text: 'Environment cleanup failed; resources may remain.' },
+    ] },
+    route: { name: 'dashboard' },
+    viewerState: { cursor: { incarnation: 'first-daemon' } },
+    selectedWorkspaceId: () => 'primary',
+    document: { querySelector: () => notices },
+    el: (tag, className, textContent) => Object.assign(makeNode(tag), { className, textContent }),
+  });
+  vm.runInContext(sourceBetween('const dismissedLaunchFailures =', '\nfunction renderWorkspaces()'), context);
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children[0].children[0].textContent, context.snapshot.notices[0].text);
+  context.route.name = 'conversation';
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children.length, 1, 'warning survives the route after session removal');
+  notices.children[0].children[1].onclick();
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children.length, 0, 'snapshot refresh does not undo dismissal');
+  context.viewerState.cursor.incarnation = 'second-daemon';
+  context.snapshot.notices[0] = { id: 7, session_id: 'another', text: 'A new cleanup failed.' };
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children.length, 1, 'an ID reused by a new daemon is not dismissed');
+  assert.equal(notices.children[0].children[0].textContent, 'A new cleanup failed.');
+});
+
 function descendants(root, tag) {
   const wanted = tag.toUpperCase();
   const found = [];
@@ -517,12 +546,12 @@ test('phone review status exactly mirrors the shared status sentences', () => {
   const context = vm.createContext({});
   vm.runInContext(`${statusSource}\nglobalThis.reviewStatusLineForTest = reviewStatusLine;\nglobalThis.sessionReviewStatusConfigForTest = sessionReviewStatusConfig;`, context);
   const status = context.reviewStatusLineForTest;
-  const snapshot = { review_config: { trigger: 'turn', reviewers: [{ model: 'terra' }, { model: 'sol' }] } };
-  const session = { review_trigger: 'turn', review_count: 1 };
-  assert.equal(status(context.sessionReviewStatusConfigForTest(snapshot, session), false), 'Reviewing every completed turn; 1 reviewer');
-  assert.equal(status({ trigger: 'turn', reviewers: [{ model: 'terra' }, { model: 'sol' }] }, false), 'Reviewing every completed turn; 2 reviewers');
-  assert.equal(status({ trigger: 'turn', reviewers: [] }, false), 'Reviewing every completed turn; no reviewers');
-  assert.equal(status({ trigger: 'off', reviewers: [{ model: 'terra' }] }, true), 'Automatic review is off; /review reviews one turn; 1 reviewer. A review is open now.');
+  const snapshot = { review_config: { trigger: 'push', reviewers: [{ model: 'terra' }, { model: 'sol' }] } };
+  const session = { review_trigger: 'push', review_count: 1 };
+  assert.equal(status(context.sessionReviewStatusConfigForTest(snapshot, session), false), 'Review trigger is before push; 1 reviewer');
+  assert.equal(status({ trigger: 'push', reviewers: [{ model: 'terra' }, { model: 'sol' }] }, false), 'Review trigger is before push; 2 reviewers');
+  assert.equal(status({ trigger: 'off', reviewers: [] }, false), 'Automatic review is off; /review reviews commits; no reviewers');
+  assert.equal(status({ trigger: 'off', reviewers: [{ model: 'terra' }] }, true), 'Automatic review is off; /review reviews commits; 1 reviewer. A review is open now.');
   assert.equal(status({ trigger: 'push', reviewers: [{ model: 'terra' }] }, false), 'Review trigger is before push; 1 reviewer');
 });
 
@@ -924,6 +953,13 @@ test('an unanswered turn offers the prompt that was running', () => {
     null,
   );
   assert.equal(vm.runInContext('unansweredPromptFor', context)(warning, null), null);
+  // Hard-won: 9c2b74a01: a failed turn Mjolnir started offered an earlier, unrelated request.
+  const turnPromptText = vm.runInContext('turnPromptText', context);
+  const earlier = turnPromptText({ role: 'user', lines: ['rename the module'] }, null);
+  assert.equal(earlier, 'rename the module');
+  assert.equal(turnPromptText({ role: 'agent', lines: ['done'] }, earlier), earlier);
+  const continued = turnPromptText({ role: 'user', generated: true, lines: ['Continue'] }, earlier);
+  assert.equal(vm.runInContext('unansweredPromptFor', context)(warning, continued), null);
 });
 
 // Live path suggestions must never fight the person typing: a superseded
@@ -1352,7 +1388,7 @@ test('Create sends the selected delegation policy across the browser action wire
 });
 
 test('delegation reflects unavailable configuration and rechecks it before submission', async () => {
-  for (const [kind, configured] of [['codex', false], ['grok', true], ['claude', true]]) {
+  for (const [kind, configured] of [['codex', false], ['grok', true], ['claude', true], ['opencode', true]]) {
     const context = delegationContext(kind, configured);
     const body = makeNode();
     const draft = { profileId: 'profile', subagents: { mode: 'native' } };

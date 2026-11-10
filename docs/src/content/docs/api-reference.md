@@ -467,7 +467,7 @@ ancestors. Directories you attach with `additional_mounts` are not checked.
 
 Choose `native` for harness delegation or `mjolnir` for Mjolnir-managed children.
 Omitted policy defaults to Native, or to `none` for a DSH profile, which refuses
-`native` because DSH has no sub-agents of its own. Mjolnir requires a Claude, Codex, or DSH parent and
+`native` because DSH has no sub-agents of its own. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and
 a straightforward choice, either global or a session override. A subtle choice
 is optional:
 
@@ -501,20 +501,16 @@ selects an enabled profile by quota. Spawn no longer accepts `profile_id`, `mode
 `effort` overrides. Without a session override, if global choices become unconfigured, spawn fails
 with a message naming the missing configuration section and matching CLI flag.
 
-`review` sets the session's own turn review, overriding `[review]` for this
-session only:
+`review` sets the session's review mode, overriding `[review]` for this session:
 
 ```json
-{"review": {"mode": "turn", "model": "<model-id>", "effort": "high"}}
 {"review": {"mode": "push"}}
 {"review": {"mode": "off"}}
 ```
 
-`review.mode` accepts `off`, `turn`, or `push`; `on` is rejected. `turn` reviews
-completed turns, and `push` reviews commits before push. Optional `model` and
-`effort` replace those in `[review]`. `off` turns off automatic review; a
-manual review still runs. A blank or overlong `model` or `effort` answers `400`.
-When `review` is omitted, the session follows `[review]`. See
+`review.mode` accepts `off` or `push`; `turn` is refused. Optional `reviewers`
+sets reviewer choices. `off` disables review for the session. When `review` is
+omitted, the session follows global reviewer settings. See
 [per-session settings](/turn-review/#per-session-settings).
 
 `no_project_memory` (boolean, default `false`) starts the session with no
@@ -888,48 +884,19 @@ For a session that is still starting, it withdraws the prompts held for it.
 There is no `/close` endpoint or `force` parameter. Destruction is available only
 through its dedicated authenticated endpoint, not the generic viewer actions.
 
-### Turn review
+### Push review
 
 ```text
 POST /api/v1/sessions/{session_id}/review
 GET  /api/v1/sessions/{session_id}/review
-POST /api/v1/sessions/{session_id}/review/{forward|dismiss|cancel}
 ```
 
-`POST` starts a one-off review of the turn the session just finished, with the
-session's reviewer, as `/review` does in Prompt. It answers `202` once the
-review has opened, which can take minutes while a reviewer is chosen and
-started:
+`POST` starts a review of the session's committed work. It answers `202` once
+the review has opened. Tracked changes must be committed first. A request that
+cannot start answers `409` with the reason in `error`.
 
-```json
-{ "session_id": "0123abcd…", "started": true }
-```
-
-A review that cannot start answers `409` with the reason in `error`: the
-session is still working, prompts are queued, it is a sub-agent, a review is
-already open, or no reviewer is usable.
-
-`GET` answers `200` with the review the session has open, as the viewer shows
-it, or `"review": null` when none is open:
-
-```json
-{
-  "trigger": "turn",
-  "session_id": "0123abcd…",
-  "review": {
-    "status": "sending findings to the primary agent…",
-    "roles": [{ "label": "reviewer", "state": "findings" }],
-    "verdict": {
-      "kind": "findings",
-      "text": "[P1] src/lib.rs:1 -- unbounded retry loop"
-    }
-  }
-}
-```
-
-A role's `state` is `pending`, `running`, `done`, `findings`, or `failed`.
-`verdict` appears once the review has one; its `kind` is `clean`, `findings`,
-or `failed`. An unknown session answers `404`.
+`GET` answers `200` with the open review, or `"review": null` when none is open.
+A verdict appears when available. An unknown session answers `404`.
 
 ### Resume a suspended session
 

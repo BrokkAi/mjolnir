@@ -571,6 +571,11 @@ pub enum TargetTemplate {
 }
 
 impl TargetTemplate {
+    /// One availability rule for runtime kinds retained only to read history.
+    pub fn launch_refusal(&self) -> Option<&'static str> {
+        matches!(self, Self::AwsEc2 { .. }).then_some(super::LEGACY_EC2_TARGET_NOTICE)
+    }
+
     /// Whether a session can start on this target: every environment
     /// reference its container names resolved. Like
     /// [`HarnessProfile::ensure_ready`](super::HarnessProfile::ensure_ready),

@@ -309,7 +309,7 @@ impl SubagentDraft {
                     .get(profile)
                     .is_some_and(|p| p.kind.supports_delegation_tools())
                 {
-                    Err("Mjolnir sub-agents need a Claude, Codex, or DSH profile".into())
+                    Err("Mjolnir sub-agents need a Claude, Codex, DSH, or OpenCode profile".into())
                 } else if config
                     .subagents
                     .effective_choice(

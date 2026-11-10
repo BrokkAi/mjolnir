@@ -9,7 +9,7 @@ use crossterm::event::Event;
 use mj_chat::components::{ComboBox, ComboBoxState, ControlKind, Dialog, Interaction, PopupSide};
 use mj_chat::theme;
 use mj_core::acp::SessionConfigChoice;
-use mj_core::config::{Config, MAX_REVIEWERS, ReviewConfig, ReviewTrigger, SubagentChoice};
+use mj_core::config::{Config, MAX_REVIEWERS, ReviewConfig, SubagentChoice};
 use mj_core::profile_capabilities::ProfileCapabilitiesSnapshot;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -21,7 +21,6 @@ use crate::{DashboardAction, DashboardState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ReviewSettingsFocus {
-    Trigger,
     Model(usize),
     Effort(usize),
     Remove(usize),
@@ -266,12 +265,6 @@ impl ReviewSettingsDialog {
         {
             return false;
         }
-        if self.review.trigger != ReviewTrigger::Off
-            && self.review.reviewers.is_empty()
-            && !self.review.is_legacy()
-        {
-            return false;
-        }
         self.review
             .reviewers
             .iter()
@@ -311,12 +304,8 @@ impl ReviewSettingsDialog {
         if review.is_legacy() && snapshot.legacy {
             return None;
         }
-        if review.reviewers.len() > MAX_REVIEWERS
-            || (review.trigger != ReviewTrigger::Off
-                && review.reviewers.is_empty()
-                && !review.is_legacy())
-        {
-            return Some("Choose 1–3 reviewers for automatic review.".into());
+        if review.reviewers.len() > MAX_REVIEWERS {
+            return Some("Choose at most 3 reviewers.".into());
         }
         if snapshot.reviewers != review.reviewers {
             return None;
@@ -346,14 +335,6 @@ impl ReviewSettingsDialog {
     fn choices(&self, id: ReviewSettingsFocus) -> (Vec<String>, usize) {
         use ReviewSettingsFocus::*;
         match id {
-            Trigger => (
-                vec!["Off".into(), "End of turn".into(), "Before push".into()],
-                match self.review.trigger {
-                    ReviewTrigger::Off => 0,
-                    ReviewTrigger::Turn => 1,
-                    ReviewTrigger::Push => 2,
-                },
-            ),
             Model(i) => {
                 let current = &self.review.reviewers[i].model;
                 let mut values: Vec<String> = self
@@ -395,7 +376,7 @@ impl ReviewSettingsDialog {
     }
 
     fn selectors(&self) -> Vec<(ReviewSettingsFocus, String)> {
-        let mut selectors = vec![(ReviewSettingsFocus::Trigger, "Trigger".into())];
+        let mut selectors = Vec::new();
         for i in 0..self.review.reviewers.len() {
             selectors.push((
                 ReviewSettingsFocus::Model(i),
@@ -448,7 +429,16 @@ impl ReviewSettingsDialog {
         form.declare_with_enabled(Back, ControlKind::Button, true);
         form.declare_with_enabled(Cancel, ControlKind::Button, true);
         form.declare_with_enabled(Save, ControlKind::Button, self.can_save());
-        form.end_frame(Trigger);
+        form.end_frame(self.initial_focus());
+    }
+
+    /// Where focus starts: the first reviewer, or the button that adds one.
+    fn initial_focus(&self) -> ReviewSettingsFocus {
+        if self.review.reviewers.is_empty() {
+            ReviewSettingsFocus::Add
+        } else {
+            ReviewSettingsFocus::Model(0)
+        }
     }
 
     pub(crate) fn handle_event(
@@ -469,10 +459,6 @@ impl ReviewSettingsDialog {
             _ => ReviewSettingsOutcome::Continue,
         };
         match interaction {
-            Some(Interaction::ComboBoxCommit(Trigger, index)) => {
-                self.review.trigger =
-                    [ReviewTrigger::Off, ReviewTrigger::Turn, ReviewTrigger::Push][index]
-            }
             Some(Interaction::ComboBoxCommit(Model(i), index)) => {
                 if let Some(value) = self.choices(Model(i)).0.get(index).cloned() {
                     self.review.reviewers[i].model = value;
@@ -577,7 +563,7 @@ impl ReviewSettingsDialog {
                     );
                 }
             }
-            Some(Interaction::Activate(id @ (Trigger | Model(_) | Effort(_)))) => {
+            Some(Interaction::Activate(id @ (Model(_) | Effort(_)))) => {
                 self.combo.open(id, self.choices(id).1)
             }
             Some(Interaction::Activate(Cancel)) => self.review = self.original_review.clone(),
@@ -625,19 +611,18 @@ pub(crate) fn render_review_settings(
     } else if dialog.efforts_known.iter().any(|known| !known) {
         "Loading effort choices…"
     } else {
-        "Choose each reviewer’s model and effort."
+        "Review runs before push when reviewers are set."
     };
     // A roomy dialog keeps each reviewer's three controls together. On a
     // narrow terminal, preserve the same focus order in three adjacent rows.
     let inline = body.width >= 64;
     let reviewer_rows = if inline { 2 } else { 4 };
-    let actions_row = 1 + reviewer_rows * dialog.review.reviewers.len() as u16;
+    let actions_row = reviewer_rows * dialog.review.reviewers.len() as u16;
     let content_height = actions_row + 3;
     let focus_row = match form.focused() {
-        Some(Trigger) => 0,
-        Some(Model(i)) => 1 + reviewer_rows * i as u16,
-        Some(Effort(i)) => 1 + reviewer_rows * i as u16 + u16::from(!inline),
-        Some(Remove(i)) => 1 + reviewer_rows * i as u16 + if inline { 0 } else { 2 },
+        Some(Model(i)) => reviewer_rows * i as u16,
+        Some(Effort(i)) => reviewer_rows * i as u16 + u16::from(!inline),
+        Some(Remove(i)) => reviewer_rows * i as u16 + if inline { 0 } else { 2 },
         Some(Add | Autoconfigure) => actions_row,
         _ => 0,
     };
@@ -646,22 +631,13 @@ pub(crate) fn render_review_settings(
     let mut expanded = None;
     for (id, label) in &selectors {
         let index = match id {
-            Trigger => 0,
-            Model(i) => 1 + reviewer_rows * *i as u16,
-            Effort(i) => 1 + reviewer_rows * *i as u16 + u16::from(!inline),
+            Model(i) => reviewer_rows * *i as u16,
+            Effort(i) => reviewer_rows * *i as u16 + u16::from(!inline),
             _ => unreachable!("selectors contain only combos"),
         };
         let area = row(index);
         let field = if inline {
             match id {
-                Trigger => {
-                    let label_width = 12.min(area.width);
-                    frame.render_widget(
-                        Line::raw(label.clone()),
-                        Rect::new(area.x, area.y, label_width, 1),
-                    );
-                    Rect::new(area.x + label_width, area.y, area.width - label_width, 1)
-                }
                 Model(_) | Effort(_) => {
                     let label_width = 12;
                     let remaining = area.width.saturating_sub(label_width);
@@ -745,7 +721,7 @@ pub(crate) fn render_review_settings(
                 };
                 frame.render_widget(
                     Line::styled(reason, Style::default().fg(theme::palette().warning)),
-                    row(1 + reviewer_rows * *i as u16 + reviewer_rows - 1),
+                    row(reviewer_rows * *i as u16 + reviewer_rows - 1),
                 );
             }
         }
@@ -820,7 +796,7 @@ pub(crate) fn render_review_settings(
             id,
         );
     }
-    form.end_frame(Trigger);
+    form.end_frame(dialog.initial_focus());
 }
 
 /// A model's offered efforts, or `None` while a profile that may offer the

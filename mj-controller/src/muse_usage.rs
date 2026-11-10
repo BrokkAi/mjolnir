@@ -34,11 +34,6 @@ const DEFAULT_AUTH_BASE_URL: &str = "https://auth.meta.com";
 /// against the same endpoint.
 const TOKEN_PATH: &str = "/oidc/device/token/";
 const OAUTH_CLIENT_ID: &str = "1031625952748946";
-/// Muse serializes every `auth.json` write with an exclusive lock on this
-/// file, and gives up after waiting 5 seconds for it.
-const AUTH_LOCK_FILE: &str = ".auth.json.lock";
-const AUTH_LOCK_WAIT: Duration = Duration::from_secs(10);
-const AUTH_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 /// Refresh this long before the recorded expiry. It spans two quota polls, so
 /// the credential sync hands the new login to running sessions before their
 /// copies run out and have to spend the same refresh token themselves.
@@ -377,7 +372,11 @@ async fn fresh_access_token(
     }
 
     // Held until this function returns, released on drop.
-    let _lock = acquire_auth_lock(home).await?;
+    let _lock = mj_core::credentials::CredentialWriteGuard::acquire(
+        mj_core::config::HarnessKind::Muse,
+        &home.join("auth.json"),
+    )
+    .await?;
     let active = read_login(home).await?;
     let renewed_meanwhile = match rejected {
         Some(rejected) => active.access_token != rejected,
@@ -494,35 +493,6 @@ fn save_login(home: &Path, mut document: Value, grant: &TokenGrant, now: i64) ->
     body.push(b'\n');
     mj_core::config::atomic_write(&home.join("auth.json"), &body)
         .context("save the refreshed Muse login")
-}
-
-/// Take the exclusive lock Muse holds while it writes `auth.json`.
-async fn acquire_auth_lock(home: &Path) -> Result<mj_core::file_lock::FileLock> {
-    let path = home.join(AUTH_LOCK_FILE);
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("open the Muse login lock {}", path.display()))?;
-    let deadline = tokio::time::Instant::now() + AUTH_LOCK_WAIT;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(mj_core::file_lock::FileLock::new(file)),
-            Err(std::fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(AUTH_LOCK_RETRY_INTERVAL).await;
-            }
-            Err(std::fs::TryLockError::WouldBlock) => bail!(
-                "another Muse process held the login lock {} for {} seconds",
-                path.display(),
-                AUTH_LOCK_WAIT.as_secs()
-            ),
-            Err(std::fs::TryLockError::Error(error)) => {
-                return Err(error)
-                    .with_context(|| format!("lock the Muse login {}", path.display()));
-            }
-        }
-    }
 }
 
 async fn read_login(home: &Path) -> Result<MuseLogin> {
@@ -1197,7 +1167,7 @@ mod tests {
             .create(true)
             .truncate(false)
             .write(true)
-            .open(raced.path().join(AUTH_LOCK_FILE))
+            .open(raced.path().join(".auth.json.lock"))
             .unwrap();
         muse.lock().unwrap();
         let query = tokio::spawn({

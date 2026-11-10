@@ -1057,6 +1057,7 @@ mod tests {
                 mj_core::acp::AirTaskUpdate::Finished {
                     task_id: "design-review".into(),
                     settled: false,
+                    failed: false,
                 },
             )
             .unwrap();

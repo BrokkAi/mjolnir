@@ -60,51 +60,6 @@ fn failed(stderr: impl AsRef<[u8]>) -> CommandOutput {
 // Hard-won: #1266: a working Claude Bedrock profile was reported as needing subscription login.
 #[test]
 fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
-    // Fixture shapes follow aws-cli v2, EC2 JSON, OpenSSH, and Docker CLI
-    // output; the Podman-limit lines match the production remote probe.
-    let aws = FakeExecutor::new([
-        Ok(output(
-            b"aws-cli/2.15.40 Python/3.11.6 Linux/5.10.205 exe/x86_64 prompt/off\n",
-        )),
-        Ok(output(
-            br#"{"UserId":"AIDAEXAMPLE","Account":"123456789012","Arn":"arn:aws:iam::123456789012:user/doctor"}"#,
-        )),
-        Ok(output(
-            br#"{"LaunchTemplates":[{"LaunchTemplateId":"lt-0123456789abcdef0","LaunchTemplateName":"mjolnir","CreateTime":"2026-01-01T00:00:00+00:00","CreatedBy":"arn:aws:iam::123456789012:user/doctor","DefaultVersionNumber":7,"LatestVersionNumber":7}]}"#,
-        )),
-    ]);
-    let aws_check = aws_target_check(
-        "production",
-        None,
-        "us-east-2",
-        "lt-0123456789abcdef0",
-        &aws,
-    );
-    let aws_commands = aws.commands.borrow();
-    assert_eq!(
-        aws_commands[1]
-            .args
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        [
-            "--profile",
-            "default",
-            "--region",
-            "us-east-2",
-            "sts",
-            "get-caller-identity",
-            "--output",
-            "json",
-        ]
-    );
-    assert!(
-        aws_commands[2]
-            .args
-            .contains(&"--launch-template-ids".to_owned())
-    );
-    drop(aws_commands);
-
     let ssh = RuntimeSshTarget {
         destination: "dev@docker.example.test".to_owned(),
         ssh_args: Vec::new(),
@@ -180,7 +135,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         },
     );
     let subagent_checks = subagent_policy_checks(Ok(&config));
-    let mut checks = vec![aws_check, docker_check, podman_check, missing_ssh_check];
+    let mut checks = vec![docker_check, podman_check, missing_ssh_check];
     checks.extend(subagent_checks);
 
     // External Git distributions vary their version suffixes. Exercise the
@@ -357,9 +312,6 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
                 "bash: line 1: docker: command not found",
             ),
         ]))),
-        // spot: AWS credentials, then the launch template
-        Ok(output(br#"{"Account":"123456789012"}"#)),
-        Ok(output(b"{}")),
     ]);
     checks.extend(machine_runtime_checks(Ok(&machines), &probes));
     assert!(probes.responses.borrow().is_empty());
@@ -370,7 +322,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
             .iter()
             .map(|command| command.program.as_str())
             .collect::<Vec<_>>(),
-        ["ssh", "ssh", "ssh", "aws", "aws"],
+        ["ssh", "ssh", "ssh"],
         "one SSH call per host"
     );
 
@@ -628,7 +580,7 @@ fn config_with(targets: impl IntoIterator<Item = (&'static str, TargetTemplate)>
     windows,
     ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
 )]
-fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
+fn doctor_accepts_older_shared_container_host_mbx() {
     let config = config_with([
         (
             "podman",
@@ -653,18 +605,15 @@ fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
     assert_eq!(checks.len(), 1);
     let check = &checks[0];
     assert_eq!(check.id, "build-cache.local");
-    assert_eq!(check.status, CheckStatus::Warning);
+    assert_eq!(check.status, CheckStatus::Ready);
     assert!(check.detail.contains("1.15.0"));
-    assert!(check.detail.contains(crate::controller::MBX_VERSION));
-    assert!(check.detail.contains("run without the shared build cache"));
-    assert!(check.detail.contains("docker, podman"));
     assert!(
         check
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains("Upgrade mbx")
+            .detail
+            .contains("compatible with the shared build cache")
     );
+    assert!(!check.detail.contains("1.30.0"));
+    assert!(check.detail.contains("docker, podman"));
     assert_eq!(executor.commands.borrow().len(), 2);
     assert!(
         all_ready(&checks),
@@ -672,18 +621,11 @@ fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
     );
 
     let json = serde_json::to_value(check).unwrap();
-    assert_eq!(json["status"], "warning");
-    assert!(
-        json["remediation"]
-            .as_str()
-            .unwrap()
-            .contains(crate::controller::MBX_VERSION)
-    );
+    assert_eq!(json["status"], "ready");
     let mut human = Vec::new();
     render_human(&checks, &mut human).unwrap();
     let human = String::from_utf8(human).unwrap();
-    assert!(human.contains("warning Build cache on local"));
-    assert!(human.contains("remediation: Upgrade mbx"));
+    assert!(human.contains("ready Build cache on local"));
 }
 
 #[test]
@@ -700,10 +642,7 @@ fn doctor_distinguishes_compatible_absent_and_uncheckable_host_mbx() {
     )]);
     for (response, expected_status, expected_text) in [
         (
-            Ok(output(format!(
-                "/usr/local/bin/mbx\nmbx {}",
-                crate::controller::MBX_VERSION
-            ))),
+            Ok(output("/usr/local/bin/mbx\nmbx 1.22.0")),
             CheckStatus::Ready,
             "compatible",
         ),
@@ -1946,5 +1885,245 @@ fn remote_apple_container_check_reports_a_stopped_daemon_and_a_present_image() {
             .is_some_and(|fix| fix.contains("container system start") || fix.contains("container")),
         "{:?}",
         check.remediation
+    );
+}
+
+/// A host that does not answer has one problem, not two: its GitHub check
+/// waits for the SSH check to pass, and then runs on the host under the same
+/// strict host-key checking.
+#[test]
+fn ssh_bare_github_check_runs_only_on_a_reachable_host() {
+    let unreachable = FakeExecutor::new([Ok(failed(
+        b"ssh: connect to host example.test port 22: Connection timed out",
+    ))]);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &unreachable);
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<Vec<_>>(),
+        ["runtime.ssh-bare.builder"]
+    );
+
+    let reachable = FakeExecutor::new([
+        Ok(output(b"")),
+        // Git on the host rewrites neither SSH spelling, so SSH decides.
+        Ok(output(b"git@github.com:octocat/hello-world.git")),
+        Ok(output(b"ssh://git@github.com/octocat/hello-world.git")),
+        Ok(failed(
+            b"Hi octocat! You've successfully authenticated, but GitHub does not provide shell access.",
+        )),
+    ]);
+    let checks = ssh_bare_checks(Ok(&ssh_bare_config()), &reachable);
+    assert_eq!(checks[1].id, "github.ssh-bare.builder");
+    assert_eq!(checks[1].status, CheckStatus::Ready);
+    let commands = reachable.commands.borrow();
+    assert_eq!(&commands[3].args[..2], ["-o", "StrictHostKeyChecking=yes"]);
+    assert!(
+        commands[3]
+            .args
+            .last()
+            .unwrap()
+            .contains("'StrictHostKeyChecking=yes' '-o' 'ConnectTimeout=5' 'git@github.com'"),
+        "{:?}",
+        commands[3].args
+    );
+}
+
+// Hard-won: e32a6aeef: the default localhost target, not saved in config.toml, got no GitHub check.
+#[test]
+fn the_default_local_target_gets_a_github_check() {
+    if !crate::targets::HOST_RUNS_WORKERS {
+        return;
+    }
+    let checks = local_bare_github_checks(Ok(&Config::default()), &AlwaysFailingExecutor);
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| check.id.as_str())
+            .collect::<Vec<_>>(),
+        ["github.local-bare.localhost"]
+    );
+}
+
+#[test]
+fn golden_doctor_reports_what_aws_credentials_bedrock_sessions_receive() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = |role: Option<mj_core::config::AwsRoleConfig>| HarnessProfile {
+        environment: [
+            ("CLAUDE_CODE_USE_BEDROCK".to_owned(), "1".to_owned()),
+            ("AWS_PROFILE".to_owned(), "work".to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+        aws: role,
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
+    };
+    let role = mj_core::config::AwsRoleConfig {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        session_policy: None,
+        session_policy_arns: Vec::new(),
+        duration_seconds: None,
+        source_identity: false,
+    };
+    let containers: BTreeMap<String, TargetTemplate> = [(
+        "podman".to_owned(),
+        TargetTemplate::LocalPodman {
+            container: container("ghcr.io/example/dev:1"),
+        },
+    )]
+    .into_iter()
+    .collect();
+    let local_only: BTreeMap<String, TargetTemplate> =
+        [("localhost".to_owned(), TargetTemplate::LocalBare)]
+            .into_iter()
+            .collect();
+    let recorded = include_str!("../../tests/fixtures/aws-sts-assume-role.json");
+    let granted = {
+        let mut output: serde_json::Value = serde_json::from_str(recorded).unwrap();
+        output["Credentials"]["Expiration"] = "2099-01-01T00:00:00+00:00".into();
+        serde_json::to_vec(&output).unwrap()
+    };
+    let denied = include_str!("../../tests/fixtures/aws-sts-assume-role-access-denied.txt");
+
+    let mut checks = Vec::new();
+    // No role: sessions on the container target get the host's credentials.
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(None),
+        &containers,
+        &AlwaysFailingExecutor,
+    ));
+    // No role, but only raw local sessions, which read the host's files anyway.
+    assert!(
+        aws_scope_check(
+            "bedrock",
+            &profile(None),
+            &local_only,
+            &AlwaysFailingExecutor
+        )
+        .is_empty()
+    );
+    // A role the host's login can assume.
+    let ok = FakeExecutor::new([Ok(output(&granted))]);
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(role.clone())),
+        &containers,
+        &ok,
+    ));
+    let probe = ok.commands.borrow();
+    let name = probe[0]
+        .args
+        .windows(2)
+        .find(|args| args[0] == "--role-session-name")
+        .map(|args| args[1].clone())
+        .unwrap();
+    assert!(
+        name.strip_prefix("mj-").is_some_and(|id| id.len() == 32
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+        "{name}"
+    );
+    drop(probe);
+    // A role the host's login cannot assume.
+    let refused = FakeExecutor::new([Ok(failed(denied))]);
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(role.clone())),
+        &containers,
+        &refused,
+    ));
+    // A role on a profile that only runs raw local sessions has no effect.
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(role.clone())),
+        &local_only,
+        &AlwaysFailingExecutor,
+    ));
+    let mixed_role = role;
+
+    let mixed: BTreeMap<String, TargetTemplate> = [
+        (
+            "podman".to_owned(),
+            TargetTemplate::LocalPodman {
+                container: container("ghcr.io/example/dev:1"),
+            },
+        ),
+        ("localhost".to_owned(), TargetTemplate::LocalBare),
+        (
+            "own-identity".to_owned(),
+            TargetTemplate::LocalDocker {
+                container: ContainerTemplate {
+                    environment: [("AWS_PROFILE".to_owned(), "team".to_owned())]
+                        .into_iter()
+                        .collect(),
+                    ..container("ghcr.io/example/dev:1")
+                },
+            },
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let granted_again = FakeExecutor::new([Ok(output(&granted))]);
+    checks.extend(aws_scope_check(
+        "bedrock",
+        &profile(Some(mixed_role)),
+        &mixed,
+        &granted_again,
+    ));
+
+    // A table on a profile that does not use the AWS chain has no effect;
+    // sessions run, and doctor says so.
+    let not_bedrock = HarnessProfile {
+        aws: Some(mj_core::config::AwsRoleConfig {
+            role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+            session_policy: None,
+            session_policy_arns: Vec::new(),
+            duration_seconds: None,
+            source_identity: false,
+        }),
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf())
+    };
+    checks.extend(aws_scope_check(
+        "claude",
+        &not_bedrock,
+        &containers,
+        &AlwaysFailingExecutor,
+    ));
+
+    // A role on a Codex profile whose provider configuration cannot be read:
+    // unknown is not "not Bedrock", so doctor asks the same question launch and
+    // the sync do, and reports the read error instead of dismissing the role.
+    let unreadable = tempfile::tempdir().unwrap();
+    std::fs::write(
+        unreadable.path().join("config.toml"),
+        "model_provider = [unterminated",
+    )
+    .unwrap();
+    let unreadable_profile = HarnessProfile {
+        aws: Some(mj_core::config::AwsRoleConfig {
+            role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+            session_policy: None,
+            session_policy_arns: Vec::new(),
+            duration_seconds: None,
+            source_identity: false,
+        }),
+        ..mj_core::config::HarnessProfile::new(HarnessKind::Codex, unreadable.path().to_path_buf())
+    };
+    checks.extend(aws_scope_check(
+        "codex-bedrock",
+        &unreadable_profile,
+        &containers,
+        &AlwaysFailingExecutor,
+    ));
+
+    let mut rendered = Vec::new();
+    render_human(&checks, &mut rendered).expect("render doctor checks");
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "doctor-aws-scope-checks",
+        &String::from_utf8(rendered).unwrap(),
     );
 }

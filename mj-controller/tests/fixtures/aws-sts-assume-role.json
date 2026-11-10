@@ -1,0 +1,14 @@
+{
+    "Credentials": {
+        "AccessKeyId": "ASIAEXAMPLEEXAMPLE00",
+        "SecretAccessKey": "example-secret-access-key",
+        "SessionToken": "example-session-token",
+        "Expiration": "2026-11-07T04:03:09+00:00"
+    },
+    "AssumedRoleUser": {
+        "AssumedRoleId": "AROAEXAMPLEEXAMPLE00:mj-0123456789abcdef0123456789abcdef",
+        "Arn": "arn:aws:sts::123456789012:assumed-role/mj-1424-m0-test/mj-0123456789abcdef0123456789abcdef"
+    },
+    "PackedPolicySize": 25,
+    "SourceIdentity": "mj-0123456789abcdef0123456789abcdef"
+}

@@ -43,6 +43,15 @@ pub const ARCHIVE_SCHEMA_VERSION_REVIEW_REFS: u32 = 10;
 /// Mjolnir's private Git refs: review baselines, review points and reviewed
 /// trees. They are bookkeeping, never pushed, and some name a bare tree.
 pub const MJOLNIR_REF_NAMESPACE: &str = "refs/mj/";
+
+/// A review baseline pin: `refs/mj/review-baseline` for a main worktree, or
+/// `refs/mj/worktrees/<name>/review-baseline` for a linked one. Releases that
+/// reviewed each turn wrote them into the user's repositories. Nothing reads
+/// their value any more, so captures and restores neither carry nor write them.
+pub fn is_review_baseline_pin(name: &str) -> bool {
+    name == "refs/mj/review-baseline"
+        || (name.starts_with("refs/mj/worktrees/") && name.ends_with("/review-baseline"))
+}
 /// Shared diagnostic identity across the target export's stderr boundary.
 pub const NESTED_REPOSITORY_CHECKPOINT_ERROR: &str =
     "cannot checkpoint nested Git repository directory at ";
@@ -122,8 +131,10 @@ pub struct RepositoryMetadata {
     /// the objects and working files; absent objects do not prevent resume.
     #[serde(default, skip_serializing_if = "is_false")]
     pub review_refs_metadata_only: bool,
-    /// The source checkout's baseline name, used to relocate that checkout's
-    /// review state without adopting pins belonging to other worktrees.
+    /// The source checkout's session-start scope name, used to relocate that
+    /// checkout's session-start refs. Archives written by earlier releases also
+    /// carried the review baseline pin under this name; restore ignores that
+    /// pin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_baseline_ref: Option<String>,
     /// Saved local branches, tags, notes, and durable Mjolnir refs.

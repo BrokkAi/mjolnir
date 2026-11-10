@@ -5,14 +5,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
-pub const QUESTIONS: &str = include_str!("github_item/questions.json");
-// Keep the item's serialized prefix fixed across sessions, with room left for
-// recent turns after the shared model and question wrapper.
-const MAX_ITEM_PREFIX_BYTES: usize = MAX_BODY_BYTES - 16 * 1024;
-const BODY_TRUNCATION_MARKER: &str =
-    "\n\n[GitHub item body truncated to fit the 64 KiB request limit.]";
-const CONTEXT_TRUNCATION_MARKER: &str =
-    "[Older session turns omitted to fit the 64 KiB request limit.]\n\n";
+pub const QUESTIONS: &str = include_str!("github_item/questions_v2.json");
+// Relevance evidence budgets; conversation limits are selected by replay.
+// Mirrored by the v2 proxy validator.
+pub const ITEM_BODY_BYTES: usize = 4096;
+pub const SESSION_TURNS: usize = 3;
+pub const CONVERSATION_BYTES: usize = 8 * 1024;
+pub const MESSAGE_BYTES: usize = 2 * 1024;
+pub const MAX_FILES: usize = 32;
+pub const FILE_BYTES: usize = 256;
+pub const MAX_REFERENCES: usize = 32;
+pub const REFERENCE_BYTES: usize = 128;
+// Design budgets sizing item-conditioned evidence, motivated by the 83-pair replay.
+pub const MAX_MENTIONS: usize = 16;
+pub const MENTION_BYTES: usize = 256;
+const BODY_TRUNCATION_MARKER: &str = "\n[GitHub item body truncated.]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,10 +40,53 @@ pub struct GithubItem {
     pub url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionContext {
-    pub recent_turns: String,
+    pub conversation: String,
+    pub files: Vec<String>,
+    pub references: Vec<String>,
+    #[serde(default)]
+    pub mentions: Vec<String>,
+    /// Per-session reference index; never included in a provider request.
+    #[serde(skip)]
+    pub mention_candidates: Vec<(crate::github_reference::GithubReference, String)>,
+}
+
+impl SessionContext {
+    /// Select the lines that mention `item` or an issue its title or body
+    /// references. A bare `#N` in the item means the item's repository. In
+    /// the session it does only when `bare_is_item_repo`: a session whose
+    /// project spans several GitHub repositories cannot say which one `#42`
+    /// names, and must not have the line presented as a mention of every
+    /// watched repository's #42.
+    pub fn for_item(mut self, item: &GithubItem, bare_is_item_repo: bool) -> Self {
+        use crate::github_reference::{GithubReference, github_references};
+        let mut targets = github_references(&format!("{}\n{}", item.title, item.body));
+        targets.extend(github_references(&format!("{}#{}", item.repo, item.number)));
+        let identity = |r: &GithubReference, bare_is_item_repo: bool| {
+            let repo = match (&r.owner, &r.repo) {
+                (Some(owner), Some(repo)) => format!("{owner}/{repo}"),
+                _ if bare_is_item_repo => item.repo.clone(),
+                _ => return None,
+            };
+            Some((repo.to_ascii_lowercase(), r.number))
+        };
+        let targets: Vec<_> = targets.iter().filter_map(|t| identity(t, true)).collect();
+        self.mentions.clear();
+        for (reference, line) in self.mention_candidates.iter().rev() {
+            if identity(reference, bare_is_item_repo).is_some_and(|r| targets.contains(&r))
+                && !self.mentions.contains(line)
+            {
+                self.mentions.push(line.clone());
+                if self.mentions.len() == MAX_MENTIONS {
+                    break;
+                }
+            }
+        }
+        self.mention_candidates.clear();
+        self
+    }
 }
 
 /// The GitHub item deliberately serializes before its session-specific context,
@@ -51,7 +101,6 @@ pub struct GithubItemEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GithubItemVerdict {
     pub interested: bool,
-    pub created: bool,
 }
 
 #[derive(Serialize)]
@@ -71,62 +120,54 @@ impl GithubItemEvidence {
     pub fn bounded_for_request(&self) -> Result<Self> {
         self.validate_fixed_fields()?;
         let mut bounded = self.clone();
-        bounded.session.recent_turns.clear();
-        if upstream_len(&bounded)? > MAX_ITEM_PREFIX_BYTES {
-            let mut best = self.with_body_retained_bytes(0);
-            best.session.recent_turns.clear();
-            ensure!(
-                upstream_len(&best)? <= MAX_ITEM_PREFIX_BYTES,
-                "GitHub item metadata exceeds the Jev request limit"
+        if bounded.item.body.len() > ITEM_BODY_BYTES {
+            bounded.item.body = format!(
+                "{}{}",
+                utf8_prefix(&bounded.item.body, ITEM_BODY_BYTES),
+                BODY_TRUNCATION_MARKER
             );
-            let mut low = 0;
-            let mut high = self.item.body.len();
-            for _ in 0..32 {
-                let retained_bytes = low + (high - low).div_ceil(2);
-                let candidate = self.with_body_retained_bytes(retained_bytes);
-                let mut prefix = candidate;
-                prefix.session.recent_turns.clear();
-                if upstream_len(&prefix)? <= MAX_ITEM_PREFIX_BYTES {
-                    low = retained_bytes;
-                    best = prefix;
-                } else {
-                    high = retained_bytes - 1;
-                }
-            }
-            bounded = best;
         }
-
-        bounded.session.recent_turns = self.session.recent_turns.clone();
-        if upstream_len(&bounded)? <= MAX_BODY_BYTES {
-            return Ok(bounded);
-        }
-
-        let mut best = bounded.with_context_retained_bytes(0);
-        ensure!(
-            upstream_len(&best)? <= MAX_BODY_BYTES,
-            "GitHub item request metadata exceeds the Jev request limit"
-        );
-        let mut low = 0;
-        let mut high = self.session.recent_turns.len();
-        for _ in 0..32 {
-            let retained_bytes = low + (high - low).div_ceil(2);
-            let candidate = bounded.with_context_retained_bytes(retained_bytes);
-            if upstream_len(&candidate)? <= MAX_BODY_BYTES {
-                low = retained_bytes;
-                best = candidate;
-            } else {
-                high = retained_bytes - 1;
-            }
-        }
-        ensure!(
-            upstream_len(&best)? <= MAX_BODY_BYTES,
-            "GitHub item request exceeds byte limit"
-        );
-        Ok(best)
+        bounded.validate()?;
+        Ok(bounded)
     }
 
     pub fn validate(&self) -> Result<()> {
         self.validate_fixed_fields()?;
+        ensure!(
+            self.session.conversation.len() <= CONVERSATION_BYTES,
+            "GitHub session conversation is too long"
+        );
+        ensure!(
+            self.session.files.len() <= MAX_FILES
+                && self
+                    .session
+                    .files
+                    .iter()
+                    .all(|s| !s.trim().is_empty() && s.len() <= FILE_BYTES),
+            "invalid GitHub session files"
+        );
+        ensure!(
+            self.session.references.len() <= MAX_REFERENCES
+                && self
+                    .session
+                    .references
+                    .iter()
+                    .all(|s| !s.trim().is_empty() && s.len() <= REFERENCE_BYTES),
+            "invalid GitHub session references"
+        );
+        ensure!(
+            self.session.mentions.len() <= MAX_MENTIONS
+                && self
+                    .session
+                    .mentions
+                    .iter()
+                    .all(|s| !s.trim().is_empty() && s.len() <= MENTION_BYTES),
+            "invalid GitHub session mentions"
+        );
+        ensure!(
+            self.item.body.len() <= ITEM_BODY_BYTES + BODY_TRUNCATION_MARKER.len(),
+            "GitHub item body is too long"
+        );
         ensure!(
             upstream_len(self)? <= MAX_BODY_BYTES,
             "GitHub item request exceeds byte limit"
@@ -167,28 +208,6 @@ impl GithubItemEvidence {
         );
         Ok(())
     }
-
-    fn with_body_retained_bytes(&self, retained_bytes: usize) -> Self {
-        let mut bounded = self.clone();
-        bounded.item.body = truncate_with_marker(
-            &self.item.body,
-            retained_bytes,
-            BODY_TRUNCATION_MARKER,
-            false,
-        );
-        bounded
-    }
-
-    fn with_context_retained_bytes(&self, retained_bytes: usize) -> Self {
-        let mut bounded = self.clone();
-        bounded.session.recent_turns = truncate_with_marker(
-            &self.session.recent_turns,
-            retained_bytes,
-            CONTEXT_TRUNCATION_MARKER,
-            true,
-        );
-        bounded
-    }
 }
 
 impl GithubItemVerdict {
@@ -203,51 +222,25 @@ impl GithubItemVerdict {
                 probability.is_finite() && (0.0..=1.0).contains(&probability),
                 "invalid GitHub item probability"
             );
-            Ok(probability >= 0.5)
+            // The 83-pair production replay found relevant items just below 0.5.
+            Ok(probability >= 0.4)
         }
 
         let answers = response["answers"]
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("missing GitHub item answers"))?;
         ensure!(
-            answers.len() == 2
-                && answers.contains_key("interested")
-                && answers.contains_key("created"),
+            answers.len() == 1 && answers.contains_key("interested"),
             "incomplete GitHub item answers"
         );
         Ok(Self {
             interested: affirmative_probability(response, "interested")?,
-            created: affirmative_probability(response, "created")?,
         })
     }
 }
 
 fn upstream_len(evidence: &GithubItemEvidence) -> Result<usize> {
     Ok(serde_json::to_vec(&evidence.upstream_body())?.len())
-}
-
-fn truncate_with_marker(
-    text: &str,
-    retained_bytes: usize,
-    marker: &str,
-    from_oldest: bool,
-) -> String {
-    if retained_bytes >= text.len() {
-        return text.to_owned();
-    }
-    if text.is_empty() {
-        return String::new();
-    }
-    let retained = if from_oldest {
-        utf8_suffix(text, retained_bytes)
-    } else {
-        utf8_prefix(text, retained_bytes)
-    };
-    if from_oldest {
-        format!("{marker}{retained}")
-    } else {
-        format!("{retained}{marker}")
-    }
 }
 
 fn utf8_prefix(text: &str, limit: usize) -> &str {
@@ -258,103 +251,132 @@ fn utf8_prefix(text: &str, limit: usize) -> &str {
     &text[..end]
 }
 
-fn utf8_suffix(text: &str, limit: usize) -> &str {
-    let mut start = text.len().saturating_sub(limit);
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    &text[start..]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    fn evidence(body: String, recent_turns: String) -> GithubItemEvidence {
+    fn evidence() -> GithubItemEvidence {
         GithubItemEvidence {
             item: GithubItem {
                 repo: "brokkai/mjolnir".into(),
                 kind: GithubItemKind::PullRequest,
                 number: 42,
                 title: "Add mailbox support".into(),
-                body,
+                body: "Add mailbox support".into(),
                 author: "agent".into(),
                 url: "https://github.com/brokkai/mjolnir/pull/42".into(),
             },
-            session: SessionContext { recent_turns },
+            session: SessionContext {
+                conversation: "User: Implement mailbox support\nAgent: Checking the worker\n"
+                    .into(),
+                files: vec!["mj-worker/src/lib.rs".into()],
+                references: vec!["#42".into()],
+                ..Default::default()
+            },
         }
     }
 
     #[test]
-    fn bounded_request_marks_truncation_and_keeps_newest_context_without_splitting_utf8() {
-        let original = evidence(
-            "🛠".repeat(30_000),
-            "old turn\n".to_owned() + &"new turn 🧭\n".repeat(5_000),
-        );
-        let bounded = original.bounded_for_request().unwrap();
-        assert!(upstream_len(&bounded).unwrap() <= MAX_BODY_BYTES);
-        assert!(bounded.item.body.ends_with(BODY_TRUNCATION_MARKER));
+    fn item_mentions_resolve_bare_references_without_crossing_repositories() {
+        let item = GithubItem {
+            repo: "owner/repo".into(),
+            kind: GithubItemKind::Issue,
+            number: 42,
+            title: "Fix #7642".into(),
+            body: String::new(),
+            author: String::new(),
+            url: "https://github.com/owner/repo/issues/42".into(),
+        };
+        let mut session = SessionContext::default();
+        for line in [
+            "pending #7642",
+            "other/repo#42",
+            "owner/repo#42",
+            "pending #7642",
+        ] {
+            for reference in crate::github_reference::github_references(line) {
+                session.mention_candidates.push((reference, line.into()));
+            }
+        }
+        // A multi-repository session's bare #7642 names no repository.
+        let ambiguous = session.clone().for_item(&item, false);
+        assert_eq!(ambiguous.mentions, ["owner/repo#42"]);
+        let selected = session.for_item(&item, true);
+        assert_eq!(selected.mentions, ["pending #7642", "owner/repo#42"]);
         assert!(
-            bounded
-                .session
-                .recent_turns
-                .starts_with(CONTEXT_TRUNCATION_MARKER)
+            !serde_json::to_string(&selected)
+                .unwrap()
+                .contains("mention_candidates")
         );
-        assert!(!bounded.session.recent_turns.contains("old turn"));
-        assert!(bounded.session.recent_turns.ends_with("new turn 🧭\n"));
-
-        let short_context = evidence(original.item.body.clone(), "three recent turns".into())
-            .bounded_for_request()
-            .unwrap();
-        assert_eq!(bounded.item, short_context.item);
     }
 
     #[test]
-    fn evidence_serialization_keeps_item_before_session_and_parses_only_typed_answers() {
-        let evidence = evidence(
-            "Add mailbox support".into(),
-            "<turn number=\"1\">work</turn>".into(),
+    fn bounded_request_marks_truncation_without_splitting_utf8() {
+        let typical = evidence();
+        println!(
+            "typical v2 request: {} bytes",
+            upstream_len(&typical).unwrap()
         );
-        let serialized = serde_json::to_string(&evidence).unwrap();
-        assert!(serialized.find("\"item\"").unwrap() < serialized.find("\"session\"").unwrap());
-        let direct = serde_json::to_string(&evidence.upstream_body()).unwrap();
-        let state = &direct[direct.find("\"state\":").unwrap()..];
-        let ordered_fields = [
-            "\"item\":",
-            "\"repo\":",
-            "\"kind\":",
-            "\"number\":",
-            "\"title\":",
-            "\"body\":",
-            "\"author\":",
-            "\"url\":",
-            "\"session\":",
-            "\"recent_turns\":",
-        ];
-        let positions: Vec<_> = ordered_fields
-            .iter()
-            .map(|field| state.find(field).unwrap())
-            .collect();
-        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
-        let verdict = GithubItemVerdict::parse(&json!({"answers": {
-            "interested": {"type":"noul","noul":0.91},
-            "created": {"type":"noul","noul":0.04}
-        }}))
-        .unwrap();
+        let mut maximal = typical.clone();
+        maximal.item.repo = "r".repeat(256);
+        maximal.item.title = "t".repeat(1024);
+        maximal.item.author = "a".repeat(256);
+        maximal.item.url = "u".repeat(2048);
+        maximal.item.number = 9_007_199_254_740_991;
+        maximal.item.body = "x".repeat(ITEM_BODY_BYTES - 1) + "🦀";
+        maximal.session = SessionContext {
+            conversation: "x".repeat(CONVERSATION_BYTES),
+            files: vec!["x".repeat(FILE_BYTES); MAX_FILES],
+            references: vec!["x".repeat(REFERENCE_BYTES); MAX_REFERENCES],
+            ..Default::default()
+        };
+        let bounded = maximal.bounded_for_request().unwrap();
         assert_eq!(
-            verdict,
-            GithubItemVerdict {
-                interested: true,
-                created: false
-            }
+            bounded.item.body,
+            "x".repeat(ITEM_BODY_BYTES - 1) + BODY_TRUNCATION_MARKER
         );
-        for answer in [
-            json!({"answers":{"interested":{"type":"choice","choice":"yes"},"created":{"type":"noul","noul":0.1}}}),
-            json!({"answers":{"interested":{"type":"noul","noul":1.1},"created":{"type":"noul","noul":0.1}}}),
-            json!({"answers":{"interested":{"type":"noul","noul":0.1}}}),
+        println!(
+            "maximal v2 request: {} bytes",
+            upstream_len(&bounded).unwrap()
+        );
+        assert!(upstream_len(&bounded).unwrap() <= MAX_BODY_BYTES);
+        let mut escaped = bounded.clone();
+        escaped.item.repo = "\"".repeat(256);
+        escaped.item.title = "\"".repeat(1024);
+        escaped.item.author = "\"".repeat(256);
+        escaped.item.url = "\"".repeat(2048);
+        escaped.item.body = format!("{}{}", "\"".repeat(ITEM_BODY_BYTES), BODY_TRUNCATION_MARKER);
+        escaped.session.conversation = "\"".repeat(CONVERSATION_BYTES);
+        escaped.session.files = vec!["\"".repeat(FILE_BYTES); MAX_FILES];
+        escaped.session.references = vec!["\"".repeat(REFERENCE_BYTES); MAX_REFERENCES];
+        escaped.validate().unwrap();
+        println!(
+            "maximal escaped v2 request: {} bytes",
+            upstream_len(&escaped).unwrap()
+        );
+        // Individual UTF-8 budgets do not bound JSON's six-byte control escapes.
+        // The complete envelope must still reject oversized combinations.
+        escaped.item.body = "\0".repeat(ITEM_BODY_BYTES);
+        assert!(upstream_len(&escaped).unwrap() > MAX_BODY_BYTES);
+        assert!(escaped.validate().is_err());
+        let serialized = serde_json::to_string(&bounded.upstream_body()).unwrap();
+        assert!(serialized.find("\"item\"").unwrap() < serialized.find("\"session\"").unwrap());
+    }
+
+    #[test]
+    fn evidence_serialization_parses_only_typed_v2_answers() {
+        assert!(
+            GithubItemVerdict::parse(&json!({"answers":{"interested":{"type":"noul","noul":0.5}}}))
+                .unwrap()
+                .interested
+        );
+        for response in [
+            json!({"answers":{"interested":{"type":"choice","choice":"yes"}}}),
+            json!({"answers":{"interested":{"type":"noul","noul":1.1}}}),
+            json!({"answers":{"interested":{"type":"noul","noul":0.1},"created":{"type":"noul","noul":0.2}}}),
         ] {
-            assert!(GithubItemVerdict::parse(&answer).is_err());
+            assert!(GithubItemVerdict::parse(&response).is_err());
         }
     }
 }

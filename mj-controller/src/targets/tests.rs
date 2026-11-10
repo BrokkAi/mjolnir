@@ -764,7 +764,7 @@ fn batched_preflight_parser_keeps_multiline_and_noisy_probe_output() {
 }
 
 #[test]
-fn managed_resource_identity_args_build_container_labels_and_ec2_tags() {
+fn managed_resource_identity_args_build_container_labels() {
     let instance = mj_core::config::instance_identity();
     assert_eq!(
         managed_resource_identity_args(ManagedResourceKind::Container, SESSION),
@@ -775,15 +775,6 @@ fn managed_resource_identity_args_build_container_labels_and_ec2_tags() {
             "dev.mj.managed=true".to_owned(),
             "--label".to_owned(),
             format!("dev.mj.instance={instance}"),
-        ]
-    );
-    assert_eq!(
-        managed_resource_identity_args(ManagedResourceKind::Ec2Instance, SESSION),
-        vec![
-            "--tag-specifications".to_owned(),
-            format!(
-                "ResourceType=instance,Tags=[{{Key=dev.mj.session,Value=018f9dd2-a3b4-7c8d-9000-123456789abc}},{{Key=dev.mj.managed,Value=true}},{{Key=dev.mj.instance,Value={instance}}}]"
-            ),
         ]
     );
 }
@@ -1474,7 +1465,7 @@ fn a_never_policy_is_not_pre_pulled() {
 
 /// Apple's `container` CLI spells both commands differently from Podman and
 /// Docker: `image pull` rather than `pull`, no `--format` on `image inspect`,
-/// no `--platform` (it runs native images only) and no verified prune.
+/// no `--platform` (it runs native images only), and no `-f` on `image prune`.
 // Hard-won: 8c5355ea: Auto images left first Create waiting for a background download.
 #[test]
 fn an_apple_container_image_refresh_uses_the_container_cli() {
@@ -1497,7 +1488,8 @@ fn an_apple_container_image_refresh_uses_the_container_cli() {
         refresh.image_id.args,
         ["image", "inspect", "ghcr.io/example/dev:latest"]
     );
-    assert!(refresh.prune.is_none(), "{:?}", refresh.prune);
+    assert_eq!(refresh.prune.program, "container");
+    assert_eq!(refresh.prune.args, ["image", "prune"]);
 }
 
 /// A launch never waits on a registry under the default policy. The daemon
@@ -2580,17 +2572,6 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
             },
             "create SSH session workspace",
         ),
-        (
-            TargetTemplate::AwsEc2(AwsTemplate {
-                profile: "work".to_owned(),
-                region: "us-east-2".to_owned(),
-                launch_template: "hel-dev".to_owned(),
-                launch_template_version: None,
-                instance_type: None,
-                ssh: ssh(),
-            }),
-            "launch EC2 session instance",
-        ),
     ];
     for (template, purpose) in creating {
         let plan = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
@@ -2620,12 +2601,11 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
             plan.commands.len()
         );
         // Cloning a bundle happens against a target that already exists.
-        assert_eq!(
+        assert!(
             remainder
                 .commands
                 .iter()
-                .any(|command| command.purpose.starts_with("clone ")),
-            !matches!(template, TargetTemplate::AwsEc2(_)),
+                .any(|command| command.purpose.starts_with("clone "))
         );
     }
 
@@ -2640,27 +2620,7 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
 }
 
 #[test]
-fn aws_plan_tags_instance_and_close_uses_recorded_id() {
-    let template = TargetTemplate::AwsEc2(AwsTemplate {
-        profile: "work".to_owned(),
-        region: "us-east-2".to_owned(),
-        launch_template: "hel-dev".to_owned(),
-        launch_template_version: Some("3".to_owned()),
-        instance_type: Some("m8i-flex.2xlarge".into()),
-        ssh: ssh(),
-    });
-    let provision = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
-    assert_eq!(provision.commands.len(), 1);
-    assert!(
-        provision.commands[0].args.windows(2).any(|args| args
-            == managed_resource_identity_args(ManagedResourceKind::Ec2Instance, SESSION))
-    );
-    assert!(
-        provision.commands[0]
-            .args
-            .windows(2)
-            .any(|args| { args == ["--instance-type", "m8i-flex.2xlarge"] })
-    );
+fn legacy_ec2_close_uses_recorded_id() {
     let close = close_plan(
         &TargetLocator::AwsEc2 {
             profile: "work".to_owned(),
@@ -2688,7 +2648,9 @@ fn aws_clone_receives_github_token_on_stdin_only() {
         workspace: format!(".local/share/hel/workspaces/{SESSION}"),
     };
     let token = "ghs_secret-token";
-    let plan = provision_on_locator_plan(&locator, SESSION, &bundle(), Some(token)).unwrap();
+    let mut repositories = bundle();
+    repositories.repositories[0].url = Some("https://github.com/example/app.git".into());
+    let plan = provision_on_locator_plan(&locator, SESSION, &repositories, Some(token)).unwrap();
     let clones = plan
         .commands
         .iter()
@@ -2698,7 +2660,7 @@ fn aws_clone_receives_github_token_on_stdin_only() {
     for command in clones {
         let remote = command.args.last().unwrap();
         assert!(unwrapped_remote_line(remote).starts_with("'sh' '-c' 'IFS= read -r GH_TOKEN"));
-        assert!(remote.contains("'credential.helper=' '-c' 'credential.helper=!f()"));
+        assert!(remote.contains("'credential.https://github.com.helper=' '-c' 'credential.https://github.com.helper=!f()"));
         assert!(remote.contains("'git' '-c'") && remote.contains("'clone'"));
         assert!(!format!("{command:?}").contains(token));
     }
@@ -2714,6 +2676,67 @@ fn aws_clone_receives_github_token_on_stdin_only() {
     );
 }
 
+// Hard-won: 6dbb3ac44: withholding worker credentials also removed private-checkout authentication.
+#[test]
+fn checkout_authentication_uses_real_git_without_persisting_the_token() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().to_string_lossy().into_owned();
+    let config = directory.path().join(".gitconfig");
+    let original = "[credential \"https://github.com\"]\nhelper = \"!f() { echo username=old; echo password=old; }; f\"\n";
+    std::fs::write(&config, original).unwrap();
+    let token = "checkout-only-secret";
+    let (args, mut input) = clone_with_github_token(
+        vec!["git".into(), "credential".into(), "fill".into()],
+        token,
+    );
+    input.extend_from_slice(b"protocol=https\nhost=github.com\n\n");
+    let mut command = CommandSpec::new(&args[0], args[1..].to_vec()).with_sensitive_stdin(input);
+    command.clear_env = true;
+    command.env.extend([
+        ("PATH".into(), std::env::var("PATH").unwrap()),
+        ("HOME".into(), home),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            config.to_string_lossy().into_owned(),
+        ),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+    ]);
+    let output = ProcessExecutor.execute(&command).unwrap();
+    assert_eq!(
+        output.status,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains(&format!("password={token}"))
+    );
+    assert_eq!(std::fs::read_to_string(config).unwrap(), original);
+    assert!(!format!("{command:?}").contains(token));
+
+    let mut bundle = bundle();
+    bundle.repositories[0].url = Some("https://github.com/example/app.git".into());
+    bundle.repositories[1].url = Some("https://example.invalid/non-github.git".into());
+    let commands = clone_commands(&bundle, "/workspace", Some(token), |args| {
+        CommandSpec::new(&args[0], args[1..].to_vec())
+    });
+    let clone = |purpose: &str| {
+        commands
+            .iter()
+            .find(|command| command.purpose == purpose)
+            .unwrap()
+            .to_node_run(false)
+    };
+    assert_eq!(
+        clone("clone app").sensitive_stdin.as_deref(),
+        Some(b"checkout-only-secret\n".as_slice())
+    );
+    assert!(clone("clone libs/lib").sensitive_stdin.is_none());
+}
+
 fn cutoff_bundle(reference: Option<&str>) -> ProjectBundleSpec {
     let mut bundle = bundle();
     bundle.repositories.truncate(1);
@@ -2727,7 +2750,7 @@ fn cutoff_bundle(reference: Option<&str>) -> ProjectBundleSpec {
 
 #[test]
 fn a_history_cutoff_initializes_and_fetches_by_object_id_instead_of_cloning() {
-    let commands = clone_commands(&cutoff_bundle(None), "/workspace", |args| {
+    let commands = clone_commands(&cutoff_bundle(None), "/workspace", None, |args| {
         CommandSpec::new(args[0].clone(), args[1..].to_vec())
     });
     let argv = commands
@@ -2769,6 +2792,7 @@ fn a_history_cutoff_initializes_and_fetches_by_object_id_instead_of_cloning() {
     let commands = clone_commands(
         &cutoff_bundle(Some("/run/hel/git-cache/key.bundle")),
         "/workspace",
+        None,
         |args| CommandSpec::new(args[0].clone(), args[1..].to_vec()),
     );
     assert!(commands.iter().all(|command| {
@@ -2798,8 +2822,9 @@ fn aws_cutoff_fetch_receives_github_token_on_stdin_only() {
         workspace: format!(".local/share/hel/workspaces/{SESSION}"),
     };
     let token = "ghs_secret-token";
-    let plan =
-        provision_on_locator_plan(&locator, SESSION, &cutoff_bundle(None), Some(token)).unwrap();
+    let mut repositories = cutoff_bundle(None);
+    repositories.repositories[0].url = Some("https://github.com/example/app.git".into());
+    let plan = provision_on_locator_plan(&locator, SESSION, &repositories, Some(token)).unwrap();
     let with_token = plan
         .commands
         .iter()
@@ -3278,6 +3303,7 @@ fn removable_profile_root_names_a_per_session_profile_directory_for_every_harnes
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        aws: None,
         ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
     };
     let worker_root = format!("/var/lib/hel/workers/{SESSION}");
@@ -3357,6 +3383,7 @@ fn a_session_never_runs_from_the_profile_home_itself() {
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        aws: None,
         ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
     };
     let local = TargetLocator::LocalBare {
@@ -3481,6 +3508,95 @@ fn podman_quiesce_stops_and_confirms_the_owned_container_without_removing_it() {
     assert!(command.args[1].contains("podman stop --time 0 --ignore"));
     assert!(command.args[1].contains(".State.Running"));
     assert!(!command.args[1].contains("podman rm"));
+}
+
+// Hard-won: 770a4e74c: exec could not stop writers in an existing stopped container.
+#[cfg(unix)]
+#[test]
+fn container_retirement_uses_the_engine_and_retains_files_until_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = r#"#!/bin/sh
+set -eu
+state=$MJ_ENGINE_TEST_ROOT
+[ ! -e "$state/unavailable" ] || exit 17
+printf '%s\n' "$*" >>"$state/commands"
+case $1 in
+    container)
+        case $* in
+            *State.Running*) cat "$state/running" ;;
+            *) printf 'true|%s\n' "$MJ_ENGINE_TEST_SESSION" ;;
+        esac ;;
+    list) if [ "$(cat "$state/running")" = true ]; then printf '%s\n' "$MJ_ENGINE_TEST_CONTAINER"; fi ;;
+    stop) printf 'false\n' >"$state/running" ;;
+    *) exit 99 ;;
+esac
+"#;
+    for engine in ["docker", "container"] {
+        mj_core::test_hooks::install_fake_command(&bin, engine, script);
+    }
+    let container_id = resource_name(SESSION).unwrap();
+    for target in [
+        TargetLocator::LocalDocker {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+        },
+        TargetLocator::AppleContainer {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+        },
+    ] {
+        for running in [false, true] {
+            std::fs::write(root.path().join("running"), running.to_string()).unwrap();
+            let mut plan = stop_container_plan(&target, SESSION).unwrap().unwrap();
+            for command in &mut plan.commands {
+                command.env.insert(
+                    "PATH".into(),
+                    format!(
+                        "{}:{}",
+                        bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                );
+                command.env.insert(
+                    "MJ_ENGINE_TEST_ROOT".into(),
+                    root.path().display().to_string(),
+                );
+                command
+                    .env
+                    .insert("MJ_ENGINE_TEST_SESSION".into(), SESSION.into());
+                command
+                    .env
+                    .insert("MJ_ENGINE_TEST_CONTAINER".into(), container_id.clone());
+            }
+            std::fs::write(
+                root.path().join("worker-files"),
+                "retain until every writer stops",
+            )
+            .unwrap();
+            plan.execute(&ProcessExecutor).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("running"))
+                    .unwrap()
+                    .trim(),
+                "false"
+            );
+            assert!(root.path().join("worker-files").exists());
+            std::fs::write(root.path().join("unavailable"), "offline").unwrap();
+            assert!(
+                plan.execute(&ProcessExecutor).is_err(),
+                "an unavailable engine cannot prove termination"
+            );
+            std::fs::remove_file(root.path().join("unavailable")).unwrap();
+        }
+    }
+    assert!(
+        !std::fs::read_to_string(root.path().join("commands"))
+            .unwrap()
+            .lines()
+            .any(|line| line.starts_with("exec "))
+    );
 }
 
 #[test]
@@ -5213,6 +5329,7 @@ fn move_destination_generations_have_independent_container_and_volume_ownership(
         &[],
         None,
         &destination_name,
+        None,
     )
     .unwrap();
     assert!(plan.commands[0].args.contains(&destination_name));

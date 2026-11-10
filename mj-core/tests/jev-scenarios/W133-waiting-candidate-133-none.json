@@ -25,16 +25,6 @@
     "authorization": {
       "messages": [
         {
-          "id": "user:21",
-          "role": "user",
-          "text": "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /home/jonathan/Projects/bifrost/.mj/clones/07d292ca700ead3ba5c751211efb3228/.mj/agents/6ddcd49aa83ee80f25ed1479979bdbf3. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Put longer logs, tables and findings in your report directory; list their paths instead of copying them into the report. Keep text evidence here, not build outputs, binaries or downloads. Handback is refused above the directory's byte limit. Fix compile, lint and format errors and tests your changes break; list each fix in one report line. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When blocked on a parent decision, hand back the question and decisive evidence. The parent owns consequential design decisions and final acceptance. A question you ask is sent to your parent and closed right away; its answer arrives as a message.\n\nYou are implementing #8389 Output units for composed taint and flow policies, in the lane worktree /home/jonathan/Projects/bifrost/.mj/clones/07d292ca700ead3ba5c751211efb3228/.mj/lanes/8389-output-units (branch 8389-native-output-units, head dd5d9b5891, already merged with origin/master 3f3649b430). Work only in this worktree. Do not commit, push, or use any cloud resource; I (the parent) commit your checkpoints. An earlier child built the parts listed below and kept stopping after small steps. Your job is to finish the feature in one long turn. A compiling checkpoint is NOT a stop point. Stop only when (a) the golden and the validation below pass, or (b) you hit a design question that the decisions below do not answer. In case (b), state the question with file/line evidence and the options.\n\nWhy: #8386 (one summary/composition/slicing architecture for native dataflow policies) needs incremental reuse for the four deployed composed taint and flow policies (bifrost.security.rust.stored-request-to-sql, bifrost.security.rust.store-requires-validation, and their Go versions). Today their whole policy family recomputes on every check. With Output units, an edit recomputes only the output anchors whose reads changed.\n\nApproved design (owner and coordinator decisions; do not re-open them):\n- One `Output` unit per reported sink site (taint) or per flow write-observation site. `UnitPartition::Output { anchor, compilation }` already exists in crates/bifrost-policy/src/units.rs. The anchor is the stable reported site (language, rel_path, blob, and the stable semantic site key), never a run-local ValueFlowSinkId or AnalysisEventRef handle. On load, reconstruct the AnalysisEventRef from the stored stable site key (see taint_policy.rs around line 10795, where the ref is derived from a semantic site key).\n- The compilation identity covers the policy semantic hash, the compiled selectors, the active model set, and the label and transform context. The source inventory and store-channel inventory are reads (recorded as endpoint-selector read keys), not identity.\n- The unit's prefix \n[... 4322 bytes omitted from the middle of this message ...]\nstore-channel writer that invalidates the dependent unit. New fixture files need open-core rows; list their paths in your report and I will regenerate the inventory.\n\nValidation, in the canonical environment (env -u RUSTUP_TOOLCHAIN JAVA_HOME= BIFROST_OPEN_PACKS_DISABLE=1 BIFROST_PARALLELISM=1 RAYON_NUM_THREADS=1, a fresh XDG_CACHE_HOME=$(mktemp -d), PYO3_PYTHON=/home/jonathan/.local/share/uv/python/cpython-3.12.8-linux-x86_64-gnu/bin/python3.12 LD_LIBRARY_PATH=/home/jonathan/.local/share/uv/python/cpython-3.12.8-linux-x86_64-gnu/lib, prefixed by nice -n 10 eatmydata): `cargo check -p brokk-bifrost --features brokk-bifrost/python,devtools,release-tooling --tests`; `cargo nextest run --max-fail 100 -p brokk-bifrost --features brokk-bifrost/python,devtools,release-tooling --test suite_bench_policy --test suite_cross_language` (suite_cross_language has a workspace_authority_gate test that requires any new memo field to be classified in tests/suite_cross_language/workspace_authority_classification.tsv); `cargo nextest run --max-fail 100 -p brokk-bifrost-policy --lib`; `cargo clippy -p brokk-bifrost-policy -p brokk-bifrost-flow --all-targets --all-features -- -D warnings`; `cargo fmt --all -- --check`; `node scripts/check-pack-authoring-drift.mjs`. Do not redirect target/ and do not change Cargo profiles. Do not re-bless any existing golden; if one changes, report the exact diff and its cause.\n\nRepo rules that apply: AGENTS.md (CLAUDE.md is a symlink) in the worktree; read .agents/docs/architecture-and-analyzer-store.md (heap-residency section: no Rust map whose size scales with the workspace and outlives a query; query-lifetime state or a capped moka cache only) and .agents/docs/testing-and-rust-validation.md before writing code. Plain ASCII in code and comments; assertions for impossible states; no `let _ = fallible()`.\n\nReport: what you changed (files, key symbols), the golden's behavior, each validation command with pass/fail and log path, any failing test names with the reason and log path, and new fixture paths."
-        },
-        {
-          "id": "user:423",
-          "role": "user",
-          "text": "Parent decision: (A). bifrost-flow owns a stable Output DTO for one anchor's composed result (the pre-projection report content: per-event source-sink paths and origin classes, witnesses, store crossings, barrier notes, diagnostics, completeness and work), with public `encode` and `decode` in flow. Keep TaintFindingReport and witness internals private. The policy crate stores the encoded DTO in the existing JSONB `product` column of policy_units (migration 0240 already requires `json_valid(product, 8)`), so serialize to JSON values with stable field names, the same way the existing prefix and root products are stored; no bincode or other binary layout. Decode validates every invariant the flow constructors assert (indices in range, a witness step that names a path that exists, ordering) and returns a corrupt error instead of panicking, because persisted rows can be corrupt; the shared unit loop then recomputes the unit. Add one round-trip test at the flow boundary (encode then decode then compare) for a report with two origins and a witness; that is an integration test of the stored format, which is allowed. Your epoch token edit is right; keep it. Continue with the remaining steps in order, and when the ~30-minute turn limit approaches, stop at a compiling state and send me a one-line note with the files changed so I can commit the checkpoint."
-        },
-        {
           "id": "agent:1443",
           "role": "assistant",
           "text": "The policy library suite passed: 1,186 tests, with two skipped. The checkpoint is compiling and behavior preserving so far. I’m doing the final format check, then I’ll hand back the changed files and the remaining DTO work for the parent’s commit."
@@ -43,11 +33,6 @@
           "id": "agent:1513",
           "role": "assistant",
           "text": "I handed the parent a compiling checkpoint across four files. The policy library suite passed (1,186 tests); the durable Output DTO, execution wiring, and golden remain to be completed."
-        },
-        {
-          "id": "user:1576",
-          "role": "user",
-          "text": "Parent: committed and pushed your checkpoint as 7bbc6f1348. Continue with the next steps in order: the flow-owned JSON Output DTO with encode/decode/validate and the two-origin witness round-trip test; the anchor-selected UnitSlice with the durable output product and per-anchor receipts; merge and seal wiring in prepare_in_range; then the golden and gates. Same stop rule: compiling state plus a one-line note near the turn limit."
         },
         {
           "id": "agent:1585",
@@ -85,11 +70,6 @@
           "text": "I handed the parent a compiling checkpoint with the flow-owned JSON DTO and a passing two-origin witness round-trip test. Output-unit wiring, remaining evidence fields, the golden, and full gates remain."
         },
         {
-          "id": "user:3387",
-          "role": "user",
-          "text": "Parent: committed and pushed as c595304951. Continue: complete the DTO (authored closures, frontier-source carrier and phase, store crossings, barrier pairs and notes, diagnostics, remaining work) with decode that restores the evidence the merge and projection need; then the anchor-selected UnitSlice using it, per-anchor receipts, merge and seal, the golden and the gates. Same stop rule near the turn limit."
-        },
-        {
           "id": "agent:3396",
           "role": "assistant",
           "text": "I’ll inspect the committed DTO against the report fields and projection code, then finish the stored evidence and use it in the per-anchor unit path."
@@ -120,11 +100,6 @@
           "text": "Checkpoint handed to the parent with the changed file, passing checks, and the projection decision needed to continue."
         },
         {
-          "id": "user:4248",
-          "role": "user",
-          "text": "Parent: committed and pushed your DTO completion as 9a782e194f. Decision: direct projection from the stable rows, with ONE projector. Reuse must not re-materialize artifacts, so the shared policy/RQL projection (project_batch_report, project_taint_finding_report, witness_projection) is refactored to consume the stable Output rows; a freshly computed anchor is encoded to rows first and goes through the same merge and projection as a reused one, so there is no second projection path and fresh and reused units cannot drift. Where the projector reads live carriers or witness handles today, give it the stable keys and locators the rows hold; if a rendered field truly needs something the rows lack (for example Location cardinality, which ValueFlowCarrier::stable_key omits), add it to the rows rather than rehydrating. Also make OutputCarrierRow::encode iterative. Keep public output byte-identical for existing goldens (this is a refactor of the projection input, not of what it renders); any changed golden line is a defect to report. Then the UnitSlice, per-anchor receipts, merge and seal, the golden and gates. Same stop rule near the turn limit."
-        },
-        {
           "id": "agent:4254",
           "role": "assistant",
           "text": "I’ll start at the flow boundary: make the carrier rows safe for deeply nested keys, then check what the shared projector needs from the rows."
@@ -145,11 +120,6 @@
           "text": "Compiling checkpoint handed to the parent. The flow boundary checks pass; shared projection and Output unit wiring remain."
         },
         {
-          "id": "user:5239",
-          "role": "user",
-          "text": "Parent: committed and pushed your key-decoding checkpoint. Continue with the projector refactor, the UnitSlice, receipts, merge and seal, the golden and gates. Same stop rule near the turn limit."
-        },
-        {
           "id": "agent:5246",
           "role": "assistant",
           "text": "I’ll trace the composed projection path and identify the live fields it reads, then move that path to the validated Output rows. Fresh and reused anchors will need to enter the same projector."
@@ -163,11 +133,6 @@
           "id": "agent:5486",
           "role": "assistant",
           "text": "Checkpoint handed to the parent. The DTO now exposes the fields needed by the stable row projector, and flow checks pass. The projector and Output unit wiring remain unfinished."
-        },
-        {
-          "id": "user:5545",
-          "role": "user",
-          "text": "Parent: committed and pushed. Continue with the projector refactor (witness_projection.rs ~404-690 over decoded rows; project_batch_report encodes fresh anchors first), then the UnitSlice and the rest. Same stop rule."
         },
         {
           "id": "agent:5554",
@@ -203,11 +168,6 @@
           "id": "agent:6372",
           "role": "assistant",
           "text": "The checkpoint is with the parent. Fresh composed sites now use stable Output rows for public projection, and the focused goldens pass. Policy projection and Output unit reuse remain unfinished."
-        },
-        {
-          "id": "user:6433",
-          "role": "user",
-          "text": "Parent: committed and pushed as 9ce0485507. Continue: migrate project_policy_findings (taint_policy.rs ~10600+) to the Output rows, including barrier pairs and store crossings, then the per-anchor UnitSlice with real per-unit work counters, receipts, merge and seal, the golden and gates. Same stop rule."
         },
         {
           "id": "agent:6440",
@@ -255,11 +215,6 @@
           "text": "Checkpoint handed to the parent. The lane compiles, clippy and formatting pass, and the focused golden and DTO round trip pass. Policy projection from Output rows and the per-anchor unit loop remain."
         },
         {
-          "id": "user:7571",
-          "role": "user",
-          "text": "Parent: committed and pushed. Continue: migrate project_policy_findings to the rows (store seed evidence and sanitizer declines included), then the per-anchor UnitSlice, receipts, merge and seal, the golden and the gates. Same stop rule."
-        },
-        {
           "id": "agent:7577",
           "role": "assistant",
           "text": "I’ll map the remaining policy projection inputs to the Output rows, starting with store seed evidence and sanitizer declines. Then I’ll connect the row projector for composed findings and validate the affected paths."
@@ -280,11 +235,6 @@
           "text": "Checkpoint handed to the parent. The Output row now records store seed and sanitizer decline evidence; the focused golden, compile check, and clippy pass. Policy projection from rows and the unit loop remain."
         },
         {
-          "id": "user:8068",
-          "role": "user",
-          "text": "Parent: committed and pushed. Note #9095 (provider split into crates/bifrost-flow/src/composition/mod.rs) has landed on master; merge origin/master into your lane at the start of your next step (expect conflicts in taint_compose_provider.rs and compose/*; keep master's moved provider code and re-apply your Output-row changes on top; tell me if you cannot stage, and I will). Then migrate project_policy_findings to the rows, then the UnitSlice and the rest. Same stop rule."
-        },
-        {
           "id": "agent:8075",
           "role": "assistant",
           "text": "I’ll merge the latest `origin/master` into the lane first and preserve the provider split. Then I’ll continue the row projector against the merged code."
@@ -293,11 +243,6 @@
           "id": "agent:8116",
           "role": "assistant",
           "text": "The merge is blocked by the sandbox: `git fetch` cannot write the lane’s `FETCH_HEAD`. The lane is clean at `26ed7a342f`. I asked the parent to perform the merge, as offered, before I continue the projector work."
-        },
-        {
-          "id": "user:8195",
-          "role": "user",
-          "text": "Parent: merged origin/master 632dd75aa2 (with #9095's provider split and #9035) into your lane and pushed. Conflicts were only in taint_policy.rs (kept your `let batch_report = match engine` and project_batch_report, which now also destructures master's composition_sanitizer_declines so the sanitizer-decline plan extension applies in the shared projection) and the units.rs epoch (master's plus -8389-native-output-units once). `cargo check -p brokk-bifrost-policy -p brokk-bifrost-rql` passes. Note the provider code now lives in crates/bifrost-flow/src/composition/mod.rs. Continue: migrate project_policy_findings to the rows, then the UnitSlice, receipts, merge and seal, the golden and gates. Same stop rule."
         },
         {
           "id": "agent:8200",
@@ -310,11 +255,6 @@
           "text": "The merged lane is clean at `af4b5d4757`. I found that the Output crossing row still lacks the endpoint, channel, and upstream witness evidence used by policy projection. No files changed this turn; those fields need to be added before the row projector can replace the live path."
         },
         {
-          "id": "user:8355",
-          "role": "user",
-          "text": "Parent: agreed. Extend the store-crossing row with the StoreCrossingProvenance endpoint and channel metadata and the optional source-to-write witness, then migrate project_policy_findings to the rows as the one path for fresh and reused anchors, then the UnitSlice and the rest. Same stop rule."
-        },
-        {
           "id": "agent:8361",
           "role": "assistant",
           "text": "I’ll extend the crossing row with the policy provenance it needs, then move the composed policy projector to consume those rows. I’ll keep the new fields SQL-readable and validate them on decode."
@@ -323,11 +263,6 @@
           "id": "agent:8481",
           "role": "assistant",
           "text": "The crossing DTO shape is in place and compiles, but its policy provenance records are not populated yet. I handed the checkpoint to the parent with the remaining projection and unit-loop work."
-        },
-        {
-          "id": "user:8544",
-          "role": "user",
-          "text": "Parent: committed and pushed as 3285b00b3e. Continue: populate the policy provenance rows from PreparedTaintPlan and the store seeds, validate them in decode, replace the composed project_policy_findings with the row path, then the UnitSlice and the rest. Same stop rule."
         },
         {
           "id": "agent:8550",
@@ -340,11 +275,6 @@
           "text": "The crossing policy metadata now populates and validates, and the lane compiles. I handed the checkpoint to the parent. The row policy projector, unit loop, and golden remain."
         },
         {
-          "id": "user:8769",
-          "role": "user",
-          "text": "Parent: committed and pushed. Output units only apply to composed policies, so the seeded ICFG upstream witness is not needed in the rows (ICFG keeps its own projector); do not build it. Next: replace the composed project_policy_findings with the row projector (one path for fresh and reused anchors; existing goldens must stay byte-identical), then the per-anchor UnitSlice, receipts, merge and seal, the golden and gates. Same stop rule."
-        },
-        {
           "id": "agent:8776",
           "role": "assistant",
           "text": "I’ll wire the composed policy projector to the stored Output rows first, then use that path for per-anchor execution. I’ll check the current call sites and row fields before editing."
@@ -353,11 +283,6 @@
           "id": "agent:8871",
           "role": "assistant",
           "text": "The stable row already carries the site, origins, witnesses, store crossings, barrier pairs, and sanitizer declines. I’ll keep the ICFG projector as it is and move composed policy findings onto a row-specific path, using the existing policy identities and limits."
-        },
-        {
-          "id": "user:9057",
-          "role": "user",
-          "text": "Parent: your turn was interrupted by a session restart; your working tree has uncommitted edits in output_product.rs and taint_policy.rs. Resume moving composed policy findings onto the row-specific path (ICFG projector unchanged, existing policy identities and limits), keep the tree compiling, then the UnitSlice and the rest. Same stop rule."
         },
         {
           "id": "agent:9063",
@@ -375,11 +300,6 @@
           "text": "Checkpoint handed back to the parent. The Output-row projection helpers compile and are formatted, but the composed projector and Output units are not yet wired."
         },
         {
-          "id": "user:9331",
-          "role": "user",
-          "text": "Parent: committed and pushed your helpers (the structure is fine). The jvm-analysis clippy warnings are a master defect already fixed (#9124); merge origin/master when you next need clippy, or ignore that crate's warnings. Continue: group rows so each origin is associated with its owning nested barrier-pair report (witness indices are local to that report), connect the one row projector for fresh and reused composed anchors and remove the dead-code annotations, then the UnitSlice, receipts, merge and seal, the golden (with the two-temp-root identity check) and the gates. Same stop rule."
-        },
-        {
           "id": "agent:9336",
           "role": "assistant",
           "text": "I’ll attach each origin to the report that owns its witness indices, then connect the composed policy projector to the validated rows. I’ll keep the ICFG route as it is."
@@ -393,11 +313,6 @@
           "id": "agent:9813",
           "role": "assistant",
           "text": "I handed back a compiling checkpoint with the row grouping changes. The composed projector, Output units, and golden remain to be completed."
-        },
-        {
-          "id": "user:9865",
-          "role": "user",
-          "text": "Parent: committed and pushed. Continue: connect project_output_policy_findings to fresh and reused composed rows (strict barrier evidence through the owning nested rows), remove the dead-code annotations, then the UnitSlice and the rest. Same stop rule."
         },
         {
           "id": "agent:9869",
@@ -440,11 +355,6 @@
           "text": "I handed back the row projector and the barrier parity failure with the evidence and decision options. The deployed store golden passes; the bounded barrier case needs a decision on stable note charging before I continue."
         },
         {
-          "id": "user:10917",
-          "role": "user",
-          "text": "Parent decision: (A). A cap that charges String capacity depends on the allocator and on how a value was built, so the same input can give different truncation; that already violates \"same code, same inputs, same answer\". Change the shared barrier-note bound (ValueTypeBarrierNotes::push / RetainedSize for notes and PolicySourceLocation paths) to a stable content-based charge (byte length of the content, not capacity), used identically by the live ICFG path and the row path. Which notes a cap retains is not a contract (owner rule), so re-bless golden_value_type_barriers with the cause stated per changed line (the cap now counts content bytes, so N notes are retained instead of M), and require ICFG and composition to retain the same notes. Check other goldens that pin capped note counts and re-bless only for this cause. Do not persist allocator-dependent cost. Then continue with the UnitSlice and the rest. Same stop rule."
-        },
-        {
           "id": "agent:10926",
           "role": "assistant",
           "text": "I’ll make barrier-note admission charge content bytes in both the live and row paths, then rerun the parity golden. I’ll inspect any changed golden lines before blessing them and proceed to the Output unit loop once parity holds."
@@ -463,11 +373,6 @@
           "id": "agent:11356",
           "role": "assistant",
           "text": "The barrier cap now uses content bytes, and ICFG and composition agree. I handed back the audited golden change and a decision needed for registering reused Output rows in MCP."
-        },
-        {
-          "id": "user:11416",
-          "role": "user",
-          "text": "Parent: committed and pushed as 185624ef7b. Decision on the public outcome: yes, carry the stable Output rows in PolicyBatchOutcome for composed anchors, fresh and reused alike (the same rows), and have MCP register composed taint results from those rows; live ProductionTaintAnalysisResult stays only for ICFG runs. That keeps one path: a fresh composed anchor is encoded to rows before it is registered, so fresh and warm registrations cannot differ. Audit every MCP consumer of a registered taint result (searchtools_service.rs ~2750 and whatever reads the registry later: witness or path retrieval, explanations, related locations) and make each answer from the rows; if one needs data the rows lack, add it to the rows rather than keeping a live-only side path. Then the UnitSlice, receipts, merge and seal, the golden (cold, warm reuse, one edited remote source adding a second origin, a store-channel writer edit, two temp roots) and the gates, including suite_mcp_cli since MCP registration changes. Same stop rule."
         },
         {
           "id": "agent:11426",
@@ -502,7 +407,7 @@
     "transcript_summary": "",
     "background_commands": 0,
     "queued_commands": 0,
-    "user_prompt_tail": "Parent: committed and pushed as 185624ef7b. Decision on the public outcome: yes, carry the stable Output rows in PolicyBatchOutcome for composed anchors, fresh and reused alike (the same rows), and have MCP register composed taint results from those rows; live ProductionTaintAnalysisResult stays only for ICFG runs. That keeps one path: a fresh composed anchor is encoded to rows before it is registered, so fresh and warm registrations cannot differ. Audit every MCP consumer of a registered taint result (searchtools_service.rs ~2750 and whatever reads the registry later: witness or path retrieval, explanations, related locations) and make each answer from the rows; if one needs data the rows lack, add it to the rows rather than keeping a live-only side path. Then the UnitSlice, receipts, merge and seal, the golden (cold, warm reuse, one edited remote source adding a second origin, a store-channel writer edit, two temp roots) and the gates, including suite_mcp_cli since MCP registration changes. Same stop rule.",
+    "user_prompt_tail": "",
     "assistant_text_tail": "The row transport is compiling through the policy and RQL crates. The root test build is still running; once it finishes I’ll fix any type errors, then exercise the MCP registration path before moving to the unit loop.",
     "completion": {
       "stop_reason": "EndTurn",

@@ -4,6 +4,7 @@ mod backend;
 mod cache_host;
 pub(crate) mod checkpoint;
 mod container_upgrade;
+mod environment;
 mod git_cache;
 mod github_app;
 mod lifecycle;
@@ -29,7 +30,6 @@ mod subagent_park;
 pub use subagent_park::ParkOutcome;
 pub(crate) use subagent_park::{FAILED_STARTUP_CLEANUP_TIMEOUT, failed_launch_cleanup_executor};
 mod subagents;
-pub(crate) use subagents::SubagentReportCleanup;
 pub(crate) use subagents::recover_registered_subagent_startup;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -83,9 +83,8 @@ pub(crate) use backend::backend_locator;
 pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 pub(crate) use backend::validate_resource_allocation;
-pub(crate) use backend::{
-    LocalEngineReadiness, is_missing_command, local_engine_readiness, verify_target_before_launch,
-};
+pub use backend::wait_for_ec2_ssh;
+pub(crate) use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
 pub use github_app::GithubBundleSelectionError;
 pub(crate) use github_app::{
     GithubAppTokenProvider, github_token_for_session, install_configured_session_github_token,
@@ -96,7 +95,7 @@ pub use mbx::install::{
 };
 pub use mbx::preview_build_cache;
 pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
-pub(crate) use mbx::{DoctorHostMbxStatus, MBX_VERSION, doctor_host_mbx};
+pub(crate) use mbx::{DoctorHostMbxStatus, doctor_host_mbx};
 use provisioning::apply_failed_new_session_rollback;
 pub use provisioning::{GitIdentity, controller_git_identity, set_controller_git_identity};
 pub(crate) use worker_binary::{
@@ -111,7 +110,7 @@ pub use checkpoint::{
     sweep_local_checkpoint_leftovers,
 };
 pub use lifecycle::{
-    BeforeClose, BranchDisposition, CheckoutDisposition, has_nothing_to_checkpoint,
+    BeforeClose, BranchDisposition, CheckoutDisposition, DestroyOutcome, has_nothing_to_checkpoint,
 };
 pub use recovery_scan::{RecoveryCandidate, RecoveryScan};
 pub(crate) use resume::InPlaceRestartError;
@@ -604,6 +603,8 @@ pub struct SessionLaunchOptions {
     pub no_project_memory: bool,
     /// Exclude this session from GitHub watcher delivery targets; see `SessionRecord::no_github_events`.
     pub no_github_events: bool,
+    /// Withhold GitHub credentials; inherited by children.
+    pub no_github_credentials: bool,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
@@ -920,6 +921,7 @@ impl Controller {
             mut review,
             no_project_memory,
             no_github_events,
+            no_github_credentials,
             initial_prompt,
             workspace_id,
             additional_mounts,
@@ -1121,6 +1123,7 @@ impl Controller {
             review,
             no_project_memory,
             no_github_events,
+            no_github_credentials: no_github_credentials || !self.config.github.session_credentials,
             target_template_id: target_id.to_string(),
             resource_allocation,
             additional_mounts: additional_mounts.clone(),
@@ -1669,6 +1672,12 @@ pub fn resolve_machine_input_path(
 
 fn execute_checked(executor: &impl CommandExecutor, command: CommandSpec) -> Result<CommandOutput> {
     let output = executor.execute(&command)?;
+    check_output(&command, output)
+}
+
+/// `output` of `command` when it succeeded, otherwise the error its stderr
+/// describes.
+fn check_output(command: &CommandSpec, output: CommandOutput) -> Result<CommandOutput> {
     if output.status != 0 {
         let detail = command_error_detail(&output.stderr);
         if detail.is_empty() {

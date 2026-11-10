@@ -105,14 +105,9 @@ impl TurnReviewHost {
                 preparing: BTreeMap::new(),
                 pending_open: BTreeMap::new(),
                 closing: BTreeSet::new(),
-                awaiting_forward_persistence: BTreeMap::new(),
                 awaiting_capture_persistence: BTreeMap::new(),
                 next_epoch: 0,
                 sessions: BTreeMap::new(),
-                followups: BTreeSet::new(),
-                followup_saving: BTreeSet::new(),
-                recovery_candidates: BTreeSet::new(),
-                recovery_in_flight: BTreeSet::new(),
                 startup_ready: false,
                 startup_failure: None,
                 deferred_handbacks: Vec::new(),
@@ -132,39 +127,14 @@ impl TurnReviewHost {
     }
 
     pub fn observe(&self, session_id: &str, view: &ManagedSessionView) {
-        // Running -> Idle is an edge, not a level: the session manager
-        // suppresses unchanged views, so dropping one here can lose an
-        // automatic review permanently. An unbounded hand-off keeps the
-        // daemon's update loop nonblocking without dropping that edge.
+        // Retain the latest reviewer questions without blocking the daemon's
+        // update loop.
         let _ = self.events.send(HostEvent::View {
             session_id: session_id.to_owned(),
             snapshot: view
                 .snapshot
                 .as_ref()
                 .map(|snapshot| Box::new(snapshot.materialized.clone())),
-            prompt_driven: view.snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot
-                    .operational
-                    .active_prompt
-                    .as_ref()
-                    .is_some_and(|prompt| {
-                        let user_id = format!("user:{}", prompt.command_id);
-                        !snapshot
-                            .materialized
-                            .transcript
-                            .iter()
-                            .find(|item| item.stable_id == user_id)
-                            .is_some_and(|item| match &item.body {
-                                mj_core::state::TranscriptBody::User { content } => matches!(
-                                    mj_core::acp::context_command_text(
-                                        &mj_core::transcript::materialized_content_text(content)
-                                    ),
-                                    Some((mj_core::acp::ContextCommand::Compact, _))
-                                ),
-                                _ => false,
-                            })
-                    })
-            }),
         });
     }
 
@@ -189,13 +159,13 @@ impl TurnReviewHost {
     pub async fn override_push(
         &self,
         session_id: &str,
-        reason: String,
+        overrides: Vec<ReviewOverride>,
     ) -> Result<serde_json::Value, StartRefusal> {
         let (reply, answer) = oneshot::channel();
         self.events
             .send(HostEvent::OverridePush {
                 session_id: session_id.to_owned(),
-                reason,
+                overrides,
                 reply,
             })
             .map_err(|_| StartRefusal("the review host stopped".into()))?;
@@ -204,19 +174,72 @@ impl TurnReviewHost {
             .map_err(|_| StartRefusal("the review host stopped".into()))?
     }
 
-    /// Reviews the turn that just finished, on request.
-    pub async fn start(&self, session_id: &str, manual: bool) -> Result<(), StartRefusal> {
+    pub async fn set_push_base(
+        &self,
+        session_id: &str,
+        commit: String,
+        path: Option<String>,
+    ) -> Result<serde_json::Value, StartRefusal> {
         let (reply, answer) = oneshot::channel();
         self.events
-            .send(HostEvent::Start {
+            .send(HostEvent::SetPushBase {
                 session_id: session_id.to_owned(),
-                manual,
-                reply: Some(reply),
+                commit,
+                path,
+                reply,
             })
-            .map_err(|_| StartRefusal("the review host stopped".to_owned()))?;
+            .map_err(|_| StartRefusal("the review host stopped".into()))?;
         answer
             .await
-            .map_err(|_| StartRefusal("the review host stopped".to_owned()))?
+            .map_err(|_| StartRefusal("the review host stopped".into()))?
+    }
+
+    /// Reviews committed work through the request_review gate.
+    pub async fn start(&self, session_id: &str) -> Result<(), StartRefusal> {
+        self.begin_push(session_id, None).await.map(|_| ())
+    }
+
+    /// Whether `session_id` has a review open. The host's own slots answer, so
+    /// callers never infer this from a copy of the review views. A session
+    /// with an open review is waiting for its verdict.
+    pub(crate) async fn has_open_review(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, OpenReviewUnknown> {
+        let (reply, answer) = oneshot::channel();
+        self.events
+            .send(HostEvent::HasOpenReview {
+                session_id: session_id.to_owned(),
+                reply,
+            })
+            .map_err(|_| OpenReviewUnknown::HostStopped)?;
+        answer.await.map_err(|_| OpenReviewUnknown::HostStopped)?
+    }
+
+    /// Puts the host in the state a failed startup recovery leaves it in.
+    #[cfg(test)]
+    pub(crate) fn fail_startup_recovery(&self, error: &str) {
+        let _ = self
+            .events
+            .send(HostEvent::StartupRecoveryFailed(error.to_owned()));
+    }
+
+    /// Hands a finished reviewer child to the host's closer. The host retries
+    /// the close with backoff until it succeeds; callers must not close the
+    /// child again themselves.
+    pub(crate) fn close_child(&self, child_session_id: String) {
+        let _ = self.events.send(HostEvent::CloseChild { child_session_id });
+    }
+
+    /// Reports that a reviewer child's session ended (stopped, destroyed or
+    /// failed). The daemon's record owner calls this once per such transition.
+    /// A role that already has an outcome, and a child no open group tracks,
+    /// are left alone.
+    pub(crate) fn child_ended(&self, child_session_id: String, reason: String) {
+        let _ = self.events.send(HostEvent::ChildEnded {
+            child_session_id,
+            reason,
+        });
     }
 
     pub(crate) async fn reviewer_finished(
@@ -230,7 +253,12 @@ impl TurnReviewHost {
             .send(HostEvent::ReviewerFinished {
                 session_id,
                 child_session_id,
-                answer,
+                report: match answer {
+                    Some(answer) => ReviewerReport::Answer(answer),
+                    None => ReviewerReport::Failed(
+                        "the reviewer finished without calling handback".into(),
+                    ),
+                },
                 reply,
             })
             .map_err(|_| "review host stopped".to_owned())?;
@@ -312,4 +340,15 @@ impl TurnReviewHost {
             .ok()?;
         result.await.ok().flatten()
     }
+}
+
+/// Why the host could not say whether a session has an open review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OpenReviewUnknown {
+    /// Its startup recovery failed and it did not restore this session.
+    RecoveryFailed(String),
+    /// Its startup sweep has not finished restoring reviews yet.
+    NotReady,
+    /// The host task is gone.
+    HostStopped,
 }

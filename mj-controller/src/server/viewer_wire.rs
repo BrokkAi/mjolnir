@@ -15,7 +15,7 @@ const INTERNED_FIELDS: [&str; 5] = [
     "incompatible_resume_targets",
 ];
 
-pub(super) const METADATA_FIELDS: [&str; 18] = [
+pub(super) const METADATA_FIELDS: [&str; 19] = [
     "profile_capabilities",
     "last_subagent_policies",
     "last_oracle_choices",
@@ -34,6 +34,7 @@ pub(super) const METADATA_FIELDS: [&str; 18] = [
     "review_config",
     "capacity",
     "launch_failures",
+    "notices",
 ];
 
 /// Fixed-size digests avoid retaining serialized metadata for each history
@@ -126,6 +127,8 @@ struct SnapshotMetadata<'a> {
     capacity: &'a [super::ViewerTargetCapacity],
     #[serde(skip_serializing_if = "slice_is_empty")]
     launch_failures: &'a [super::ViewerLaunchFailure],
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    notices: &'a [mj_client::daemon::RuntimeNotice],
 }
 
 fn slice_is_empty<T>(values: &&[T]) -> bool {
@@ -174,6 +177,7 @@ pub(super) fn metadata(
         review_config: &snapshot.review_config,
         capacity: &snapshot.capacity,
         launch_failures: &snapshot.launch_failures,
+        notices: &snapshot.notices,
     };
     serde_json::to_value(metadata)?
         .as_object()

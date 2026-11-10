@@ -103,6 +103,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        aws: None,
         codex_profile: None,
     }
 }
@@ -133,6 +134,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        aws: None,
         codex_profile: None,
         ..HarnessProfile::new(kind, home.to_path_buf())
     };
@@ -1275,6 +1277,27 @@ fn bundle_rejects_non_github_sources() {
     );
 }
 
+/// A rejected `github` value fails the whole configuration, so every value
+/// that loaded before the shared GitHub parser must keep loading, including
+/// ones the parser does not call GitHub (the last three).
+#[test]
+fn bundle_keeps_loading_github_values_accepted_before_the_shared_parser() {
+    for source in [
+        "BrokkAi/hel",
+        "https://github.com/BrokkAi/hel.git",
+        "ssh://git@github.com/BrokkAi/hel.git",
+        "git@gitlab.example:BrokkAi/hel.git",
+        "BrokkAi/hel+fork",
+        "https://github.com/BrokkAi/hel?ref=main",
+    ] {
+        let mut config = sample_config();
+        config.bundles.get_mut("hel").unwrap().repositories[0].github = Some(source.into());
+        config
+            .validate()
+            .unwrap_or_else(|error| panic!("{source}: {error:#}"));
+    }
+}
+
 #[test]
 fn bundle_accepts_one_absolute_local_source() {
     let mut config = sample_config();
@@ -1367,6 +1390,7 @@ fn github_app_configuration_is_optional_and_round_trips() {
         )])),
     });
     configured.github.session_token_path = Some(PathBuf::from("~/.secrets/gh_agents_pat"));
+    configured.github.session_credentials = false;
     configured.github.watch.interval_seconds = 30;
     configured.github.watch.api_base = "http://127.0.0.1:9411".into();
     configured.github.watch.enabled = false;
@@ -1374,6 +1398,7 @@ fn github_app_configuration_is_optional_and_round_trips() {
     configured.save_to(&path).unwrap();
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.contains("[github.app]"), "{body}");
+    assert!(body.contains("session_credentials = false"), "{body}");
     assert!(body.contains("[github.app.installations]"), "{body}");
     assert!(body.contains("[github.app.session_permissions]"), "{body}");
     assert!(body.contains("[github.app.token_permissions]"), "{body}");
@@ -1464,7 +1489,7 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
 
     let review = ReviewConfig {
         legacy: None,
-        trigger: ReviewTrigger::Turn,
+        disabled: false,
         reviewers: vec![
             SubagentChoice {
                 model: "review-model".into(),
@@ -1664,6 +1689,7 @@ fn version_one_podman_config_upgrades_to_isolated_workspace_storage() {
     .unwrap();
 
     let config = Config::load_from(&path).unwrap();
+
     assert_eq!(config.version, CONFIG_VERSION);
     let TargetTemplate::LocalPodman { container } = &config.targets["podman"] else {
         panic!("version-one Podman target changed kind")
@@ -2307,8 +2333,7 @@ fn legacy_review_keys_and_session_records_preserve_partial_overrides() {
             .iter()
             .all(|reviewer| reviewer.effort.as_deref() == Some("high"))
     );
-    let mut auto_config = ReviewConfig::legacy_default();
-    auto_config.trigger = ReviewTrigger::Turn;
+    let auto_config = ReviewConfig::legacy_default();
     let effective = auto_config.for_session(Some(&model_only));
     assert!(!effective.is_legacy());
     assert_eq!(effective.reviewers.len(), 2);
@@ -2338,7 +2363,7 @@ fn legacy_review_keys_and_session_records_preserve_partial_overrides() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&count_only).unwrap())
             .unwrap(),
-        serde_json::json!({"mode":"turn","count":1})
+        serde_json::json!({"mode":"push","count":1})
     );
     let auto: ReviewConfig = toml::from_str("enabled = true\ncount = 2\n").unwrap();
     assert!(auto.reviewers.is_empty());
@@ -2379,8 +2404,8 @@ fn empty_config_uses_clean_v1_defaults() {
     let path = directory.path().join("config.toml");
     fs::write(&path, "\n\t").unwrap();
     let loaded = Config::load_from(&path).unwrap();
-    assert!(loaded.review.is_legacy());
-    assert!(!Config::default().review.is_legacy());
+    assert!(!loaded.review.is_legacy());
+    assert_eq!(loaded.review.trigger(), ReviewTrigger::Off);
 }
 
 #[test]
@@ -2423,7 +2448,7 @@ fn legacy_profile_count_and_effort_survive_unrelated_save() {
     fs::write(
         &path,
         format!(
-            "version = {CONFIG_VERSION}\n[review]\ncount = 3\nprofile = 'claude'\neffort = 'high'\n"
+            "version = {CONFIG_VERSION}\n[review]\ntrigger = 'push'\ncount = 3\nprofile = 'claude'\neffort = 'high'\n"
         ),
     )
     .unwrap();
@@ -2544,7 +2569,7 @@ fn a_profile_for_a_removed_harness_is_dropped_without_failing_the_config() {
 
     let loaded = Config::load_from(&path).expect("the config must still load");
     assert_eq!(loaded.profiles.keys().collect::<Vec<_>>(), ["codex"]);
-    assert_eq!(loaded.review.trigger, ReviewTrigger::Turn);
+    assert_eq!(loaded.review.trigger(), ReviewTrigger::Push);
     assert_eq!(loaded.review.reviewers[0].model, "mimo-v2");
 
     loaded.save_to(&path).unwrap();
@@ -2811,6 +2836,15 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
     fs::write(&path, VERSION_TEN_CONFIG).unwrap();
 
     let config = Config::load_from(&path).unwrap();
+    assert!(config.enabled_target("aws").is_none());
+    assert!(!config.enabled_targets().any(|(id, _)| id == "aws"));
+    assert!(
+        config
+            .ensure_target_enabled("aws")
+            .unwrap_err()
+            .to_string()
+            .contains(LEGACY_EC2_TARGET_NOTICE)
+    );
     assert_eq!(config.version, CONFIG_VERSION);
     assert_eq!(
         config.machines.keys().collect::<Vec<_>>(),
@@ -3193,6 +3227,7 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        aws: None,
         codex_profile: codex_profile.map(str::to_owned),
         ..HarnessProfile::new(kind, home.to_path_buf())
     };
@@ -3228,17 +3263,34 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
     assert!(continues(HarnessKind::Claude, "removed", "claude2"));
 }
 
+/// The removed `trigger` and `enabled` keys load with any value. A table that
+/// names no reviewers keeps asking for automatic ones only if it asked for
+/// review, and the key is written only while that is still pending.
 #[test]
-fn review_trigger_loads_legacy_settings_and_saves_only_the_trigger() {
+fn removed_review_keys_load_and_only_pending_automatic_reviewers_keep_the_trigger() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
-    for (settings, expected) in [
-        ("", ReviewTrigger::Off),
-        ("enabled = true", ReviewTrigger::Turn),
-        ("enabled = false", ReviewTrigger::Off),
-        ("enabled = true\ntrigger = \"off\"", ReviewTrigger::Off),
-        ("enabled = false\ntrigger = \"turn\"", ReviewTrigger::Turn),
-        ("enabled = true\ntrigger = \"push\"", ReviewTrigger::Push),
+    for (settings, expected, pending) in [
+        ("", ReviewTrigger::Off, false),
+        ("enabled = true", ReviewTrigger::Push, true),
+        ("enabled = false", ReviewTrigger::Off, false),
+        (
+            "enabled = true\ntrigger = \"off\"",
+            ReviewTrigger::Off,
+            false,
+        ),
+        (
+            "enabled = false\ntrigger = \"turn\"",
+            ReviewTrigger::Push,
+            true,
+        ),
+        (
+            "enabled = true\ntrigger = \"push\"",
+            ReviewTrigger::Push,
+            true,
+        ),
+        ("trigger = \"sometimes\"", ReviewTrigger::Off, false),
+        ("trigger = 7", ReviewTrigger::Off, false),
     ] {
         fs::write(
             &path,
@@ -3246,23 +3298,127 @@ fn review_trigger_loads_legacy_settings_and_saves_only_the_trigger() {
         )
         .unwrap();
         let config = Config::load_from(&path).unwrap();
-        assert_eq!(config.review.trigger, expected, "{settings}");
+        assert_eq!(config.review.trigger(), expected, "{settings}");
+        assert_eq!(config.review.is_legacy(), pending, "{settings}");
         config.save_to(&path).unwrap();
         let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(
-            saved
-                .get("review")
-                .is_none_or(|review| review.get("enabled").is_none())
+        let review = saved.get("review");
+        assert!(review.is_none_or(|review| review.get("enabled").is_none()));
+        assert_eq!(
+            review.and_then(|review| review.get("trigger")?.as_str()),
+            pending.then_some("push"),
+            "{settings}"
         );
-        if expected == ReviewTrigger::Off {
-            assert_eq!(saved["review"]["trigger"].as_str(), Some("off"));
-        } else {
-            assert_eq!(
-                saved["review"]["trigger"].as_str(),
-                serde_json::to_value(expected).unwrap().as_str()
-            );
+    }
+}
+
+/// Review is on exactly when reviewers are configured, whatever the removed
+/// `trigger` key said, and the next save drops the key.
+#[test]
+fn review_is_on_exactly_when_reviewers_are_configured_and_the_trigger_is_dropped() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let reviewers = "reviewers = [{ model = \"gpt-6-terra\" }]";
+    for trigger in [None, Some("off"), Some("push"), Some("turn")] {
+        for (list, expected) in [
+            (reviewers, ReviewTrigger::Push),
+            ("reviewers = []", ReviewTrigger::Off),
+        ] {
+            let line = trigger.map_or(String::new(), |trigger| {
+                format!("trigger = \"{trigger}\"\n")
+            });
+            fs::write(
+                &path,
+                format!("version = {CONFIG_VERSION}\n# kept\n[review]\n{line}{list}\n"),
+            )
+            .unwrap();
+            let mut config = Config::load_from(&path).unwrap();
+            assert_eq!(config.review.trigger(), expected, "{trigger:?} {list}");
+            config.phone.enabled = false;
+            config.save_to(&path).unwrap();
+            let saved = fs::read_to_string(&path).unwrap();
+            assert!(!saved.contains("trigger"), "{saved}");
+            assert!(saved.contains("# kept"), "{saved}");
+            let reloaded = Config::load_from(&path).unwrap();
+            assert_eq!(reloaded.review.trigger(), expected, "{saved}");
         }
     }
+    // Once automatic reviewers are chosen the pending trigger goes too.
+    let mut pending = ReviewConfig::legacy_default();
+    assert_eq!(pending.trigger(), ReviewTrigger::Push);
+    pending.reviewers = vec![SubagentChoice {
+        model: "gpt-6-terra".into(),
+        effort: None,
+    }];
+    pending.clear_legacy();
+    assert!(!toml::to_string(&pending).unwrap().contains("trigger"));
+}
+
+/// A session that chose Off is off whatever reviewers exist; one that names
+/// neither Off nor Push follows whether review is on.
+#[test]
+fn session_choice_decides_whether_review_runs() {
+    let choice = SubagentChoice {
+        model: "gpt-6-terra".into(),
+        effort: None,
+    };
+    let on = ReviewConfig {
+        reviewers: vec![choice.clone()],
+        ..ReviewConfig::default()
+    };
+    let off = ReviewConfig::default();
+    let inherit = SessionReview::Inherit {
+        reviewers: Some(vec![choice.clone()]),
+    };
+    let push = SessionReview::Push { reviewers: None };
+    assert_eq!(
+        on.for_session(Some(&SessionReview::Off)).trigger(),
+        ReviewTrigger::Off
+    );
+    assert_eq!(on.for_session(Some(&push)).trigger(), ReviewTrigger::Push);
+    assert_eq!(
+        on.for_session(Some(&inherit)).trigger(),
+        ReviewTrigger::Push
+    );
+    // A session reviewer choice enables review even without global reviewers.
+    assert_eq!(
+        off.for_session(Some(&inherit)).trigger(),
+        ReviewTrigger::Push
+    );
+    assert_eq!(
+        off.for_session(Some(&SessionReview::Push {
+            reviewers: Some(vec![choice])
+        }))
+        .trigger(),
+        ReviewTrigger::Push
+    );
+    assert_eq!(off.for_session(Some(&push)).trigger(), ReviewTrigger::Off);
+}
+
+/// Per-turn review was removed. Sessions and launch files an older build
+/// stored with `turn` (or `on`) read as `push`, and are written as `push`.
+#[test]
+fn stored_turn_review_reads_as_push_and_is_never_written() {
+    let choice = r#"[{"model":"gpt-6-terra","effort":"high"}]"#;
+    for mode in ["turn", "on", "push"] {
+        let session: SessionReview =
+            serde_json::from_str(&format!(r#"{{"mode":"{mode}","reviewers":{choice}}}"#)).unwrap();
+        assert!(matches!(
+            &session,
+            SessionReview::Push { reviewers: Some(reviewers) } if reviewers.len() == 1
+        ));
+        assert_eq!(session.trigger(), Some(ReviewTrigger::Push));
+        let saved = serde_json::to_value(&session).unwrap();
+        assert_eq!(saved["mode"], "push");
+    }
+    // The count, model and effort form an older build stored.
+    let legacy: SessionReview =
+        serde_json::from_str(r#"{"mode":"turn","count":2,"model":"gpt-6-terra"}"#).unwrap();
+    assert_eq!(legacy.trigger(), Some(ReviewTrigger::Push));
+    assert_eq!(serde_json::to_value(&legacy).unwrap()["mode"], "push");
+    let trigger: ReviewTrigger = serde_json::from_str(r#""turn""#).unwrap();
+    assert_eq!(trigger, ReviewTrigger::Push);
+    assert_eq!(serde_json::to_string(&trigger).unwrap(), r#""push""#);
 }
 
 // Hard-won: 060306642: startup discovery duplicated a home containing `..`.
@@ -3305,6 +3461,7 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,
+            aws: None,
             codex_profile: None,
             ..HarnessProfile::new(HarnessKind::Claude, home)
         };
@@ -3360,4 +3517,19 @@ fn a_profile_models_allow_list_round_trips_and_is_omitted_when_empty() {
         Config::load_from(&path).unwrap().profiles["ds8bit"].models,
         [listed]
     );
+}
+
+#[test]
+fn an_aws_role_table_on_a_profile_that_cannot_use_it_does_not_refuse_sessions() {
+    let home = tempfile::tempdir().unwrap();
+    let mut profile = HarnessProfile::new(HarnessKind::Claude, home.path());
+    profile.aws = Some(AwsRoleConfig {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        session_policy: None,
+        session_policy_arns: Vec::new(),
+        duration_seconds: None,
+        source_identity: false,
+    });
+    assert_ne!(profile.auth_scheme(), AuthScheme::AwsCredentialChain);
+    profile.ensure_ready("claude").unwrap();
 }

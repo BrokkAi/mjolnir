@@ -280,7 +280,8 @@ pub struct StartSessionRequest {
     pub oracle: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_choice: Option<mj_core::config::SubagentChoice>,
-    /// Turn review for this session. Omitted follows `[review]`.
+    /// Review for this session: `off`, `push` or `inherit`. Omitted follows
+    /// `[review]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "super::super::actions::deserialize_api_session_review")]
     pub review: Option<mj_core::config::SessionReview>,
@@ -292,6 +293,9 @@ pub struct StartSessionRequest {
     /// Exclude this session and its children from GitHub watcher delivery targets.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_github_events: bool,
+    /// Withhold GitHub credentials; inherited by children.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     #[serde(default)]
     pub workspace_id: Option<String>,
     /// Omitted follows the saved default, or anchors model-based profile
@@ -389,6 +393,9 @@ pub struct StartSessionResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnSubagentRequest {
+    /// Withhold credentials from this child; a parent's opt-out is always inherited.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_github_credentials: bool,
     pub task_name: String,
     pub instructions: String,
     #[serde(default)]

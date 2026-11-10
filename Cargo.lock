@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-chat"
-version = "2.68.0"
+version = "2.70.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-checkpoint"
-version = "2.68.0"
+version = "2.70.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-client"
-version = "2.68.0"
+version = "2.70.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-controller"
-version = "2.68.0"
+version = "2.70.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -729,6 +729,7 @@ dependencies = [
  "brokk-mj-review",
  "brokk-mj-transcript",
  "brokk-mj-worker",
+ "brokk-sessionwiki",
  "bytes",
  "chrono",
  "chrono-tz",
@@ -749,7 +750,6 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "sessionwiki",
  "sha2 0.11.0",
  "signal-hook",
  "sysinfo",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-core"
-version = "2.68.0"
+version = "2.70.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-desktop"
-version = "2.68.0"
+version = "2.70.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -841,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-review"
-version = "2.68.0"
+version = "2.70.0"
 dependencies = [
  "brokk-mj-core",
  "serde_json",
@@ -849,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-transcript"
-version = "2.68.0"
+version = "2.70.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-tui"
-version = "2.68.0"
+version = "2.70.0"
 dependencies = [
  "anyhow",
  "brokk-mj-chat",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-voice-worker"
-version = "2.68.0"
+version = "2.70.0"
 dependencies = [
  "anyhow",
  "brokk-anvil-client",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mj-worker"
-version = "2.68.0"
+version = "2.70.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "brokk-mjolnir"
-version = "2.68.0"
+version = "2.70.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -977,6 +977,26 @@ dependencies = [
  "url",
  "vte",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "brokk-sessionwiki"
+version = "0.34.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d1fc221b4127f3409338e2192f854132ccaee5e72abd06bb3d6312a2517f61a"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs 7.0.0",
+ "rusqlite",
+ "ruzstd",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tiny_http",
+ "unicode-normalization",
+ "walkdir",
 ]
 
 [[package]]
@@ -3312,9 +3332,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -5069,9 +5089,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.11.1",
  "fallible-iterator",
@@ -5459,26 +5479,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "170fb83ab34de17dc69aa7c67482b22218ddb85da56546f9bd6b929e32a05930"
 dependencies = [
  "stable_deref_trait",
-]
-
-[[package]]
-name = "sessionwiki"
-version = "0.34.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6720c0cfc1b27aac4592639652c6948a4ce795c4a4133e09cf6b6ca96f1c9ea"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "dirs 7.0.0",
- "rusqlite",
- "ruzstd",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tiny_http",
- "unicode-normalization",
- "walkdir",
 ]
 
 [[package]]

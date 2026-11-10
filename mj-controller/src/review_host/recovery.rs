@@ -58,12 +58,6 @@ impl HostState {
         }
         let requests = driver.recovery_requests();
         self.next_epoch = self.next_epoch.saturating_add(1);
-        let push =
-            (group.scope == mj_core::relay::CaptureScope::PushableCommits).then(|| PushReview {
-                deltas: snapshot.deltas,
-                finishing: false,
-                retry_delay: std::time::Duration::from_secs(1),
-            });
         self.reviews.insert(
             session_id.clone(),
             ReviewSlot {
@@ -72,10 +66,12 @@ impl HostState {
                 reviewers: group.reviewers.clone(),
                 state,
                 _background: None,
-                push,
+                finishing: false,
+                retry_delay: std::time::Duration::from_secs(1),
                 start_reply: None,
                 pending_outcome: None,
                 queued_outcomes: Vec::new(),
+                ended_while_queued: BTreeMap::new(),
             },
         );
         self.run(&session_id, requests);

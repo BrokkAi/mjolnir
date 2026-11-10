@@ -82,13 +82,14 @@ Type in Prompt and press `Enter`. If the harness is already answering, another s
 The prompt surface also understands:
 
 - `!command` to run `bash -lc` independently inside the session workspace.
-- `/config` to open a settings dialog listing every selectable setting the
-  active harness advertises. `/config <key>` opens that setting's values, while
+- `/config` to open a settings dialog listing user-settable settings the
+  active harness advertises. The target permission policy owns permission
+  settings; use `/plan` and `/implement` to enter or leave Plan. `/config <key>` opens that setting's values, while
   `/config <key> <value>` applies one directly. A change submitted during a
   turn queues with the other work.
 - `/model` and `/effort` to change the harness settings. A change submitted during a turn queues with the other work.
 - `/fast`, `/plan`, and `/implement` when the active harness exposes the corresponding mode.
-- `/review` for an independent review of the completed turn; see [turn review](/turn-review/).
+- `/review` for an push review of committed work; see [Code review](/turn-review/).
 - Agent-advertised slash commands, which appear in completion beside Mjolnir's local commands.
 
 Press `Esc` to cancel the active agent turn or shell command. This does not stop the worker, delete queued prompts, or detach the client. A prompt still waiting to join the running turn stays queued and runs next, so `Esc` is also how you stop waiting for a long tool call. Use `prefix+shift+c` only for a lifecycle operation such as launch, resume, or stop.
@@ -201,7 +202,22 @@ sub-agent holds hundreds of processes and threads against the container's
 process limit, even when it is only waiting. So when a sub-agent's turn ends
 and its parent has been told, Mjolnir parks it:
 
-- Its worker and harness stop, so it holds no processes.
+- Its worker and harness stop, so it holds no harness processes. Parking
+  stops the harness and the processes under it; a process the agent started
+  detached, for example with `setsid`, is not part of that tree and may keep
+  running. So when a sub-agent's turn ends, its worker observes which
+  processes it can find in the worker's process tree or carrying this
+  session's marker, and what the working tree holds, before it publishes the
+  turn's outcome. The two are read together, and the facts are part of the
+  outcome record, so the report the parent receives lists them as Mjolnir's
+  observation, ahead of the child's own text, and nothing waits for them
+  afterwards. A process outside that scope, such as a job started with
+  `env -i setsid` whose launching shell has exited, is not seen. There is no
+  time limit on the observation: the sub-agent's next turn starts after it. It
+  ends early only if the harness stops or exits, and the outcome then says the
+  facts are unavailable and why. A turn recorded by an older worker has no
+  facts, and the report says so. `list_agents` shows the same lines under
+  `facts`.
 - Its conversation, its report, and the files on its target stay. Its row
   shows the idle symbol and reads "Parked". The report message the parent
   receives and `list_agents` show it as finished, with `"parked": true`.
@@ -628,17 +644,17 @@ take turns re-indexing everything until you upgrade the command. When a newer
 SessionWiki wrote the index, Mjolnir leaves it alone and search stays closed
 until you upgrade Mjolnir.
 
-This build links the `sessionwiki` crate, version 0.34.5. Install the matching
-tool with either:
+This build links the `brokk-sessionwiki` crate, version 0.34.22. Install the
+matching tool with:
 
 ```sh
-cargo install --locked sessionwiki@0.34.5
-npm install --global @youdie006/sessionwiki@0.34.5
+cargo install --locked brokk-sessionwiki@0.34.22
 ```
 
-If you installed `brokk-sessionwiki` for an earlier Mjolnir build, run
-`cargo uninstall brokk-sessionwiki` first. Both packages install a command named
-`sessionwiki`.
+If you installed the `sessionwiki` package for an earlier Mjolnir build, remove
+it first with `cargo uninstall sessionwiki` or
+`npm uninstall --global @youdie006/sessionwiki`. Both packages install a command
+named `sessionwiki`.
 
 ## Recover an orphaned worker
 
@@ -676,7 +692,7 @@ enabled = false
 
 Continuation also needs Jev: with `[jev] enabled = false` it does not run, whatever `[continuation]` says, and the Continuation row in Settings reads **Off · Jev is off (Privacy)**.
 
-The session shows **Checking continuation** while Jev checks the conversation. A continuation appears as **Continuing requested work automatically · 1 of 3**. The diagnostic logs contain the evidence and outcome. There are at most three automatic continuations between your messages. New input or interrupting the session cancels a pending check. Automatic turn review waits until the continuation chain settles.
+The session shows **Checking continuation** while Jev checks the conversation. A continuation appears as **Continuing requested work automatically · 1 of 3**. The diagnostic logs contain the evidence and outcome. There are at most three automatic continuations between your messages. New input or interrupting the session cancels a pending check. Push review runs when the agent requests it before pushing.
 
 Mjolnir checks every turn that ends, including a turn the agent starts on its own, for example when a background task it was waiting for finishes.
 

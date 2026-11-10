@@ -331,8 +331,9 @@ pub(crate) enum DashboardIoUpdate {
     SpinnerStyleSaved {
         result: std::result::Result<Config, String>,
     },
-    DetachedSessionState {
+    TerminalDraft {
         session_id: String,
+        revision: u64,
         result: std::result::Result<(), String>,
     },
     ReadReceipt {
@@ -903,6 +904,10 @@ impl DashboardContext {
                             if let Some(draft) = self.composer_drafts.get(&session_id) { chat.with_draft(draft.text.clone()) } else { chat }
                         } else { chat };
                         let mut chat = chat.open();
+                        super::drains::apply_policy_config_key(
+                            &mut chat,
+                            &self.runtime_sessions,
+                        );
                         if let Some(composer) = composer { chat.adopt_live_composer(composer); }
                         // Only a newly opened chat may receive a locator jump. A warm
                         // chat retains the reader's current position.
@@ -1217,9 +1222,6 @@ impl DashboardContext {
             DashboardIoUpdate::ResumeRecord { session_id, result } => {
                 match self.dashboard.apply_resume_record(&session_id, *result) {
                     DashboardAction::None => {}
-                    DashboardAction::ResolveAwsResourceOptions {
-                        target_template_ids,
-                    } => self.resolve_aws_resource_options(target_template_ids),
                     action => tracing::warn!(
                         ?action,
                         "the resume wizard asked for an action its record loader cannot run"
@@ -1389,33 +1391,25 @@ impl DashboardContext {
                     Err(error) => self.dashboard.set_notice(format!("Paste failed: {error}")),
                 }
             }
-            DashboardIoUpdate::DetachedSessionState { session_id, result } => match result {
-                Ok(()) => {
-                    self.draft_save_failures.remove(&session_id);
+            DashboardIoUpdate::TerminalDraft { session_id, revision, result } => {
+                self.composer_drafts.complete(&session_id, revision, result.is_ok());
+                match result {
+                    Ok(()) => { self.draft_save_failures.remove(&session_id); }
+                    Err(error) => {
+                        let message = format!("Could not confirm saved draft for {}: {error}", self.session_notice_name(&session_id));
+                        self.draft_save_failures.insert(session_id.clone(), message.clone());
+                        self.dashboard.set_notice(message);
+                    }
                 }
-                Err(error) => {
-                    let message = format!(
-                        "Could not confirm saved draft and read status for {}: {error}",
-                        self.session_notice_name(&session_id)
-                    );
-                    self.draft_save_failures.insert(session_id, message.clone());
-                    self.dashboard.set_notice(message);
-                }
-            },
+                self.flush_composer_draft(&session_id, false);
+            }
             DashboardIoUpdate::ReadReceipt { session_id, result } => {
                 self.finish_read_receipt(session_id, result);
             }
             DashboardIoUpdate::CreatedBundle { result } => match *result {
                 Ok(created) => {
-                    let followup = self
-                        .dashboard
+                    self.dashboard
                         .apply_created_bundle(self.controller.config.clone(), &created.bundle_id);
-                    if let DashboardAction::ResolveAwsResourceOptions {
-                        target_template_ids,
-                    } = followup
-                    {
-                        self.resolve_aws_resource_options(target_template_ids);
-                    }
                 }
                 Err(error) => {
                     self.dashboard.fail_bundle_creation(&error);
@@ -1442,12 +1436,8 @@ impl DashboardContext {
                     // Import completion can arrive after a tab switch. Keep
                     // the imported record globally visible, but only open
                     // the resume modal in the workspace that owns it.
-                    if self.session_in_active_workspace(&session_id)
-                        && let DashboardAction::ResolveAwsResourceOptions {
-                            target_template_ids,
-                        } = self.dashboard.begin_resume_for(&session_id)
-                    {
-                        self.resolve_aws_resource_options(target_template_ids);
+                    if self.session_in_active_workspace(&session_id) {
+                        self.dashboard.begin_resume_for(&session_id);
                     }
                 }
                 Err(error) => {
@@ -2381,6 +2371,7 @@ mod tests {
     }
 
     // Hard-won: 0bd61a289: summary hydration exhausted the blocking pool while awaiting nested metadata reads.
+    // Hard-won: 99572842f: an unowned daemon fixture took the slow Windows stale-record path.
     #[test]
     fn stored_summary_bursts_leave_the_blocking_pool_available() {
         const CHILD: &str = "MJ_TEST_SUMMARY_BLOCKING_POOL";
@@ -2389,6 +2380,9 @@ mod tests {
         if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
             return;
         }
+        // A running daemon owns its store. Without that ownership, startup
+        // probes this record's process and endpoint before refusing it.
+        let _store_guard = mj_controller::controller::ControllerStoreGuard::acquire().unwrap();
         // Refuse before startup can launch anything. Even this refusal needs
         // connection metadata, just as successful summary reads do.
         let metadata = daemon::DaemonMetadata {
@@ -2431,7 +2425,13 @@ mod tests {
                     else {
                         panic!("expected a summary result")
                     };
-                    assert!(result.is_err(), "the newer daemon must be refused");
+                    assert!(
+                        result
+                            .err()
+                            .expect("the newer daemon must be refused")
+                            .contains("the daemon uses a newer protocol"),
+                        "the refusal must come from the recorded daemon's protocol"
+                    );
                 }
                 // Attachment renewal and chat preparation need this pool too.
                 tokio::task::spawn_blocking(|| ()).await.unwrap();
@@ -2476,8 +2476,9 @@ mod tests {
                         released.await;
                         Ok(())
                     },
-                    move |result| DashboardIoUpdate::DetachedSessionState {
+                    move |result| DashboardIoUpdate::TerminalDraft {
                         session_id: id.to_string(),
+                        revision: 1,
                         result,
                     },
                 ));
@@ -2501,7 +2502,7 @@ mod tests {
             for _ in 0..64 {
                 assert!(matches!(
                     results.recv().await,
-                    Some(DashboardIoUpdate::DetachedSessionState { result: Ok(()), .. })
+                    Some(DashboardIoUpdate::TerminalDraft { result: Ok(()), .. })
                 ));
             }
             assert!(
@@ -2522,8 +2523,9 @@ mod tests {
             updates,
             Duration::from_millis(20),
             std::future::pending::<Result<()>>(),
-            |result| DashboardIoUpdate::DetachedSessionState {
+            |result| DashboardIoUpdate::TerminalDraft {
                 session_id: "muse".into(),
+                revision: 1,
                 result,
             },
         );
@@ -2532,7 +2534,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let Some(DashboardIoUpdate::DetachedSessionState {
+        let Some(DashboardIoUpdate::TerminalDraft {
             result: Err(error), ..
         }) = results.recv().await
         else {
@@ -2669,6 +2671,7 @@ mod tests {
             review: None,
             no_project_memory: false,
             no_github_events: false,
+            no_github_credentials: false,
             target_template_id: "podman".into(),
             resource_allocation: None,
             additional_mounts: Vec::new(),

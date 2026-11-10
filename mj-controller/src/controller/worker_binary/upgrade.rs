@@ -62,7 +62,12 @@ impl LiveStaging {
         // A snapshot must remain current until its sweep finishes. Other
         // registrations wait here before creating their first directory entry.
         let gate = super::store::store_gate(locator, &format!("{root}/staging"));
-        let _owner = super::store::lock_gate(executor, &gate)?;
+        let _owner = super::store::lock_gate(
+            executor,
+            &gate,
+            session_id,
+            "register and sweep private worker staging",
+        )?;
         let (live, names) = Self::register(session_id, name);
         execute_checked(
             executor,
@@ -498,7 +503,7 @@ fn prepare_container_harness_for_upgrade(
     Ok(())
 }
 
-pub(super) fn prepare_installed_managed_harness(
+pub(in crate::controller) fn prepare_installed_managed_harness(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     worker_root: &str,

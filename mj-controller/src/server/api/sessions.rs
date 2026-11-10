@@ -37,9 +37,10 @@ pub(super) async fn get_session(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<ApiSession>, ApiFailure> {
-    let mut session = {
+    let (mut session, enforcement) = {
         let snapshot = state.snapshot_rx.borrow();
-        ApiSession::from(require_session_record(&snapshot, &session_id)?)
+        let record = require_session_record(&snapshot, &session_id)?;
+        (ApiSession::from(record), record.execution_enforcement)
     };
     if let Ok(backend) = backend(&state) {
         if let Some(turn) = backend.turn_state(session_id.clone()).await? {
@@ -53,11 +54,16 @@ pub(super) async fn get_session(
             let view = handle.view();
             if let Some(snapshot) = view.snapshot {
                 // Use the setter's live configuration source; the dashboard can lag.
-                let options = crate::server::session_config_view(
+                let mut options = crate::server::session_config_view(
                     session.harness_kind.parse()?,
                     &snapshot.operational,
                 );
-                if !options.is_empty() {
+                crate::server::filter_policy_config_options(
+                    &mut options,
+                    enforcement,
+                    &snapshot.operational.config_options,
+                );
+                if !snapshot.operational.config_options.is_empty() {
                     session.config_options = options;
                 }
                 if view.connected {
@@ -223,6 +229,7 @@ pub(super) async fn start_session(
         review: request.review.clone(),
         no_project_memory: request.no_project_memory,
         no_github_events: request.no_github_events,
+        no_github_credentials: request.no_github_credentials,
         workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,
         profile_id,
         bundle_id,

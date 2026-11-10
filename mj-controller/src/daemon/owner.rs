@@ -75,6 +75,41 @@ pub(super) struct RuntimeStateOwner {
     store: StoreState,
     credential_inputs: Option<(Arc<PollableWorkerInputs>, BTreeSet<String>)>,
     worker_inputs: std::cell::RefCell<Option<WorkerInputsPublication>>,
+    /// Told when a reviewer child's session ends, so an open review does not
+    /// wait forever for a report the child can no longer give.
+    reviewer_ended: ReviewerEnded,
+}
+
+/// Receives a reviewer child's session id and why its session ended.
+pub(super) type ReviewerEnded = Arc<dyn Fn(&str, String) + Send + Sync>;
+
+/// Why a reviewer child's session just ended, when this change is the one
+/// that ended it: it left a live state for a terminal one, or its record was
+/// removed (a destroy). Any other change, and any other session, is `None`.
+fn reviewer_child_end(
+    before: &mj_core::state::State,
+    id: &str,
+    after: Option<&SessionRecord>,
+) -> Option<String> {
+    let prior = before.sessions.get(id)?;
+    if before.subagents.get(id)?.kind != mj_core::subagent::SubagentKind::Reviewer
+        || crate::session_manager::session_has_ended(prior.state)
+    {
+        return None;
+    }
+    match after {
+        None => Some("the reviewer's session was destroyed".into()),
+        Some(record) if crate::session_manager::session_has_ended(record.state) => {
+            Some(match &record.last_error {
+                Some(cause) => format!(
+                    "the reviewer's session ended ({}): {cause}",
+                    record.state.as_str()
+                ),
+                None => format!("the reviewer's session ended ({})", record.state.as_str()),
+            })
+        }
+        Some(_) => None,
+    }
 }
 
 enum StoreState {
@@ -174,10 +209,16 @@ impl RuntimeStateOwner {
                 self.transcripts.remove(&session_id);
             }
         }
-        self.sessions.insert(
-            session_id.clone(),
-            RuntimeSessionView::from_managed(session_id, view),
-        );
+        let mut runtime = RuntimeSessionView::from_managed(session_id.clone(), view);
+        if let Some(record) = self.controller.state.sessions.get(&session_id) {
+            let config = &self.controller.config;
+            runtime.policy_config_keys = record
+                .execution_enforcement(config)
+                .zip(runtime.operational.as_ref())
+                .map(|(enforcement, state)| enforcement.owned_config_keys(&state.config_options))
+                .unwrap_or_default();
+        }
+        self.sessions.insert(session_id, runtime);
     }
 
     pub(super) fn install_config(&mut self, config: Config) {
@@ -197,7 +238,7 @@ impl RuntimeStateOwner {
         result
     }
 
-    pub(super) fn new(controller: Controller) -> Self {
+    pub(super) fn new(controller: Controller, reviewer_ended: ReviewerEnded) -> Self {
         let indexes = RecordIndexes::bootstrap(&controller.state);
         Self {
             config_snapshot: controller.config.clone().into(),
@@ -213,6 +254,7 @@ impl RuntimeStateOwner {
             store: StoreState::Bootstrap,
             credential_inputs: None,
             worker_inputs: Default::default(),
+            reviewer_ended,
         }
     }
 
@@ -243,6 +285,11 @@ impl RuntimeStateOwner {
     fn records_changed(&mut self, before: &mj_core::state::State) {
         self.indexes.apply(before, &self.controller.state);
         for (id, record) in before.sessions.changes(&self.controller.state.sessions) {
+            // The one place every committed session-record change passes, so
+            // it is the one place a reviewer child's end is seen.
+            if let Some(reason) = reviewer_child_end(before, id, record) {
+                (self.reviewer_ended)(id, reason);
+            }
             if record.is_none() {
                 self.sessions.remove(id);
                 self.transcripts.remove(id);
@@ -427,6 +474,61 @@ mod tests {
     use super::super::tests::runtime_test_session;
     use super::*;
 
+    fn state_with_reviewer_child(child: SessionState) -> mj_core::state::State {
+        let mut state = mj_core::state::State::default();
+        let record = runtime_test_session("child", "workspace", child);
+        state.sessions.insert(record.id.clone(), record);
+        state.subagents.insert(
+            "child".into(),
+            mj_core::subagent::SubagentRecord {
+                kind: mj_core::subagent::SubagentKind::Reviewer,
+                reviewer_launch: None,
+                child_session_id: "child".into(),
+                parent_session_id: "parent".into(),
+                task_name: "child".into(),
+                profile_id: "codex".into(),
+                model: None,
+                effort: None,
+                working_directory: std::path::PathBuf::new(),
+                initial_prompt: String::new(),
+                request_key: "child".into(),
+                created_at: "now".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            }
+            .into(),
+        );
+        state
+    }
+
+    /// Provisioning enters `StartupCleanup` before retrying a worker start
+    /// that failed before publishing its socket, so the reviewer's session has
+    /// not ended while it is there.
+    // Hard-won: pre-push review of 2ac022d85/4aaf9274c: a reviewer whose worker start was being retried was reported ended
+    #[test]
+    fn a_reviewer_child_passing_through_startup_cleanup_has_not_ended() {
+        let step = |from, to| {
+            let before = state_with_reviewer_child(from);
+            let after = state_with_reviewer_child(to);
+            reviewer_child_end(&before, "child", after.sessions.get("child"))
+        };
+        assert_eq!(
+            step(SessionState::Provisioning, SessionState::StartupCleanup),
+            None
+        );
+        assert_eq!(
+            step(SessionState::StartupCleanup, SessionState::Running),
+            None
+        );
+        // Cleanup that gives up does end it.
+        assert!(
+            step(SessionState::StartupCleanup, SessionState::Error)
+                .is_some_and(|reason| reason.contains("ended"))
+        );
+        assert!(step(SessionState::Running, SessionState::Stopped).is_some());
+    }
+
     #[cfg(unix)]
     #[test]
     fn credential_staging_changes_are_observed_without_record_changes() {
@@ -441,10 +543,13 @@ mod tests {
             worker_root: root.path().to_owned(),
         });
         state.sessions.insert(active.id.clone(), active);
-        let owner = RuntimeStateOwner::new(Controller {
-            config: Config::default(),
-            state,
-        });
+        let owner = RuntimeStateOwner::new(
+            Controller {
+                config: Config::default(),
+                state,
+            },
+            Arc::new(|_, _| {}),
+        );
         let inputs = owner.pollable_worker_inputs();
         assert!(inputs.staged_credentials().is_empty());
         std::fs::remove_file(&profile).unwrap();
@@ -467,10 +572,13 @@ mod tests {
             worker_root: "/worker".into(),
         });
         state.sessions.insert(active.id.clone(), active);
-        let mut owner = RuntimeStateOwner::new(Controller {
-            config: Config::default(),
-            state,
-        });
+        let mut owner = RuntimeStateOwner::new(
+            Controller {
+                config: Config::default(),
+                state,
+            },
+            Arc::new(|_, _| {}),
+        );
         let inputs = owner.pollable_worker_inputs();
         assert!(
             Arc::ptr_eq(&inputs, &owner.pollable_worker_inputs()),
@@ -532,10 +640,13 @@ mod tests {
                 worker_root: "/worker".into(),
             });
             state.sessions.insert(active.id.clone(), active.clone());
-            let mut owner = RuntimeStateOwner::new(Controller {
-                config: Config::default(),
-                state,
-            });
+            let mut owner = RuntimeStateOwner::new(
+                Controller {
+                    config: Config::default(),
+                    state,
+                },
+                Arc::new(|_, _| {}),
+            );
             crate::pollers::take_pollability_visits();
             let held = owner.pollable_worker_inputs();
             assert!(Arc::ptr_eq(&held, &owner.pollable_worker_inputs()));
@@ -567,5 +678,68 @@ mod tests {
             );
             assert_eq!(crate::pollers::take_pollability_visits(), 0);
         }
+    }
+
+    /// Only the transition into an ended state, or the record's removal, is
+    /// reported, and only for reviewer children.
+    // Hard-won: f61b30a62: a reviewer child's end never reached its open review
+    #[test]
+    fn a_reviewer_childs_end_is_reported_once_and_other_sessions_never() {
+        use mj_core::subagent::SubagentKind;
+        let mut state = mj_core::state::State::default();
+        for id in ["reviewer", "worker", "plain"] {
+            state.sessions.insert(
+                id.into(),
+                runtime_test_session(id, "workspace", SessionState::Running),
+            );
+        }
+        for (id, kind) in [
+            ("reviewer", SubagentKind::Reviewer),
+            ("worker", SubagentKind::Worker),
+        ] {
+            let mut relation = super::super::tests::runtime_test_subagent(id, "parent");
+            relation.kind = kind;
+            state.subagents.insert(id.into(), relation.into());
+        }
+        let ended = Arc::new(Mutex::new(Vec::new()));
+        let mut owner = RuntimeStateOwner::new(
+            Controller {
+                config: Config::default(),
+                state,
+            },
+            {
+                let ended = ended.clone();
+                Arc::new(move |id: &str, reason| {
+                    ended.lock().unwrap().push((id.to_owned(), reason))
+                })
+            },
+        );
+        let stop = |owner: &mut RuntimeStateOwner, state| {
+            owner.edit_sessions(|sessions| {
+                for id in ["reviewer", "worker", "plain"] {
+                    sessions.get_mut(id).unwrap().state = state;
+                }
+            })
+        };
+        stop(&mut owner, SessionState::Closing);
+        assert!(ended.lock().unwrap().is_empty(), "closing is not the end");
+        stop(&mut owner, SessionState::Stopped);
+        stop(&mut owner, SessionState::Error);
+        assert_eq!(
+            *ended.lock().unwrap(),
+            [(
+                "reviewer".to_owned(),
+                "the reviewer's session ended (stopped)".to_owned()
+            )],
+            "one report, for the reviewer, at the transition"
+        );
+        owner.edit_sessions(|sessions| {
+            sessions.remove("reviewer");
+        });
+        assert_eq!(
+            ended.lock().unwrap().len(),
+            1,
+            "an ended session stays reported once"
+        );
     }
 }

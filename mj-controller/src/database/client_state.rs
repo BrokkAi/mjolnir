@@ -274,59 +274,118 @@ pub(super) fn advance_client_read_frontier_at(
     client_read_frontier_at(path, client_id, workspace_id, session_id)
 }
 
-/// Preserve unsent input for explicit recovery and retire its unchanged legacy
-/// seed together. Empty input still retires the seed: clearing is an edit.
-pub fn save_detached_session_draft(
-    workspace_id: &str,
+/// Persist one revision of a terminal's composer while retiring its unchanged
+/// legacy seed on the first accepted save.
+pub fn save_terminal_draft(
     session_id: &str,
     source: &str,
     owner_pid: u32,
+    revision: u64,
     draft: DetachedSessionDraft,
-) -> Result<Option<String>> {
-    let workspace_id = workspace_id.to_owned();
+) -> Result<()> {
+    let revision =
+        i64::try_from(revision).context("terminal draft revision exceeds SQLite range")?;
+    ensure!(revision > 0, "terminal draft revision must be positive");
     let session_id = session_id.to_owned();
     let source = source.to_owned();
-    submit_database_write("save_detached_session_draft", move |connection| {
-        save_detached_session_draft_in(
+    submit_database_write("save_terminal_draft", move |connection| {
+        save_terminal_draft_in(
             connection,
-            &workspace_id,
             &session_id,
             &source,
             owner_pid,
+            revision,
             &draft,
         )
     })
 }
 
-pub(super) fn save_detached_session_draft_in(
+pub(super) fn save_terminal_draft_in(
     connection: &mut Connection,
-    workspace_id: &str,
     session_id: &str,
     source: &str,
     owner_pid: u32,
+    revision: i64,
     draft: &DetachedSessionDraft,
-) -> Result<Option<String>> {
+) -> Result<()> {
+    ensure!(revision > 0, "terminal draft revision must be positive");
+    ensure!(!source.trim().is_empty(), "draft source is empty");
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if let Some(inherited) = &draft.inherited_input {
+    let canonical_workspace: String = transaction
+        .query_row(
+            "SELECT workspace_id FROM session_contexts WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("find managed session {session_id:?}"))?;
+    let existing: Option<(String, i64)> = transaction
+        .query_row(
+            "SELECT draft_id, revision FROM detached_drafts
+              WHERE source = ?1 AND session_id = ?2
+                AND revision IS NOT NULL",
+            params![source, session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if existing
+        .as_ref()
+        .is_some_and(|(_, stored_revision)| revision <= *stored_revision)
+    {
+        transaction.commit()?;
+        return Ok(());
+    }
+
+    let saved_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    if let Some(inherited) = &draft.inherited_input
+        && existing.is_none()
+    {
         transaction.execute(
             "UPDATE sessions SET draft_input = ''
-              WHERE session_id = ?1 AND draft_input = ?2
-                AND EXISTS (SELECT 1 FROM session_contexts
-                             WHERE session_id = ?1 AND workspace_id = ?3)",
-            params![session_id, inherited, workspace_id],
+              WHERE session_id = ?1 AND draft_input = ?2",
+            params![session_id, inherited],
         )?;
     }
-    let id = insert_detached_draft(
-        &transaction,
-        workspace_id,
-        Some(session_id),
-        source,
-        Some(owner_pid),
-        &draft.text,
-    )?;
+    if let Some((draft_id, _)) = existing {
+        transaction.execute(
+            "UPDATE detached_drafts
+                SET workspace_id = ?2, owner_pid = ?3, saved_at = ?4,
+                    text = ?5, revision = ?6,
+                    recovered_at = CASE
+                        WHEN text = ?5 THEN recovered_at
+                        WHEN ?5 <> '' THEN NULL
+                        ELSE recovered_at
+                    END
+              WHERE draft_id = ?1",
+            params![
+                draft_id,
+                canonical_workspace,
+                owner_pid,
+                saved_at,
+                draft.text,
+                revision
+            ],
+        )?;
+    } else {
+        let id = new_workspace_id()?;
+        transaction.execute(
+            "INSERT INTO detached_drafts(
+                 draft_id, workspace_id, session_id, source, owner_pid, saved_at, text, revision
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                canonical_workspace,
+                session_id,
+                source,
+                owner_pid,
+                saved_at,
+                draft.text,
+                revision
+            ],
+        )?;
+    }
     transaction.commit()?;
-    Ok(id)
+    Ok(())
 }
 
 pub fn save_detached_draft(
@@ -418,7 +477,7 @@ pub(super) fn list_detached_drafts_at(
         "SELECT draft_id, workspace_id, session_id, source, owner_pid, saved_at, text,
                 recovered_at
            FROM detached_drafts
-          WHERE workspace_id = ?1 AND recovered_at IS NULL
+          WHERE workspace_id = ?1 AND recovered_at IS NULL AND text <> ''
           ORDER BY saved_at DESC, draft_id DESC",
     )?;
     let rows = statement.query_map([workspace_id], |row| {
@@ -448,7 +507,7 @@ pub(super) fn mark_draft_recovered_at(path: &Path, draft_id: &str) -> Result<()>
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let changed = connection.execute(
         "UPDATE detached_drafts SET recovered_at = ?2
-          WHERE draft_id = ?1 AND recovered_at IS NULL",
+          WHERE draft_id = ?1 AND recovered_at IS NULL AND text <> ''",
         params![draft_id, now],
     )?;
     ensure!(
@@ -475,7 +534,7 @@ pub(super) fn recover_detached_draft_at(path: &Path, draft_id: &str) -> Result<S
     let (session_id, text): (Option<String>, String) = tx
         .query_row(
             "SELECT session_id, text FROM detached_drafts
-              WHERE draft_id = ?1 AND recovered_at IS NULL",
+              WHERE draft_id = ?1 AND recovered_at IS NULL AND text <> ''",
             [draft_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )

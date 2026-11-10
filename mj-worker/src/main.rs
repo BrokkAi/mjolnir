@@ -115,6 +115,11 @@ enum WorkerCommand {
         #[arg(long, value_parser = ["PostToolUse", "PostToolBatch"])]
         event: String,
     },
+    /// Exchange one mailbox lease request for a durable harness inbox.
+    MailboxRequest {
+        #[arg(long)]
+        socket: PathBuf,
+    },
     /// Serve Mjolnir-owned delegation tools over MCP stdio.
     SubagentMcp {
         #[arg(long)]
@@ -133,8 +138,14 @@ enum WorkerCommand {
         /// spawn tool then offers no task type.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         subtle_subagents: bool,
-        #[arg(long)]
+        /// Accepted for configurations written by older workers; the review
+        /// tools now belong to the `--review-server` server.
+        #[arg(long, hide = true)]
         review_gate: bool,
+        /// Serve the before-push review tools as `mj-review` instead of the
+        /// delegation tools.
+        #[arg(long)]
+        review_server: bool,
     },
     /// Print a unified diff of the session's work in one repository.
     Diff {
@@ -324,22 +335,29 @@ fn bootstrap_login_environment(
                     &mut environment,
                     std::env::vars(),
                 );
-                if let WorkerCommand::Run { root, .. } = &args.command {
+                if let WorkerCommand::Run { root, .. } = &args.command
+                    && !launch.no_github_credentials
+                {
                     mj_worker::worker_runtime::seed_container_github_token(root, std::env::vars())?;
                 }
             }
             environment.extend(launch.target_environment);
+            if launch.no_github_credentials {
+                mj_core::credentials::remove_github_authentication_environment(&mut environment);
+            }
         }
         if let WorkerCommand::PushBranch { root, .. } = &args.command {
-            environment.extend(
-                WorkerLaunchConfig::read(&root.join("launch.json"))
-                    .with_context(|| {
-                        let guidance = mj_worker::worker_runtime::SESSION_SETUP_GUIDANCE;
-                        format!("load branch export target settings; {guidance}")
-                    })?
-                    .target_environment,
-            );
-            mj_worker::worker_runtime::attach_session_git_environment(root, &mut environment)?;
+            let launch =
+                WorkerLaunchConfig::read(&root.join("launch.json")).with_context(|| {
+                    let guidance = mj_worker::worker_runtime::SESSION_SETUP_GUIDANCE;
+                    format!("load branch export target settings; {guidance}")
+                })?;
+            environment.extend(launch.target_environment);
+            mj_worker::worker_runtime::attach_session_git_environment(
+                root,
+                &mut environment,
+                launch.no_github_credentials,
+            )?;
         }
         environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
         // The reliability lab's crash hooks run inside the worker after this
@@ -467,7 +485,7 @@ const WORKER_RUNTIME_THREADS: usize = 4;
 
 fn run_worker(cli: Cli, exit_root: Option<&Path>, owner: Option<&WorkerRootOwner>) -> Result<()> {
     if let Some(root) = exit_root {
-        record_startup_step(root, "login-environment");
+        record_startup_step(root, mj_core::relay::WORKER_STARTUP_STEP_LOGIN_ENVIRONMENT);
     }
     bootstrap_login_environment(&cli, owner).context("initialize worker environment")?;
     if let Some(root) = exit_root {
@@ -546,6 +564,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
         WorkerCommand::MailboxHook { socket, event } => {
             mj_worker::mailbox_hook::run(&socket, &event)
         }
+        WorkerCommand::MailboxRequest { socket } => mj_worker::mailbox_hook::request(&socket),
 
         WorkerCommand::SubagentMcp {
             socket,
@@ -553,18 +572,24 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             role,
             agent_mailboxes_enabled,
             subtle_subagents,
-            review_gate,
-        } => mj_worker::subagent_mcp::run_mcp_stdio(
-            &socket,
-            harness,
-            role,
-            mj_worker::subagent_mcp::ParentTools {
-                oracle: false,
-                agent_mailboxes_enabled,
-                subtle_subagents,
-                review_gate,
-            },
-        ),
+            review_gate: _,
+            review_server,
+        } => {
+            if review_server {
+                mj_worker::subagent_mcp::run_review_mcp_stdio(&socket, harness, role)
+            } else {
+                mj_worker::subagent_mcp::run_mcp_stdio(
+                    &socket,
+                    harness,
+                    role,
+                    mj_worker::subagent_mcp::ParentTools {
+                        oracle: false,
+                        agent_mailboxes_enabled,
+                        subtle_subagents,
+                    },
+                )
+            }
+        }
         WorkerCommand::Diff {
             repository,
             base,

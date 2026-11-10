@@ -1,0 +1,153 @@
+{
+  "id": "L0302",
+  "title": "DataFlowBench unrun coverage",
+  "category": "still-open-none",
+  "harness": "claude",
+  "source": {
+    "kind": "transcript",
+    "session": "baaf6d25e9b783ee16230bdd673d77db",
+    "session_title": "eval29 3528 sonnet55med",
+    "reply_position": 978,
+    "captured_at": "2026-09-29T23:00:36.063Z",
+    "note": "Runtime facts were not recorded; the turn is assumed to have ended cleanly with nothing in flight.",
+    "is_child": false
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": {
+      "messages": [
+        {
+          "id": "user:21",
+          "role": "user",
+          "text": "I want you to solve GitHub issue #3528: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 18fa60ee98f92a8dca58ffbd3a5d949adb30ee19\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nRepository history after the base commit is out of bounds. This issue was\nsolved on master after the base commit; do not read, fetch, log, diff or\ncheck out anything newer than the base commit named above, do not look at\nclosed pull requests or issue comments, and do not search master for the\nlanded solution. Solve it from the base commit and the issue text below.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache\n[... 1982 bytes omitted from the middle of this message ...]\nixed point with unproven/partial edges and open boundary rows:\n\n- mutual recursion: 3 unproven edges, 3 partial edges, 2 open boundary rows;\n- self-recursive carry/payload: 2 unproven edges, 2 partial edges, 1 open boundary row.\n\nThe v0.8.0 recursive additions make this material for recall: Bifrost reaches only 11/74 newly added positives overall. This slice accounts for 12 of the 63 new positive inconclusives and has a shared diagnostic shape across four frontends.\n\nThis follows the diagnostic work in #2838 / PR #2889. That work made the incompleteness visible and explicitly left recursion proof closure and SCC introspection for later. It also sits under the summary architecture in #2445 and the DataFlowBench decisiveness epic #2839. Exceptional-return state is tracked separately by #3100 and its language children.\n\n## Evidence\n\n- Frozen release: https://github.com/BrokkAi/dataflowbench/releases/tag/v0.8.0\n- Bifrost build: `015ee1f76b049e1ebdbb2fe66fb0bcd01ba43b2f` (0.11.4)\n- Reports: `reports/bifrost-{csharp,javascript,python,typescript}-kernel.json`\n- Case IDs: `dfb-taint-<language>-<template>-{positive,negative}`\n\n## Scope and acceptance\n\n- First reproduce all 24 assertions on current master and retain exact before evidence; the release pin is evidence of the gap, not proof that master still has the same counts.\n- Explain the open boundary rows in terms of concrete SCC/call/access-path facts. Keep call identity, dataflow proof, and completeness distinct.\n- Close or soundly bound the recursive SCC so all 12 positives become `reached` and all 12 paired negatives become `not-reached`.\n- Preserve uncertainty when an edge or boundary is genuinely unresolved. A sink witness alone must not force `reached` while coverage is incomplete.\n- Add ordinary nonrecursive, depth-limited, mutually recursive, and unresolved-target near misses so the fix does not smear summaries across call contexts or objects.\n- Rerun the four affected DataFlowBench kernels and report both recall and negative-control precision before closing.\n\n"
+        },
+        {
+          "id": "agent:24",
+          "role": "assistant",
+          "text": "I'll start by verifying the checkout is clean and moving to the base commit."
+        },
+        {
+          "id": "agent:63",
+          "role": "assistant",
+          "text": "Status: base checkout is clean at 18fa60ee98, the release build is running in the background, and I'm reading the recursive cases and the solver crate."
+        },
+        {
+          "id": "agent:111",
+          "role": "assistant",
+          "text": "Still waiting on the release build. Meanwhile I'm writing a script that runs the 24 cases through the same CLI invocation DataFlowBench uses."
+        },
+        {
+          "id": "agent:138",
+          "role": "assistant",
+          "text": "Meanwhile, I'll find the solver code for recursion and open boundary rows."
+        },
+        {
+          "id": "agent:250",
+          "role": "assistant",
+          "text": "The build got killed by my timeout. I'll rerun it in the background with nohup."
+        },
+        {
+          "id": "agent:546",
+          "role": "assistant",
+          "text": "Now the policy-route cases for Python: the issue's templates plus the near misses."
+        },
+        {
+          "id": "agent:569",
+          "role": "assistant",
+          "text": "Building. In the meantime I'm looking at the JS case structure to add matching JS rows."
+        },
+        {
+          "id": "agent:609",
+          "role": "assistant",
+          "text": "Python passes, including the unresolved-target and handler near misses. JS needs the same reason update for its handler row."
+        },
+        {
+          "id": "agent:651",
+          "role": "assistant",
+          "text": "Before the fix both tests fail with the exact issue message (2 unproven, 2 partial, 1 open boundary). I'll restore the fix and run the broader suites."
+        },
+        {
+          "id": "agent:697",
+          "role": "assistant",
+          "text": "Status: the `-p brokk-bifrost-analysis --lib` run passed (3183 tests, 0 failures). The semantic and bench-policy suites are compiling and will run next."
+        },
+        {
+          "id": "agent:809",
+          "role": "assistant",
+          "text": "Status: restarted the semantic and bench-policy suites, skipping three slow JVM-only tests that this change doesn't touch. Meanwhile I'm checking whether rustfmt can be installed."
+        },
+        {
+          "id": "agent:858",
+          "role": "assistant",
+          "text": "Status: 298 tests passed and none failed so far in the second run. It's a large suite, so I'm polling until it finishes."
+        },
+        {
+          "id": "agent:926",
+          "role": "assistant",
+          "text": "While clippy runs, I'm getting evidence for the before/after report: the DataFlowBench reports counts on the baseline vs. now are in `/workspace/before` and `/workspace/after`."
+        },
+        {
+          "id": "agent:978",
+          "role": "assistant",
+          "text": "FINAL REPORT\n\nAll 24 assertions now end decisive. The 12 positives complete with 1 finding each and the 12 negatives complete with 0 findings, in C#, JavaScript, Python and TypeScript. The cause was not the recursive SCC. It was an unlowered implicit-exception gap on the callee's exceptional return edge.\n\n### 1. Confirmed cause\n\n- **Reproduction on the base.** I ran the 24 DataFlowBench v0.8.0 cases (`9c0916338a`) through a release build of the base. All 24 were `inconclusive` / `partial_discovery`: positives kept 1 finding, negatives had 0.\n- **What the open rows are.** A temporary dump of `SummaryCoverage` (since reverted) showed that every unproven and partial edge was an `ExceptionalReturn` from a callee exit to its caller. The single open boundary was `Semantic(Unsupported ExceptionalControlFlow)` at the callee. The edge proof read \"callee-exit evidence does not prove this Exceptional completion returns to its caller: …\".\n- **The gap behind it.** Python `comparison dispatch and result coercion failures are not lowered`. JS/TS `implicit exceptions from runtime coercion or operator dispatch`. C# `implicit exceptions from runtime operators`. All four adapters left `SemanticGap.discharge = None` on these.\n- **Why edges stayed open.** `IcfgExitProfile::matched_return_gaps_are_implicit_abort_only` (`icfg.rs`) needs every matched-return gap to be `NonRejoiningExceptionalExit`. It was false, so `SummaryEdge.implicit_abort_only` was false and `execution_result_modeled` kept the edges open. Only Go and Rust set that discharge.\n- **Not recursion-specific.** A non-recursive chain `run -> carry -> inner`, where `carry` compares and then calls `inner`, was also inconclusive on the base. A callee that compares but calls nothing was already complete, because no tainted fact reached its exceptional exit.\n- **Separate concerns.** Call identity stayed resolved. The dataflow proof (the finding) was retained. Only completeness was weakened, and only by the callee's unlowered abort path.\n\n### 2. Changes and reasons\n\n- **Base commit:** `18fa60ee98f92a8dca58ffbd3a5d949adb30ee19` (detached, verified clean before starting).\n- **Final commit:** `cd16328b1c493565092af1b8f1ea497f0e39695f`.\n- **New shared seam.** `ProcedureCfgBuilder::throw_unwinds_without_user_code` (`semantic/cfg.rs`) walks the scope chain. It answers true only when no `Handler` or `Cleanup` frame lies between the gap and the procedure's throw target. `LoweringSession::add_implicit_abort_gap` (`semantic/lowering.rs`) declares `NonRejoiningExceptionalExit` in that case and `None` otherwise. This is the Go/Rust rule, shared.\n- **Adapters switched to the seam:** Python comparison and truth-test gaps, the JS/TS operator gap, and the C# operator gap. JS/TS and C# property/index-access gaps are unchanged.\n- **Adapter versions bumped:** python v30→v31, javascript v19→v20, typescript v23→v24, csharp v10→v11. The lowered semantic facts changed. I did not touch a language extraction epoch, because no extraction facts changed. That is my reading of the code, not something I checked against the epoch definition.\n- **Not closed by fiat:**\n  - The plan-level `abort_paths_only_unwind` check is unchanged, so one handler anywhere in the plan keeps these edges open.\n  - Unresolved calls still produce their own boundaries.\n  - A sink witness never forces `reached`.\n- **Tests.**\n  - New rows in `issue_2314_dataflowbench_kernel.rs` (tagged #3528), for Python and JS:\n    - recursive carry, positive and negative\n    - mutual recursion, positive and negative\n    - a non-recursive chain\n    - a constant-result recursion (negative)\n    - a two-call-contexts negative\n    - a handler near miss (stays `CapabilityIncomplete`)\n    - an unresolved recursive target (stays `PartialDiscovery`)\n  - A Python IR test for discharge by scope: no handler discharges, `try/except` and `with` do not.\n  - The #2838 tests that pinned these recursive rows as inconclusive now pin them complete. I renamed the four negative-row tests and removed the now-unused typed-partial helper. The fixed-point diagnostic itself \n[... 2905 bytes omitted from the middle of this message ...]\nLI witnesses above.\n- **Still open, separately actionable:**\n  - JS/TS property and index access gaps use `RuntimeReadBehavior`, and C# member and element access gaps have no discharge. Either can still hold a callee's exceptional return open.\n  - Python has about 15 other `ExceptionalControlFlow` gap sites (definition-time evaluation, iterator protocol, and others) that I left as they were.\n  - Handler-bearing callees stay honestly incomplete. That is the exceptional-return work tracked in #3100.\n  - Any handler in the analyzed region keeps all such edges open, by design.\n\n### 6. Draft GitHub approach comment\n\nI reproduced all 24 assertions on the base and found the open rows are not recursion state. Every unproven and partial edge is an exceptional-return edge from a callee exit, weakened by an unlowered implicit-exception gap: a Python comparison, or a JS/TS or C# operator. Those gaps declared no discharge, so the exit profile was never marked as an implicit abort only. A non-recursive callee that both compares and calls something fails the same way, so the trigger is the callee exit and not the SCC. Go and Rust already declare `NonRejoiningExceptionalExit` for such gaps. I added a shared lowering helper that declares it only when no handler or cleanup lies between the gap and the procedure's throw target. Python, JS/TS and C# now use it, and their semantic adapter versions are bumped. Nothing is closed by fiat: one handler anywhere in the plan, an unresolved call target, or a cleanup scope still keeps the run inconclusive. With the fix, all 12 positives report `reached` and all 12 negative controls report `not-reached` on the CLI. Regression rows cover recursion, mutual recursion, a non-recursive chain, constant-result and two-context negatives, a handler near miss and an unresolved target. The old #2838 rows that pinned these runs as inconclusive now pin them complete. I have not run the full DataFlowBench v0.8.0 population or the JVM/jar policy tests, and property-access gaps can still hold other runs open."
+        }
+      ],
+      "authorization_complete": true,
+      "assistant_history_omitted": false,
+      "open_assistant_id": null,
+      "final_reply_omitted": false
+    },
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "p,javascript,python,typescript}-kernel.json`\n- Case IDs: `dfb-taint-<language>-<template>-{positive,negative}`\n\n## Scope and acceptance\n\n- First reproduce all 24 assertions on current master and retain exact before evidence; the release pin is evidence of the gap, not proof that master still has the same counts.\n- Explain the open boundary rows in terms of concrete SCC/call/access-path facts. Keep call identity, dataflow proof, and completeness distinct.\n- Close or soundly bound the recursive SCC so all 12 positives become `reached` and all 12 paired negatives become `not-reached`.\n- Preserve uncertainty when an edge or boundary is genuinely unresolved. A sink witness alone must not force `reached` while coverage is incomplete.\n- Add ordinary nonrecursive, depth-limited, mutually recursive, and unresolved-target near misses so the fix does not smear summaries across call contexts or objects.\n- Rerun the four affected DataFlowBench kernels and report both recall and negative-control precision before closing.\n\n",
+    "assistant_text_tail": "LI witnesses above.\n- **Still open, separately actionable:**\n  - JS/TS property and index access gaps use `RuntimeReadBehavior`, and C# member and element access gaps have no discharge. Either can still hold a callee's exceptional return open.\n  - Python has about 15 other `ExceptionalControlFlow` gap sites (definition-time evaluation, iterator protocol, and others) that I left as they were.\n  - Handler-bearing callees stay honestly incomplete. That is the exceptional-return work tracked in #3100.\n  - Any handler in the analyzed region keeps all such edges open, by design.\n\n### 6. Draft GitHub approach comment\n\nI reproduced all 24 assertions on the base and found the open rows are not recursion state. Every unproven and partial edge is an exceptional-return edge from a callee exit, weakened by an unlowered implicit-exception gap: a Python comparison, or a JS/TS or C# operator. Those gaps declared no discharge, so the exit profile was never marked as an implicit abort only. A non-recursive callee that both compares and calls something fails the same way, so the trigger is the callee exit and not the SCC. Go and Rust already declare `NonRejoiningExceptionalExit` for such gaps. I added a shared lowering helper that declares it only when no handler or cleanup lies between the gap and the procedure's throw target. Python, JS/TS and C# now use it, and their semantic adapter versions are bumped. Nothing is closed by fiat: one handler anywhere in the plan, an unresolved call target, or a cleanup scope still keeps the run inconclusive. With the fix, all 12 positives report `reached` and all 12 negative controls report `not-reached` on the CLI. Regression rows cover recursion, mutual recursion, a non-recursive chain, constant-result and two-context negatives, a handler near miss and an unresolved target. The old #2838 rows that pinned these runs as inconclusive now pin them complete. I have not run the full DataFlowBench v0.8.0 population or the JVM/jar policy tests, and property-access gaps can still hold other runs open.",
+    "completion": {
+      "stop_reason": "EndTurn",
+      "diagnostic": null
+    }
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "input": "none",
+    "wrong_actions": [
+      "await_input"
+    ],
+    "failure": "none",
+    "quiet": null
+  },
+  "known_failure": [],
+  "outcome": {
+    "request_positions": [],
+    "user_position": 21,
+    "input_rationale": "FINAL REPORT for a finished, committed fix. The still-open items are the agent's own scoped-out follow-ups (other gap sites, handler-bearing callees tracked in #3100) and none is a question or decision for the judge.",
+    "label": "none",
+    "trigger": "still open",
+    "project": "bifrost-dev",
+    "is_child": false,
+    "kind": null,
+    "judgment": "2026-11-06 blind second labeler (still-open corpus)"
+  },
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-29T23:02:28.951Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      }
+    ]
+  }
+}

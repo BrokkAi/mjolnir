@@ -1,7 +1,7 @@
 use crate::test_support::{git, wait_for};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::{
@@ -14,9 +14,9 @@ use super::*;
 use crate::acp::{CommandRequest, RuntimeEvent};
 use crate::relay::{
     BackgroundWorkPolicy, DurableRelay, RELAY_EVENT_GENESIS_DIGEST, RELAY_PROTOCOL_VERSION,
-    RelayCommand, RelayErrorCode, RelayExecutionState, RelayObservation, RelayProtocolError,
-    RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
-    RelayResponsePayload,
+    RelayCell, RelayCommand, RelayErrorCode, RelayExecutionState, RelayObservation,
+    RelayProtocolError, RelayRequest, RelayRequestEnvelope, RelayResponseBody,
+    RelayResponseEnvelope, RelayResponsePayload,
 };
 use mj_core::config::ExecutionPolicy;
 use mj_core::elicitation::ElicitationResponse;
@@ -82,7 +82,7 @@ async fn oversized_legacy_delegation_history_replays_only_completion_receipts() 
             .len()
             < 100_000
     );
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(root, SESSION_ID, "test").unwrap(),
     ));
     let (wake, _) = mpsc::channel(1);
@@ -190,7 +190,7 @@ fn runtime_event_channel() -> (TestRuntimeEventSender, mpsc::Receiver<RuntimeEve
 /// Protocol fixtures have no classifier. Verdict fixtures supply their own
 /// local HTTP endpoint instead of resolving the host's default service.
 async fn run_relay_coordinator(
-    relay: Arc<Mutex<DurableRelay>>,
+    relay: Arc<RelayCell>,
     events: mpsc::Receiver<RuntimeEvent>,
     wakes: mpsc::Receiver<()>,
     commands: mpsc::Sender<CommandRequest>,
@@ -201,8 +201,10 @@ async fn run_relay_coordinator(
         BTreeMap::new(),
         shell_events,
     );
-    unix::run_relay_coordinator_with_verdict(relay, events, wakes, commands, shells, None, None)
-        .await
+    unix::run_relay_coordinator_with_verdict(
+        relay, events, wakes, commands, shells, None, None, None,
+    )
+    .await
 }
 
 fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error>) {
@@ -211,6 +213,8 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
 
 fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
+        cpu_accounting: Default::default(),
+        no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
         reviewer_launch: None,
@@ -219,8 +223,8 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
-        review_capture: true,
         review_trigger: Default::default(),
+        review_capture: false,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -321,6 +325,26 @@ fn install_request(bytes: &[u8]) -> RelayRequest {
     }
 }
 
+async fn credential_request(
+    endpoint: &CredentialEndpoint,
+    request: RelayRequest,
+) -> anyhow::Result<RelayResponsePayload> {
+    let response = unix::credential_response(
+        RelayRequestEnvelope {
+            request_id: "credential-request-test".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request,
+        },
+        &Ok(endpoint.clone()),
+        &endpoint.home,
+    )
+    .await;
+    match response.body {
+        RelayResponseBody::Ok { payload } => Ok(payload),
+        RelayResponseBody::Error { error } => anyhow::bail!("{}", error.message),
+    }
+}
+
 fn skills_install_request(bytes: &[u8]) -> RelayRequest {
     use base64::Engine as _;
     RelayRequest::InstallSkills {
@@ -358,7 +382,7 @@ fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
         "PATH".into(),
         format!("{}:/usr/bin:/bin", real_bin.display()),
     )]);
-    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
+    unix::configure_github_cli(worker.path(), &mut environment, None, None, false).unwrap();
     let token_path = worker.path().join("github-token");
     mj_core::credentials::remove_github_token(&token_path).unwrap();
 
@@ -389,6 +413,182 @@ fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
     assert_eq!(invoke(None), "unset|unset\n");
 }
 
+// Hard-won: a4c6fe269: URL-specific repository auth outranked a host-level reset.
+#[test]
+fn credential_free_git_and_gh_do_not_recover_host_or_refreshed_credentials() {
+    let directory = tempfile::tempdir().unwrap();
+    let worker = directory.path().join("worker");
+    let home = directory.path().join("home");
+    let project = directory.path().join("project");
+    for path in [&worker, &home, &project, &home.join(".config/gh")] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    git(&project, &["init", "-q"]);
+    let original_git = "[user]\nname = Isolated Author\nemail = author@example.invalid\n[credential \"https://github.com\"]\nhelper = \"!f() { echo username=host-user; echo password=host-secret; }; f\"\n[http \"https://github.com\"]\nextraheader = Authorization: host-secret\n[url \"git@github.com:\"]\ninsteadOf = https://github.com/\n";
+    std::fs::write(home.join(".gitconfig"), original_git).unwrap();
+    let original_gh =
+        "github.com:\n    oauth_token: host-secret\n    user: host-user\n    git_protocol: https\n";
+    std::fs::write(home.join(".config/gh/hosts.yml"), original_gh).unwrap();
+    git(
+        &project,
+        &[
+            "config",
+            "credential.https://github.com.helper",
+            "!f() { echo username=repo-user; echo password=repo-secret; }; f",
+        ],
+    );
+    git(
+        &project,
+        &[
+            "config",
+            "credential.https://github.com/org/repo.helper",
+            "!f() { echo username=repo-user; echo password=scoped-secret; }; f",
+        ],
+    );
+    git(
+        &project,
+        &[
+            "config",
+            "http.https://github.com/org/repo.extraheader",
+            "Authorization: scoped-secret",
+        ],
+    );
+    let login_hook = home.join("login-hook");
+    std::fs::write(
+        &login_hook,
+        "export GH_TOKEN=login-secret GITHUB_TOKEN=login-secret\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    let ssh_config = home.join(".ssh/config");
+    std::fs::write(&ssh_config, "Host github-work\n    HostName github.com\n    PubkeyAuthentication yes\n    ControlMaster auto\n    ControlPath /existing-authenticated-socket\nHost internal-work\n    HostName internal.example.invalid\n    PubkeyAuthentication yes\n").unwrap();
+    let parent = directory.path().join("parent-worker");
+    std::fs::create_dir_all(&parent).unwrap();
+    let mut parent_environment = BTreeMap::from([("PATH".into(), std::env::var("PATH").unwrap())]);
+    unix::configure_github_cli(&parent, &mut parent_environment, Some(&home), None, false).unwrap();
+    mj_core::credentials::write_github_token(&parent.join("github-token"), b"parent-secret")
+        .unwrap();
+    let mut environment = BTreeMap::from([
+        ("PATH".into(), parent_environment["PATH"].clone()),
+        ("HOME".into(), home.to_string_lossy().into_owned()),
+        (
+            "XDG_CONFIG_HOME".into(),
+            home.join(".config").to_string_lossy().into_owned(),
+        ),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            home.join(".gitconfig").to_string_lossy().into_owned(),
+        ),
+        ("BASH_ENV".into(), login_hook.to_string_lossy().into_owned()),
+        ("GH_TOKEN".into(), "stale-secret".into()),
+        ("GITHUB_TOKEN".into(), "stale-secret".into()),
+    ]);
+    mj_core::credentials::write_github_token(&worker.join("github-token"), b"stale-secret")
+        .unwrap();
+    for _ in 0..2 {
+        unix::configure_github_cli(&worker, &mut environment, Some(&home), None, true).unwrap();
+        assert!(!worker.join("github-token").exists());
+        assert!(!environment.contains_key("GH_TOKEN"));
+        assert!(!environment.contains_key("GITHUB_TOKEN"));
+        let invoke = |program: &str, args: &[&str], input: &[u8]| {
+            let mut command = std::process::Command::new(program);
+            command
+                .args(args)
+                .env_clear()
+                .envs(&environment)
+                .current_dir(directory.path());
+            mj_core::subprocess::run_with_input(&mut command, input).unwrap()
+        };
+        let git = invoke(
+            "git",
+            &["-C", project.to_str().unwrap(), "credential", "fill"],
+            b"protocol=https\nhost=github.com\npath=org/repo\n\n",
+        );
+        assert!(
+            !git.status.success(),
+            "Git must not recover a host or repository credential"
+        );
+        let gh = invoke("gh", &["auth", "token", "--hostname", "github.com"], &[]);
+        assert!(!gh.status.success(), "gh must not recover the host login");
+        let header = invoke(
+            "git",
+            &[
+                "-C",
+                project.to_str().unwrap(),
+                "config",
+                "--get-urlmatch",
+                "http.extraheader",
+                "https://github.com/org/repo",
+            ],
+            &[],
+        );
+        assert!(header.status.success());
+        assert!(header.stdout.iter().all(u8::is_ascii_whitespace));
+        let author = invoke("git", &["config", "user.name"], &[]);
+        assert_eq!(
+            String::from_utf8(author.stdout).unwrap().trim(),
+            "Isolated Author"
+        );
+        for (alias, pubkey) in [
+            ("github-work", ["no", "false"]),
+            ("internal-work", ["yes", "true"]),
+        ] {
+            let ssh = invoke(
+                worker.join("bin/git-ssh").to_str().unwrap(),
+                &["-G", "-F", ssh_config.to_str().unwrap(), alias],
+                &[],
+            );
+            assert!(ssh.status.success());
+            let settings = String::from_utf8(ssh.stdout).unwrap();
+            let setting = settings
+                .lines()
+                .find(|line| line.starts_with("pubkeyauthentication "))
+                .unwrap();
+            assert!(
+                pubkey.contains(&setting.split_whitespace().nth(1).unwrap()),
+                "{setting}"
+            );
+            if alias == "github-work" {
+                assert!(
+                    settings
+                        .lines()
+                        .all(|line| !line.contains("/existing-authenticated-socket"))
+                );
+            }
+        }
+        let shell = invoke(
+            "bash",
+            &[
+                "-c",
+                "printf '%s|%s' \"${GH_TOKEN-unset}\" \"${GITHUB_TOKEN-unset}\"",
+            ],
+            &[],
+        );
+        assert!(shell.status.success());
+        assert_eq!(shell.stdout, b"unset|unset");
+    }
+    let mut launch = launch_config(&worker.to_string_lossy());
+    launch.no_github_credentials = true;
+    let endpoint = credential_endpoint(&launch).unwrap();
+    let error = unix::apply_credential_request(
+        &endpoint,
+        &RelayRequest::InstallGithubToken {
+            data: "bmV3LXNlY3JldA==".into(),
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("disabled"));
+    assert!(!worker.join("github-token").exists());
+    assert_eq!(
+        std::fs::read_to_string(home.join(".gitconfig")).unwrap(),
+        original_git
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join(".config/gh/hosts.yml")).unwrap(),
+        original_gh
+    );
+}
+
 #[test]
 fn slopcop_wrapper_exports_each_live_login() {
     use mj_core::slopcop::SlopcopLogin;
@@ -407,7 +607,7 @@ fn slopcop_wrapper_exports_each_live_login() {
         "PATH".into(),
         format!("{}:/usr/bin:/bin", real_bin.display()),
     )]);
-    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
+    unix::configure_github_cli(worker.path(), &mut environment, None, None, false).unwrap();
     let login_path = home.path().join(mj_core::slopcop::LOGIN_FILE);
     unix::configure_slopcop_cli(worker.path(), &login_path).unwrap();
 
@@ -504,9 +704,9 @@ fi
         ("GIT_CONFIG_KEY_0".into(), "user.email".into()),
         ("GIT_CONFIG_VALUE_0".into(), "harness@example.test".into()),
     ]);
-    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
+    unix::configure_github_cli(worker.path(), &mut environment, None, None, false).unwrap();
     let configured_once = environment.clone();
-    unix::configure_github_cli(worker.path(), &mut environment, None, None).unwrap();
+    unix::configure_github_cli(worker.path(), &mut environment, None, None, false).unwrap();
     assert_eq!(environment, configured_once);
 
     // Git settings reach the harness through one worker-owned file, not
@@ -685,7 +885,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
 
     let temp = tempfile::tempdir().unwrap();
     let relay_root = temp.path().join("relay");
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(&relay_root, SESSION_ID, "1.0.0").unwrap(),
     ));
     let endpoint = credential_endpoint(&launch_config(&temp.path().to_string_lossy())).unwrap();
@@ -774,6 +974,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
         for request in [
             RelayRequest::InstallAwsCredentials {
                 data: base64::engine::general_purpose::STANDARD.encode(&aws_bytes),
+                scope: None,
             },
             RelayRequest::AwsCredentialsState,
         ] {
@@ -841,6 +1042,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
                 &mut writer,
                 RelayRequest::InstallAwsCredentials {
                     data: base64::engine::general_purpose::STANDARD.encode(&aws_bytes),
+                    scope: None,
                 },
             )
             .await;
@@ -873,6 +1075,110 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
             );
         }
     }
+
+    // Credentials Mjolnir issued carry a scope the worker keeps beside the
+    // secret and reports; it describes only the secret it was written with.
+    let scope = mj_core::aws_credentials::AwsCredentialScope {
+        role_arn: "arn:aws:iam::123456789012:role/mj-bedrock".into(),
+        role_session_name: "mj-0123456789abcdef0123456789abcdef".into(),
+        session_policy_fingerprint: "policy".into(),
+        source_identity: None,
+        expires_at_epoch_millis: 4_070_908_800_000,
+        tag: "tag".into(),
+    };
+    let scoped_credentials =
+        |key: &str, scope: Option<&mj_core::aws_credentials::AwsCredentialScope>| {
+            let credentials = mj_core::aws_credentials::AwsCredentials::from_export(
+                "bedrock",
+                &serde_json::to_vec(&serde_json::json!({
+                    "Version": 1, "AccessKeyId": key, "SecretAccessKey": "secret",
+                    "SessionToken": "token", "Expiration": "2099-01-01T00:00:00Z",
+                }))
+                .unwrap(),
+            )
+            .unwrap()
+            .with_scope(scope.cloned());
+            base64::engine::general_purpose::STANDARD.encode(credentials.encode().unwrap())
+        };
+    for (key, recorded, expected) in [
+        ("issued", Some(&scope), Some(scope.clone())),
+        ("host-own", None, None),
+    ] {
+        delegation_exchange(
+            &mut lines,
+            &mut writer,
+            RelayRequest::InstallAwsCredentials {
+                data: scoped_credentials(key, recorded),
+                scope: recorded.cloned(),
+            },
+        )
+        .await;
+        let reported =
+            delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsScope).await;
+        assert!(
+            matches!(&reported, RelayResponsePayload::AwsCredentialsScope { scope, .. } if *scope == expected),
+            "{key}: {reported:?}"
+        );
+    }
+    // A record never vouches for a different secret.
+    delegation_exchange(
+        &mut lines,
+        &mut writer,
+        RelayRequest::InstallAwsCredentials {
+            data: scoped_credentials("issued", Some(&scope)),
+            scope: Some(scope.clone()),
+        },
+    )
+    .await;
+    let secret = temp
+        .path()
+        .join(mj_core::aws_credentials::SHARED_CREDENTIALS_FILE);
+    std::fs::write(
+        &secret,
+        String::from_utf8(std::fs::read(&secret).unwrap())
+            .unwrap()
+            .replace("issued", "swapped"),
+    )
+    .unwrap();
+    let reported =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsScope).await;
+    assert!(matches!(
+        reported,
+        RelayResponsePayload::AwsCredentialsScope { scope: None, .. }
+    ));
+
+    // Withdrawing the credentials deletes the secret file, reports them absent
+    // and leaves the way open to install again.
+    let removed =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::RemoveAwsCredentials).await;
+    assert!(matches!(
+        removed,
+        RelayResponsePayload::CredentialState { present: false, .. }
+    ));
+    assert!(
+        !temp
+            .path()
+            .join(mj_core::aws_credentials::SHARED_CREDENTIALS_FILE)
+            .exists()
+    );
+    let again =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::RemoveAwsCredentials).await;
+    assert!(matches!(
+        again,
+        RelayResponsePayload::CredentialState { present: false, .. }
+    ));
+    // The profile the session was staged with outlives the credentials: the
+    // controller asks the worker for it, and the worker still knows.
+    let staged =
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::AwsCredentialsScope).await;
+    assert!(
+        matches!(
+            &staged,
+            RelayResponsePayload::AwsCredentialsScope { scope: None, profile: Some(profile) }
+                if profile == "bedrock"
+        ),
+        "{staged:?}"
+    );
 
     // The host's slopcop login takes the same connection-only route.
     let login =
@@ -937,7 +1243,7 @@ async fn credential_exchange_stays_on_the_connection_and_out_of_relay_state() {
 #[tokio::test]
 async fn protocol_v1_cannot_respond_to_elicitation() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path().join("relay"), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
@@ -981,7 +1287,7 @@ async fn protocol_v1_cannot_respond_to_elicitation() {
 #[tokio::test]
 async fn incompatible_protocol_cannot_read_or_mutate_credentials() {
     let home = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(home.path().join("relay"), SESSION_ID, "1.0.0").unwrap(),
     ));
     let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
@@ -1038,16 +1344,17 @@ async fn incompatible_protocol_cannot_read_or_mutate_credentials() {
     server_task.await.unwrap().unwrap();
 }
 
-#[test]
-fn installed_credentials_are_owner_only() {
+#[tokio::test]
+async fn installed_credentials_are_owner_only() {
     use std::os::unix::fs::PermissionsExt;
 
     let home = tempfile::tempdir().unwrap();
     let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
-    unix::apply_credential_request(
+    credential_request(
         &endpoint,
-        &install_request(&codex_credentials("2026-08-05T02:51:00Z")),
+        install_request(&codex_credentials("2026-08-05T02:51:00Z")),
     )
+    .await
     .unwrap();
 
     let mode = std::fs::metadata(home.path().join("auth.json"))
@@ -1057,8 +1364,8 @@ fn installed_credentials_are_owner_only() {
     assert_eq!(mode & 0o777, 0o600);
 }
 
-#[test]
-fn installing_kimi_credentials_uses_its_fixed_nested_marker() {
+#[tokio::test]
+async fn installing_kimi_credentials_uses_its_fixed_nested_marker() {
     // A configuration persisted before the controller stated the marker, and
     // one stating it the way the controller does now: both install where Kimi
     // reads its login.
@@ -1078,7 +1385,9 @@ fn installing_kimi_credentials_uses_its_fixed_nested_marker() {
         }))
         .unwrap();
 
-        unix::apply_credential_request(&endpoint, &install_request(&bytes)).unwrap();
+        credential_request(&endpoint, install_request(&bytes))
+            .await
+            .unwrap();
 
         assert_eq!(
             std::fs::read(home.path().join("credentials/kimi-code.json")).unwrap(),
@@ -1089,8 +1398,41 @@ fn installing_kimi_credentials_uses_its_fixed_nested_marker() {
     }
 }
 
-#[test]
-fn absent_reads_and_invalid_installs_are_refused() {
+// Hard-won: #1485: freshness ordering rejected authoritative OpenCode updates and empty exports.
+#[tokio::test]
+async fn opencode_credential_exports_remain_authoritative_across_updates_and_deletion() {
+    let home = tempfile::tempdir().unwrap();
+    let mut config = launch_config(&home.path().to_string_lossy());
+    config.harness = HarnessKind::OpenCode;
+    let endpoint = credential_endpoint(&config).unwrap();
+
+    for bytes in [
+        br#"[{"provider":"openai","type":"oauth","access":"old"}]"#.as_slice(),
+        br#"[{"provider":"openai","type":"oauth","access":"new"}]"#.as_slice(),
+        b"[]".as_slice(),
+    ] {
+        let payload = credential_request(&endpoint, install_request(bytes))
+            .await
+            .unwrap();
+        let RelayResponsePayload::CredentialState {
+            present,
+            fingerprint,
+            ..
+        } = payload
+        else {
+            panic!("unexpected OpenCode credential response: {payload:?}");
+        };
+        assert!(present);
+        assert_eq!(
+            fingerprint,
+            mj_core::credentials::credential_fingerprint(bytes)
+        );
+        assert_eq!(std::fs::read(&endpoint.marker).unwrap(), bytes);
+    }
+}
+
+#[tokio::test]
+async fn absent_reads_and_invalid_installs_are_refused() {
     let home = tempfile::tempdir().unwrap();
     let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
 
@@ -1098,28 +1440,31 @@ fn absent_reads_and_invalid_installs_are_refused() {
         unix::apply_credential_request(&endpoint, &RelayRequest::ReadCredentials).unwrap_err();
     assert!(format!("{error:#}").contains("no"), "{error:#}");
 
-    let error =
-        unix::apply_credential_request(&endpoint, &install_request(b"not json")).unwrap_err();
+    let error = credential_request(&endpoint, install_request(b"not json"))
+        .await
+        .unwrap_err();
     assert!(format!("{error:#}").contains("JSON"), "{error:#}");
 
     let oversized = vec![b'a'; mj_core::credentials::MAX_CREDENTIAL_BYTES + 1];
-    let error =
-        unix::apply_credential_request(&endpoint, &install_request(&oversized)).unwrap_err();
+    let error = credential_request(&endpoint, install_request(&oversized))
+        .await
+        .unwrap_err();
     assert!(format!("{error:#}").contains("limit"), "{error:#}");
 }
 
-#[test]
-fn installing_over_a_symlink_leaves_the_link_target_untouched() {
+#[tokio::test]
+async fn installing_over_a_symlink_leaves_the_link_target_untouched() {
     let home = tempfile::tempdir().unwrap();
     let elsewhere = home.path().join("stolen.json");
     std::fs::write(&elsewhere, b"{}").unwrap();
     std::os::unix::fs::symlink(&elsewhere, home.path().join("auth.json")).unwrap();
     let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
 
-    let error = unix::apply_credential_request(
+    let error = credential_request(
         &endpoint,
-        &install_request(&codex_credentials("2026-08-05T02:51:00Z")),
+        install_request(&codex_credentials("2026-08-05T02:51:00Z")),
     )
+    .await
     .unwrap_err();
 
     assert!(format!("{error:#}").contains("symbolic link"), "{error:#}");
@@ -1275,7 +1620,7 @@ fn elicitation_request() -> CommandRequest {
 /// Whether a runtime warning reached durable state. A coordinator that
 /// parked on a command send stops draining runtime events, so this stays
 /// false forever once that happens.
-fn recorded_warning(relay: &Arc<Mutex<DurableRelay>>, message: &str) -> bool {
+fn recorded_warning(relay: &Arc<RelayCell>, message: &str) -> bool {
     relay
         .lock()
         .unwrap()
@@ -1354,7 +1699,7 @@ async fn kimi_diagnostic_is_enriched_before_durable_completion() {
         .active_prompt
         .unwrap()
         .started_at_ms;
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut monitor = Some(unix::KimiTaskMonitor::new(Ok(home)));
     monitor
         .as_mut()
@@ -1438,7 +1783,7 @@ async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure(
         .active_prompt
         .unwrap()
         .started_at_ms;
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut monitor = Some(unix::KimiTaskMonitor::new(Ok(home)));
     monitor
         .as_mut()
@@ -1571,7 +1916,7 @@ async fn kimi_turn_usage_is_recorded_from_native_records() {
         .active_prompt
         .unwrap()
         .started_at_ms;
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut monitor = Some(unix::KimiTaskMonitor::new(Ok(home)));
     monitor
         .as_mut()
@@ -1664,7 +2009,7 @@ async fn kimi_native_task_level_blocks_replacement_until_termination() {
             config_options: Vec::new(),
         })
         .unwrap();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut monitor = unix::KimiTaskMonitor::new(Ok(home));
     monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
 
@@ -1773,7 +2118,7 @@ async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
             config_options: Vec::new(),
         })
         .unwrap();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut monitor = unix::KimiTaskMonitor::new(Ok(home.clone()));
     monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
     assert_eq!(
@@ -1845,7 +2190,7 @@ async fn kimi_native_task_monitor_retains_tasks_and_deduplicates_failure_warning
             config_options: Vec::new(),
         })
         .unwrap();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut monitor = unix::KimiTaskMonitor::new(Ok(home.clone()));
     monitor.attach(SESSION_ID.into(), &relay).await.unwrap();
     std::fs::remove_file(home.join("session_index.jsonl")).unwrap();
@@ -1881,7 +2226,7 @@ async fn offline_prompt_queue_runs_serially_without_a_controller() {
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-1", prompt("first"));
     submit(&mut durable, "prompt-2", prompt("second"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -1943,7 +2288,7 @@ async fn config_during_a_prompt_waits_but_cancel_dispatches_immediately() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "active-prompt", prompt("running"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -2027,7 +2372,7 @@ async fn cancel_turn_interrupts_a_running_prompt_without_steering_or_cutting_a_c
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "active-prompt", prompt("running"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -2205,7 +2550,7 @@ async fn prompt_dispatch_preserves_the_complete_acp_content_vector() {
             prompt: content.clone(),
         },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
@@ -2254,7 +2599,7 @@ async fn same_priority_queue_entries_dispatch_in_acceptance_order() {
             value: "second".into(),
         },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
@@ -2346,7 +2691,7 @@ async fn dispatch_batch_does_not_outgrow_the_bounded_acp_command_channel() {
     // so only the bounded channel limits the durable batch.
     submit(&mut durable, "prompt-first", prompt("running"));
     submit(&mut durable, "cancel-second", RelayCommand::Cancel);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
@@ -2398,7 +2743,7 @@ async fn dispatch_batch_does_not_outgrow_the_bounded_acp_command_channel() {
 async fn out_of_band_sends_cannot_steal_reserved_dispatch_capacity() {
     const COMMAND_CAPACITY: usize = 2;
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (command_tx, mut command_rx) = mpsc::channel(COMMAND_CAPACITY);
@@ -2473,7 +2818,7 @@ async fn coordinator_drains_events_while_the_acp_command_channel_is_full() {
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-batched", prompt("queued turn"));
     submit(&mut durable, "cancel-batched", RelayCommand::Cancel);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
@@ -2545,7 +2890,7 @@ async fn coordinator_drains_events_while_the_acp_command_channel_is_full() {
 async fn a_selector_hel_applied_for_itself_is_durable_without_a_relay_command() {
     let temp = tempfile::tempdir().unwrap();
     let durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, _command_rx) = mpsc::channel(2);
@@ -2602,7 +2947,7 @@ async fn different_command_types_dispatch_in_acceptance_order() {
         },
     );
     submit(&mut durable, "prompt-second", prompt("after config"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
@@ -2660,7 +3005,7 @@ async fn rejected_prompt_is_durable_and_does_not_stall_the_queue() {
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-1", prompt("first"));
     submit(&mut durable, "prompt-2", prompt("second"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -2715,7 +3060,7 @@ async fn rejected_prompt_is_durable_and_does_not_stall_the_queue() {
 #[tokio::test]
 async fn set_session_mode_waits_for_idle_then_records_a_durable_outcome() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -2790,7 +3135,7 @@ async fn set_session_mode_waits_for_idle_then_records_a_durable_outcome() {
 #[tokio::test(start_paused = true)]
 async fn a_rejected_session_mode_change_reports_the_failure_and_leaves_the_mode_alone() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -2846,7 +3191,7 @@ async fn execution_mode_restoration_waits_for_idle_and_records_the_confirmed_mod
     assert!(request.supported_at(RELAY_PROTOCOL_VERSION));
 
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -2929,7 +3274,7 @@ async fn execution_mode_restoration_waits_for_idle_and_records_the_confirmed_mod
 #[tokio::test(start_paused = true)]
 async fn config_cancel_and_close_commands_have_durable_terminal_outcomes() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -3070,7 +3415,7 @@ async fn config_cancel_and_close_commands_have_durable_terminal_outcomes() {
 }
 
 async fn wait_for_relay_state(
-    relay: &Arc<Mutex<DurableRelay>>,
+    relay: &Arc<RelayCell>,
     predicate: impl Fn(&mj_core::relay::RelayOperationalState) -> bool,
 ) {
     wait_for("relay state to reach the expected condition", async {
@@ -3087,7 +3432,7 @@ async fn wait_for_relay_state(
 #[test]
 fn typed_acp_observations_are_journaled() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let mut in_flight = BTreeMap::new();
@@ -3150,7 +3495,7 @@ fn typed_acp_observations_are_journaled() {
 #[test]
 fn advertised_steering_enables_automatic_steering() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let mut in_flight = BTreeMap::new();
@@ -3188,7 +3533,7 @@ fn harness_restarting_interrupts_in_flight_commands() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     submit(&mut durable, "prompt-1", prompt("go"));
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let mut in_flight = BTreeMap::new();
     in_flight.insert("prompt-1".into(), prompt("go"));
 
@@ -3237,7 +3582,7 @@ fn harness_restarting_interrupts_in_flight_commands() {
 #[test]
 fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let mut in_flight = BTreeMap::new();
@@ -3355,7 +3700,7 @@ fn terminal_lifecycle_journals_a_fallback_tool_and_tail_capped_output() {
 #[test]
 fn a_fast_terminal_cannot_be_resurrected_by_a_late_start_event() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let mut in_flight = BTreeMap::new();
@@ -3414,7 +3759,7 @@ fn claude_result(origin: &str) -> mj_core::acp::ClaudeTurnResult {
     .unwrap()
 }
 
-fn harness_turn_open(relay: &Arc<Mutex<DurableRelay>>) -> bool {
+fn harness_turn_open(relay: &Arc<RelayCell>) -> bool {
     relay
         .lock()
         .unwrap()
@@ -3431,7 +3776,7 @@ async fn a_self_started_turn_holds_prompt_promotion_and_checkpoint_admission() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -3593,7 +3938,7 @@ async fn a_bridge_restart_releases_a_held_prompt_after_session_readiness() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -3683,7 +4028,7 @@ async fn harness_exit_during_a_turn_releases_held_prompt_after_worker_recovery()
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -3741,7 +4086,7 @@ async fn harness_exit_during_a_turn_releases_held_prompt_after_worker_recovery()
     recovered
         .record_observation(RelayObservation::SessionRestarted)
         .unwrap();
-    let relay = Arc::new(Mutex::new(recovered));
+    let relay = Arc::new(RelayCell::new(recovered));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -3778,7 +4123,7 @@ async fn cancel_turn_during_a_claude_harness_turn_dispatches_queued_prompt_once(
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -3922,7 +4267,7 @@ async fn a_model_change_answer_opens_no_turn_and_an_unanswered_stop_ends_one() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -4039,7 +4384,7 @@ async fn checkpoint_waits_for_current_session_configuration_then_stays_local() {
             reason: Some("test".into()),
         },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(1);
@@ -4109,7 +4454,7 @@ async fn checkpoint_waits_for_an_in_flight_config_command() {
             reason: Some("after config".into()),
         },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
@@ -4217,7 +4562,7 @@ async fn a_released_checkpoint_barrier_is_not_cancelled_when_its_connection_drop
     assert_eq!(durable.claim_pending_commands(true).unwrap().len(), 1);
     durable.record_checkpoint_ready("released-barrier").unwrap();
     let floor_before = durable.operational_state().recovery_floor_ordinal;
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
 
     let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
     let (wake_tx, _wake_rx) = mpsc::channel(1);
@@ -4289,7 +4634,7 @@ async fn a_released_checkpoint_barrier_is_not_cancelled_when_its_connection_drop
 #[tokio::test]
 async fn checkpoint_wake_records_already_queued_runtime_events_first() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -4368,7 +4713,7 @@ async fn checkpoint_wake_is_not_starved_by_a_runtime_event_flood() {
             reason: Some("event flood fairness".into()),
         },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = mpsc::channel(8);
     event_tx
         .try_send(RuntimeEvent::SessionConfigured {
@@ -4457,7 +4802,7 @@ async fn checkpoint_freezes_effectful_commands_submitted_after_the_barrier() {
             value: "later-model".into(),
         },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = runtime_event_channel();
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(2);
@@ -4525,7 +4870,7 @@ async fn a_removed_worker_root_reports_a_fatal_failure_to_the_daemon() {
         .unwrap();
     let through = durable.latest_ordinal();
     let digest = durable.latest_digest().to_owned();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
     let (fatal_tx, mut fatal_rx) = fatal_reports();
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
@@ -4583,7 +4928,7 @@ async fn a_removed_worker_root_reports_a_fatal_failure_to_the_daemon() {
 #[tokio::test]
 async fn client_disconnect_releases_checkpoint_and_runs_queued_prompt() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -4711,7 +5056,7 @@ async fn client_disconnect_releases_checkpoint_and_runs_queued_prompt() {
 #[tokio::test]
 async fn relay_client_rejects_unknown_envelope_fields_without_disconnect() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
@@ -4771,7 +5116,7 @@ async fn relay_client_rejects_unknown_envelope_fields_without_disconnect() {
 #[tokio::test]
 async fn an_unknown_relay_method_is_named_in_its_rejection() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
@@ -4834,7 +5179,7 @@ async fn an_unknown_relay_method_is_named_in_its_rejection() {
 #[tokio::test]
 async fn disconnect_between_close_and_checkpoint_completion_dispatches_close() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -4935,7 +5280,7 @@ async fn disconnect_between_close_and_checkpoint_completion_dispatches_close() {
 #[tokio::test]
 async fn relay_v1_client_disconnect_does_not_own_command_execution() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -5056,7 +5401,7 @@ async fn closed_relay_stays_attachable_after_the_acp_runtime_stops() {
     durable
         .record_observation(RelayObservation::Closed)
         .unwrap();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
 
     let socket = temp.path().join("closed-relay.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -5080,6 +5425,7 @@ async fn closed_relay_stays_attachable_after_the_acp_runtime_stops() {
         request: RelayRequest::Attach {
             after_ordinal: 0,
             after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            known_state_digest: None,
         },
     };
     let mut encoded = serde_json::to_vec(&request).unwrap();
@@ -5279,27 +5625,6 @@ async fn first_daemon_start_does_not_record_a_restart_marker() {
             .iter()
             .any(|event| matches!(event.observation, RelayObservation::SessionRestarted))
     );
-}
-
-#[tokio::test]
-async fn first_daemon_start_pins_the_worktree_before_the_primary_harness() {
-    let temp = tempfile::tempdir().unwrap();
-    let repository = git_repository(&temp);
-    std::fs::write(repository.join("preexisting.rs"), "already here\n").unwrap();
-    let root = temp.path().join("relay");
-    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
-    config.bridge_command = temp.path().join("missing-acp-bridge");
-    config.cwd = repository.clone();
-
-    expect_daemon_launch_failure(&root, config).await;
-
-    let baseline = std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "refs/mj/review-baseline^{tree}"])
-        .current_dir(&repository)
-        .output()
-        .unwrap();
-    assert!(baseline.status.success());
-    assert!(!baseline.stdout.is_empty());
 }
 
 #[tokio::test]
@@ -5604,6 +5929,42 @@ async fn the_acp_bridge_never_sees_an_excluded_variable() {
     );
 }
 
+// Hard-won: a4c6fe269: login environment composition could restore GitHub Enterprise tokens.
+#[tokio::test]
+async fn credential_free_supervisor_excludes_all_github_tokens_after_environment_composition() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = temp.path().join("observed");
+    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
+    config.no_github_credentials = true;
+    config.cwd = temp.path().to_owned();
+    config.bridge_command = "/bin/sh".into();
+    config.bridge_args = vec![
+        "-c".into(),
+        format!(
+            "printf '%s|%s|%s|%s' \"${{GH_TOKEN-unset}}\" \"${{GITHUB_TOKEN-unset}}\" \"${{GH_ENTERPRISE_TOKEN-unset}}\" \"${{GITHUB_ENTERPRISE_TOKEN-unset}}\" > {}",
+            mj_core::targets::posix_quote(&observed.to_string_lossy()),
+        ),
+    ];
+    let mut spec = AcpSupervisorSpec::from(&config);
+    let path = temp.path().join("supervisor.json");
+    spec.write_spec(&path).unwrap();
+    spec = AcpSupervisorSpec::read(&path).unwrap();
+    // The supervisor composes this with the login environment before applying
+    // its exclusions; tokens from either source must be absent from the child.
+    for name in mj_core::credentials::GITHUB_AUTHENTICATION_ENVIRONMENT {
+        spec.environment
+            .insert(name.into(), "reintroduced-secret".into());
+    }
+    let (supervisor_stdin, _held_stdin) = tokio::io::duplex(64);
+    unix::run_acp_supervisor_with_streams(spec, supervisor_stdin, tokio::io::sink())
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(observed).unwrap(),
+        "unset|unset|unset|unset"
+    );
+}
+
 #[tokio::test]
 async fn acp_supervisor_notices_child_exit_while_a_descendant_holds_stdout_open() {
     let temp = tempfile::tempdir().unwrap();
@@ -5882,7 +6243,7 @@ async fn request_line_limit_is_enforced_while_the_line_is_read() {
 #[test]
 fn repeated_dispatch_wakes_coalesce_to_one_pending_token() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (wake_tx, mut wake_rx) = mpsc::channel(1);
@@ -6025,7 +6386,7 @@ fn a_used_native_session_is_reported_as_used_after_a_worker_restart() {
     // transmitted.
     let mut in_flight = BTreeMap::new();
     unix::record_runtime_event(
-        &Arc::new(Mutex::new(relay)),
+        &Arc::new(RelayCell::new(relay)),
         &mut in_flight,
         RuntimeEvent::NativeSessionUsed,
     )
@@ -6055,6 +6416,7 @@ fn attach_frame(request_id: &str, after_ordinal: u64, after_digest: &str) -> Vec
         request: RelayRequest::Attach {
             after_ordinal,
             after_digest: after_digest.to_owned(),
+            known_state_digest: None,
         },
     })
     .unwrap();
@@ -6072,7 +6434,7 @@ struct LiveRecorder {
 }
 
 impl LiveRecorder {
-    fn start(relay: Arc<Mutex<DurableRelay>>) -> Self {
+    fn start(relay: Arc<RelayCell>) -> Self {
         // Sample the lock often enough that a page read cannot hide in the
         // gaps, but append rarely enough that the fsync per event neither
         // dominates the sampling nor grows the active segment far enough
@@ -6122,7 +6484,7 @@ async fn a_replaying_controller_does_not_stall_live_event_recording() {
     let temp = tempfile::tempdir().unwrap();
     let durable = paged_relay_history(temp.path(), 80);
     let frontier = durable.latest_ordinal();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
 
     let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
     let (wake_tx, _wake_rx) = mpsc::channel(1);
@@ -6178,8 +6540,10 @@ async fn a_replaying_controller_does_not_stall_live_event_recording() {
             request: RelayRequest::Attach {
                 after_ordinal: 0,
                 after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+                known_state_digest: None,
             },
         },
+        None,
     )
     .await
     .unwrap();
@@ -6210,7 +6574,7 @@ async fn a_catch_up_completes_while_the_journal_keeps_sealing_under_it() {
     let durable = paged_relay_history(temp.path(), 96);
     let target = durable.latest_ordinal();
     let generation = durable.journal_generation();
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
 
     // Events large enough to seal a segment every few appends, written as
     // fast as the durable path allows.
@@ -6243,8 +6607,10 @@ async fn a_catch_up_completes_while_the_journal_keeps_sealing_under_it() {
                 request: RelayRequest::Attach {
                     after_ordinal: cursor.0,
                     after_digest: cursor.1.clone(),
+                    known_state_digest: None,
                 },
             },
+            None,
         )
         .await
         .unwrap()
@@ -6297,7 +6663,7 @@ async fn catch_up_recording_throughput() {
         let durable = paged_relay_history(temp.path(), HISTORY_EVENTS);
         let frontier = durable.latest_ordinal();
         let genesis = RELAY_EVENT_GENESIS_DIGEST.to_owned();
-        let relay = Arc::new(Mutex::new(durable));
+        let relay = Arc::new(RelayCell::new(durable));
         let recorder = LiveRecorder::start(relay.clone());
 
         let started = std::time::Instant::now();
@@ -6310,10 +6676,14 @@ async fn catch_up_recording_throughput() {
                 request: RelayRequest::Attach {
                     after_ordinal: cursor.0,
                     after_digest: cursor.1.clone(),
+                    known_state_digest: None,
                 },
             };
             let body = if defer_page_reads {
-                unix::handle_request(&relay, envelope).await.unwrap().body
+                unix::handle_request(&relay, envelope, None)
+                    .await
+                    .unwrap()
+                    .body
             } else {
                 // The coupled policy: the whole read runs under the lock.
                 relay
@@ -6688,7 +7058,7 @@ async fn large_photo_transfer_is_verified_without_journaling_image_bytes() {
     use mj_core::attachment::{AttachmentRef, MAX_IMAGE_BYTES};
     let temp = tempfile::tempdir().unwrap();
     let relay_root = temp.path().join("relay");
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(&relay_root, SESSION_ID, "1.0.0").unwrap(),
     ));
     let (wake_tx, _wake_rx) = mpsc::channel(1);
@@ -6800,6 +7170,7 @@ async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
         .record_command_completed(
             "capacity-original",
             crate::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
                 diagnostic: None,
                 stop_reason: "error".into(),
                 usage: None,
@@ -6813,7 +7184,7 @@ async fn capacity_retry_dispatches_without_a_controller_after_the_deadline() {
     facts.capacity_retry_armed = false;
     assert!(mj_core::activity::is_quiet(&facts), "{facts:?}");
     let configured_ordinal = state.latest_ordinal();
-    let relay = Arc::new(Mutex::new(state));
+    let relay = Arc::new(RelayCell::new(state));
     let (event_tx, event_rx) = runtime_event_channel();
     let (_wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(4);
@@ -7420,7 +7791,6 @@ async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot
 
     let mut config = launch_config("profile-home");
     config.cwd = workspace.path().to_owned();
-    config.review_capture = false;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
     let appeared = tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -7474,7 +7844,6 @@ async fn the_control_socket_answers_while_the_harness_is_prepared() {
         format!("{}:/usr/bin:/bin", temp.path().display()),
     );
     config.cwd = temp.path().to_owned();
-    config.review_capture = false;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
     let steps = || -> Vec<String> {
@@ -7521,62 +7890,13 @@ async fn the_control_socket_answers_while_the_harness_is_prepared() {
     assert!(daemon.await.unwrap_err().is_cancelled());
 }
 
-/// Review capture still precedes bridge start, while the relay remains live.
-#[tokio::test]
-async fn a_reviewed_session_serves_its_relay_while_preparing_its_baseline() {
-    let workspace = repository_whose_staging_blocks(10);
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("worker");
-    std::fs::create_dir_all(&root).unwrap();
-
-    let mut config = launch_config("profile-home");
-    config.cwd = workspace.path().to_owned();
-    config.review_capture = true;
-    let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
-
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-    let (status, last_error) = async {
-        let mut last_error = "startup step not reached".to_owned();
-        loop {
-            if startup_step_recorded(&root, "review-baseline") {
-                match worker_status(&root).await {
-                    Ok(status) => break (Some(status), last_error),
-                    Err(error) => last_error = error,
-                }
-            }
-            if daemon.is_finished() || tokio::time::Instant::now() >= deadline {
-                break (None, last_error);
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }
-    .await;
-    let status = status.unwrap_or_else(|| {
-        let startup = std::fs::read_to_string(root.join(WORKER_STARTUP_FILE))
-            .unwrap_or_else(|error| format!("cannot read startup record: {error}"));
-        panic!(
-            "worker did not answer Status during review baseline preparation: {last_error}; startup record: {startup}"
-        )
-    });
-    assert!(
-        matches!(
-            status.harness_preparation,
-            Some(mj_core::relay::HarnessPreparation::Preparing { ref step, .. })
-                if step == "review-baseline"
-        ),
-        "unexpected worker preparation state after Status succeeded: {status:?}; last request error: {last_error}"
-    );
-    daemon.abort();
-    assert!(daemon.await.unwrap_err().is_cancelled());
-}
-
 /// Start a coordinator whose session has a ready checkpoint barrier, fed by a
 /// runtime event channel of `capacity`. Returns the cut the barrier holds.
 async fn coordinator_behind_a_ready_barrier(
     temp: &tempfile::TempDir,
     capacity: usize,
 ) -> (
-    Arc<Mutex<DurableRelay>>,
+    Arc<RelayCell>,
     mpsc::Sender<RuntimeEvent>,
     mpsc::Sender<()>,
     tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -7588,7 +7908,7 @@ async fn coordinator_behind_a_ready_barrier(
         "checkpoint-barrier",
         RelayCommand::BeginCheckpoint { reason: None },
     );
-    let relay = Arc::new(Mutex::new(durable));
+    let relay = Arc::new(RelayCell::new(durable));
     let (event_tx, event_rx) = mpsc::channel(capacity);
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let (command_tx, _command_rx) = mpsc::channel(4);
@@ -7625,7 +7945,7 @@ async fn coordinator_behind_a_ready_barrier(
     (relay, event_tx, wake_tx, coordinator, cut)
 }
 
-fn journaled_notices(relay: &Arc<Mutex<DurableRelay>>) -> Vec<String> {
+fn journaled_notices(relay: &Arc<RelayCell>) -> Vec<String> {
     relay
         .lock()
         .unwrap()
@@ -7752,7 +8072,7 @@ async fn a_question_during_a_ready_barrier_is_journaled_at_once() {
 #[tokio::test]
 async fn expired_mailbox_hook_lease_starts_idle_wake_without_another_request() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (event_tx, event_rx) = runtime_event_channel();
@@ -7880,7 +8200,7 @@ async fn expired_mailbox_hook_lease_starts_idle_wake_without_another_request() {
 #[tokio::test]
 async fn cpu_usage_answers_from_the_sampler_without_journaling() {
     let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
+    let relay = Arc::new(RelayCell::new(
         DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
     ));
     let (wake, _wakes) = mpsc::channel(1);
@@ -7900,6 +8220,7 @@ async fn cpu_usage_answers_from_the_sampler_without_journaling() {
     ));
     let mut client = BufReader::new(client);
     let usage = mj_core::cpu_usage::SessionCpuUsage {
+        scope: Default::default(),
         recent_permille: 230,
         hourly_permille: 100,
         hourly_covered_secs: 20,
@@ -7945,6 +8266,386 @@ async fn cpu_usage_answers_from_the_sampler_without_journaling() {
     }
     drop(client);
     task.await.unwrap().unwrap();
+}
+
+/// A sub-agent's coordinator: it observes its agent's work when a prompt ends.
+async fn run_capturing_coordinator(
+    relay: Arc<RelayCell>,
+    events: mpsc::Receiver<RuntimeEvent>,
+    wakes: mpsc::Receiver<()>,
+    commands: mpsc::Sender<CommandRequest>,
+    observer: crate::work_facts::WorkObserver,
+) -> anyhow::Result<()> {
+    let (shell_events, _shell_events_rx) = mpsc::channel(1);
+    let shells = crate::user_shell::UserShellRegistry::new(
+        std::env::current_dir()?,
+        BTreeMap::new(),
+        shell_events,
+    );
+    unix::run_relay_coordinator_with_verdict(
+        relay,
+        events,
+        wakes,
+        commands,
+        shells,
+        None,
+        None,
+        Some(observer),
+    )
+    .await
+}
+
+/// The facts a prompt's published outcome carries, once it is published:
+/// `Some(None)` is an outcome without any.
+fn prompt_outcome_facts(relay: &Arc<RelayCell>) -> Option<Option<mj_core::work_facts::WorkFacts>> {
+    relay
+        .lock()
+        .unwrap()
+        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap()
+        .into_iter()
+        .find_map(|event| match event.observation {
+            RelayObservation::CommandCompleted {
+                outcome: mj_core::relay::RelayCommandOutcome::Prompt { work_facts, .. },
+                ..
+            } => Some(work_facts.map(|facts| *facts)),
+            _ => None,
+        })
+}
+
+/// A fake `git` whose `status` announces itself and then waits for a release
+/// file, so a test can hold the capture open.
+#[cfg(unix)]
+fn gated_git(directory: &Path, release: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let git = directory.join("gated-git");
+    let wait = if release {
+        r#"while [ ! -f "$dir/release" ]; do sleep 0.01; done"#
+    } else {
+        r#"while true; do sleep 0.05; done"#
+    };
+    std::fs::write(
+        &git,
+        format!(
+            r#"#!/bin/sh
+dir="$2"; command="$3"
+sha=1111111111111111111111111111111111111111
+case "$command" in
+  status) touch "$dir/status.started"; {wait}
+          printf '# branch.oid %s\000# branch.head main\000? notes.txt\000' "$sha" ;;
+  log) printf '%s\000The subject\n' "$sha" ;;
+  *) exit 2 ;;
+esac
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git
+}
+
+#[cfg(unix)]
+fn capture_observer(
+    relay: &Arc<RelayCell>,
+    directory: &Path,
+    git: PathBuf,
+) -> crate::work_facts::WorkObserver {
+    crate::work_facts::WorkObserver {
+        session_id: SESSION_ID.into(),
+        worker_pid: std::process::id(),
+        directory: directory.to_path_buf(),
+        git: git.into(),
+        harness_ready_ms: relay.lock().unwrap().harness_ready_clock(),
+        children: Default::default(),
+    }
+}
+
+/// A sub-agent's prompt outcome is published with the facts its worker observed,
+/// and the next prompt, which this task dispatches only after the outcome is
+/// recorded, waits for the observation.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sub_agents_prompt_outcome_carries_its_facts_and_the_next_prompt_waits_for_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-first", prompt("first"));
+    submit(&mut durable, "prompt-second", prompt("second"));
+    let relay = Arc::new(RelayCell::new(durable));
+    let git = gated_git(work.path(), true);
+    let observer = capture_observer(&relay, work.path(), git);
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (_wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_capturing_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+        observer,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-first", "first");
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-first".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    // The capture is running (its Git read has started and is held): nothing is
+    // published and the second prompt has not been dispatched.
+    wait_for("the capture to start", async {
+        while !work.path().join("status.started").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(command_rx.try_recv().is_err(), "the next turn started");
+    assert_eq!(prompt_outcome_facts(&relay), None, "published early");
+
+    std::fs::write(work.path().join("release"), "").unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-second", "second");
+    let facts = prompt_outcome_facts(&relay)
+        .expect("the outcome is published")
+        .expect("with the facts");
+    let tree = facts.worktree.known().expect("the working tree was read");
+    assert!(tree.shown.iter().any(|path| path.path == "notes.txt"));
+    assert!(facts.processes.known().is_some(), "{:?}", facts.processes);
+    drop(event_tx);
+    drop(_wake_tx);
+    let _ = coordinator.await;
+}
+
+/// The harness stopping while the observation runs ends it: the outcome is
+/// published with the facts unavailable and the reason, and the event that
+/// stopped it is recorded after the outcome.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_capture_cancelled_by_the_harness_stopping_publishes_unavailable_facts() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-only", prompt("only"));
+    let relay = Arc::new(RelayCell::new(durable));
+    // A Git read that never ends: only the stop can end the capture.
+    let git = gated_git(work.path(), false);
+    let observer = capture_observer(&relay, work.path(), git);
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (_wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_capturing_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+        observer,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-only", "only");
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-only".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    wait_for("the capture to start", async {
+        while !work.path().join("status.started").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    coordinator.await.unwrap().unwrap();
+    let facts = prompt_outcome_facts(&relay)
+        .expect("the outcome is published")
+        .expect("with facts that say they are unavailable");
+    assert!(
+        matches!(
+            &facts.worktree,
+            mj_core::work_facts::Observed::Unavailable { reason }
+                if reason.contains("harness stopped")
+        ),
+        "{facts:?}"
+    );
+    assert!(facts.processes.known().is_none());
+}
+
+/// A Git read that never returns must not hold the turn's outcome, or the
+/// commands behind it: a cancellation accepted during the observation ends it,
+/// the outcome is published with the facts unavailable, and the Git read is
+/// killed with the dropped observation.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancellation_accepted_during_a_capture_ends_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-only", prompt("only"));
+    let relay = Arc::new(RelayCell::new(durable));
+    let git = gated_git(work.path(), false);
+    let observer = capture_observer(&relay, work.path(), git);
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_capturing_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+        observer,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-only", "only");
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-only".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    wait_for("the capture to start", async {
+        while !work.path().join("status.started").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(prompt_outcome_facts(&relay), None, "published early");
+
+    submit(&mut relay.lock().unwrap(), "cancel-1", RelayCommand::Cancel);
+    wake_tx.send(()).await.unwrap();
+    wait_for("the outcome to be published", async {
+        while prompt_outcome_facts(&relay).is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let facts = prompt_outcome_facts(&relay).unwrap().expect("with facts");
+    assert!(
+        matches!(
+            &facts.worktree,
+            mj_core::work_facts::Observed::Unavailable { reason }
+                if reason.contains("cancellation or close")
+        ),
+        "{facts:?}"
+    );
+    drop(event_tx);
+    drop(wake_tx);
+    let _ = coordinator.await;
+}
+
+/// A cancellation accepted before the finishing event is drained is waiting for
+/// the same task that would observe the turn, and its wake may already be spent:
+/// the capture must see it on entry, not only when another wake comes.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancellation_accepted_before_a_capture_starts_ends_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-only", prompt("only"));
+    let relay = Arc::new(RelayCell::new(durable));
+    let git = gated_git(work.path(), false);
+    let observer = capture_observer(&relay, work.path(), git);
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_capturing_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+        observer,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-only", "only");
+    // Accepted with no wake sent, then the turn finishes: the cancellation is
+    // still undelivered when the capture starts.
+    submit(&mut relay.lock().unwrap(), "cancel-1", RelayCommand::Cancel);
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-only".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    wait_for("the outcome to be published", async {
+        while prompt_outcome_facts(&relay).is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let facts = prompt_outcome_facts(&relay).unwrap().expect("with facts");
+    assert!(
+        matches!(
+            &facts.worktree,
+            mj_core::work_facts::Observed::Unavailable { reason }
+                if reason.contains("cancellation or close")
+        ),
+        "{facts:?}"
+    );
+    drop(event_tx);
+    drop(wake_tx);
+    let _ = coordinator.await;
+}
+
+/// A session that is not a sub-agent has no observer, and its outcome says
+/// nothing of facts.
+#[tokio::test]
+async fn an_ordinary_sessions_prompt_outcome_carries_no_facts() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    submit(&mut durable, "prompt-only", prompt("only"));
+    let relay = Arc::new(RelayCell::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (_wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(command_rx.recv().await.unwrap(), "prompt-only", "only");
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "prompt-only".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    wait_for_relay_state(&relay, |state| state.active_prompt.is_none()).await;
+    assert_eq!(prompt_outcome_facts(&relay), Some(None));
+    drop(event_tx);
+    drop(_wake_tx);
+    let _ = coordinator.await;
 }
 
 #[test]
@@ -8001,18 +8702,62 @@ fn push_gate_startup_and_environment_follow_harness_and_primary_ownership() {
         launch
             .environment
             .remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
-        for trigger in [
-            mj_core::config::ReviewTrigger::Turn,
-            mj_core::config::ReviewTrigger::Off,
-        ] {
-            launch.review_trigger = trigger;
-            assert!(
-                !super::harness_launch::primary_supervisor_spec(&launch)
-                    .environment
-                    .contains_key("MJ_REVIEW_GATE")
-            );
-        }
+        launch.review_trigger = mj_core::config::ReviewTrigger::Off;
+        assert!(
+            !super::harness_launch::primary_supervisor_spec(&launch)
+                .environment
+                .contains_key("MJ_REVIEW_GATE")
+        );
     }
+}
+
+// A child offered the review tools records where its work starts at launch,
+// without the push gate. Otherwise a repository with no default-branch merge
+// base would record the already-committed HEAD at its first request and refuse.
+#[test]
+fn a_review_enabled_child_is_pinned_at_launch_without_the_push_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = git_repository(&temp);
+    let mut launch = launch_config("/test/profile");
+    launch.cwd = repository.clone();
+    launch.session_id = "review-child".into();
+    launch.harness = HarnessKind::Codex;
+    launch.review_trigger = mj_core::config::ReviewTrigger::Push;
+    launch.environment.insert(
+        mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV.into(),
+        "1".into(),
+    );
+    let start = git(&repository, &["rev-parse", "HEAD"]);
+    assert!(launch.prepares_review() && !launch.review_gate());
+    let notices = super::harness_launch::prepare_review_gate(&launch).unwrap();
+    assert!(notices.is_empty());
+    assert!(!repository.join(".git/hooks/pre-push").exists());
+    assert!(
+        !super::harness_launch::primary_supervisor_spec(&launch)
+            .environment
+            .contains_key("MJ_REVIEW_GATE")
+    );
+    std::fs::write(repository.join("tracked.rs"), "fn main() { work(); }\n").unwrap();
+    git(&repository, &["commit", "-qam", "child work"]);
+    assert_eq!(
+        crate::review::capture::review_start_head(
+            &mj_checkpoint::archive::SystemGit,
+            &repository,
+            "review-child"
+        )
+        .unwrap(),
+        Some(start),
+        "the first review covers the commits made after the child started"
+    );
+    // A harness that cannot offer the tools records nothing and says nothing.
+    launch.session_id = "muse-child".into();
+    launch.harness = HarnessKind::Muse;
+    assert!(!launch.prepares_review());
+    assert!(
+        super::harness_launch::prepare_review_gate(&launch)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -8033,4 +8778,150 @@ fn push_gate_startup_reports_a_refused_hook_install_once() {
         std::fs::read_to_string(hooks.join("pre-push")).unwrap(),
         "existing hook"
     );
+}
+
+/// The harness preparation joins an attach's state before the relay digests
+/// it. A preparation that moves on while the relay itself is unchanged must
+/// still bring the whole state back, or the controller keeps a stale one.
+#[tokio::test]
+async fn a_changed_preparation_is_never_taken_for_a_known_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "test").unwrap(),
+    ));
+    let attach = |known: Option<String>| RelayRequestEnvelope {
+        request_id: "attach".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Attach {
+            after_ordinal: 0,
+            after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+            known_state_digest: known,
+        },
+    };
+    let preparing = mj_core::relay::HarnessPreparation::Preparing {
+        step: "harness-profile".into(),
+        since_ms: 1,
+    };
+    let RelayResponseBody::Ok {
+        payload:
+            RelayResponsePayload::Attached {
+                state,
+                state_digest,
+                ..
+            },
+    } = unix::handle_request(&relay, attach(None), Some(preparing.clone()))
+        .await
+        .unwrap()
+        .body
+    else {
+        panic!("expected the whole state");
+    };
+    assert_eq!(state.harness_preparation, Some(preparing.clone()));
+    let held = state_digest.unwrap();
+
+    let unchanged = unix::handle_request(&relay, attach(Some(held.clone())), Some(preparing))
+        .await
+        .unwrap()
+        .body;
+    assert!(matches!(
+        unchanged,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::AttachedWithKnownState { .. }
+        }
+    ));
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::Attached { state, .. },
+    } = unix::handle_request(
+        &relay,
+        attach(Some(held)),
+        Some(mj_core::relay::HarnessPreparation::Started),
+    )
+    .await
+    .unwrap()
+    .body
+    else {
+        panic!("a changed preparation must resend the state");
+    };
+    assert_eq!(
+        state.harness_preparation,
+        Some(mj_core::relay::HarnessPreparation::Started)
+    );
+}
+
+/// A change wait answers when the relay changes and not before, and with the
+/// values it was given once its bound passes without a change. Every relay
+/// change takes the relay lock, so the lock's release is what wakes it.
+#[tokio::test(start_paused = true)]
+async fn a_change_wait_answers_on_a_relay_change_or_at_its_bound() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "test").unwrap(),
+    ));
+    let feed = super::subagents::SubagentFeed::default();
+    let current = || {
+        let mut state = relay.lock().unwrap().operational_state();
+        state.harness_preparation = None;
+        (
+            state.latest_ordinal,
+            mj_core::relay::relay_state_digest(&state).unwrap(),
+        )
+    };
+    let observed = |body: RelayResponseBody| match body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ChangeObserved {
+                    latest_ordinal,
+                    state_digest,
+                    subagent_queue_changed,
+                },
+        } => (latest_ordinal, state_digest, subagent_queue_changed),
+        other => panic!("expected an observed change, got {other:?}"),
+    };
+    let (ordinal, digest) = current();
+
+    let started = tokio::time::Instant::now();
+    let quiet = unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest))
+        .await
+        .unwrap();
+    assert_eq!(observed(quiet), (ordinal, digest.clone(), false));
+    assert_eq!(started.elapsed(), mj_core::relay::RELAY_CHANGE_WAIT_BOUND);
+
+    let started = tokio::time::Instant::now();
+    let wait = unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest));
+    let record = async {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        relay
+            .lock()
+            .unwrap()
+            .record_observation(RelayObservation::Warning {
+                message: "something happened".into(),
+            })
+            .unwrap();
+    };
+    let (changed, ()) = tokio::join!(wait, record);
+    let (latest, changed_digest, _) = observed(changed.unwrap());
+    assert_eq!(latest, ordinal + 1);
+    assert_ne!(changed_digest, digest);
+    assert_eq!(started.elapsed(), std::time::Duration::from_secs(1));
+
+    let stale = unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest))
+        .await
+        .unwrap();
+    assert_eq!(
+        observed(stale).0,
+        ordinal + 1,
+        "a stale view is answered at once"
+    );
+
+    // Waits only observe the relay, so two of them on an unchanged relay stay
+    // idle until their bound instead of waking each other.
+    let (ordinal, digest) = current();
+    let started = tokio::time::Instant::now();
+    let (first, second) = tokio::join!(
+        unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest)),
+        unix::wait_for_change(&relay, None, None, &feed, ordinal, Some(&digest)),
+    );
+    assert_eq!(observed(first.unwrap()).0, ordinal);
+    assert_eq!(observed(second.unwrap()).0, ordinal);
+    assert_eq!(started.elapsed(), mj_core::relay::RELAY_CHANGE_WAIT_BOUND);
 }

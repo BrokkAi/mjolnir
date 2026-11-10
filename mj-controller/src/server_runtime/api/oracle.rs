@@ -70,6 +70,7 @@ impl ApiBackend {
         };
         let started = self
             .start_subagent(crate::controller::RegisterSubagentRequest {
+                no_github_credentials: false,
                 kind: SubagentKind::Oracle,
                 reviewer_launch: None,
                 parent_session_id: primary_id.to_owned(),
