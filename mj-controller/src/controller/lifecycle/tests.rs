@@ -1707,11 +1707,9 @@ fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
 }
 
 // Hard-won: 27c51a34c: an unreachable host made explicit Destroy impossible.
+// The managed clone fixture and its process executor require a POSIX host.
+#[cfg(unix)]
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
-)]
 fn destroy_warns_when_cleanup_fails_but_automatic_stopping_keeps_the_record() {
     if !in_isolated_store(
         "destroy_warns_when_cleanup_fails_but_automatic_stopping_keeps_the_record",

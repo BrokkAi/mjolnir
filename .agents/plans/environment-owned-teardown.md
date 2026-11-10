@@ -22,7 +22,7 @@ The observable result is that deleting an unreachable child, restarting the daem
 - [x] Route physical teardown through the environment owner across Destroy, Suspend, Resume, Move, failed startup and recovery. Predictable provisioning targets are reserved before creation. Unknown legacy orphan ownership permits stopping only and reports retained files.
 - [x] Run isolated regressions, full touched-crate suites, and workspace Clippy.
 - [x] (2026-11-10) Review passed after two correction rounds; committed and pushed through a49ba3920.
-- [ ] Install and apply the fix to the affected live session only after installation is authorized.
+- [x] (2026-11-10) User authorized installation; installed ed8f8a5f6, migrated the live store to revision 122 and verified the requested session is gone with physical ownership retained.
 
 ## Surprises & Discoveries
 
@@ -56,7 +56,7 @@ The migration is breaking. Older readers and writers do not understand independe
 
 ## Outcomes & Retrospective
 
-The user approved the broader refactor. Environment ownership, startup admission, typed checkout deletion authority, and shared teardown are implemented locally and are being integrated and validated. The two principal regressions passed before the path-storage and admission refinements. No live state has been changed and no code has been pushed or installed. Upstream was merged at c69e8327a. A focused run passed 202 lifecycle, Resume, Move, provisioning and schema cases. The full four-crate run passed core, CLI, TUI, startup/upgrade and integration suites; the controller run passed 2,498 cases with 13 fixture/expectation failures. Those failures and all subsequently changed provisioning/branch cases passed in a 47-case rerun. Workspace `cargo clippy --all-targets -- -D warnings` passes. Browser notice tests also pass. Review passed on 49c7babbb; upstream was merged and the result pushed as a49ba3920. Installation remains pending explicit authorization.
+The user approved the broader refactor. Environment ownership, startup admission, typed checkout deletion authority, and shared teardown are implemented locally and are being integrated and validated. The two principal regressions passed before the path-storage and admission refinements. No live state has been changed and no code has been pushed or installed. Upstream was merged at c69e8327a. A focused run passed 202 lifecycle, Resume, Move, provisioning and schema cases. The full four-crate run passed core, CLI, TUI, startup/upgrade and integration suites; the controller run passed 2,498 cases with 13 fixture/expectation failures. Those failures and all subsequently changed provisioning/branch cases passed in a 47-case rerun. Workspace `cargo clippy --all-targets -- -D warnings` passes. Browser notice tests also pass. Review passed on 49c7babbb; upstream was merged and the result pushed as a49ba3920. Installation was explicitly authorized on 2026-11-10 and completed from ed8f8a5f6.
 
 ## Context and Orientation
 
@@ -178,5 +178,29 @@ clean. Evidence: `/tmp/mj-environment-retained-rerun.log`,
 Final review is clean through `49c7babbb`. Upstream `9907bf540` merged without
 conflicts; `a49ba3920` is on origin/master. The macOS/Windows nightly workflow
 was dispatched for this code. Implementation, validation, review and push are
-complete. The live store and affected session remain unchanged pending the
-user's installation instruction, because revision 122 is a breaking upgrade.
+complete. The user subsequently authorized installation and the live store upgraded to revision 122.
+
+## Installation outcome (2026-11-10)
+
+The user approved installation. `scripts/install.sh` completed successfully
+from `ed8f8a5f6` on an unchanged source tree. The controller, native worker and
+musl worker agree on worker inputs `2aa5848cb913a0d4ccb02fc528b928233e30ddc1`.
+Ordinary `mj api-info` startup drained accepted creation work and coordinated
+the daemon replacement. The live schema revision and compatibility floor are
+both 122. The upgraded daemon remained stable after handoff.
+
+The requested unavailable-host session was destroyed after the upgrade. Its
+SSH cleanup timed out, Destroy logged its warning and removed the logical
+record, and its environment remains retiring with one durable worker lease.
+The later explicit retry received 404 because the record was already gone.
+A subsequent graceful daemon restart cleared the recent public notice list;
+the warning is present in the daemon tracing log, and the physical evidence
+remains in the database.
+
+Nightly validation exposed one test-only Windows compilation error in this
+work: a runtime-ignored test referred to a Unix-only managed-clone fixture.
+The test now compiles only on Unix, matching that fixture. Its isolated test
+and affected-crate Clippy pass. This does not change the installed runtime.
+The macOS lane separately fails in the existing profile archive upload code
+(`chmod` argument ordering); that code is unchanged by this refactor and the
+nightly workflow has reported it to its platform tracking issue.
