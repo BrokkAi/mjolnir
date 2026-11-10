@@ -1059,6 +1059,7 @@ fn golden_dashboard_dialogs() {
                 hourly_permille: 180,
                 hourly_covered_secs: 3600,
                 online_cpus: 8,
+                scope: mj_core::cpu_usage::CpuSampleScope::ProcessTree,
             },
         },
     );
@@ -1077,6 +1078,7 @@ fn golden_dashboard_dialogs() {
                     hourly_permille: 80 + index as u16,
                     hourly_covered_secs: 3600,
                     online_cpus: 8,
+                    scope: mj_core::cpu_usage::CpuSampleScope::ProcessTree,
                 },
             },
         );

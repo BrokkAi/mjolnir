@@ -213,6 +213,7 @@ fn fatal_reports() -> (mpsc::Sender<anyhow::Error>, mpsc::Receiver<anyhow::Error
 
 fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
+        cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
@@ -8160,6 +8161,7 @@ async fn cpu_usage_answers_from_the_sampler_without_journaling() {
     ));
     let mut client = BufReader::new(client);
     let usage = mj_core::cpu_usage::SessionCpuUsage {
+        scope: Default::default(),
         recent_permille: 230,
         hourly_permille: 100,
         hourly_covered_secs: 20,

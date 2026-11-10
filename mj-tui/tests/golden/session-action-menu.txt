@@ -92,7 +92,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
 │  │             │  Sub-agents Native · 0 of 1 working                                                │                │
 │                │  CPU        2.0%+ hourly / 3.0%+ recent                                            │                │
-│                │             (tree of 2; own 3.0%, 1 of 2 measured)                                 │                │
+│                │             (tree of 2; process tree 3.0%, 1 of 2 measured)                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
@@ -132,7 +132,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  podman                                                                                                        │
 │  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
 │  │             │  Sub-agents Native                                                                 │                │
-│                │  CPU        10% hourly / 23% recent                                                │                │
+│                │  CPU        10% hourly / 23% recent (process tree)                                 │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │

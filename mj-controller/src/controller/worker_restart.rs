@@ -250,10 +250,6 @@ impl Controller {
                     crate::database::begin_worker_restart(session_id, &intent)?;
                     install_staged_worker_binary(&owner, &staging, executor, &backend, session_id)
                         .context("install the prepared worker under its idle reservation")?;
-                    replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
-                        .context(
-                            "install the worker launch configuration under its idle reservation",
-                        )?;
                     crate::database::advance_worker_restart(
                         session_id,
                         &operation_id,
@@ -261,6 +257,12 @@ impl Controller {
                     )?;
                     stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
                         .context(RESTART_FOR_UPGRADE.stop)?;
+                    // Old workers reject unknown launch fields and may reread on stop.
+                    replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
+                        .context(
+                            "install the worker launch configuration under its idle reservation",
+                        )
+                        .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
                     start_worker_durably(
                         &owner,
                         target,

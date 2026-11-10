@@ -652,6 +652,7 @@ mod tests {
         let mut history = RuntimeHistory::default();
         let value = mj_client::runtime_feed::SessionCpuView::Measured {
             usage: mj_core::cpu_usage::SessionCpuUsage {
+                scope: Default::default(),
                 recent_permille: 230,
                 hourly_permille: 100,
                 hourly_covered_secs: 30,

@@ -2146,6 +2146,7 @@ fn two_machine_cpu_report() -> (
                         hourly_permille: hourly,
                         hourly_covered_secs: 840,
                         online_cpus: 8,
+                        scope: mj_core::cpu_usage::CpuSampleScope::ProcessTree,
                     },
                 },
             );
@@ -2157,7 +2158,7 @@ fn two_machine_cpu_report() -> (
             reason: "permission denied".into(),
         },
     );
-    dashboard.set_session_cpu(cpu.clone());
+    dashboard.set_session_cpu(cpu.clone().into_iter().collect());
     dashboard.set_deployment_capacity_targets(
         ["machine-a", "machine-b"]
             .into_iter()
@@ -2220,18 +2221,18 @@ fn session_cpu_report_keeps_its_size_across_tabs_and_switches_metric() {
     // The stacked buttons choose the figure the rows, totals and tabs show.
     dashboard.handle_key(key(KeyCode::Left));
     let text = draw(&mut dashboard).join("\n");
-    assert!(text.contains("machine-a · 40% hourly"), "{text}");
+    assert!(text.contains("machine-a · 40%+ hourly"), "{text}");
     assert!(text.contains("30% hourly"), "{text}");
-    assert!(text.contains("(14m)"), "{text}");
+    assert!(text.contains("(process tree; 14m)"), "{text}");
     let recent = point(&draw(&mut dashboard), "Recent");
     click_cpu_report(&mut dashboard, recent);
     let text = draw(&mut dashboard).join("\n");
-    assert!(text.contains("machine-a · 46% recent"), "{text}");
-    assert!(text.contains("machine-b · 23% recent"), "{text}");
+    assert!(text.contains("machine-a · 46%+ recent"), "{text}");
+    assert!(text.contains("machine-b · 23%+ recent"), "{text}");
     assert!(text.contains("fast  [codex-1]  23% recent"), "{text}");
     assert!(!text.contains("hourly"), "{text}");
     assert!(
-        !text.contains("(14m)"),
+        !text.contains("(process tree; 14m)"),
         "the covered period qualifies only the hourly average:\n{text}"
     );
     let hourly = point(&draw(&mut dashboard), "Hourly");
@@ -2239,7 +2240,7 @@ fn session_cpu_report_keeps_its_size_across_tabs_and_switches_metric() {
     assert!(
         draw(&mut dashboard)
             .join("\n")
-            .contains("machine-a · 40% hourly")
+            .contains("machine-a · 40%+ hourly")
     );
 }
 
@@ -2256,8 +2257,8 @@ fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
         text.find("machine-a ·").unwrap() < text.find("machine-b ·").unwrap(),
         "{text}"
     );
-    assert!(text.contains("machine-a · 40% hourly"), "{text}");
-    assert!(text.contains("machine-b · 20% hourly"), "{text}");
+    assert!(text.contains("machine-a · 40%+ hourly"), "{text}");
+    assert!(text.contains("machine-b · 20%+ hourly"), "{text}");
     assert!(
         text.find("fast  [codex-1]").unwrap() < text.find("slow  [codex-1]").unwrap(),
         "{text}"
@@ -2267,7 +2268,7 @@ fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
         "{text}"
     );
     assert!(text.contains("permission denied"));
-    assert!(text.contains("(14m)"));
+    assert!(text.contains("(process tree; 14m)"));
     assert!(
         !text.contains("other  [codex-1]"),
         "the second machine is a tab:\n{text}"
@@ -2307,10 +2308,11 @@ fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
                 hourly_permille: 900,
                 hourly_covered_secs: 3600,
                 online_cpus: 8,
+                scope: mj_core::cpu_usage::CpuSampleScope::ProcessTree,
             },
         },
     );
-    dashboard.set_session_cpu(cpu);
+    dashboard.set_session_cpu(cpu.into_iter().collect());
     assert!(
         dashboard.clock_changed(),
         "an open report must be invalidated by a CPU sample"
@@ -2386,6 +2388,7 @@ fn measured_cpu(recent: u16, hourly: u16) -> mj_client::runtime_feed::SessionCpu
             hourly_permille: hourly,
             hourly_covered_secs: 3600,
             online_cpus: 8,
+            scope: mj_core::cpu_usage::CpuSampleScope::ProcessTree,
         },
     }
 }
@@ -2510,7 +2513,7 @@ fn set_cpu(dashboard: &mut DashboardState, entries: &[(&str, u16, u16)]) {
     for (id, recent, hourly) in entries {
         cpu.insert((*id).into(), measured_cpu(*recent, *hourly));
     }
-    dashboard.set_session_cpu(cpu);
+    dashboard.set_session_cpu(cpu.into_iter().collect());
 }
 
 #[test]
@@ -2747,6 +2750,7 @@ fn cpu_rollup_is_derived_only_when_samples_or_the_tree_change() {
     assert_eq!(dashboard.cpu_rollup_derivations(), settled + 2);
 }
 
+// Hard-won: b7d5c8399: process-tree sampling omitted shared-container work and could double count children.
 #[test]
 fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
     let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a", "kid-b"]);
@@ -2773,9 +2777,9 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
         lines[parent_line].contains("32% hourly+") || lines[parent_line].contains("32%+ hourly"),
         "{lines:#?}"
     );
-    // The parent's own share is the same figure as its tree total.
+    // The legacy process-tree figure remains distinct from the tree total.
     assert!(
-        lines[parent_line].contains("own 2.0%, 2 of 3 measured"),
+        lines[parent_line].contains("process tree 2.0%, 2 of 3 measured"),
         "{lines:#?}"
     );
     let recent = crate::session_cpu_report::report_lines(
@@ -2786,7 +2790,7 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
     .map(|line| line.to_string())
     .collect::<Vec<_>>();
     assert!(
-        recent[parent_line].contains("43%+ recent (tree of 3; own 3.0%, 2 of 3 measured)"),
+        recent[parent_line].contains("43%+ recent (tree of 3; process tree 3.0%, 2 of 3 measured)"),
         "{recent:#?}"
     );
     assert!(
@@ -2798,6 +2802,146 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
         "{lines:#?}"
     );
     assert!(lines[parent_line + 2].contains("no CPU data yet"));
+    let mut golden = lines.join("\n");
+    let mut state = dashboard.state.clone();
+    for (id, borrowed) in [(&parent, None), (&"kid-a".to_owned(), Some(parent.clone()))] {
+        state.sessions.get_mut(id).unwrap().target =
+            Some(mj_core::state::TargetLocator::LocalDocker {
+                container_id: "shared-container".into(),
+                borrowed_from: borrowed,
+            });
+    }
+    // A separately sampled child, including after moving away from the shared container.
+    state.sessions.get_mut("kid-b").unwrap().target =
+        Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: "/independent".into(),
+        });
+    dashboard.set_state(state);
+    let mut cpu = dashboard
+        .session_cpu
+        .iter()
+        .map(|(id, view)| (id.clone(), view.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    if let mj_client::runtime_feed::SessionCpuView::Measured { usage } =
+        cpu.get_mut(&parent).unwrap()
+    {
+        usage.scope = mj_core::cpu_usage::CpuSampleScope::Container;
+    }
+    cpu.remove("kid-a");
+    cpu.insert("kid-b".into(), measured_cpu(200, 100));
+    dashboard.set_session_cpu(cpu.clone().into_iter().collect());
+    let report = |dashboard: &DashboardState| {
+        crate::session_cpu_report::report_lines(
+            dashboard,
+            crate::session_cpu_report::CpuMetric::Hourly,
+        )
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+    };
+    golden.push_str(&format!(
+        "\n\nShared container and independent child\n{}",
+        report(&dashboard)
+    ));
+    assert_eq!(dashboard.cpu_rollup(&parent).hourly_permille, 120);
+    assert!(!dashboard.cpu_rollup(&parent).is_partial());
+    assert_eq!(
+        dashboard.cpu_share("kid-a").unwrap().label(),
+        "included in parent"
+    );
+    assert_eq!(
+        crate::session_cpu_report::cpu_summary(&dashboard, "kid-a").main,
+        "included in parent"
+    );
+    // A still-running old child sample is covered by an upgraded container owner.
+    cpu.insert("kid-a".into(), measured_cpu(400, 300));
+    dashboard.set_session_cpu(cpu.clone().into_iter().collect());
+    assert_eq!(dashboard.cpu_rollup(&parent).hourly_permille, 120);
+    if let mj_client::runtime_feed::SessionCpuView::Measured { usage } =
+        cpu.get_mut("kid-a").unwrap()
+    {
+        usage.scope = mj_core::cpu_usage::CpuSampleScope::Container;
+    }
+    dashboard.set_session_cpu(cpu.clone().into_iter().collect());
+    let shared_state = dashboard.state.clone();
+    let mut moved = shared_state.clone();
+    moved.sessions.get_mut(&parent).unwrap().target =
+        Some(mj_core::state::TargetLocator::LocalDocker {
+            container_id: "destination-container".into(),
+            borrowed_from: None,
+        });
+    dashboard.set_state(moved);
+    golden.push_str(&format!(
+        "\n\nOwner moved; source child sampled independently\n{}",
+        report(&dashboard)
+    ));
+    assert_eq!(dashboard.cpu_rollup(&parent).hourly_permille, 420);
+    assert!(dashboard.cpu_included_in("kid-a").is_none());
+    let mut remote = dashboard.state.clone();
+    remote.sessions.get_mut("kid-b").unwrap().target_template_id = "other-machine".into();
+    dashboard.set_state(remote);
+    dashboard.set_deployment_capacity_targets(vec![mj_core::targets::DeploymentCapacityTarget {
+        id: "other-machine".into(),
+        host: "other-machine".into(),
+        target_ids: vec!["other-machine".into()],
+        kind: mj_core::targets::DeploymentCapacityKind::Host,
+        local: false,
+        probes: Vec::new(),
+        local_storage_paths: Vec::new(),
+        probe_error: None,
+    }]);
+    golden.push_str(&format!(
+        "\n\nIndependent child on another machine\n{}",
+        report(&dashboard)
+    ));
+    let groups = crate::session_cpu_report::report_groups(
+        &dashboard,
+        crate::session_cpu_report::CpuMetric::Hourly,
+    );
+    let remote_group = groups
+        .iter()
+        .find(|group| group.key == "other-machine")
+        .unwrap();
+    assert_eq!(remote_group.total_permille, 100);
+    assert_eq!(remote_group.session_ids, vec!["kid-b"]);
+    dashboard.set_deployment_capacity_targets(Vec::new());
+
+    dashboard.set_state(shared_state.clone());
+    cpu.remove(&parent);
+    dashboard.set_session_cpu(cpu.clone().into_iter().collect());
+    golden.push_str(&format!(
+        "\n\nBorrower supplies shared container sample\n{}",
+        report(&dashboard)
+    ));
+    assert_eq!(dashboard.cpu_rollup(&parent).hourly_permille, 400);
+    let mut stopped = shared_state.clone();
+    stopped.sessions.get_mut(&parent).unwrap().state = mj_core::state::SessionState::Parked;
+    dashboard.set_state(stopped);
+    golden.push_str(&format!(
+        "\n\nOwner parked; borrower still sampled\n{}",
+        report(&dashboard)
+    ));
+    dashboard.set_state(shared_state);
+    cpu.insert(parent.clone(), measured_cpu(30, 20));
+    cpu.remove("kid-a");
+    if let mj_client::runtime_feed::SessionCpuView::Measured { usage } =
+        cpu.get_mut(&parent).unwrap()
+    {
+        usage.scope = mj_core::cpu_usage::CpuSampleScope::ProcessTree;
+    }
+    dashboard.set_session_cpu(cpu.clone().into_iter().collect());
+    golden.push_str(&format!(
+        "\n\nLegacy owner does not cover borrowed child\n{}",
+        report(&dashboard)
+    ));
+    cpu.clear();
+    dashboard.set_session_cpu(cpu.into_iter().collect());
+    golden.push_str(&format!(
+        "\n\nUnknown measurements\n{}\n",
+        report(&dashboard)
+    ));
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "session-cpu-scopes", &golden);
 }
 
 // Hard-won: c17d3225: A stale table offset hid fitting session rows after a list shrank.

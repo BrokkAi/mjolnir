@@ -10,6 +10,7 @@ real ones detach, so it outlives the process that started it.
 
 from __future__ import annotations
 
+import base64
 import json
 import socket
 import struct
@@ -30,6 +31,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from reliability_lab import Lab, daemon_request  # noqa: E402
+from session_cpu_usage import CpuLab  # noqa: E402
 
 HEL = pathlib.Path("/bin/true")
 SLEEPER = "import time; time.sleep(300)"
@@ -208,7 +210,36 @@ class LabCleanupTest(unittest.TestCase):
         self.assertEqual((lab.root / "leaks.txt").read_text(), "")
 
 
+class CpuAcceptanceCleanupTests(unittest.TestCase):
+    # Hard-won: e584948ba: shutdown failures skipped process and container cleanup.
+    def test_shutdown_failures_do_not_skip_later_cleanup(self):
+        calls = []
+
+        class FailedRun:
+            def stop_daemon(self):
+                calls.append("daemon")
+                raise RuntimeError("daemon stop failed")
+
+            def cleanup_owned(self):
+                calls.append("processes")
+                raise RuntimeError("process cleanup failed")
+
+            def cleanup_cpu_containers(self):
+                calls.append("containers")
+
+            def capture_process_tree(self):
+                calls.append("evidence")
+
+            def integrity(self):
+                calls.append("integrity")
+
+        with self.assertRaisesRegex(RuntimeError, "process cleanup failed"):
+            CpuLab.cleanup_cpu_run(FailedRun())
+        self.assertEqual(calls, ["daemon", "processes", "containers", "evidence", "integrity"])
+
+
 class DaemonReplyTests(unittest.TestCase):
+    # Hard-won: ee1e226e5: daemon reply byte fragments switched to base64 strings.
     def test_chunked_reply_reassembles_more_than_one_pipe_buffer(self):
         expected = {"reply": "runtime_changes", "value": {"Snapshot": {"projection": {"payload": "large reply " * 20000}}}}
         body = json.dumps(expected).encode()
@@ -236,7 +267,8 @@ class DaemonReplyTests(unittest.TestCase):
                     request = json.loads(receive_exact(length))
                     self.assertEqual(request["request_id"], 99)
                     for offset in range(0, len(body), 64 * 1024):
-                        payload = json.dumps({"protocol_version": 1, "request_id": 99, "result": {"Ok": {"reply": "reply_chunk", "value": {"bytes": list(body[offset:offset+64*1024]), "finished": offset + 64*1024 >= len(body)}}}}).encode()
+                        chunk = body[offset:offset + 64 * 1024]
+                        payload = json.dumps({"protocol_version": 1, "request_id": 99, "result": {"Ok": {"reply": "reply_chunk", "value": {"bytes": base64.b64encode(chunk).decode("ascii"), "finished": offset + 64*1024 >= len(body)}}}}).encode()
                         header = struct.pack(">I", len(payload))
                         connection.sendall(header[:2])
                         connection.sendall(header[2:] + payload)

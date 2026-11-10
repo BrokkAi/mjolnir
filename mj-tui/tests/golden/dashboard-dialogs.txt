@@ -490,29 +490,29 @@ action: None
 ╭ Sessions  ╭ × CPU by session ────────────────────────────────────────────────────────────────────────────╮           │
 │ Create    │  podman · 171% hourly                                                                        │           │
 │  · CPU s  │                                                                                              │           │
-│  Idle  p  │  ACP pretty name  [codex-1]  18% hourly                                            ✓ Hourly  │           │
+│  Idle  p  │  ACP pretty name  [codex-1]  18% hourly (process tree)                             ✓ Hourly  │           │
 │  │ No me  │                                                                                      Recent  │           │
-│  │        │  CPU session 18  [codex-1]  9.8% hourly                                                      │           │
+│  │        │  CPU session 18  [codex-1]  9.8% hourly (process tree)                                       │           │
 │           │                                                                                              │           │
-│  · CPU s  │  CPU session 17  [codex-1]  9.7% hourly                                                      │           │
+│  · CPU s  │  CPU session 17  [codex-1]  9.7% hourly (process tree)                                       │           │
 │  Idle  p  │                                                                                              │           │
-│  │ No me  │  CPU session 16  [codex-1]  9.6% hourly                                                      │           │
+│  │ No me  │  CPU session 16  [codex-1]  9.6% hourly (process tree)                                       │           │
 │  │        │                                                                                              │           │
-│           │  CPU session 15  [codex-1]  9.5% hourly                                                      │           │
+│           │  CPU session 15  [codex-1]  9.5% hourly (process tree)                                       │           │
 │  · CPU s  │                                                                                              │           │
-│  Idle  p  │  CPU session 14  [codex-1]  9.4% hourly                                                      │           │
+│  Idle  p  │  CPU session 14  [codex-1]  9.4% hourly (process tree)                                       │           │
 │  │ No me  │                                                                                              │           │
-│  │        │  CPU session 13  [codex-1]  9.3% hourly                                                      │           │
+│  │        │  CPU session 13  [codex-1]  9.3% hourly (process tree)                                       │           │
 │           │                                                                                              │           │
-│  · CPU s  │  CPU session 12  [codex-1]  9.2% hourly                                                      │           │
+│  · CPU s  │  CPU session 12  [codex-1]  9.2% hourly (process tree)                                       │           │
 │  Idle  p  │                                                                                              │  ─────────╯
-│  │ No me  │  CPU session 11  [codex-1]  9.1% hourly                                                      │  ─────────╮
+│  │ No me  │  CPU session 11  [codex-1]  9.1% hourly (process tree)                                       │  ─────────╮
 │  │        │                                                                                              │           │
-│           │  CPU session 10  [codex-1]  9.0% hourly                                                      │           │
+│           │  CPU session 10  [codex-1]  9.0% hourly (process tree)                                       │           │
 │› · ACP p  │                                                                                              │  ─────────╯
-│  Idle  p  │  CPU session 09  [codex-1]  8.9% hourly                                                      │  ── ▁   ▄ ╮
+│  Idle  p  │  CPU session 09  [codex-1]  8.9% hourly (process tree)                                       │  ── ▁   ▄ ╮
 │  │ No me  │                                                                                              │           │
-│  │        │  CPU session 08  [codex-1]  8.8% hourly                                                      │  ─────────╯
+│  │        │  CPU session 08  [codex-1]  8.8% hourly (process tree)                                       │  ─────────╯
 │           │                                                                                              │  ── ▁   ▄ ╮
 │  · CPU s  │←/→ tabs · ↑/↓ sessions · Enter opens · Esc closes                                            │           │
 │  Idle  p  │  Close                                                                                       │           │
@@ -528,29 +528,29 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╭ Sessions  ╭ × CPU by session ────────────────────────────────────────────────────────────────────────────╮           │
 │ Create    │  podman · 171% hourly                                                                        │           │
 │  · CPU s  │                                                                                              │           │
-│  Idle  p  │  CPU session 15  [codex-1]  9.5% hourly                                            ✓ Hourly  │           │
+│  Idle  p  │  CPU session 15  [codex-1]  9.5% hourly (process tree)                             ✓ Hourly  │           │
 │  │ No me  │                                                                                      Recent  │           │
-│  │        │  CPU session 14  [codex-1]  9.4% hourly                                                      │           │
+│  │        │  CPU session 14  [codex-1]  9.4% hourly (process tree)                                       │           │
 │           │                                                                                              │           │
-│  · CPU s  │  CPU session 13  [codex-1]  9.3% hourly                                                      │           │
+│  · CPU s  │  CPU session 13  [codex-1]  9.3% hourly (process tree)                                       │           │
 │  Idle  p  │                                                                                              │           │
-│  │ No me  │  CPU session 12  [codex-1]  9.2% hourly                                                      │           │
+│  │ No me  │  CPU session 12  [codex-1]  9.2% hourly (process tree)                                       │           │
 │  │        │                                                                                              │           │
-│           │  CPU session 11  [codex-1]  9.1% hourly                                                      │           │
+│           │  CPU session 11  [codex-1]  9.1% hourly (process tree)                                       │           │
 │  · CPU s  │                                                                                              │           │
-│  Idle  p  │  CPU session 10  [codex-1]  9.0% hourly                                                      │           │
+│  Idle  p  │  CPU session 10  [codex-1]  9.0% hourly (process tree)                                       │           │
 │  │ No me  │                                                                                              │           │
-│  │        │  CPU session 09  [codex-1]  8.9% hourly                                                      │           │
+│  │        │  CPU session 09  [codex-1]  8.9% hourly (process tree)                                       │           │
 │           │                                                                                              │           │
-│  · CPU s  │  CPU session 08  [codex-1]  8.8% hourly                                                      │           │
+│  · CPU s  │  CPU session 08  [codex-1]  8.8% hourly (process tree)                                       │           │
 │  Idle  p  │                                                                                              │  ─────────╯
-│  │ No me  │  CPU session 07  [codex-1]  8.7% hourly                                                      │  ─────────╮
+│  │ No me  │  CPU session 07  [codex-1]  8.7% hourly (process tree)                                       │  ─────────╮
 │  │        │                                                                                              │           │
-│           │  CPU session 06  [codex-1]  8.6% hourly                                                      │           │
+│           │  CPU session 06  [codex-1]  8.6% hourly (process tree)                                       │           │
 │› · ACP p  │                                                                                              │  ─────────╯
-│  Idle  p  │  CPU session 05  [codex-1]  8.5% hourly                                                      │  ── ▁   ▄ ╮
+│  Idle  p  │  CPU session 05  [codex-1]  8.5% hourly (process tree)                                       │  ── ▁   ▄ ╮
 │  │ No me  │                                                                                              │           │
-│  │        │  CPU session 04  [codex-1]  8.4% hourly                                                      │  ─────────╯
+│  │        │  CPU session 04  [codex-1]  8.4% hourly (process tree)                                       │  ─────────╯
 │           │                                                                                              │  ── ▁   ▄ ╮
 │  · CPU s  │←/→ tabs · ↑/↓ sessions · Enter opens · Esc closes                                            │           │
 │  Idle  p  │  Close                                                                                       │           │

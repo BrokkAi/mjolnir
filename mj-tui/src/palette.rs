@@ -1283,6 +1283,7 @@ mod tests {
                 hourly_permille: hourly,
                 hourly_covered_secs: 3600,
                 online_cpus: 8,
+                scope: mj_core::cpu_usage::CpuSampleScope::ProcessTree,
             },
         }
     }

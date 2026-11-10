@@ -3953,6 +3953,22 @@ fn launches_on_every_target(
 }
 
 #[test]
+fn cpu_accounting_follows_container_placement_in_launch_config() {
+    use mj_core::cpu_usage::CpuAccountingMode;
+    let home = tempfile::tempdir().unwrap();
+    let profile = codex_login_profile(home.path(), "chatgpt");
+    for (target, launch) in launches_on_every_target(&profile) {
+        let expected = match target {
+            "localhost" => CpuAccountingMode::ProcessTree,
+            "container" => CpuAccountingMode::Container,
+            "sub-agent" => CpuAccountingMode::Container,
+            _ => unreachable!(),
+        };
+        assert_eq!(launch.cpu_accounting, expected, "{target}");
+    }
+}
+
+#[test]
 fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() {
     let home = tempfile::tempdir().unwrap();
     let codex = codex_login_profile(home.path(), "chatgpt");
@@ -4711,6 +4727,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         commands: RefCell::new(Vec::new()),
     };
     let launch = WorkerLaunchConfig {
+        cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
@@ -4851,6 +4868,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         borrowed_from: None,
     };
     let launch = WorkerLaunchConfig {
+        cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),
@@ -4960,6 +4978,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         launch: RefCell::new(None),
     };
     let launch = WorkerLaunchConfig {
+        cpu_accounting: Default::default(),
         no_github_credentials: false,
         oracle: false,
         initial_commands: Vec::new(),

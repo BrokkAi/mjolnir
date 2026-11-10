@@ -149,6 +149,12 @@ pub enum WorkerRunMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerLaunchConfig {
+    /// Chosen from the target locator, never from ambient container detection.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::cpu_usage::CpuAccountingMode::is_process_tree"
+    )]
+    pub cpu_accounting: crate::cpu_usage::CpuAccountingMode,
     /// Accepted session policy; do not seed or accept GitHub authentication.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_github_credentials: bool,
@@ -661,6 +667,42 @@ pub fn offers_review_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_cpu_wire_and_launch_default_to_process_tree() {
+        use crate::cpu_usage::{CpuAccountingMode, CpuSampleScope, SessionCpuUsage};
+        let legacy = serde_json::json!({
+            "recent_permille": 10, "hourly_permille": 20,
+            "hourly_covered_secs": 30, "online_cpus": 4
+        });
+        let usage: SessionCpuUsage = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(usage.scope, CpuSampleScope::ProcessTree);
+        let mut container = legacy;
+        container["scope"] = serde_json::json!("container");
+        assert_eq!(
+            serde_json::from_value::<SessionCpuUsage>(container)
+                .unwrap()
+                .scope,
+            CpuSampleScope::Container
+        );
+        let launch: WorkerLaunchConfig = serde_json::from_value(launch_json()).unwrap();
+        assert_eq!(launch.cpu_accounting, CpuAccountingMode::ProcessTree);
+        assert!(
+            serde_json::to_value(&launch)
+                .unwrap()
+                .get("cpu_accounting")
+                .is_none()
+        );
+        let mut launch = launch;
+        launch.cpu_accounting = CpuAccountingMode::Container;
+        let saved = serde_json::to_value(launch).unwrap();
+        assert_eq!(
+            serde_json::from_value::<WorkerLaunchConfig>(saved)
+                .unwrap()
+                .cpu_accounting,
+            CpuAccountingMode::Container
+        );
+    }
 
     fn launch_json() -> serde_json::Value {
         serde_json::json!({

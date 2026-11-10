@@ -4222,6 +4222,7 @@ async fn actor_publishes_worker_cpu_and_removes_it_on_retirement() {
     register_leased_relay_session();
     let root = tempfile::tempdir().unwrap();
     let usage = mj_core::cpu_usage::SessionCpuUsage {
+        scope: Default::default(),
         recent_permille: 230,
         hourly_permille: 100,
         hourly_covered_secs: 20,

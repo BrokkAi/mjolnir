@@ -1241,6 +1241,7 @@ pub(super) fn worker_launch_config_with_checkout(
     }
     Ok((
         WorkerLaunchConfig {
+            cpu_accounting: backend.cpu_accounting(),
             no_github_credentials: session.no_github_credentials,
             oracle: false,
             initial_commands: Vec::new(),

@@ -2627,6 +2627,15 @@ impl TargetTemplate {
 }
 
 impl TargetLocator {
+    /// Container placement includes borrowed workers: each can survive its owner moving.
+    pub fn cpu_accounting(&self) -> crate::cpu_usage::CpuAccountingMode {
+        if self.container_engine().is_some() {
+            crate::cpu_usage::CpuAccountingMode::Container
+        } else {
+            crate::cpu_usage::CpuAccountingMode::ProcessTree
+        }
+    }
+
     /// The target kind spelling shared with [`crate::config::TargetTemplate`].
     pub const fn kind_name(&self) -> &'static str {
         match self {
