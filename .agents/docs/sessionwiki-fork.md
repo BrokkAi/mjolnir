@@ -25,6 +25,14 @@ names remain `kimi-code`, `grok-build`, `muse` and `dsh`. Mjolnir retains its
 native import readers for resume fidelity; DSH search does not imply DSH
 import support. `MjolnirAdapter` still indexes Mjolnir's stored transcripts.
 
+Version 0.34.25 offers `.keep_configured_paths()` on Grok and Muse adapters;
+Mjolnir selects it to preserve legacy keys through symlinked profile homes.
+The standalone defaults retain 0.34.24's canonical keys. Kimi keys remain
+canonical, matching its previous import-backed adapter. The indexer uses
+`Adapter::path_key_depth` to reuse an existing physical session's key and ID
+across both discovery policies. Forward that hook from delegating adapters;
+keep key rewriting and identity adoption in the library.
+
 What the fork used to add, and where it is now:
 
 - The embedder hooks (`index::sync_with`, `Adapter::reconcile_scope`,
@@ -43,7 +51,7 @@ What the fork used to add, and where it is now:
   write, with a full pass. Standing aside from an older index too stranded it
   for good, since nothing else would ever bring it forward. Check
   `sessionwiki::index::SCHEMA_VERSION` on every bump. 0.30.1 to 0.33.1 kept
-  version 8; 0.34.0 to 0.34.24 keep version 9. SessionWiki itself refuses to
+  version 8; 0.34.0 to 0.34.25 keep version 9. SessionWiki itself refuses to
   rebuild a newer index from 0.34.1 on, so only a `sessionwiki` command older
   than that rebuilds Mjolnir's index back down.
 - **Full-pass marker.** `<data_dir>/sessionwiki-built` records the cache

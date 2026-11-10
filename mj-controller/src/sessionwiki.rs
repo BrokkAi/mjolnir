@@ -728,6 +728,10 @@ impl Adapter for SharedMjolnirAdapter {
         self.0.modified_at(key)
     }
 
+    fn path_key_depth(&self) -> Option<usize> {
+        self.0.path_key_depth()
+    }
+
     fn reconcile_scope(&self) -> Option<String> {
         self.0.reconcile_scope()
     }
@@ -1083,11 +1087,17 @@ fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
             HarnessKind::Kimi => {
                 adapters.push(Box::new(sessionwiki::adapters::KimiCode::in_home(home)));
             }
+            // Earlier mj Grok/Muse keys used the configured home spelling,
+            // including symlinks. Keep those IDs and reconciliation scopes.
             HarnessKind::Grok => {
-                adapters.push(Box::new(sessionwiki::adapters::GrokBuild::in_home(home)));
+                adapters.push(Box::new(
+                    sessionwiki::adapters::GrokBuild::in_home(home).keep_configured_paths(),
+                ));
             }
             HarnessKind::Muse => {
-                adapters.push(Box::new(sessionwiki::adapters::Muse::in_home(home)));
+                adapters.push(Box::new(
+                    sessionwiki::adapters::Muse::in_home(home).keep_configured_paths(),
+                ));
             }
             HarnessKind::Dsh => {
                 adapters.push(Box::new(sessionwiki::adapters::Dsh::in_home(home)));

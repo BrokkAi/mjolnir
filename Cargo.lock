@@ -980,9 +980,9 @@ dependencies = [
 
 [[package]]
 name = "brokk-sessionwiki"
-version = "0.34.24"
+version = "0.34.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2ae87e4a838b2e65c80416e563a6e32de00f4f6bbb6a8fac263b6790f6feb56"
+checksum = "bd795451e3a68781f9a3d1174675ab025382b73686f948f64b9afe09e7668670"
 dependencies = [
  "anyhow",
  "chrono",

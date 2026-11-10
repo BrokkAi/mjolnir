@@ -74,6 +74,34 @@ fn write_session(kind: HarnessKind, home: &Path, cwd: &Path) -> PathBuf {
     }
 }
 
+/// Seed the former mj adapter's key and searchable transcript in the real
+/// schema, so an adapter switch must update that row rather than duplicate it.
+fn seed_legacy_row(connection: &rusqlite::Connection, path: &Path, tool: &str) -> String {
+    let key = path.to_str().unwrap();
+    let id = sessionwiki::util::short_id(key);
+    tags::testing::index_row(connection, &id, tool);
+    connection
+        .execute(
+            "UPDATE files SET path = ?1 WHERE session_id = ?2",
+            [key, &id],
+        )
+        .unwrap();
+    let text = "remember legacy native history";
+    connection
+        .execute(
+            "INSERT INTO messages(session_id, role, text) VALUES (?1, 'user', ?2)",
+            [id.as_str(), text],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO msgs(rowid, text) VALUES (?1, ?2)",
+            rusqlite::params![connection.last_insert_rowid(), text],
+        )
+        .unwrap();
+    id
+}
+
 #[test]
 fn muse_native_search_and_import_agree_on_the_xdg_root() {
     let native_config = std::env::var_os("XDG_CONFIG_HOME")
@@ -82,15 +110,20 @@ fn muse_native_search_and_import_agree_on_the_xdg_root() {
         .unwrap_or_else(|| mj_core::path_input::user_home().unwrap().join(".config"))
         .join("muse");
     let import_root = mj_checkpoint::native::muse_sessions_root(&native_config).unwrap();
-    let import_root =
-        sessionwiki::util::canonicalize_as_recorded(&import_root).unwrap_or(import_root);
+    let index_root = sessionwiki::adapters::Muse::in_home(native_config)
+        .keep_configured_paths()
+        .root()
+        .unwrap();
+    let canonical =
+        |path: PathBuf| sessionwiki::util::canonicalize_as_recorded(&path).unwrap_or(path);
     assert_eq!(
-        sessionwiki::adapters::Muse::in_home(native_config).root(),
-        Some(import_root),
+        canonical(index_root),
+        canonical(import_root),
         "native search and import must agree on Muse's XDG data directory on every OS"
     );
 }
 
+// Hard-won: cff4a06e6: canonical Grok/Muse roots changed existing keys beneath symlinked homes.
 #[test]
 fn native_profiles_search_and_reconcile_only_their_own_home() {
     let _held = tags::testing::lock();
@@ -109,13 +142,22 @@ fn native_profiles_search_and_reconcile_only_their_own_home() {
         let mut paths = Vec::new();
         for name in ["first", "second", "disabled"] {
             let home = root.join(tool).join(name);
+            #[cfg(unix)]
+            let home = if matches!(kind, HarnessKind::Grok | HarnessKind::Muse) && name == "first" {
+                fs::create_dir_all(&home).unwrap();
+                let linked = root.join(tool).join("first-link");
+                std::os::unix::fs::symlink(&home, &linked).unwrap();
+                linked
+            } else {
+                home
+            };
             let cwd = home.join("workspace");
             fs::create_dir_all(&cwd).unwrap();
             let path = write_session(kind, &home, &cwd);
-            // Kimi/Grok retain canonical directory keys, including Windows'
-            // extended prefix. File-backed Muse/DSH use recorded path spelling.
+            // Kimi retains canonical directory keys, including Windows'
+            // extended prefix. Grok/Muse retain the configured home spelling.
             paths.push(match kind {
-                HarnessKind::Kimi | HarnessKind::Grok => path.canonicalize().unwrap(),
+                HarnessKind::Kimi => path.canonicalize().unwrap(),
                 _ => path,
             });
             let mut profile = HarnessProfile::new(kind, home);
@@ -130,6 +172,8 @@ fn native_profiles_search_and_reconcile_only_their_own_home() {
             .filter(|adapter| adapter.name() == tool)
             .collect();
         assert_eq!(adapters.len(), 2, "only distinct enabled {tool} homes");
+        let legacy_id = matches!(kind, HarnessKind::Grok | HarnessKind::Muse)
+            .then(|| seed_legacy_row(&connection, &paths[0], tool));
         sessionwiki::index::sync_with(&mut connection, &adapters, None).unwrap();
 
         let hits =
@@ -141,6 +185,13 @@ fn native_profiles_search_and_reconcile_only_their_own_home() {
             .collect();
         assert_eq!(indexed, expected, "stable path keys for {tool}");
         assert!(hits.iter().all(|hit| !hit.row.archived));
+        if let Some(id) = &legacy_id {
+            assert!(
+                hits.iter()
+                    .any(|hit| hit.row.session_id.as_str() == id.as_str()),
+                "the {tool} row indexed before the adapter switch keeps its ID"
+            );
+        }
         for hit in &hits {
             let path = Path::new(&hit.row.path);
             if kind != HarnessKind::Dsh {
@@ -184,6 +235,32 @@ fn native_profiles_search_and_reconcile_only_their_own_home() {
         )
         .unwrap();
         assert_eq!(rows.iter().filter(|row| row.tool == tool).count(), 2);
+
+        // A standalone writer uses canonical discovery, but the shared index
+        // must retain the key and ID established by the former mj adapter.
+        if let Some(id) = &legacy_id {
+            let home = &config.profiles["first"].home;
+            let canonical: Box<dyn Adapter> = match kind {
+                HarnessKind::Grok => Box::new(sessionwiki::adapters::GrokBuild::in_home(home)),
+                HarnessKind::Muse => Box::new(sessionwiki::adapters::Muse::in_home(home)),
+                _ => unreachable!(),
+            };
+            sessionwiki::index::sync_with(&mut connection, &[canonical], None).unwrap();
+            let hits =
+                sessionwiki::index::search(&connection, "remember", 10, Some(tool), None).unwrap();
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| hit.row.path.as_str())
+                    .collect::<BTreeSet<_>>(),
+                expected,
+                "alternate writers must reuse existing {tool} keys"
+            );
+            assert!(hits.iter().all(|hit| !hit.row.archived));
+            assert!(
+                hits.iter()
+                    .any(|hit| hit.row.session_id.as_str() == id.as_str())
+            );
+        }
 
         if paths[0].is_dir() {
             fs::remove_dir_all(&paths[0]).unwrap();

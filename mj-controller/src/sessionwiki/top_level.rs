@@ -172,6 +172,10 @@ impl Adapter for PreparedFiles {
     fn modified_at(&self, key: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         self.adapter.modified_at(key)
     }
+
+    fn path_key_depth(&self) -> Option<usize> {
+        self.adapter.path_key_depth()
+    }
 }
 
 /// Discovery and removal consume the same classification snapshot. An
