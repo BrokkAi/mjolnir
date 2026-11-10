@@ -16,8 +16,12 @@ mj ec2 destroy builder
 ```
 
 `create` launches the current official Ubuntu 24.04 image for the instance's
-CPU architecture, installs rootless Podman, waits for EC2 status checks and
-cloud-init, then adds an SSH machine and a Podman target to your configuration.
+CPU architecture, installs rootless Podman, and waits for EC2 status checks and
+cloud-init. It adds the SSH machine and Podman target to your live configuration,
+then preloads mj's dev image through the same image refresher used by the daemon.
+A session launched while that preload is running waits on mj's shared image gate
+instead of starting another download. If preloading fails, creation keeps the
+host registered and prints a warning; the daemon can retry the download.
 Raw SSH sessions are disabled for this host; SSH is still used to manage Podman.
 The VM stays running across session suspension and destruction. Its on-demand
 compute, storage, and network charges continue until you stop or destroy it.
@@ -29,7 +33,18 @@ gateway; use `--subnet` for another public subnet in that zone. The command
 creates a tagged Elastic IP (stable across stop/start), a dedicated SSH key,
 and a security group allowing SSH only from the
 controller's discovered public IPv4, or the explicit `--ssh-cidr`. It requires
-IMDSv2 and uses an encrypted 200 GiB gp3 root disk; `--disk-gib` changes its size.
+IMDSv2 and uses an encrypted 200 GiB gp3 root disk. `--disk-gib` sets its size,
+`--disk-mbps` sets throughput in MiB/s, and `--disk-iops` sets provisioned IOPS.
+Omitted performance options use AWS's gp3 defaults (125 MiB/s and 3,000 IOPS).
+AWS validates the requested size/performance combination against its
+[gp3 limits](https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html).
+For example:
+
+```console
+mj ec2 create c8id.16xlarge --zone us-east-1a --name builder \
+  --disk-gib 512 --disk-mbps 500 --disk-iops 12000
+```
+
 The image supplies the root filesystem (ext4); it is separate from local SSDs.
 
 Instances with local NVMe SSDs, such as C8id or M8id, automatically use those

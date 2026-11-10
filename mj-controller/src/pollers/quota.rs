@@ -370,19 +370,7 @@ pub(super) fn refresh_one_host(
         if !running {
             return Ok(None);
         }
-        // A launch that needs this image waits on the same lock, so it
-        // never starts a second download of what this tick is fetching.
-        let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
-        let held = crate::image_pull_gate::hold_image_pull(
-            &lock,
-            || executor.cancellation_requested(),
-            || {},
-        );
-        held.and_then(|guard| {
-            let outcome = refresh_host_image(&refresh, executor, report);
-            drop(guard);
-            outcome.map(Some)
-        })
+        refresh_host_image(&refresh, executor, report).map(Some)
     });
     let error = match outcome {
         Ok(Some(_)) => None,
@@ -509,7 +497,7 @@ pub(super) async fn refresh_host_after_startup(
 
 /// What one host's refresh of one image did.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ImageRefreshOutcome {
+pub enum ImageRefreshOutcome {
     /// The host already had the image and this target only wants it present,
     /// so nothing was downloaded.
     Present,
@@ -528,12 +516,19 @@ pub(crate) enum ImageRefreshOutcome {
 ///
 /// `report` is told when a download actually starts and when one leaves the
 /// host with a new image, so the user hears about the wait they are in rather
-/// than about every hourly check.
-pub(crate) fn refresh_host_image(
+/// than about every hourly check. The same gate covers background refreshes,
+/// explicit preloads, and session launches, including other mj processes.
+pub fn refresh_host_image(
     refresh: &ImageRefresh,
     executor: &impl CommandExecutor,
     report: &dyn Fn(ImageRefreshReport),
 ) -> Result<ImageRefreshOutcome> {
+    let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
+    let _guard = crate::image_pull_gate::hold_image_pull(
+        &lock,
+        || executor.cancellation_requested(),
+        || {},
+    )?;
     let host = refresh.host.label();
     let cached = image_id(&refresh.image_id, executor);
     if refresh.when == RefreshWhen::WhenAbsent && cached.is_some() {

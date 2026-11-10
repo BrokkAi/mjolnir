@@ -70,6 +70,12 @@ struct CreateArgs {
     /// Encrypted gp3 root disk size in GiB; separate from local SSDs.
     #[arg(long, default_value_t = 200)]
     disk_gib: u32,
+    /// EBS gp3 throughput in MiB/s. Omitted uses the AWS default.
+    #[arg(long)]
+    disk_mbps: Option<u32>,
+    /// EBS gp3 provisioned IOPS. Omitted uses the AWS default.
+    #[arg(long)]
+    disk_iops: Option<u32>,
     /// Require local NVMe storage (used automatically when available).
     /// ZFS/lz4 holds Podman and mbx; stop/start clears this storage.
     #[arg(long)]
@@ -447,11 +453,25 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             .context("AWS returned no security group ID")?;
         cloud.ec2("authorize-security-group-ingress", json!({"GroupId":group_id,"IpPermissions":[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":cidr}]}]}))?;
         let bootstrap = bootstrap(local_nvme);
+        let mut ebs = json!({
+            "VolumeSize": args.disk_gib,
+            "VolumeType": "gp3",
+            "Encrypted": true,
+            "DeleteOnTermination": true,
+        });
+        // AWS owns gp3 limits and the size/IOPS/throughput ratios, including
+        // regional differences; omitted performance settings use its defaults.
+        if let Some(mbps) = args.disk_mbps {
+            ebs["Throughput"] = mbps.into();
+        }
+        if let Some(iops) = args.disk_iops {
+            ebs["Iops"] = iops.into();
+        }
         let launched = cloud.ec2("run-instances", json!({
             "ImageId":ami,"InstanceType":args.instance_type,"MinCount":1,"MaxCount":1,
             "KeyName":key_name,"ClientToken":record.operation,"Placement":{"AvailabilityZone":args.zone},
             "NetworkInterfaces":[{"DeviceIndex":0,"SubnetId":subnet_id,"Groups":[group_id],"AssociatePublicIpAddress":true,"DeleteOnTermination":true}],
-            "BlockDeviceMappings":[{"DeviceName":root_device,"Ebs":{"VolumeSize":args.disk_gib,"VolumeType":"gp3","Encrypted":true,"DeleteOnTermination":true}}],
+            "BlockDeviceMappings":[{"DeviceName":root_device,"Ebs":ebs}],
             "MetadataOptions":{"HttpTokens":"required","HttpEndpoint":"enabled"},
             "UserData":base64::engine::general_purpose::STANDARD.encode(bootstrap),
             "TagSpecifications":[tags(&record,"instance"),tags(&record,"volume")]
@@ -529,6 +549,7 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
                 &mj_controller::targets::ProcessExecutor,
             )?;
         }
+        let image = mj_core::config::DEFAULT_CONTAINER_IMAGE;
         Config::update(|config| {
             ensure!(
                 !config.machines.contains_key(&record.target)
@@ -542,9 +563,9 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             config.targets.insert(
                 record.target.clone(),
                 TargetTemplate::SshPodman {
-                    ssh,
+                    ssh: ssh.clone(),
                     container: ContainerTemplate {
-                        image: mj_core::config::DEFAULT_CONTAINER_IMAGE.into(),
+                        image: image.into(),
                         pull_policy: Default::default(),
                         platform: Some(platform.into()),
                         cpus: None,
@@ -580,6 +601,33 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             config.disabled_targets.insert(raw);
             Ok(())
         })?;
+        // Provisioning is complete. Image warming owns only its image gate,
+        // so destroying the registered host never waits for this download.
+        drop(_lock);
+        eprintln!(
+            "Registered Podman target {}. Preloading {image}.",
+            record.target
+        );
+        let preload = mj_core::targets::image_refresh(
+            mj_core::targets::ImageHost::SshPodman((&ssh).into()),
+            image,
+            Some(platform),
+            mj_core::config::ImagePullPolicy::Missing,
+        )
+        .context("prepare EC2 dev image preload")
+        .and_then(|refresh| {
+            mj_controller::pollers::refresh_host_image(
+                &refresh,
+                &mj_controller::targets::ProcessExecutor,
+                &|_| {},
+            )
+            .map(|_| ())
+        });
+        if let Err(error) = preload {
+            eprintln!(
+                "Warning: dev image predownload failed: {error:#}\nThe host is registered; the background image refresher can retry."
+            );
+        }
         Ok(
             json!({"instance_id":id,"target":record.target,"region":record.region,"zone":args.zone,"instance_type":args.instance_type,"public_ip":host,"zfs_cache":args.zfs_cache,"operation":record.operation}),
         )
@@ -953,6 +1001,7 @@ sudo -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 podman info --format '{{{{.Host.Se
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     // A subprocess fixture checks the AWS CLI's actual argv/JSON boundary and
     // failure ordering. It never reads real credentials or contacts AWS.
@@ -1002,6 +1051,13 @@ elif op == 'run-instances':
     assert request['MetadataOptions']['HttpTokens'] == 'required'
     assert request['BlockDeviceMappings'][0]['Ebs']['DeleteOnTermination'] is True
     assert request['BlockDeviceMappings'][0]['Ebs']['Encrypted'] is True
+    ebs = request['BlockDeviceMappings'][0]['Ebs']
+    if (root/'ebs-settings').exists():
+        expected = json.loads((root/'ebs-settings').read_text())
+        assert {key:ebs[key] for key in expected} == expected
+    else:
+        assert ebs['VolumeSize'] == 200
+        assert 'Throughput' not in ebs and 'Iops' not in ebs
     import base64
     bootstrap = base64.b64decode(request['UserData']).decode()
     if (root/'nvme').exists():
@@ -1043,7 +1099,43 @@ elif op not in ('authorize-security-group-ingress','wait instance-status-ok','wa
 print(json.dumps(response))
 "#;
 
-    fn fixture_child(name: &str) -> bool {
+    const PODMAN_FIXTURE: &str = r#"#!/usr/bin/python3
+import fcntl, json, os, pathlib, sys
+root = pathlib.Path(__file__).parent
+args = sys.argv[1:]
+if args == ['info', '--format', '{{.Host.Security.Rootless}}']:
+    print('true')
+elif args[:2] == ['image', 'inspect']:
+    if not (root/'image-ready').exists(): sys.exit(125)
+    print('sha256:downloaded-image')
+elif args == ['image', 'prune', '-f']:
+    pass
+elif args and args[0] == 'pull':
+    config = pathlib.Path(os.environ['MJ_CONFIG_DIR'])/'config.toml'
+    assert config.exists() and 'builder' in config.read_text(), 'host must be registered before preloading'
+    # Hard-won: c66e5f4: a slow preload held the operation lock and blocked destroy.
+    with (config.parent/'ec2'/'locks'/'builder.lock').open('a') as operation:
+        fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    locks = list((pathlib.Path(os.environ['MJ_DATA_DIR'])/'image-pulls').glob('*.lock'))
+    assert len(locks) == 1, 'preload must use the shared mj image gate'
+    with locks[0].open('a') as gate:
+        try:
+            fcntl.flock(gate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            sys.exit('preload did not hold the cross-process image gate')
+    (root/'image-pull-args').write_text(json.dumps(args))
+    if (root/'fail-image-pull').exists():
+        sys.stderr.write('download progress\n' * 5000 + 'registry refused the image download\n')
+        sys.exit(1)
+    (root/'image-ready').write_text('ready')
+    print('sha256:downloaded-image')
+else:
+    sys.exit('unexpected Podman command: '+repr(args))
+"#;
+
+    fn fixture_child(name: &str, expected_warning: Option<&str>) -> bool {
         if std::env::var_os("MJ_EC2_FIXTURE_CHILD").is_some() {
             return false;
         }
@@ -1055,8 +1147,10 @@ print(json.dumps(response))
             ("aws", AWS_FIXTURE),
             (
                 "ssh",
-                "#!/bin/sh\ncase \"$*\" in *MJOLNIR-SSH-SESSION-STARTED*) printf 'MJOLNIR-SSH-SESSION-STARTED\\n';; esac\nprintf 'status: done\\ntrue\\n'\n",
+                "#!/bin/sh\nfor remote_command do :; done\nexec sh -c \"$remote_command\"\n",
             ),
+            ("podman", PODMAN_FIXTURE),
+            ("cloud-init", "#!/bin/sh\nprintf 'status: done\\n'\n"),
         ] {
             let path = bin.join(name);
             fs::write(&path, body).unwrap();
@@ -1073,7 +1167,14 @@ print(json.dumps(response))
             .env("MJ_INSTANCE", "ec2-fixture")
             .env("MJ_SSH_CONTROL_MASTER", "0")
             .env("PATH", std::env::join_paths(paths).unwrap());
-        checked(&mut command, &[]).unwrap();
+        let output = checked(&mut command, &[]).unwrap();
+        if let Some(warning) = expected_warning {
+            assert!(String::from_utf8_lossy(&output.stderr).contains(warning));
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("registry refused the image download")
+            );
+        }
         true
     }
 
@@ -1086,6 +1187,8 @@ print(json.dumps(response))
             subnet: None,
             ssh_cidr: Some("192.0.2.3/32".into()),
             disk_gib: 200,
+            disk_mbps: None,
+            disk_iops: None,
             zfs_cache: false,
             json: true,
         }
@@ -1095,13 +1198,59 @@ print(json.dumps(response))
     fn aws_cli_contract_preserves_configuration_and_keys_until_termination_succeeds() {
         if fixture_child(
             "ec2::tests::aws_cli_contract_preserves_configuration_and_keys_until_termination_succeeds",
+            None,
         ) {
             return;
         }
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         let bin = fixture.join("bin");
         let root = config_dir().join("ec2");
-        create(create_args(), &root).unwrap();
+        fs::write(
+            bin.join("ebs-settings"),
+            r#"{"VolumeSize":512,"Throughput":500,"Iops":12000}"#,
+        )
+        .unwrap();
+        let cli = crate::Cli::try_parse_from([
+            "mj",
+            "--instance",
+            "ec2-fixture",
+            "ec2",
+            "create",
+            "c8id.16xlarge",
+            "--zone",
+            "us-east-1a",
+            "--name",
+            "builder",
+            "--ssh-cidr",
+            "192.0.2.3/32",
+            "--disk-gib",
+            "512",
+            "--disk-mbps",
+            "500",
+            "--disk-iops",
+            "12000",
+            "--json",
+        ])
+        .unwrap();
+        let Some(crate::Command::Ec2(Ec2Args {
+            command: Ec2Command::Create(args),
+        })) = cli.command
+        else {
+            panic!("expected EC2 create command");
+        };
+        create(args, &root).unwrap();
+        assert!(bin.join("image-ready").exists());
+        let pulled: Vec<String> =
+            serde_json::from_slice(&fs::read(bin.join("image-pull-args")).unwrap()).unwrap();
+        assert_eq!(
+            pulled,
+            [
+                "pull",
+                "--platform=linux/amd64",
+                mj_core::config::DEFAULT_CONTAINER_IMAGE
+            ]
+        );
+
         let record = records(&root).unwrap().pop().unwrap();
         // Hard-won: #1481: a terminated VM with the same target blocked teardown.
         fs::write(bin.join("historical"), "").unwrap();
@@ -1197,6 +1346,7 @@ print(json.dumps(response))
     fn refused_launch_remains_discoverable_and_can_be_cleaned_without_an_instance() {
         if fixture_child(
             "ec2::tests::refused_launch_remains_discoverable_and_can_be_cleaned_without_an_instance",
+            None,
         ) {
             return;
         }
@@ -1225,5 +1375,43 @@ print(json.dumps(response))
                 .contains("terminate-instances")
         );
         assert!(!bin.join("key.json").exists() && !bin.join("group.json").exists());
+    }
+
+    // Hard-won: 0703826: an optional image-pull failure stranded a ready, billable VM.
+    #[test]
+    fn image_download_failure_warns_and_registers_the_usable_host() {
+        if fixture_child(
+            "ec2::tests::image_download_failure_warns_and_registers_the_usable_host",
+            Some("Warning: dev image predownload failed"),
+        ) {
+            return;
+        }
+        let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        let bin = fixture.join("bin");
+        let root = config_dir().join("ec2");
+        fs::write(bin.join("fail-image-pull"), "").unwrap();
+        create(create_args(), &root).unwrap();
+        assert!(!bin.join("image-ready").exists());
+        let record = records(&root).unwrap().pop().unwrap();
+        assert_eq!(record.instance_id.as_deref(), Some("i-test"));
+        assert!(record.directory(&root).unwrap().join("id_ed25519").exists());
+        let config = Config::load().unwrap();
+        assert!(config.machines.contains_key("builder"));
+        assert!(matches!(
+            config.targets.get("builder"),
+            Some(TargetTemplate::SshPodman { .. })
+        ));
+        destroy(
+            DestroyArgs {
+                host: record.operation,
+                aws: AwsArgs::default(),
+            },
+            &root,
+        )
+        .unwrap();
+        assert!(records(&root).unwrap().is_empty());
+        let instance: Value =
+            serde_json::from_slice(&fs::read(bin.join("instance.json")).unwrap()).unwrap();
+        assert_eq!(instance["State"]["Name"], "terminated");
     }
 }
