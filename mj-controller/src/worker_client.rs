@@ -18,7 +18,7 @@ use mj_core::credentials::{
     CredentialSnapshot, CredentialSyncAction, CredentialSyncHandle, CredentialSyncOutcome,
     CredentialSyncResult, CredentialSyncTarget, SYNC_INTERVAL, StepFailure, SyncAction, SyncStep,
     SyncTrigger, enqueue, profiles_with_targets, read_credential_file, reconcile,
-    validate_credential_payload, write_credential_file,
+    validate_credential_payload,
 };
 use mj_core::elicitation::ElicitationResponse;
 use mj_core::relay::{

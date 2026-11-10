@@ -1452,6 +1452,9 @@ import base64, hashlib, json, os, sys
 protocol, session, fingerprint, freshness, skills, received = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5], sys.argv[6]
 # Optional: the first connection ever made fails, to play a flaky worker.
 fail_first = sys.argv[7] if len(sys.argv) > 7 else ""
+canonical_path = sys.argv[8] if len(sys.argv) > 8 else ""
+new_canonical_path = sys.argv[9] if len(sys.argv) > 9 else ""
+worker_refresh_path = sys.argv[10] if len(sys.argv) > 10 else ""
 for line in sys.stdin:
     req = json.loads(line)
     method = req["request"]["method"]
@@ -1461,6 +1464,13 @@ for line in sys.stdin:
             sys.exit(1)
         payload = {"type": "hello", "data": {"negotiated": protocol, "relay_version": "credential-fixture", "session_id": session}}
     elif method == "credential_state":
+        if os.path.exists(received):
+            data = open(received, "rb").read()
+            login = json.loads(data)
+            if isinstance(login, dict) and login.get("last_refresh"):
+                import datetime
+                fingerprint = hashlib.sha256(data).hexdigest()
+                freshness = int(datetime.datetime.fromisoformat(login["last_refresh"].replace("Z", "+00:00")).timestamp() * 1000)
         payload = {"type": "credential_state", "data": {"present": True, "fingerprint": fingerprint, "freshness_epoch_ms": freshness}}
     elif method == "skills_state":
         payload = {"type": "skills_state", "data": {"present": True, "fingerprint": skills}}
@@ -1478,6 +1488,9 @@ for line in sys.stdin:
         payload = {"type": "aws_credentials_scope", "data": {"scope": scope, "profile": profile}}
     elif method == "read_credentials":
         payload = {"type": "credentials", "data": {"data": base64.b64encode(open(received, "rb").read()).decode()}}
+        if canonical_path and new_canonical_path:
+            import shutil
+            shutil.copyfile(new_canonical_path, canonical_path)
     elif method == "remove_aws_credentials":
         import pathlib
         pathlib.Path(received).unlink(missing_ok=True)
@@ -1485,6 +1498,9 @@ for line in sys.stdin:
         payload = {"type": "credential_state", "data": {"present": False, "fingerprint": "", "freshness_epoch_ms": None}}
     elif method in ("install_credentials", "install_aws_credentials"):
         data = base64.b64decode(req["request"]["params"]["data"])
+        if method == "install_credentials" and worker_refresh_path:
+            data = open(worker_refresh_path, "rb").read()
+            worker_refresh_path = ""
         with open(received, "wb") as out:
             out.write(data)
         if method == "install_aws_credentials":
@@ -1492,7 +1508,14 @@ for line in sys.stdin:
             scope = req["request"]["params"].get("scope")
             if scope:
                 json.dump(scope, open(received + ".scope", "w"))
-        payload = {"type": "credential_state", "data": {"present": True, "fingerprint": hashlib.sha256(data).hexdigest(), "freshness_epoch_ms": None}}
+        installed_freshness = None
+        if method == "install_credentials":
+            import datetime
+            login = json.loads(data)
+            refreshed = login.get("last_refresh")
+            installed_freshness = int(datetime.datetime.fromisoformat(refreshed.replace("Z", "+00:00")).timestamp() * 1000) if refreshed else None
+            fingerprint, freshness = hashlib.sha256(data).hexdigest(), installed_freshness
+        payload = {"type": "credential_state", "data": {"present": True, "fingerprint": hashlib.sha256(data).hexdigest(), "freshness_epoch_ms": installed_freshness}}
     else:
         break
     print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
@@ -1624,6 +1647,7 @@ async fn aws_credentials_refresh_only_the_isolated_sessions_of_a_shared_profile(
         assert_eq!(
             outcomes,
             [CredentialSyncOutcome {
+                unchanged_login: None,
                 session_id: "remote".into(),
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
                 step_failures: Vec::new(),
@@ -2776,6 +2800,89 @@ async fn a_clean_later_pass_replaces_the_failure_an_earlier_one_reported() {
     assert!(flaky.step_failures.is_empty());
     let puller = outcomes.iter().find(|o| o.session_id == "puller").unwrap();
     assert_eq!(puller.outcome, Ok(vec![CredentialSyncAction::Pulled]));
+}
+
+#[cfg(unix)]
+// Hard-won: #1485: a credential read could overwrite a host login refreshed while the relay request was in flight.
+#[tokio::test]
+async fn credential_sync_reconciles_newer_destinations_before_reporting_auth_recovery() {
+    for push_race in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let old = "2026-09-25T20:00:00.000Z";
+        let worker = "2026-09-25T21:00:00.000Z";
+        let latest = "2026-09-25T22:00:00.000Z";
+        let canonical = home.path().join("auth.json");
+        let read_from = scratch.path().join("worker");
+        let latest_file = scratch.path().join("latest");
+        std::fs::write(
+            &canonical,
+            codex_login(if push_race { worker } else { old }),
+        )
+        .unwrap();
+        std::fs::write(
+            &read_from,
+            codex_login(if push_race { old } else { worker }),
+        )
+        .unwrap();
+        std::fs::write(&latest_file, codex_login(latest)).unwrap();
+        let mut target = codex_sync_target(
+            home.path(),
+            "login-race",
+            if push_race { old } else { worker },
+            &read_from,
+        );
+        target.spec.args.extend([
+            String::new(),
+            if push_race {
+                String::new()
+            } else {
+                canonical.to_string_lossy().into_owned()
+            },
+            if push_race {
+                String::new()
+            } else {
+                latest_file.to_string_lossy().into_owned()
+            },
+            if push_race {
+                latest_file.to_string_lossy().into_owned()
+            } else {
+                String::new()
+            },
+        ]);
+
+        let outcomes = reconcile_profile(&[target], Some("login-race")).await;
+
+        assert_eq!(std::fs::read(&canonical).unwrap(), codex_login(latest));
+        assert_eq!(std::fs::read(&read_from).unwrap(), codex_login(latest));
+        let outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.session_id == "login-race")
+            .unwrap();
+        let expected = if push_race {
+            CredentialSyncAction::Pulled
+        } else {
+            CredentialSyncAction::Pushed
+        };
+        assert_eq!(outcome.outcome, Ok(vec![expected]), "{outcomes:?}");
+        let result = CredentialSyncResult {
+            profile_id: "codex".into(),
+            trigger: Some(mj_core::credentials::CredentialSyncCause {
+                session_id: "login-race".into(),
+                reason: mj_core::credentials::CredentialSyncReason::AuthenticationFailure,
+            }),
+            failure: None,
+            partial: false,
+            outcomes,
+        };
+        let profile = mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            home.path().to_owned(),
+        );
+        let mut rejected = mj_core::credentials::RejectedLogins::default();
+        rejected.observe(&result, &profile);
+        assert_eq!(rejected.refusal("codex"), None);
+    }
 }
 
 #[cfg(unix)]
@@ -4359,6 +4466,7 @@ fn a_failed_login_step_keeps_the_aws_steps_actions_in_the_outcome() {
     let mut outcomes = BTreeMap::from([(
         "session".to_owned(),
         CredentialSyncOutcome {
+            unchanged_login: None,
             session_id: "session".into(),
             outcome: Err("worker proxy disconnected".into()),
             step_failures: Vec::new(),
@@ -4528,6 +4636,10 @@ async fn a_triggered_sync_reports_the_session_it_reached_with_nothing_to_change(
     assert_eq!(
         triggered,
         [CredentialSyncOutcome {
+            unchanged_login: Some(CredentialSnapshot::of(
+                mj_core::config::HarnessKind::Codex,
+                &codex_login("2026-09-25T20:00:00.000Z"),
+            )),
             session_id: SESSION_ID.into(),
             outcome: Ok(Vec::new()),
             step_failures: Vec::new(),
@@ -4567,6 +4679,7 @@ async fn a_new_login_is_pushed_to_every_live_session_of_its_profile() {
         sessions
             .iter()
             .map(|session| CredentialSyncOutcome {
+                unchanged_login: None,
                 session_id: (*session).into(),
                 outcome: Ok(vec![CredentialSyncAction::Pushed]),
                 step_failures: Vec::new(),

@@ -325,6 +325,26 @@ fn install_request(bytes: &[u8]) -> RelayRequest {
     }
 }
 
+async fn credential_request(
+    endpoint: &CredentialEndpoint,
+    request: RelayRequest,
+) -> anyhow::Result<RelayResponsePayload> {
+    let response = unix::credential_response(
+        RelayRequestEnvelope {
+            request_id: "credential-request-test".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request,
+        },
+        &Ok(endpoint.clone()),
+        &endpoint.home,
+    )
+    .await;
+    match response.body {
+        RelayResponseBody::Ok { payload } => Ok(payload),
+        RelayResponseBody::Error { error } => anyhow::bail!("{}", error.message),
+    }
+}
+
 fn skills_install_request(bytes: &[u8]) -> RelayRequest {
     use base64::Engine as _;
     RelayRequest::InstallSkills {
@@ -1324,16 +1344,17 @@ async fn incompatible_protocol_cannot_read_or_mutate_credentials() {
     server_task.await.unwrap().unwrap();
 }
 
-#[test]
-fn installed_credentials_are_owner_only() {
+#[tokio::test]
+async fn installed_credentials_are_owner_only() {
     use std::os::unix::fs::PermissionsExt;
 
     let home = tempfile::tempdir().unwrap();
     let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
-    unix::apply_credential_request(
+    credential_request(
         &endpoint,
-        &install_request(&codex_credentials("2026-08-05T02:51:00Z")),
+        install_request(&codex_credentials("2026-08-05T02:51:00Z")),
     )
+    .await
     .unwrap();
 
     let mode = std::fs::metadata(home.path().join("auth.json"))
@@ -1343,8 +1364,8 @@ fn installed_credentials_are_owner_only() {
     assert_eq!(mode & 0o777, 0o600);
 }
 
-#[test]
-fn installing_kimi_credentials_uses_its_fixed_nested_marker() {
+#[tokio::test]
+async fn installing_kimi_credentials_uses_its_fixed_nested_marker() {
     // A configuration persisted before the controller stated the marker, and
     // one stating it the way the controller does now: both install where Kimi
     // reads its login.
@@ -1364,7 +1385,9 @@ fn installing_kimi_credentials_uses_its_fixed_nested_marker() {
         }))
         .unwrap();
 
-        unix::apply_credential_request(&endpoint, &install_request(&bytes)).unwrap();
+        credential_request(&endpoint, install_request(&bytes))
+            .await
+            .unwrap();
 
         assert_eq!(
             std::fs::read(home.path().join("credentials/kimi-code.json")).unwrap(),
@@ -1375,8 +1398,41 @@ fn installing_kimi_credentials_uses_its_fixed_nested_marker() {
     }
 }
 
-#[test]
-fn absent_reads_and_invalid_installs_are_refused() {
+// Hard-won: #1485: freshness ordering rejected authoritative OpenCode updates and empty exports.
+#[tokio::test]
+async fn opencode_credential_exports_remain_authoritative_across_updates_and_deletion() {
+    let home = tempfile::tempdir().unwrap();
+    let mut config = launch_config(&home.path().to_string_lossy());
+    config.harness = HarnessKind::OpenCode;
+    let endpoint = credential_endpoint(&config).unwrap();
+
+    for bytes in [
+        br#"[{"provider":"openai","type":"oauth","access":"old"}]"#.as_slice(),
+        br#"[{"provider":"openai","type":"oauth","access":"new"}]"#.as_slice(),
+        b"[]".as_slice(),
+    ] {
+        let payload = credential_request(&endpoint, install_request(bytes))
+            .await
+            .unwrap();
+        let RelayResponsePayload::CredentialState {
+            present,
+            fingerprint,
+            ..
+        } = payload
+        else {
+            panic!("unexpected OpenCode credential response: {payload:?}");
+        };
+        assert!(present);
+        assert_eq!(
+            fingerprint,
+            mj_core::credentials::credential_fingerprint(bytes)
+        );
+        assert_eq!(std::fs::read(&endpoint.marker).unwrap(), bytes);
+    }
+}
+
+#[tokio::test]
+async fn absent_reads_and_invalid_installs_are_refused() {
     let home = tempfile::tempdir().unwrap();
     let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
 
@@ -1384,28 +1440,31 @@ fn absent_reads_and_invalid_installs_are_refused() {
         unix::apply_credential_request(&endpoint, &RelayRequest::ReadCredentials).unwrap_err();
     assert!(format!("{error:#}").contains("no"), "{error:#}");
 
-    let error =
-        unix::apply_credential_request(&endpoint, &install_request(b"not json")).unwrap_err();
+    let error = credential_request(&endpoint, install_request(b"not json"))
+        .await
+        .unwrap_err();
     assert!(format!("{error:#}").contains("JSON"), "{error:#}");
 
     let oversized = vec![b'a'; mj_core::credentials::MAX_CREDENTIAL_BYTES + 1];
-    let error =
-        unix::apply_credential_request(&endpoint, &install_request(&oversized)).unwrap_err();
+    let error = credential_request(&endpoint, install_request(&oversized))
+        .await
+        .unwrap_err();
     assert!(format!("{error:#}").contains("limit"), "{error:#}");
 }
 
-#[test]
-fn installing_over_a_symlink_leaves_the_link_target_untouched() {
+#[tokio::test]
+async fn installing_over_a_symlink_leaves_the_link_target_untouched() {
     let home = tempfile::tempdir().unwrap();
     let elsewhere = home.path().join("stolen.json");
     std::fs::write(&elsewhere, b"{}").unwrap();
     std::os::unix::fs::symlink(&elsewhere, home.path().join("auth.json")).unwrap();
     let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
 
-    let error = unix::apply_credential_request(
+    let error = credential_request(
         &endpoint,
-        &install_request(&codex_credentials("2026-08-05T02:51:00Z")),
+        install_request(&codex_credentials("2026-08-05T02:51:00Z")),
     )
+    .await
     .unwrap_err();
 
     assert!(format!("{error:#}").contains("symbolic link"), "{error:#}");

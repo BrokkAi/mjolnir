@@ -765,8 +765,10 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
             partial: false,
         }
     };
+    let matched = read_credential_file(HarnessKind::Codex, &marker).unwrap().0;
     let reached = |outcome: Result<Vec<CredentialSyncAction>, String>| {
         vec![CredentialSyncOutcome {
+            unchanged_login: Some(matched.clone()),
             session_id: "child-1".into(),
             outcome,
             step_failures: Vec::new(),
@@ -814,6 +816,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
         &result(
             CredentialSyncReason::AuthenticationFailure,
             vec![CredentialSyncOutcome {
+                unchanged_login: Some(matched.clone()),
                 session_id: "child-1".into(),
                 outcome: Ok(vec![CredentialSyncAction::SkillsPushed]),
                 step_failures: vec![StepFailure {
@@ -876,6 +879,37 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
         ),
         &api_key,
     );
+    assert_eq!(rejected.refusal("codex4"), None);
+}
+
+// Hard-won: #1485: observing an old failed sync marked a refreshed host login refused.
+#[test]
+fn a_refused_login_observation_cannot_reject_a_later_host_refresh() {
+    let home = tempfile::tempdir().unwrap();
+    let marker = harness_authentication_marker(HarnessKind::Codex, home.path());
+    let previous = codex_credentials("2026-09-25T20:00:00.000Z");
+    std::fs::write(&marker, &previous).unwrap();
+    let observed = CredentialSnapshot::of(HarnessKind::Codex, &previous);
+    let result = CredentialSyncResult {
+        profile_id: "codex4".into(),
+        trigger: Some(CredentialSyncCause {
+            session_id: "failed-session".into(),
+            reason: CredentialSyncReason::AuthenticationFailure,
+        }),
+        failure: None,
+        partial: false,
+        outcomes: vec![CredentialSyncOutcome {
+            session_id: "failed-session".into(),
+            unchanged_login: Some(observed),
+            outcome: Ok(Vec::new()),
+            step_failures: Vec::new(),
+        }],
+    };
+    // The host refreshes after the sync made its observation, before delivery.
+    std::fs::write(&marker, codex_credentials("2026-09-25T22:49:05.000Z")).unwrap();
+    let profile = HarnessProfile::new(HarnessKind::Codex, home.path().to_owned());
+    let mut rejected = RejectedLogins::default();
+    rejected.observe(&result, &profile);
     assert_eq!(rejected.refusal("codex4"), None);
 }
 

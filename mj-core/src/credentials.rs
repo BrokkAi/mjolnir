@@ -15,6 +15,11 @@
 //! never enter the durable event stream or a checkpoint archive. Fingerprints
 //! and freshness timestamps are not secret and may appear in logs.
 
+mod locking;
+pub use locking::{
+    CLAUDE_REFRESH_LOCK_WAIT, CredentialInstall, CredentialWriteGuard, install_credentials_if_newer,
+};
+
 use crate::hex::lower_hex;
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -439,12 +444,7 @@ pub fn read_credential_file(
 /// cannot redirect the write.
 pub fn write_credential_file(kind: HarnessKind, path: &Path, bytes: &[u8]) -> Result<()> {
     validate_credential_payload(kind, bytes)?;
-    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        bail!(
-            "credential destination {} is a symbolic link",
-            path.display()
-        );
-    }
+    refuse_symlinked_token("credential", path)?;
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -732,6 +732,10 @@ pub struct StepFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSyncOutcome {
     pub session_id: String,
+    /// The snapshot that initially matched the failing session without any
+    /// credential mutation. Refusal evidence must refer to this observation,
+    /// never to a later reading of the profile's login.
+    pub unchanged_login: Option<CredentialSnapshot>,
     /// Every action taken for the session, or why the reconcile failed. An
     /// empty action list means the copies already agreed.
     pub outcome: std::result::Result<Vec<CredentialSyncAction>, String>,
@@ -864,7 +868,7 @@ impl CredentialSyncResult {
 /// The credential sync is what learns it: a session reported an auth failure,
 /// the sync reached that session, and the profile's copy was no fresher than
 /// the session's, so there was nothing to push that could help. Each entry
-/// keeps the fingerprint the profile's credential file had at that moment and
+/// keeps the fingerprint observed by that sync, rather than a later read, and
 /// holds only while the file is unchanged, so `mj login`, or a fresher copy
 /// pulled from another session, ends it.
 #[derive(Debug, Default)]
@@ -894,6 +898,7 @@ impl RejectedLogins {
         // check that the profile's own login is the one the provider refused.
         let Some(CredentialSyncOutcome {
             outcome: Ok(actions),
+            unchanged_login: Some(snapshot),
             step_failures,
             ..
         }) = reached
@@ -916,17 +921,19 @@ impl RejectedLogins {
             // profile's; either way the next turn may succeed.
             return;
         }
-        let marker = profile.authentication_marker();
-        if let Ok((snapshot, _)) = read_credential_file(profile.kind, &marker)
-            && snapshot.present
-        {
+        if snapshot.present {
             tracing::info!(
                 profile_id = %result.profile_id,
                 session_id = %cause.session_id,
                 "the profile's login was refused and there is no fresher copy; sub-agent spawns on it are refused until it changes"
             );
-            self.profiles
-                .insert(result.profile_id.clone(), (marker, snapshot.fingerprint));
+            self.profiles.insert(
+                result.profile_id.clone(),
+                (
+                    profile.authentication_marker(),
+                    snapshot.fingerprint.clone(),
+                ),
+            );
         }
     }
 
