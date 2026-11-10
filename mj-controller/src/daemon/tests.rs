@@ -5778,6 +5778,78 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
     assert!(wire.contains("Resources may remain"));
     assert!(!wire.contains("private diagnostic"));
     assert!(!wire.contains("removed.invalid"));
+
+    let repository = crate::controller::test_support::committed_repository();
+    let parent_id = "22222222222222222222222222222222";
+    let child_id = "33333333333333333333333333333333";
+    let mut parent =
+        crate::controller::test_support::managed_clone_session(repository.path(), parent_id);
+    let checkout = parent
+        .managed_worktree
+        .as_ref()
+        .unwrap()
+        .worktree_root
+        .clone();
+    let worker_root = repository.path().join(parent_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    std::fs::write(worker_root.join("keep"), "parent worker evidence").unwrap();
+    parent.state = SessionState::Running;
+    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        worker_root: worker_root.clone(),
+    });
+    crate::database::save_session(&parent).unwrap();
+    session.id = child_id.into();
+    crate::database::save_subagent_session(&session, &runtime_test_subagent(child_id, parent_id))
+        .unwrap();
+    let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_test_destroy BEFORE DELETE ON sessions WHEN OLD.session_id = '22222222222222222222222222222222' BEGIN SELECT RAISE(ABORT, 'test root deletion unavailable'); END;").unwrap();
+    // Hard-won: 5b9868d0d: forgetting an unconfirmed child lost the evidence needed to protect its parent's shared checkout.
+    assert!(
+        state
+            .force_destroy_session(parent_id.into(), BranchDisposition::Keep)
+            .await
+            .is_err()
+    );
+    let retained = crate::database::load_state().unwrap();
+    assert!(retained.sessions.contains_key(parent_id));
+    assert!(
+        retained.sessions.contains_key(child_id),
+        "root rollback retains the unconfirmed child's record"
+    );
+    assert!(!crate::pollers::session_target_is_pollable(
+        &retained.sessions[child_id]
+    ));
+    assert!(checkout.exists());
+    assert!(worker_root.join("keep").exists());
+    connection
+        .execute_batch("DROP TRIGGER reject_test_destroy;")
+        .unwrap();
+    state
+        .force_destroy_session(parent_id.into(), BranchDisposition::Keep)
+        .await
+        .unwrap();
+    let removed = crate::database::load_state().unwrap();
+    assert!(!removed.sessions.contains_key(parent_id));
+    assert!(!removed.sessions.contains_key(child_id));
+    assert!(
+        checkout.exists(),
+        "a surviving child may still write the shared checkout"
+    );
+    assert!(
+        worker_root.join("keep").exists(),
+        "parent cleanup cannot remove resources still used by its child"
+    );
+    let root_notices: Vec<_> = state
+        .public_notices()
+        .into_iter()
+        .filter(|notice| notice.session_id == parent_id)
+        .collect();
+    assert!(
+        root_notices
+            .iter()
+            .any(|notice| notice.text.contains(child_id)),
+        "the advertised parent notice path includes descendant failures"
+    );
 }
 
 /// A runtime whose controller comes from the real store, for the tests that

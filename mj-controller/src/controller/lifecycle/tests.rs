@@ -1665,6 +1665,7 @@ fn destroy_warns_when_cleanup_fails_but_automatic_stopping_keeps_the_record() {
                 Ok(())
             },
             DestroyCleanup::Required,
+            DestroyOutcome::default(),
         )
         .unwrap_err();
 

@@ -698,6 +698,7 @@ impl ActiveLifecycle {
 #[derive(Debug, Clone)]
 enum DaemonLifecycleResult {
     Done,
+    Destroy(crate::controller::DestroyOutcome),
     DeferredCleanup,
     Move(MoveOutcome),
     Park(crate::controller::ParkOutcome),

@@ -1345,7 +1345,7 @@ impl Controller {
         session_id: &str,
         executor: &impl CommandExecutor,
         branch: BranchDisposition,
-        delete: impl Fn(&str) -> Result<()>,
+        delete: impl FnOnce(&str) -> Result<()>,
     ) -> Result<DestroyOutcome> {
         self.destroy_session_with_cleanup(
             session_id,
@@ -1353,6 +1353,36 @@ impl Controller {
             branch,
             delete,
             DestroyCleanup::BestEffort,
+            DestroyOutcome::default(),
+        )
+    }
+
+    /// Keep unconfirmed descendants recorded until the root can atomically
+    /// forget the tree. A failed root removal must retain their worker evidence.
+    pub(crate) fn destroy_session_in_tree(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+        branch: BranchDisposition,
+        root: bool,
+        descendants: DestroyOutcome,
+    ) -> Result<DestroyOutcome> {
+        let retained = descendants.workers.retained_sessions().to_vec();
+        self.destroy_session_with_cleanup(
+            session_id,
+            executor,
+            branch,
+            move |id| {
+                let mut ids = retained;
+                ids.push(id.to_owned());
+                crate::database::delete_sessions(&ids)
+            },
+            if root {
+                DestroyCleanup::BestEffort
+            } else {
+                DestroyCleanup::Descendant
+            },
+            descendants,
         )
     }
 
@@ -1368,6 +1398,7 @@ impl Controller {
             BranchDisposition::Keep,
             crate::database::delete_session,
             DestroyCleanup::Required,
+            DestroyOutcome::default(),
         )
     }
 
@@ -1376,13 +1407,26 @@ impl Controller {
         session_id: &str,
         executor: &impl CommandExecutor,
         branch: BranchDisposition,
-        delete: impl Fn(&str) -> Result<()>,
+        delete: impl FnOnce(&str) -> Result<()>,
         cleanup: DestroyCleanup,
+        descendants: DestroyOutcome,
     ) -> Result<DestroyOutcome> {
-        let result =
-            self.force_destroy_session_steps(session_id, executor, branch, delete, cleanup);
-        if result.is_err() {
-            self.settle_failed_destroy(session_id);
+        let result = self.force_destroy_session_steps(
+            session_id,
+            executor,
+            branch,
+            delete,
+            cleanup,
+            descendants,
+        );
+        if result.is_err()
+            && let Err(error) = self.settle_failed_destroy(session_id)
+        {
+            tracing::warn!(
+                session_id,
+                error = format!("{error:#}"),
+                "could not record a failed destroy"
+            );
         }
         result
     }
@@ -1392,30 +1436,25 @@ impl Controller {
     /// a live session: `Error` is not polled, so the daemon does not keep
     /// reconnecting a relay proxy to the worker it stopped (I2-9). The target
     /// stays recorded, and the next destroy finishes the removal.
-    fn settle_failed_destroy(&mut self, session_id: &str) {
+    fn settle_failed_destroy(&mut self, session_id: &str) -> Result<()> {
         let Some(record) = self.state.sessions.get(session_id) else {
-            return;
+            return Ok(());
         };
         if !record.state.is_active() || record.state == SessionState::Error {
-            return;
+            return Ok(());
         }
         let previous = record.clone();
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.state = SessionState::Error;
         record.updated_at = now();
-        if let Err(error) = persist_session_record_transition_or_restore(
+        persist_session_record_transition_or_restore(
             &mut self.state,
             session_id,
             &previous,
             "persist the failed destroy",
             &crate::database::save_lifecycle_session,
-        ) {
-            tracing::warn!(
-                session_id,
-                error = format!("{error:#}"),
-                "could not record a failed destroy"
-            );
-        }
+        )?;
+        Ok(())
     }
 
     fn force_destroy_session_steps(
@@ -1423,8 +1462,9 @@ impl Controller {
         session_id: &str,
         executor: &impl CommandExecutor,
         branch: BranchDisposition,
-        delete: impl Fn(&str) -> Result<()>,
+        delete: impl FnOnce(&str) -> Result<()>,
         cleanup: DestroyCleanup,
+        mut outcome: DestroyOutcome,
     ) -> Result<DestroyOutcome> {
         crate::worker_lifecycle::run_blocking(
             session_id,
@@ -1438,8 +1478,10 @@ impl Controller {
                     .get(session_id)
                     .with_context(|| format!("unknown session {session_id}"))?
                     .clone();
-                let mut outcome = DestroyOutcome::default();
-                if let Some(mut operation) = crate::database::load_move_operation(session_id)? {
+                let descendants_confirmed = outcome.workers.is_confirmed();
+                if descendants_confirmed
+                    && let Some(mut operation) = crate::database::load_move_operation(session_id)?
+                {
                     outcome.cleanup(
                         self.cleanup_prepared_move_destination(&mut operation, executor),
                         &session,
@@ -1450,7 +1492,10 @@ impl Controller {
                 }
                 // Stop the worker before touching its files. A failed stop
                 // leaves those files in place, even when its record goes.
-                let target_removed = if let Some(locator) = &session.target {
+                let target_removed = if !descendants_confirmed {
+                    outcome.warnings.push(format!("Destroy kept the environment and checkout for session {session_id} because a sub-agent worker could still be using them."));
+                    false
+                } else if let Some(locator) = &session.target {
                     outcome.cleanup(
                         (|| {
                             let backend = backend_locator(locator, &session, &self.config)?;
@@ -1472,7 +1517,10 @@ impl Controller {
                 } else {
                     true
                 };
-                if session.target.is_none() {
+                if !target_removed {
+                    outcome.workers.mark_unconfirmed();
+                }
+                if target_removed && session.target.is_none() {
                     self.remove_child_report_directory(session_id, executor);
                 }
                 // An unconfirmed worker can still write here. Forgetting its
@@ -1498,7 +1546,14 @@ impl Controller {
                 mj_core::attachment::AttachmentStore::controller(session_id)?
                     .remove_session_data()
                     .context("remove session image attachments")?;
+                if matches!(cleanup, DestroyCleanup::Descendant) && !outcome.workers.is_confirmed()
+                {
+                    self.settle_failed_destroy(session_id)?;
+                    outcome.workers.retain(session_id);
+                    return Ok(outcome);
+                }
                 delete(session_id).context("force destroy session in database")?;
+                outcome.workers.clear_retained();
                 self.state.subagents.remove(session_id);
                 self.state.destroy_session_force(session_id)?;
                 Ok(outcome)
@@ -1507,19 +1562,72 @@ impl Controller {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DestroyOutcome {
     /// Safe messages for attached surfaces; diagnostics stay in daemon logs.
     pub warnings: Vec<String>,
+    workers: DestroyWorkers,
+}
+
+#[derive(Debug, Default, Clone)]
+enum DestroyWorkers {
+    #[default]
+    Confirmed,
+    Unconfirmed {
+        retained_sessions: Vec<String>,
+    },
+}
+
+impl DestroyWorkers {
+    fn is_confirmed(&self) -> bool {
+        matches!(self, Self::Confirmed)
+    }
+    fn mark_unconfirmed(&mut self) {
+        if self.is_confirmed() {
+            *self = Self::Unconfirmed {
+                retained_sessions: Vec::new(),
+            };
+        }
+    }
+    fn retained_sessions(&self) -> &[String] {
+        match self {
+            Self::Confirmed => &[],
+            Self::Unconfirmed { retained_sessions } => retained_sessions,
+        }
+    }
+    fn retain(&mut self, session_id: &str) {
+        self.mark_unconfirmed();
+        if let Self::Unconfirmed { retained_sessions } = self {
+            retained_sessions.push(session_id.to_owned());
+        }
+    }
+    fn clear_retained(&mut self) {
+        if let Self::Unconfirmed { retained_sessions } = self {
+            retained_sessions.clear();
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
 enum DestroyCleanup {
     Required,
     BestEffort,
+    Descendant,
 }
 
 impl DestroyOutcome {
+    pub(crate) fn absorb(&mut self, other: Self) {
+        self.warnings.extend(other.warnings);
+        if let DestroyWorkers::Unconfirmed { retained_sessions } = other.workers {
+            self.workers.mark_unconfirmed();
+            if let DestroyWorkers::Unconfirmed {
+                retained_sessions: ours,
+            } = &mut self.workers
+            {
+                ours.extend(retained_sessions);
+            }
+        }
+    }
     fn cleanup(
         &mut self,
         result: Result<()>,

@@ -1395,6 +1395,22 @@ pub fn delete_session(session_id: &str) -> Result<()> {
     })
 }
 
+/// Retained descendants and their root disappear together. A failed root
+/// delete must leave evidence of every worker whose teardown was unconfirmed.
+pub fn delete_sessions(session_ids: &[String]) -> Result<()> {
+    let session_ids = session_ids.to_vec();
+    submit_database_write("delete_sessions", move |_| {
+        let mut connection = open(&database_path())?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        for id in session_ids {
+            transaction.execute("DELETE FROM sessions WHERE session_id = ?1", [id])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    })
+}
+
 pub(super) fn delete_session_from(path: &Path, session_id: &str) -> Result<()> {
     let connection = open(path)?;
     connection.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
