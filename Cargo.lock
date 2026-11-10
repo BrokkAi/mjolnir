@@ -673,7 +673,6 @@ dependencies = [
  "blake3",
  "brokk-mj-core",
  "chrono",
- "dirs 6.0.0",
  "flate2",
  "libc",
  "rayon",
@@ -981,9 +980,9 @@ dependencies = [
 
 [[package]]
 name = "brokk-sessionwiki"
-version = "0.34.22"
+version = "0.34.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d1fc221b4127f3409338e2192f854132ccaee5e72abd06bb3d6312a2517f61a"
+checksum = "d2ae87e4a838b2e65c80416e563a6e32de00f4f6bbb6a8fac263b6790f6feb56"
 dependencies = [
  "anyhow",
  "chrono",

@@ -9,8 +9,10 @@
 //! SessionWiki can parse, so the indexer enumerates sessions by key and asks
 //! this adapter to parse the ones whose checkpoint changed.
 
-mod harness_adapters;
+mod harness_tools;
 pub(crate) mod history;
+#[cfg(test)]
+mod native_tests;
 mod provenance;
 mod search_query;
 pub mod tags;
@@ -37,7 +39,6 @@ use sessionwiki::model::{Message, Role, Session};
 
 use crate::controller::Controller;
 use crate::controller::checkpoint::managed_checkpoint_archive_name;
-use harness_adapters::HarnessAdapter;
 
 /// The tool name every Mjolnir instance publishes under. One name means one
 /// search partition; reconciliation is scoped per instance instead (see
@@ -723,6 +724,10 @@ impl Adapter for SharedMjolnirAdapter {
         self.0.parse_key(key)
     }
 
+    fn modified_at(&self, key: &str) -> Option<DateTime<Utc>> {
+        self.0.modified_at(key)
+    }
+
     fn reconcile_scope(&self) -> Option<String> {
         self.0.reconcile_scope()
     }
@@ -1037,16 +1042,14 @@ fn write_session_tags(
 /// indexed, not the stock `~/.codex` and `~/.claude` locations. A user who
 /// runs several profile homes expects every session Mjolnir can start to be
 /// searchable, and a home no profile names is not Mjolnir's to walk. So the
-/// stock Codex and Claude adapters are dropped and one adapter per enabled
-/// profile home takes their place; of the rest, only OpenCode is kept, the
-/// only other harness Mjolnir can start. Every other built-in adapter (aider,
-/// gemini, cline, ...) is dropped, so a tool Mjolnir cannot run can neither
-/// trigger a home-directory walk nor add rows Resume cannot act on.
+/// stock adapters are replaced with one adapter per enabled profile home,
+/// except OpenCode, which still uses its stock SQLite adapter. Adapters for
+/// unsupported harnesses (aider, gemini, cline, ...) are dropped, so they can
+/// neither trigger a home-directory walk nor add unrelated search results.
 ///
-/// Kimi Code, Grok Build and Muse have no SessionWiki adapter at all, so
-/// Mjolnir supplies one per enabled profile home of its own (see
-/// [`harness_adapters`]). Without them those sessions would never appear in
-/// the Resume dialog's search.
+/// Kimi Code, Grok Build, Muse and DSH use SessionWiki's public adapters
+/// directly, one per enabled profile home. DSH histories are searchable even
+/// though Mjolnir does not yet import them for native resume.
 ///
 /// Each per-home adapter reports a reconcile scope covering only its own root,
 /// so a sync of one install never archives the rows of another.
@@ -1077,15 +1080,23 @@ fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
             HarnessKind::Claude => {
                 adapters.push(Box::new(sessionwiki::adapters::ClaudeCode::in_home(home)));
             }
-            kind => {
-                if let Some(adapter) = HarnessAdapter::in_home(kind, home) {
-                    adapters.push(Box::new(adapter));
-                }
+            HarnessKind::Kimi => {
+                adapters.push(Box::new(sessionwiki::adapters::KimiCode::in_home(home)));
             }
+            HarnessKind::Grok => {
+                adapters.push(Box::new(sessionwiki::adapters::GrokBuild::in_home(home)));
+            }
+            HarnessKind::Muse => {
+                adapters.push(Box::new(sessionwiki::adapters::Muse::in_home(home)));
+            }
+            HarnessKind::Dsh => {
+                adapters.push(Box::new(sessionwiki::adapters::Dsh::in_home(home)));
+            }
+            HarnessKind::OpenCode => {}
         }
     }
     adapters.extend(sessionwiki::adapters::all().into_iter().filter(|adapter| {
-        harness_adapters::harness_for_tool(adapter.name()) == Some(HarnessKind::OpenCode)
+        harness_tools::harness_for_tool(adapter.name()) == Some(HarnessKind::OpenCode)
     }));
     adapters
 }
@@ -2593,7 +2604,7 @@ pub fn wiki_continuation(
             },
         });
     }
-    let harness = harness_adapters::harness_for_tool(tool)
+    let harness = harness_tools::harness_for_tool(tool)
         .with_context(|| format!("Mjolnir cannot continue a {tool} session"))?;
     let native_session_id = match harness {
         HarnessKind::Codex => sessionwiki::index::native_id_of(&path.to_string_lossy()),
@@ -2667,7 +2678,7 @@ fn wiki_session_from(
         .and_then(|id| id.parse::<HarnessKind>().ok())
         .or_else(|| {
             (!is_mjolnir)
-                .then(|| harness_adapters::harness_for_tool(&row.tool))
+                .then(|| harness_tools::harness_for_tool(&row.tool))
                 .flatten()
         });
     Ok(Some(WikiSessionInfo {
@@ -4723,6 +4734,7 @@ mod tests {
                 "codex",
                 "codex",
                 "codex",
+                "dsh",
                 "grok-build",
                 "kimi-code",
                 "muse",

@@ -540,9 +540,11 @@ typable as soon as the build finishes, though moving the keyboard focus there
 still takes `/` or a click. What is stored is the conversation: the prompts,
 the agent's replies, the titles of the tool calls, the session title, and the
 project directory. Native sessions from every enabled profile home that
-Mjolnir can read are indexed too, including Kimi Code, Grok Build, and Muse,
-under the tool names `kimi-code`, `grok-build`, and `muse`. OpenCode's
-SQLite store and DSH's native session records are not indexed yet. Each Mjolnir instance indexes only its
+Mjolnir can read are indexed too, including Kimi Code, Grok Build, Muse and
+DSH, under the tool names `kimi-code`, `grok-build`, `muse` and `dsh`.
+OpenCode's SQLite store is indexed through SessionWiki. DSH native histories
+and dsh-acp session records are searchable, but DSH sessions cannot yet be
+imported for resume. Each Mjolnir instance indexes only its
 own sessions, and all of them share the tool name `mjolnir`, so one search
 covers every instance:
 
@@ -644,11 +646,11 @@ take turns re-indexing everything until you upgrade the command. When a newer
 SessionWiki wrote the index, Mjolnir leaves it alone and search stays closed
 until you upgrade Mjolnir.
 
-This build links the `brokk-sessionwiki` crate, version 0.34.22. Install the
+This build links the `brokk-sessionwiki` crate, version 0.34.24. Install the
 matching tool with:
 
 ```sh
-cargo install --locked brokk-sessionwiki@0.34.22
+cargo install --locked brokk-sessionwiki@0.34.24
 ```
 
 If you installed the `sessionwiki` package for an earlier Mjolnir build, remove

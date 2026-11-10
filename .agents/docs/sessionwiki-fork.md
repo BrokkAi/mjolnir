@@ -1,22 +1,29 @@
-# SessionWiki: from fork to upstream
+# SessionWiki library integration
 
-Mjolnir links [SessionWiki](https://github.com/youdie006/sessionwiki) as a Rust
-library so the daemon can index its own sessions into the user's ordinary
-SessionWiki index.
+Mjolnir links the `brokk-sessionwiki` fork of
+[SessionWiki](https://github.com/youdie006/sessionwiki) as a Rust library so
+the daemon can index its own sessions into the user's ordinary SessionWiki
+index. The root `Cargo.toml` and `Cargo.lock` name the linked version.
 
 ## Current state
 
-Since 139726d84 (2026-10-07), Mjolnir depends on the upstream crate, now
-`sessionwiki = "0.34.5"` in the root `Cargo.toml`. It no longer depends on the
-fork's `brokk-sessionwiki` package, which stopped at 0.30.2.
+The dependency is published as `brokk-sessionwiki` and imported as
+`sessionwiki` in Rust. The matching standalone installation command is in
+`docs/src/content/docs/sessions.md`; keep it aligned with the lockfile.
 
-The user contributes to SessionWiki through the fork
-`https://github.com/jbellis/sessionwiki`, which exists only to send pull
-requests upstream. Do not publish Mjolnir-specific changes from the fork. A
-library change Mjolnir needs goes upstream as a pull request, and Mjolnir
-bumps the dependency once a release includes it. For example, role-filtered
-search (`index::search_with_roles`) came from youdie006/sessionwiki#40 and was
-released in 0.32.0.
+The user contributes library changes upstream through
+`https://github.com/jbellis/sessionwiki`. Publish generally useful library
+changes in the fork for coordinated validation, submit upstream, and switch
+Mjolnir to the published version after joint tests. Keep adapter behavior
+generally useful rather than Mjolnir-specific.
+
+`sessionwiki::adapters::{KimiCode, GrokBuild, Muse, Dsh}` own native history
+indexing, with one `in_home` adapter per enabled Mjolnir profile home. Kimi
+and Grok keep directory keys; Muse keeps its `session.jsonl` key. DSH searches
+both bridge JSON and native histories under the supplied home. The tool
+names remain `kimi-code`, `grok-build`, `muse` and `dsh`. Mjolnir retains its
+native import readers for resume fidelity; DSH search does not imply DSH
+import support. `MjolnirAdapter` still indexes Mjolnir's stored transcripts.
 
 What the fork used to add, and where it is now:
 
@@ -36,7 +43,7 @@ What the fork used to add, and where it is now:
   write, with a full pass. Standing aside from an older index too stranded it
   for good, since nothing else would ever bring it forward. Check
   `sessionwiki::index::SCHEMA_VERSION` on every bump. 0.30.1 to 0.33.1 kept
-  version 8; 0.34.0 to 0.34.19 keep version 9. SessionWiki itself refuses to
+  version 8; 0.34.0 to 0.34.24 keep version 9. SessionWiki itself refuses to
   rebuild a newer index from 0.34.1 on, so only a `sessionwiki` command older
   than that rebuilds Mjolnir's index back down.
 - **Full-pass marker.** `<data_dir>/sessionwiki-built` records the cache
