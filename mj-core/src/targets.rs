@@ -143,7 +143,7 @@ impl ProvisionStage {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct SensitiveCommandInput(Vec<u8>);
+struct SensitiveCommandInput(Arc<Vec<u8>>);
 
 impl std::fmt::Debug for SensitiveCommandInput {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -416,8 +416,14 @@ impl CommandSpec {
     /// Feed private file content through the shared concurrent pipe handler.
     /// The bytes stay out of argv, environments, serialization, and Debug.
     pub fn with_sensitive_stdin(mut self, input: Vec<u8>) -> Self {
-        self.sensitive_stdin = Some(SensitiveCommandInput(input));
+        self.sensitive_stdin = Some(SensitiveCommandInput(Arc::new(input)));
         self
+    }
+
+    pub(crate) fn sensitive_stdin(&self) -> Option<&[u8]> {
+        self.sensitive_stdin
+            .as_ref()
+            .map(|input| input.0.as_slice())
     }
 
     /// Run where the daemon runs: the command reads or writes the daemon's own
@@ -620,17 +626,26 @@ impl std::fmt::Debug for NodeRun {
 
 impl CommandSpec {
     /// The command with every field a node needs to run it exactly as this
-    /// process would.
+    /// process would. With streamed stdin, the caller supplies the body and
+    /// command-owned input is omitted from the description.
     pub fn to_node_run(&self, streamed_stdin: bool) -> NodeRun {
+        let mut spec = self.clone();
+        // The spec never serializes this field. Drop its shared reference too:
+        // streaming callers keep the bytes at the source, outside the command.
+        spec.sensitive_stdin = None;
         NodeRun {
-            spec: self.clone(),
+            spec,
             #[cfg(unix)]
             arg0: self.arg0.clone(),
             #[cfg(not(unix))]
             arg0: None,
             sensitive_output: self.sensitive_output,
             preserve_children_on_cancel: self.preserve_children_on_cancel,
-            sensitive_stdin: self.sensitive_stdin.as_ref().map(|input| input.0.clone()),
+            sensitive_stdin: if streamed_stdin {
+                None
+            } else {
+                self.sensitive_stdin().map(<[u8]>::to_vec)
+            },
             streamed_stdin,
         }
     }
@@ -645,7 +660,9 @@ impl NodeRun {
         }
         spec.sensitive_output = self.sensitive_output;
         spec.preserve_children_on_cancel = self.preserve_children_on_cancel;
-        spec.sensitive_stdin = self.sensitive_stdin.map(SensitiveCommandInput);
+        spec.sensitive_stdin = self
+            .sensitive_stdin
+            .map(|input| SensitiveCommandInput(Arc::new(input)));
         spec
     }
 }
@@ -1965,7 +1982,7 @@ impl CommandPlan {
         }
         let mut input = value.as_bytes().to_vec();
         input.push(b'\n');
-        command.sensitive_stdin = Some(SensitiveCommandInput(input));
+        command.sensitive_stdin = Some(SensitiveCommandInput(Arc::new(input)));
         Ok(())
     }
 

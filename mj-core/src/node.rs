@@ -1470,7 +1470,9 @@ impl crate::targets::CommandHost for NodeCommandHost {
         input: Option<&mut (dyn std::io::Read + Send)>,
         is_cancelled: &(dyn Fn() -> bool + Sync),
     ) -> Result<crate::targets::CommandOutput> {
-        let streamed = input.is_some();
+        let mut input = input;
+        let mut owned_input = std::io::Cursor::new(command.sensitive_stdin().unwrap_or_default());
+        let streamed = input.is_some() || command.sensitive_stdin().is_some();
         let run = command.to_node_run(streamed);
         // Called from a thread `off_async_worker` has taken off the runtime,
         // so blocking here holds no async worker.
@@ -1478,12 +1480,16 @@ impl crate::targets::CommandHost for NodeCommandHost {
             let work = async {
                 let client = self.connected().await?;
                 let mut exec = client.run(&run).await?;
-                if let Some(input) = input {
+                if streamed {
                     // Stdin is read synchronously on this thread, a chunk at
                     // a time, and each chunk waits for the node's window.
                     let mut buffer = vec![0; READ_CHUNK];
                     loop {
-                        let read = input.read(&mut buffer).context("read command stdin")?;
+                        let read = match input.as_mut() {
+                            Some(input) => input.read(&mut buffer),
+                            None => std::io::Read::read(&mut owned_input, &mut buffer),
+                        }
+                        .context("read command stdin")?;
                         if read == 0 {
                             break;
                         }
@@ -1677,6 +1683,55 @@ mod tests {
         }
     }
 
+    // Hard-won: #1482: owned stdin exceeded the node command-description limit during fetch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_stdin_streams_the_fetch_limit_through_the_node() {
+        use crate::targets::{CommandHost, CommandSpec};
+
+        let client = connected().await;
+        let (_slot, receiver) = tokio::sync::watch::channel(Some(client));
+        let host = NodeCommandHost::new(
+            receiver,
+            tokio::runtime::Handle::current(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("payload.bin");
+        let payload = (0..16 * 1024 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        tokio::task::spawn_blocking(move || {
+            // Fill a pipe before reading input; the executor must drain output
+            // concurrently even though /run returns it only after completion.
+            let command = CommandSpec::new(
+                "sh",
+                [
+                    "-c",
+                    "head -c 131072 /dev/zero; cat > \"$1\"",
+                    "sh",
+                    path.to_str().unwrap(),
+                ],
+            )
+            .with_sensitive_stdin(payload.clone());
+            let output = host.run(&command, None, &|| false).unwrap();
+            assert_eq!(output.status, 0, "{:?}", output.stderr);
+            assert_eq!(output.stdout, vec![0; 131072]);
+            assert_eq!(std::fs::read(&path).unwrap(), payload);
+
+            // An explicit reader owns stdin even when the command has owned
+            // input as well; it must neither be appended nor serialized.
+            for explicit in [vec![253; 262144], Vec::new()] {
+                let mut reader = std::io::Cursor::new(&explicit);
+                let output = host.run(&command, Some(&mut reader), &|| false).unwrap();
+                assert_eq!(output.status, 0, "{:?}", output.stderr);
+                assert_eq!(output.stdout, vec![0; 131072]);
+                assert_eq!(std::fs::read(&path).unwrap(), explicit);
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     // The daemon's executors reach the node through `NodeCommandHost`, which
     // feeds stdin from a synchronous reader and checks cancellation on its
     // own clock. A cancellation must stop the command on the node, process
@@ -1818,6 +1873,39 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&stdout).trim(), length.to_string());
         assert_eq!(stderr, b"", "refused attempts print nothing to the daemon");
         assert_eq!(fake.attempts(), 6);
+    }
+
+    // The /run channel must hold owned input until a refused SSH session starts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // The sharing override is process-wide.
+    async fn a_node_run_preserves_owned_stdin_across_ssh_refusals() {
+        use crate::targets::fake_ssh::{FakeSsh, FastRetries};
+        use crate::targets::{CommandHost, SshSharingForTest, set_ssh_connection_sharing_for_test};
+
+        let _guard = crate::targets::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let _fast_retries = FastRetries::new();
+        let fake = FakeSsh::new(&["refuse-session", "refuse-auth"]);
+        let client = connected().await;
+        let (_slot, receiver) = tokio::sync::watch::channel(Some(client));
+        let host = NodeCommandHost::new(
+            receiver,
+            tokio::runtime::Handle::current(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let payload = (0..600 * 1024).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        let command = fake.command(&["cat"]).with_sensitive_stdin(payload.clone());
+        let output = tokio::task::spawn_blocking(move || host.run(&command, None, &|| false))
+            .await
+            .unwrap();
+        set_ssh_connection_sharing_for_test(None);
+        let output = output.unwrap();
+        assert_eq!(output.status, 0, "{:?}", output.stderr);
+        assert_eq!(output.stdout, payload);
+        assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+        assert_eq!(fake.attempts(), 3);
     }
 
     /// `scp` carries no start marker and exits 1 while relaying the refusal of
