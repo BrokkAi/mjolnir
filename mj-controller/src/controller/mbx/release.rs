@@ -208,7 +208,7 @@ impl BuildStateRelease {
     /// target: an SSH workspace, or a container that mounted the shared build
     /// cache. `None` for a target another session owns, one that never had
     /// build state Mjolnir can name, and a container that ran without the cache.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(in crate::controller) fn for_target(
         session: &SessionRecord,
         backend: &targets::TargetLocator,

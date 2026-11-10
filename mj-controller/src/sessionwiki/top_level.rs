@@ -12,7 +12,7 @@ use mj_core::state::State;
 
 use crate::import::NativeScanCache;
 
-use super::harness_adapters::harness_for_tool;
+use super::harness_tools::harness_for_tool;
 
 struct PreparedFiles {
     adapter: Box<dyn Adapter>,
@@ -167,6 +167,14 @@ impl Adapter for PreparedFiles {
 
     fn parse_key(&self, key: &str) -> Result<Session> {
         self.adapter.parse_key(key)
+    }
+
+    fn modified_at(&self, key: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.adapter.modified_at(key)
+    }
+
+    fn path_key_depth(&self) -> Option<usize> {
+        self.adapter.path_key_depth()
     }
 }
 
