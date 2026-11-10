@@ -316,12 +316,19 @@ pub(super) fn save_terminal_draft_in(
     ensure!(!source.trim().is_empty(), "draft source is empty");
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let canonical_workspace: String = transaction
+        .query_row(
+            "SELECT workspace_id FROM session_contexts WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("find managed session {session_id:?}"))?;
     let existing: Option<(String, i64)> = transaction
         .query_row(
             "SELECT draft_id, revision FROM detached_drafts
-              WHERE source = ?1 AND workspace_id = ?2 AND session_id = ?3
+              WHERE source = ?1 AND session_id = ?2
                 AND revision IS NOT NULL",
-            params![source, workspace_id, session_id],
+            params![source, session_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
@@ -348,14 +355,22 @@ pub(super) fn save_terminal_draft_in(
     if let Some((draft_id, _)) = existing {
         transaction.execute(
             "UPDATE detached_drafts
-                SET owner_pid = ?2, saved_at = ?3, text = ?4, revision = ?5,
+                SET workspace_id = ?2, owner_pid = ?3, saved_at = ?4,
+                    text = ?5, revision = ?6,
                     recovered_at = CASE
-                        WHEN text = ?4 THEN recovered_at
-                        WHEN ?4 <> '' THEN NULL
+                        WHEN text = ?5 THEN recovered_at
+                        WHEN ?5 <> '' THEN NULL
                         ELSE recovered_at
                     END
               WHERE draft_id = ?1",
-            params![draft_id, owner_pid, saved_at, draft.text, revision],
+            params![
+                draft_id,
+                canonical_workspace,
+                owner_pid,
+                saved_at,
+                draft.text,
+                revision
+            ],
         )?;
     } else {
         let id = new_workspace_id()?;
@@ -365,7 +380,7 @@ pub(super) fn save_terminal_draft_in(
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 id,
-                workspace_id,
+                canonical_workspace,
                 session_id,
                 source,
                 owner_pid,

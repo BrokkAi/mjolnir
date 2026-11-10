@@ -4470,11 +4470,35 @@ fn only_resumable_sessions_can_move_to_a_new_workspace() {
     let mut stopped = session("session-stopped", "project-1");
     stopped.workspace_id = source.id.clone();
     save_session_to(&database, &stopped).unwrap();
+    save_terminal_draft_in(
+        &mut open(&database).unwrap(),
+        &source.id,
+        &stopped.id,
+        "terminal-a",
+        1234,
+        1,
+        &DetachedSessionDraft {
+            text: "kept across resume placement".into(),
+            inherited_input: None,
+        },
+    )
+    .unwrap();
+    let draft_id = list_detached_drafts_at(&database, &source.id).unwrap()[0]
+        .id
+        .clone();
 
     reassign_resumable_session_workspace_at(&database, &stopped.id, &destination.id).unwrap();
     assert_eq!(
         workspace_for_session_at(&database, &stopped.id).unwrap(),
         Some(destination.id.clone())
+    );
+    let moved_drafts = list_detached_drafts_at(&database, &destination.id).unwrap();
+    assert_eq!(moved_drafts.len(), 1);
+    assert_eq!(moved_drafts[0].id, draft_id);
+    assert!(
+        list_detached_drafts_at(&database, &source.id)
+            .unwrap()
+            .is_empty()
     );
     reassign_resumable_session_workspace_at(&database, &stopped.id, &destination.id).unwrap();
 
@@ -4488,6 +4512,42 @@ fn only_resumable_sessions_can_move_to_a_new_workspace() {
     assert!(
         reassign_resumable_session_workspace_at(&database, &stopped.id, "missing-workspace")
             .is_err()
+    );
+}
+
+#[test]
+fn assigning_new_session_workspace_moves_managed_terminal_draft() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let destination = create_workspace_at(&database, "Assigned").unwrap();
+    let record = session("session-assigned", "project-1");
+    save_session_to(&database, &record).unwrap();
+    save_terminal_draft_in(
+        &mut open(&database).unwrap(),
+        DEFAULT_WORKSPACE_ID,
+        &record.id,
+        "terminal-a",
+        1234,
+        1,
+        &DetachedSessionDraft {
+            text: "keep across initial placement".into(),
+            inherited_input: None,
+        },
+    )
+    .unwrap();
+    let draft_id = list_detached_drafts_at(&database, DEFAULT_WORKSPACE_ID).unwrap()[0]
+        .id
+        .clone();
+
+    assign_new_session_workspace_at(&database, &record.id, &destination.id).unwrap();
+
+    let drafts = list_detached_drafts_at(&database, &destination.id).unwrap();
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].id, draft_id);
+    assert!(
+        list_detached_drafts_at(&database, DEFAULT_WORKSPACE_ID)
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -4702,9 +4762,78 @@ fn a_detached_client_cannot_retire_a_draft_in_another_workspace() {
             "inherited input"
         );
     }
-    let drafts = list_detached_drafts_at(&database, &previous.id).unwrap();
+    let drafts = list_detached_drafts_at(&database, &owner.id).unwrap();
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].text, "unsent in the previous workspace");
+    assert!(
+        list_detached_drafts_at(&database, &previous.id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn moving_session_keeps_terminal_draft_canonical_across_workspace_close_and_late_saves() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let source = create_workspace_at(&database, "Source").unwrap();
+    let destination = create_workspace_at(&database, "Destination").unwrap();
+    let mut record = session("session-moved", "project-1");
+    record.workspace_id = source.id.clone();
+    save_session_to(&database, &record).unwrap();
+
+    let save = |workspace_id: &str, revision, text: &str| {
+        save_terminal_draft_in(
+            &mut open(&database).unwrap(),
+            workspace_id,
+            &record.id,
+            "terminal-a",
+            1234,
+            revision,
+            &DetachedSessionDraft {
+                text: text.into(),
+                inherited_input: None,
+            },
+        )
+    };
+    save(&source.id, 1, "unchanged composer").unwrap();
+    let draft_id = list_detached_drafts_at(&database, &source.id).unwrap()[0]
+        .id
+        .clone();
+
+    set_sessions_workspace_at(&database, std::slice::from_ref(&record.id), &destination.id)
+        .unwrap();
+    let moved = list_detached_drafts_at(&database, &destination.id).unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].id, draft_id);
+    assert_eq!(moved[0].text, "unchanged composer");
+    close_workspace_at(&database, &source.id).unwrap();
+
+    // A delayed old-workspace edit follows the session's canonical placement.
+    save(&source.id, 2, "newer edit").unwrap();
+    // A stale lower revision cannot restore the removed source placement.
+    save(&source.id, 1, "old text").unwrap();
+    save(&destination.id, 3, "latest edit").unwrap();
+
+    assert!(
+        list_detached_drafts_at(&database, &source.id)
+            .unwrap()
+            .is_empty()
+    );
+    let latest = list_detached_drafts_at(&database, &destination.id).unwrap();
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].id, draft_id);
+    assert_eq!(latest[0].text, "latest edit");
+    let connection = open(&database).unwrap();
+    let (revision, workspace_id): (i64, String) = connection
+        .query_row(
+            "SELECT revision, workspace_id FROM detached_drafts WHERE draft_id = ?1",
+            [&draft_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(revision, 3);
+    assert_eq!(workspace_id, destination.id);
 }
 
 #[test]

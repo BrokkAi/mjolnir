@@ -19,7 +19,6 @@ from tui_components_tmux import Evidence, TmuxController, locate_text
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-WORKSPACE_ID = "default"
 QUIT_FIELDS = {
     "dashboard_drop_ms",
     "attachment_shutdown_ms",
@@ -49,7 +48,7 @@ def read_draft_rows(lab: Lab) -> list[dict[str, Any]]:
         rows = connection.execute(
             "SELECT draft_id, session_id, source, owner_pid, text, recovered_at "
             "FROM detached_drafts WHERE workspace_id = ? ORDER BY draft_id",
-            (WORKSPACE_ID,),
+            (lab.workspace_id,),
         ).fetchall()
     finally:
         connection.close()
@@ -68,7 +67,7 @@ def read_draft_rows(lab: Lab) -> list[dict[str, Any]]:
 
 def visible_drafts(lab: Lab) -> list[dict[str, Any]]:
     response = lab.daemon_request(
-        {"action": "snapshot", "arguments": {"workspace_id": WORKSPACE_ID}}
+        {"action": "snapshot", "arguments": {"workspace_id": lab.workspace_id}}
     )
     value = response.get("value")
     if response.get("reply") != "snapshot" or not isinstance(value, dict):
@@ -176,7 +175,30 @@ def session_title(lab: Lab, session_id: str) -> str:
     return str(row.get("title") or row.get("name") or session_id)
 
 
+def session_workspace_id(lab: Lab, session_id: str) -> str:
+    connection = sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True)
+    try:
+        row = connection.execute(
+            "SELECT workspace_id FROM session_contexts WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        raise ScenarioFailure(f"session {session_id} has no workspace context")
+    return str(row[0])
+
+
 def rename_session(lab: Lab, session_id: str, title: str) -> None:
+    lab.wait_snapshot(
+        lambda value: any(
+            item.get("id") == session_id
+            and item.get("state") == "running"
+            and item.get("capabilities", {}).get("rename")
+            for item in value.get("sessions", [])
+        ),
+        f"session {session_id} running and rename-capable",
+    )
     status, response = lab.request(
         "POST",
         "/api/actions",
@@ -195,8 +217,9 @@ def rename_session(lab: Lab, session_id: str, title: str) -> None:
 
 def create_session(lab: Lab, tmux: TmuxController, evidence: Evidence) -> str:
     before = {row["id"] for row in lab.snapshot().get("sessions", [])}
-    # Use the controller's literal second key so tmux cannot interpret the
-    # dashboard's prefix chord as its own command prefix.
+    # The empty workspace initially focuses the conversation pane. Creation
+    # is routed from Sessions, so focus that pane before using its shortcut.
+    click_text(tmux, "Sessions")
     tmux.send_prefix("c")
     tmux.wait_for("New session · 1/4 profile")
     tmux.send_key("Home")
@@ -381,12 +404,15 @@ def run(args: argparse.Namespace) -> int:
         if status != 204:
             raise ScenarioFailure(f"fixture viewer login returned {status}")
         first_id = create_session(lab, first, evidence)
+        lab.workspace_id = session_workspace_id(lab, first_id)
         rename_session(lab, first_id, f"draft-session-{args.seed}-one")
         first_title = session_title(lab, first_id)
         open_session(first, first_id, first_title)
 
         # Create a second navigation target before entering any test drafts.
         second_id = create_session(lab, first, evidence)
+        if session_workspace_id(lab, second_id) != lab.workspace_id:
+            raise ScenarioFailure("fixture sessions were created in different workspaces")
         rename_session(lab, second_id, f"draft-session-{args.seed}-two")
         second_title = session_title(lab, second_id)
         open_session(first, first_id, first_title)

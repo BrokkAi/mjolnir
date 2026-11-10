@@ -15,7 +15,8 @@ After this work, changed drafts are saved while the dashboard is open, repeated 
 - [x] (2026-11-10) Settle draft ownership and serialization, including recovery-entry lifecycle and submission ordering.
 - [x] (2026-11-10) Implement incremental draft persistence, ordered storage, backward-compatible handoff, and disposal of both warm and standby editors.
 - [x] (2026-11-10) Overlap independent final cleanup after durable mutation drain and split teardown timings; source review complete, runtime validation pending.
-- [ ] Run focused regressions, final required Cargo validation, and an isolated named-instance TUI check.
+- [x] (2026-11-10) Run focused regressions and an isolated named-instance TUI check.
+- [ ] Run final required Cargo suites and clippy after the workspace-placement correction.
 - [ ] Review the integrated change, commit on the current branch, pass push review, and push to origin/master.
 
 ## Surprises & Discoveries
@@ -40,7 +41,7 @@ Decision: do not blindly reuse main's initial daemon stream for detachment. Rati
 
 Decision: reuse existing persistence/ordering mechanisms where possible and keep a single owner for each draft's requested, in-flight, and acknowledged state. Rationale: an old acknowledgment must never clear a newer edit, and an older save must never resurrect submitted text. Exact implementation interfaces will be recorded after the focused lifecycle investigation. Date: 2026-11-10, parent agent.
 
-Decision: add nullable revision to detached_drafts and a unique managed key on source, workspace, and session. Existing archives retain NULL revision. One managed row keeps a stable draft ID; clearing stores empty text plus its revision instead of deleting the ordering evidence. Only strictly higher revisions change that row, and listing/recovery excludes empty rows. The migration is breaking because older readers would expose empty ordering rows and older writers bypass revision checks. Rationale: local acknowledgment ordering alone cannot reject an older server operation that finishes after its caller times out. Date: 2026-11-10, parent agent.
+Decision: add nullable revision to detached_drafts and a unique managed owner key. The initial source/workspace/session key was corrected after push review to source/session, as recorded below. Existing archives retain NULL revision. One managed row keeps a stable draft ID; clearing stores empty text plus its revision instead of deleting the ordering evidence. Only strictly higher revisions change that row, and listing/recovery excludes empty rows. The migration is breaking because older readers would expose empty ordering rows and older writers bypass revision checks. Rationale: local acknowledgment ordering alone cannot reject an older server operation that finishes after its caller times out. Date: 2026-11-10, parent agent.
 
 Decision: compare-clear an inherited legacy seed only during the first managed-row insertion, never on an update. Higher-revision saves preserve recovered_at for identical text and reset it only for changed text. Rationale: lost acknowledgments cannot justify clearing an explicitly recovered legacy draft. A recovered copy and the original live composer are independent; genuinely newer text must remain protected instead of being suppressed. Date: 2026-11-10, parent agent.
 
@@ -50,9 +51,17 @@ Decision: keep attachment detachment after settings persistence completes. Ratio
 
 Decision: a final flush retries an already-failed value but does not queue a second attempt for the same value that is currently in flight. Rationale: quitting during an acknowledgment wait must not turn the existing 15-second wait into two serial waits. A genuinely newer desired value still starts after the earlier completion; a failed latest value is reported and the surface can exit. Date: 2026-11-10, parent agent.
 
+Decision: managed draft identity is source/client plus session, and workspace is placement metadata that follows the session. Move managed rows with session_contexts in the same transaction, and resolve the current workspace inside the draft-save transaction so a delayed request with old placement cannot recreate a source-workspace copy. Legacy NULL-revision archives remain historical. Rationale: push review found that workspace-keyed ownership left unchanged drafts behind and allowed source-workspace closure to delete their only durable copy. The new, unshipped migration 123 can still be corrected before publication. Date: 2026-11-10, parent agent.
+
 ## Outcomes & Retrospective
 
 Implementation and focused validation are complete. Twenty-four distinct focused regressions passed across the terminal and storage crates. The first focused run exposed one missing async runtime in a new UI fixture; both new real-composer tests now use Tokio and passed on a targeted rerun. Final full validation, live acceptance, review, and delivery remain. No performance improvement is claimed before the new behavior is exercised.
+
+Checkpoint 74da52a35 contains the implementation and initial focused validation. Workspace clippy passed with warnings denied. Push review found one workspace-placement ownership bug, corrected in the follow-up described below before final suites and a second review. No installation or push has occurred.
+
+The workspace-placement correction is complete and seven affected storage integration tests passed in `/mnt/optane/tmp/mj1486-validation/review1-workspace-drafts.log`. All three session-placement paths move managed drafts transactionally, and delayed writes resolve current placement inside their transaction. Managed ownership is now source/session; legacy archives remain unchanged.
+
+The isolated tmux acceptance scenario passed using the initial copied binaries in named instance tui-quit-persistence-1486-1518144. It verified continuous save, stable recovery ID, independent clients, clear/submission retirement, quit without first waiting for the final edit acknowledgment, and explicit recovery into a newly opened TUI. Quit took 122 ms: 110 ms pending writes, 8 ms final saves/combined cleanup, 1 ms dashboard destruction, 2 ms aggregate teardown, and 0 ms runtime shutdown. This two-session fixture does not establish the timing of a large live dashboard or an unresponsive daemon. Database integrity and foreign-key checks passed. Evidence is `/mnt/optane/tmp/mj1486-live-artifacts/tui-quit-persistence-seed-1486-1518144/live-evidence.json` and sibling runtime logs/captures.
 
 ## Context and Orientation
 

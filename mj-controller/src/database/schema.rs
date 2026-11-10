@@ -2364,7 +2364,7 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              CREATE INDEX detached_drafts_workspace_recent
                  ON detached_drafts(workspace_id, saved_at DESC);
              CREATE UNIQUE INDEX detached_drafts_terminal_revision
-                 ON detached_drafts(source, workspace_id, session_id)
+                 ON detached_drafts(source, session_id)
                  WHERE revision IS NOT NULL;",
         )?;
         transaction.execute(
