@@ -17,7 +17,11 @@ mj ec2 destroy builder
 
 `create` launches the current official Ubuntu 24.04 image for the instance's
 CPU architecture, installs rootless Podman, waits for EC2 status checks and
-cloud-init, then adds an SSH machine and a Podman target to your configuration.
+cloud-init, and downloads mj's dev image directly on the VM for its CPU
+architecture. It adds the SSH machine and Podman target to your live
+configuration only after that download succeeds, so the host is ready for its
+first session. If the download fails, the error includes a cleanup command;
+the VM and SSH key remain available, and no target is registered.
 Raw SSH sessions are disabled for this host; SSH is still used to manage Podman.
 The VM stays running across session suspension and destruction. Its on-demand
 compute, storage, and network charges continue until you stop or destroy it.

@@ -549,6 +549,23 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
                 &mj_controller::targets::ProcessExecutor,
             )?;
         }
+        let image = mj_core::config::DEFAULT_CONTAINER_IMAGE;
+        eprintln!("Downloading {image} on {}.", record.target);
+        let refresh = mj_core::targets::image_refresh(
+            mj_core::targets::ImageHost::SshPodman((&ssh).into()),
+            image,
+            Some(platform),
+            mj_core::config::ImagePullPolicy::Missing,
+        )
+        .context("prepare EC2 dev image download")?;
+        // Publish only after the image is ready, so the daemon cannot race
+        // this initial pull with an image refresh or a new session launch.
+        mj_core::targets::CommandPlan {
+            description: "predownload EC2 dev image".into(),
+            commands: vec![refresh.pull],
+        }
+        .execute(&mj_controller::targets::ProcessExecutor)
+        .context("download EC2 dev image")?;
         Config::update(|config| {
             ensure!(
                 !config.machines.contains_key(&record.target)
@@ -564,7 +581,7 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
                 TargetTemplate::SshPodman {
                     ssh,
                     container: ContainerTemplate {
-                        image: mj_core::config::DEFAULT_CONTAINER_IMAGE.into(),
+                        image: image.into(),
                         pull_policy: Default::default(),
                         platform: Some(platform.into()),
                         cpus: None,
@@ -1071,6 +1088,25 @@ elif op not in ('authorize-security-group-ingress','wait instance-status-ok','wa
 print(json.dumps(response))
 "#;
 
+    const PODMAN_FIXTURE: &str = r#"#!/usr/bin/python3
+import json, os, pathlib, sys
+root = pathlib.Path(__file__).parent
+args = sys.argv[1:]
+if args == ['info', '--format', '{{.Host.Security.Rootless}}']:
+    print('true')
+elif args and args[0] == 'pull':
+    config = pathlib.Path(os.environ['MJ_CONFIG_DIR'])/'config.toml'
+    assert not config.exists() or 'builder' not in config.read_text(), 'target published before image was ready'
+    (root/'image-pull-args').write_text(json.dumps(args))
+    if (root/'fail-image-pull').exists():
+        sys.stderr.write('download progress\n' * 5000 + 'registry refused the image download\n')
+        sys.exit(1)
+    (root/'image-ready').write_text('ready')
+    print('sha256:downloaded-image')
+else:
+    sys.exit('unexpected Podman command: '+repr(args))
+"#;
+
     fn fixture_child(name: &str) -> bool {
         if std::env::var_os("MJ_EC2_FIXTURE_CHILD").is_some() {
             return false;
@@ -1083,8 +1119,10 @@ print(json.dumps(response))
             ("aws", AWS_FIXTURE),
             (
                 "ssh",
-                "#!/bin/sh\ncase \"$*\" in *MJOLNIR-SSH-SESSION-STARTED*) printf 'MJOLNIR-SSH-SESSION-STARTED\\n';; esac\nprintf 'status: done\\ntrue\\n'\n",
+                "#!/bin/sh\nfor remote_command do :; done\nexec sh -c \"$remote_command\"\n",
             ),
+            ("podman", PODMAN_FIXTURE),
+            ("cloud-init", "#!/bin/sh\nprintf 'status: done\\n'\n"),
         ] {
             let path = bin.join(name);
             fs::write(&path, body).unwrap();
@@ -1165,6 +1203,18 @@ print(json.dumps(response))
             panic!("expected EC2 create command");
         };
         create(args, &root).unwrap();
+        assert!(bin.join("image-ready").exists());
+        let pulled: Vec<String> =
+            serde_json::from_slice(&fs::read(bin.join("image-pull-args")).unwrap()).unwrap();
+        assert_eq!(
+            pulled,
+            [
+                "pull",
+                "--platform=linux/amd64",
+                mj_core::config::DEFAULT_CONTAINER_IMAGE
+            ]
+        );
+
         let record = records(&root).unwrap().pop().unwrap();
         // Hard-won: #1481: a terminated VM with the same target blocked teardown.
         fs::write(bin.join("historical"), "").unwrap();
@@ -1288,5 +1338,45 @@ print(json.dumps(response))
                 .contains("terminate-instances")
         );
         assert!(!bin.join("key.json").exists() && !bin.join("group.json").exists());
+    }
+
+    #[test]
+    fn image_download_failure_retains_the_vm_without_publishing_a_target() {
+        if fixture_child(
+            "ec2::tests::image_download_failure_retains_the_vm_without_publishing_a_target",
+        ) {
+            return;
+        }
+        let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        let bin = fixture.join("bin");
+        let root = config_dir().join("ec2");
+        fs::write(bin.join("fail-image-pull"), "").unwrap();
+        let error = create(create_args(), &root).unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(detail.contains("download EC2 dev image"), "{detail}");
+        assert!(
+            detail.contains("registry refused the image download"),
+            "{detail}"
+        );
+        assert!(!bin.join("image-ready").exists());
+        let record = records(&root).unwrap().pop().unwrap();
+        assert_eq!(record.instance_id.as_deref(), Some("i-test"));
+        assert!(detail.contains(&record.operation));
+        assert!(record.directory(&root).unwrap().join("id_ed25519").exists());
+        let config = Config::load().unwrap();
+        assert!(!config.machines.contains_key("builder"));
+        assert!(!config.targets.contains_key("builder"));
+        destroy(
+            DestroyArgs {
+                host: record.operation,
+                aws: AwsArgs::default(),
+            },
+            &root,
+        )
+        .unwrap();
+        assert!(records(&root).unwrap().is_empty());
+        let instance: Value =
+            serde_json::from_slice(&fs::read(bin.join("instance.json")).unwrap()).unwrap();
+        assert_eq!(instance["State"]["Name"], "terminated");
     }
 }
