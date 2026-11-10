@@ -739,8 +739,19 @@ fn public_snapshot_keeps_running_sessions_but_omits_disabled_profiles() {
     let (mut config, state) = sample_config_state();
     config.profiles.get_mut("codex-1").unwrap().enabled = false;
 
+    let retired: TargetTemplate = serde_json::from_value(serde_json::json!({
+        "kind": "aws-ec2", "region": "us-east-1", "launch_template": "lt-old", "ssh_user": "ubuntu"
+    }))
+    .unwrap();
+    config.targets.insert("retired-ec2".into(), retired);
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
 
+    assert!(
+        !snapshot
+            .targets
+            .iter()
+            .any(|target| target.id == "retired-ec2")
+    );
     assert!(snapshot.profiles.is_empty());
     assert_eq!(snapshot.sessions.len(), 1);
     assert_eq!(snapshot.sessions[0].profile_id, "codex-1");

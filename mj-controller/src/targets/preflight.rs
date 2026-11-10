@@ -4,7 +4,6 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ManagedResourceKind {
     Container,
-    Ec2Instance,
 }
 
 /// Build command-line fragments that identify resources Hel owns for a session.
@@ -21,12 +20,6 @@ pub(super) fn managed_resource_identity_args(
             format!("{MANAGED_LABEL}=true"),
             "--label".to_owned(),
             format!("{INSTANCE_LABEL}={instance}"),
-        ],
-        ManagedResourceKind::Ec2Instance => vec![
-            "--tag-specifications".to_owned(),
-            format!(
-                "ResourceType=instance,Tags=[{{Key={SESSION_TAG},Value={session_id}}},{{Key={MANAGED_TAG},Value=true}},{{Key={INSTANCE_TAG},Value={instance}}}]"
-            ),
         ],
     }
 }

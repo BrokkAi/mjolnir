@@ -33,7 +33,7 @@ use crossterm::event::{
 };
 use mj_controller::database::DetachedSessionDraft;
 use mj_core::config::Config;
-use mj_core::state::{MaterializedSession, SessionRecord, SessionResourceAllocation};
+use mj_core::state::{MaterializedSession, SessionRecord};
 use mj_core::subagent::SubagentMetadata;
 
 use mj_chat::chat::ChatElicitationDraft;
@@ -448,10 +448,6 @@ pub(crate) struct DashboardContext {
     capacity_triggers_tx: Sender<()>,
     capacity: Feed<Receiver<CapacityPollUpdate>>,
 
-    pub(crate) aws_resource_options_tx: AwsResourceOptionsSender,
-    aws_options: Feed<UnboundedReceiver<AwsResourceOptions>>,
-    pub(crate) resolving_aws_resource_options: BTreeSet<String>,
-
     import_updates_tx: Sender<(u64, ImportProfileOption)>,
     import_profiles: Feed<Receiver<(u64, ImportProfileOption)>>,
     pub(crate) import_task_tx: Sender<DashboardImportUpdate>,
@@ -498,14 +494,6 @@ pub(crate) struct DashboardContext {
     checkpoint_archive_records: mj_core::snapshot_map::SnapshotMap<String, std::path::PathBuf>,
     polling_records: std::cell::RefCell<surface::PollingRecords>,
 }
-
-/// One deployment target's resolved instance sizes, or why they could not be
-/// resolved.
-type AwsResourceOptions = (
-    String,
-    std::result::Result<Vec<SessionResourceAllocation>, String>,
-);
-type AwsResourceOptionsSender = UnboundedSender<AwsResourceOptions>;
 
 /// One worker publication, kept together while background projections coalesce.
 pub(crate) struct MaterializedProjection {
@@ -1021,10 +1009,6 @@ pub(crate) async fn run_dashboard_for_workspace(
             update = paced(feed_gate, context.capacity.wait()), if context.capacity.is_open() => {
                 context.loop_stalls.woke("capacity");
                 context.capacity.accept(update);
-            }
-            update = paced(feed_gate, context.aws_options.wait()), if context.aws_options.is_open() => {
-                context.loop_stalls.woke("aws_options");
-                context.aws_options.accept(update);
             }
             update = paced(feed_gate, context.import_profiles.wait()), if context.import_profiles.is_open() => {
                 context.loop_stalls.woke("import_profiles");
@@ -1901,8 +1885,6 @@ impl DashboardContext {
         let lifecycle_operations = BTreeMap::<String, ActiveLifecycleOperation>::new();
         let (capacity_targets_tx, capacity_triggers_tx, capacity_updates_rx) =
             spawn_dashboard_capacity_poller();
-        let (aws_resource_options_tx, aws_resource_options_rx) =
-            tokio::sync::mpsc::unbounded_channel::<AwsResourceOptions>();
         let capacity_targets = controller.deployment_capacity_targets();
         capacity_targets_tx.send_replace(capacity_targets.clone());
         dashboard.set_deployment_capacity_targets(capacity_targets);
@@ -2003,9 +1985,6 @@ impl DashboardContext {
             capacity_targets_tx,
             capacity_triggers_tx,
             capacity: Feed::new(capacity_updates_rx),
-            aws_resource_options_tx,
-            aws_options: Feed::new(aws_resource_options_rx),
-            resolving_aws_resource_options: BTreeSet::new(),
             wiki_search_task: None,
             sessions_text_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             usage_report: usage_report::UsageReportLoader::default(),

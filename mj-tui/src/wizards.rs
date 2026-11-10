@@ -36,7 +36,7 @@ use mj_core::config::{
 use mj_core::state::{
     HostContainerSize, MaterializedQueuedPrompt, MoveOperation, MovePreparation,
     ResumeQueueDisposition, SessionResourceAllocation, SessionState, allocation_cpus,
-    allocation_memory, default_container_size, preferred_aws_allocation,
+    allocation_memory, default_container_size,
 };
 
 use mj_chat::components::PathField;
@@ -82,7 +82,6 @@ pub(crate) enum WizardControl {
     ResourceCpu,
     ResourceMemory,
     RememberContainerSize,
-    ResourceInstance,
     ProjectDirectory,
     RecentProject(usize),
     NewBundleRepositories,
@@ -178,7 +177,6 @@ pub(crate) struct NewWizard {
     project_history_index: usize,
     pub(crate) resource_allocation: Option<SessionResourceAllocation>,
     pub(crate) remember_container_size: bool,
-    aws_options: BTreeMap<String, Vec<SessionResourceAllocation>>,
     pub(crate) sizing_error: Option<String>,
     pub(crate) resource_editor: ResourceEditor,
     /// Network clone destinations returned by the asynchronous creation
@@ -217,7 +215,6 @@ impl PartialEq for NewWizard {
             && self.project_history_index == other.project_history_index
             && self.resource_allocation == other.resource_allocation
             && self.remember_container_size == other.remember_container_size
-            && self.aws_options == other.aws_options
             && self.sizing_error == other.sizing_error
             && self.resource_editor == other.resource_editor
             && self.remote_repositories == other.remote_repositories
@@ -468,7 +465,6 @@ pub(crate) struct ResumeWizard {
     pub(crate) mounts: MountWizard,
 
     pub(crate) resource_allocation: Option<SessionResourceAllocation>,
-    aws_options: BTreeMap<String, Vec<SessionResourceAllocation>>,
     pub(crate) sizing_error: Option<String>,
     pub(crate) resource_editor: ResourceEditor,
     pub(crate) discard_queue: bool,
@@ -496,7 +492,6 @@ impl PartialEq for ResumeWizard {
             && self.target_step_skipped == other.target_step_skipped
             && self.mounts == other.mounts
             && self.resource_allocation == other.resource_allocation
-            && self.aws_options == other.aws_options
             && self.sizing_error == other.sizing_error
             && self.resource_editor == other.resource_editor
             && self.discard_queue == other.discard_queue
@@ -591,36 +586,6 @@ fn validate_mount_entry(mounts: &MountWizard) -> Option<String> {
             mount.destination.display()
         )
     })
-}
-
-fn apply_aws_options(
-    target_id: &str,
-    result: std::result::Result<Vec<SessionResourceAllocation>, String>,
-    options_by_target: &mut BTreeMap<String, Vec<SessionResourceAllocation>>,
-    allocation: &mut Option<SessionResourceAllocation>,
-    sizing_error: &mut Option<String>,
-    previous: Option<&SessionResourceAllocation>,
-    selected_type: Option<&str>,
-) {
-    match result {
-        Ok(options) => {
-            *allocation = if let Some(instance_type) = selected_type {
-                options.iter().find(|option| matches!(option,
-                    SessionResourceAllocation::AwsEc2 { instance_type: candidate, .. } if candidate == instance_type
-                )).cloned()
-            } else {
-                preferred_aws_allocation(&options, previous).cloned()
-            };
-            *sizing_error = allocation.is_none().then(|| {
-                "The selected instance type is unavailable; choose an available type.".into()
-            });
-            options_by_target.insert(target_id.to_owned(), options);
-        }
-        Err(error) => {
-            *allocation = None;
-            *sizing_error = Some(error);
-        }
-    }
 }
 
 impl NewWizard {

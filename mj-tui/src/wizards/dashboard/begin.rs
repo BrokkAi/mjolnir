@@ -108,7 +108,6 @@ impl DashboardState {
             project_history_index: 0,
             resource_allocation: None,
             remember_container_size: false,
-            aws_options: BTreeMap::new(),
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             remote_repositories: None,
@@ -121,7 +120,7 @@ impl DashboardState {
         if action != DashboardAction::None {
             return action;
         }
-        self.resolve_all_aws_resource_options_action()
+        DashboardAction::None
     }
 
     /// Open the resume wizard for one session by id. The dashboard reaches
@@ -183,7 +182,6 @@ impl DashboardState {
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts.clone()),
 
             resource_allocation: None,
-            aws_options: BTreeMap::new(),
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             discard_queue: false,
@@ -194,7 +192,7 @@ impl DashboardState {
         if action != DashboardAction::None {
             return action;
         }
-        self.resolve_all_aws_resource_options_action()
+        DashboardAction::None
     }
 
     /// Open the resume wizard for an archived SessionWiki session.
@@ -253,7 +251,6 @@ impl DashboardState {
             mounts: MountWizard::with_mounts(Vec::new(), Vec::new()),
 
             resource_allocation: None,
-            aws_options: BTreeMap::new(),
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             discard_queue: false,
@@ -264,7 +261,7 @@ impl DashboardState {
         if action != DashboardAction::None {
             return action;
         }
-        self.resolve_all_aws_resource_options_action()
+        DashboardAction::None
     }
 
     /// Open the resume controls for an active session as a Move operation.
@@ -325,7 +322,6 @@ impl DashboardState {
             mounts: MountWizard::with_mounts(Vec::new(), session.additional_mounts),
 
             resource_allocation: session.resource_allocation,
-            aws_options: BTreeMap::new(),
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             // Move's safe default is to leave pending work idle. The review
@@ -338,7 +334,7 @@ impl DashboardState {
         if action != DashboardAction::None {
             return action;
         }
-        self.resolve_all_aws_resource_options_action()
+        DashboardAction::None
     }
 
     /// Open the Move wizard for a retained failure while the source is still
@@ -422,7 +418,6 @@ impl DashboardState {
                 .resource_allocation
                 .clone()
                 .or(session.resource_allocation),
-            aws_options: BTreeMap::new(),
             sizing_error: None,
             resource_editor: ResourceEditor::default(),
             discard_queue: operation.queue == ResumeQueueDisposition::Discard,
@@ -448,24 +443,6 @@ impl DashboardState {
                 self.advance_resume_wizard(wizard)
             }
             _ => unreachable!(),
-        }
-    }
-
-    fn resolve_all_aws_resource_options_action(&self) -> DashboardAction {
-        let target_template_ids = self
-            .config
-            .targets
-            .iter()
-            .filter_map(|(id, target)| {
-                matches!(target, TargetTemplate::AwsEc2 { .. }).then_some(id.clone())
-            })
-            .collect::<Vec<_>>();
-        if target_template_ids.is_empty() {
-            DashboardAction::None
-        } else {
-            DashboardAction::ResolveAwsResourceOptions {
-                target_template_ids,
-            }
         }
     }
 

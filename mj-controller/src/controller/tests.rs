@@ -883,6 +883,25 @@ fn registration_rejects_a_disabled_profile_before_persisting() {
 
     assert!(error.to_string().contains("disabled"));
     assert!(controller.state.sessions.is_empty());
+    controller.config.profiles.get_mut("codex").unwrap().enabled = true;
+    controller.config.targets.insert("retired-ec2".into(), serde_json::from_value(serde_json::json!({
+        "kind": "aws-ec2", "region": "us-east-1", "launch_template": "lt-old", "ssh_user": "ubuntu"
+    })).unwrap());
+    let error = controller
+        .register_session_with_resources(
+            "codex",
+            "project",
+            "retired-ec2",
+            "retired",
+            launch_options(Vec::new()),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(mj_core::config::LEGACY_EC2_TARGET_NOTICE)
+    );
+    assert!(controller.state.sessions.is_empty());
 }
 
 #[test]

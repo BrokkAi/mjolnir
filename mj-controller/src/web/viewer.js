@@ -2187,73 +2187,21 @@ function newResourceAllocationError(draft) {
   const target = snapshot?.targets.find(item => item.id === draft?.targetId);
   const kind = targetResourceKind(draft?.targetId);
   if (kind === 'container') return containerAllocationFromDraft(draft, target).error;
-  if (kind === 'aws-ec2') {
-    if (draft.resourceLoading) return 'Loading EC2 size choices…';
-    if (draft.resourceError) return draft.resourceError;
-    return draft.resourceAllocation?.kind === 'aws-ec2' ? '' : 'Choose an EC2 size before continuing.';
-  }
   return '';
 }
 
 function setNewTargetSizing(draft, targetId) {
-  draft.resourceRequestController?.abort();
-  draft.resourceRequestController = null;
-  draft.resourceRequestTargetId = null;
-  draft.resourceLoading = false;
-  draft.resourceError = '';
   const target = snapshot?.targets.find(item => item.id === targetId);
   if (targetResourceKind(targetId) === 'container') {
     const allocation = target?.default_resource_allocation;
     draft.resourceAllocation = allocation?.kind === 'container' ? { ...allocation } : null;
     draft.resourceCpuText = allocation?.kind === 'container' ? String(allocation.cpus) : '';
     draft.resourceMemoryText = allocation?.kind === 'container' ? memoryGiBText(allocation.memory_bytes) : '';
-  } else if (targetResourceKind(targetId) === 'aws-ec2') {
-    const choices = draft.resourceOptionsByTarget[targetId];
-    draft.resourceAllocation = choices?.default_allocation ? { ...choices.default_allocation } : null;
-    draft.resourceCpuText = '';
-    draft.resourceMemoryText = '';
   } else {
     draft.resourceAllocation = null;
     draft.resourceCpuText = '';
     draft.resourceMemoryText = '';
   }
-}
-
-function ensureNewTargetResourceOptions(draft) {
-  const targetId = draft.targetId;
-  if (draft.resourceOptionsByTarget[targetId]
-    || (draft.resourceLoading && draft.resourceRequestTargetId === targetId)) return;
-  draft.resourceRequestController?.abort();
-  const controller = new AbortController();
-  draft.resourceRequestController = controller;
-  draft.resourceRequestTargetId = targetId;
-  draft.resourceLoading = true;
-  draft.resourceError = '';
-  request(`/api/targets/${encodeURIComponent(targetId)}/resource-options`, { signal: controller.signal })
-    .then(result => {
-      if (newDraft !== draft || draft.targetId !== targetId || controller.signal.aborted) return;
-      draft.resourceOptionsByTarget[targetId] = result;
-      draft.resourceAllocation = result.default_allocation ? { ...result.default_allocation } : null;
-      draft.resourceError = result.options?.length
-        ? ''
-        : 'This EC2 target has no available instance sizes.';
-    })
-    .catch(error => {
-      if (controller.signal.aborted || error?.name === 'AbortError' || newDraft !== draft) return;
-      draft.resourceError = error.message || 'Could not load EC2 size choices.';
-    })
-    .finally(() => {
-      if (draft.resourceRequestController === controller) {
-        draft.resourceRequestController = null;
-        draft.resourceRequestTargetId = null;
-        draft.resourceLoading = false;
-        const controls = document.querySelector('#new-resource-controls');
-        if (newDraft === draft && controls && visibleSteps()[draft.step]?.key === 'target') {
-          renderNewTargetSizingControls(draft, controls);
-          syncNewSizingState(draft);
-        }
-      }
-    });
 }
 
 function syncNewSizingState(draft) {
@@ -2344,47 +2292,6 @@ function renderNewTargetSizingControls(draft, host) {
     const warning = el('p', 'move-warning', containerAllocationFromDraft(draft, target).warning);
     warning.id = 'new-resource-warning';
     host.append(warning);
-  } else if (kind === 'aws-ec2') {
-    if (draft.resourceLoading) {
-      host.append(el('p', 'dim', 'Loading EC2 size choices…'));
-      return;
-    }
-    if (draft.resourceError) {
-      host.append(el('p', 'error', draft.resourceError));
-      if (!draft.resourceOptionsByTarget[draft.targetId]) {
-        host.append(projectButton('Retry size choices', () => {
-          draft.resourceError = '';
-          ensureNewTargetResourceOptions(draft);
-          renderNewTargetSizingControls(draft, host);
-          syncNewSizingState(draft);
-        }, 'new-resource-retry'));
-      }
-      return;
-    }
-    const choices = draft.resourceOptionsByTarget[draft.targetId]?.options || [];
-    if (!choices.length) {
-      host.append(el('p', 'error', 'This EC2 target has no available instance sizes.'));
-      return;
-    }
-    const field = el('label', 'field');
-    field.append(el('span', '', 'EC2 instance size'));
-    const select = el('select');
-    select.id = 'new-resource-aws';
-    const selectedType = draft.resourceAllocation?.kind === 'aws-ec2'
-      ? draft.resourceAllocation.instance_type
-      : '';
-    if (!selectedType) select.append(new Option('Choose an instance size', ''));
-    for (const option of choices) {
-      const title = `${option.instance_type} · ${option.vcpus} vCPU · ${memoryGiBText(option.memory_bytes)} GiB`;
-      select.append(new Option(title, option.instance_type));
-    }
-    select.value = selectedType;
-    select.onchange = () => {
-      draft.resourceAllocation = choices.find(option => option.instance_type === select.value) || null;
-      syncNewSizingState(draft);
-    };
-    field.append(select);
-    host.append(el('h2', '', 'EC2 size'), field);
   }
 }
 
@@ -2422,11 +2329,6 @@ function freshDraft() {
     resourceCpuText: '',
     resourceMemoryText: '',
     rememberContainerSize: false,
-    resourceOptionsByTarget: {},
-    resourceRequestController: null,
-    resourceRequestTargetId: null,
-    resourceLoading: false,
-    resourceError: '',
   };
   draft.subagents = rememberedDelegationPolicy(draft.profileId);
   draft.oracle = rememberedOracleChoice(draft.profileId);
@@ -2614,9 +2516,6 @@ function renderNewForm() {
   const steps = visibleSteps();
   newDraft.step = Math.min(newDraft.step, steps.length - 1);
   const step = steps[newDraft.step];
-  if (step.key === 'target' && targetResourceKind(newDraft.targetId) === 'aws-ec2') {
-    ensureNewTargetResourceOptions(newDraft);
-  }
   if (step.key === 'project' && !newDraft.catalogStep) {
     newDraft.catalogStep = true;
     refreshProjectCatalog(newDraft);
@@ -2694,7 +2593,6 @@ function renderNewForm() {
           newDraft.targetId = value;
           newDraft.projectDirectory = newDraft.projectDirectories[value] ?? snapshot.targets.find(t => t.id === value)?.recent_project_directories?.[0] ?? '';
           setNewTargetSizing(newDraft, value);
-          if (targetResourceKind(value) === 'aws-ec2') ensureNewTargetResourceOptions(newDraft);
           // Changing the target changes which project question is asked, and
           // invalidates anything the previous project answer was checked for.
           newDraft.preflighted = false;
@@ -2772,9 +2670,7 @@ function renderNewForm() {
         ['Where to run', newDraft.targetId],
         ...(newDraft.resourceAllocation?.kind === 'container'
           ? [['Container size', `${newDraft.resourceAllocation.cpus} CPU · ${memoryGiBText(newDraft.resourceAllocation.memory_bytes)} GiB memory`]]
-          : newDraft.resourceAllocation?.kind === 'aws-ec2'
-            ? [['EC2 size', newDraft.resourceAllocation.instance_type]]
-            : []),
+          : []),
         targetIsBare(newDraft.targetId)
           ? ['Project files', newDraft.projectDirectory]
           : ['Project', newDraft.bundleId],
@@ -3605,7 +3501,7 @@ async function commitNew() {
   const target = snapshot?.targets.find(item => item.id === draft.targetId);
   const resourceAllocation = kind === 'container'
     ? containerAllocationFromDraft(draft, target).allocation
-    : kind === 'aws-ec2' ? draft.resourceAllocation : null;
+    : null;
   if (resourceAllocation) body.resource_allocation = resourceAllocation;
   if (kind === 'container') body.remember_container_size = draft.rememberContainerSize === true;
   if (newDraft.title.trim()) body.title = newDraft.title.trim();

@@ -118,6 +118,7 @@ RUN apt-get update \
         git \
         gh \
         heaptrack \
+        mold \
         jq \
         lcov \
         less \

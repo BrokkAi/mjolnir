@@ -1,8 +1,5 @@
 use super::*;
 
-/// Create the initial resource. AWS address discovery and all SSH bootstrap
-/// happen after parsing the `run-instances` response and constructing a locator.
-///
 /// `container_workspace` is the session record's recorded container workspace.
 /// Container targets clone into it and mount their workspace storage there;
 /// a session that predates per-session workspaces records none and keeps the
@@ -163,9 +160,6 @@ pub fn provision_plan_named(
             commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
                 container_exec("container", name, args)
             }));
-        }
-        TargetTemplate::AwsEc2(aws) => {
-            commands.push(ec2_launch_command(aws, session_id)?);
         }
         TargetTemplate::SshBare {
             ssh,
@@ -571,50 +565,4 @@ pub(super) fn execute_checked(
         );
     }
     Ok(())
-}
-
-/// Shared EC2 creation request; Move adds its durable per-attempt client token.
-pub fn ec2_launch_command(aws: &AwsTemplate, session_id: &str) -> Result<CommandSpec> {
-    validate_aws(aws)?;
-    let launch_key = if aws.launch_template.starts_with("lt-") {
-        "LaunchTemplateId"
-    } else {
-        "LaunchTemplateName"
-    };
-    let mut launch = format!("{launch_key}={}", aws.launch_template);
-    if let Some(version) = &aws.launch_template_version {
-        launch.push_str(",Version=");
-        launch.push_str(version);
-    }
-    let mut args = vec![
-        "--profile".to_owned(),
-        aws.profile.clone(),
-        "--region".to_owned(),
-        aws.region.clone(),
-        "ec2".to_owned(),
-        "run-instances".to_owned(),
-        "--launch-template".to_owned(),
-        launch,
-    ];
-    if let Some(instance_type) = &aws.instance_type {
-        args.extend(["--instance-type".to_owned(), instance_type.clone()]);
-    }
-    args.extend(managed_resource_identity_args(
-        ManagedResourceKind::Ec2Instance,
-        session_id,
-    ));
-    // IMDS is the instance metadata service at 169.254.169.254, where code on
-    // the instance can read its instance profile's credentials; IMDSv2 demands
-    // a session token obtained with an HTTP PUT first, which simple
-    // request-forgery bugs cannot send. `ec2_locator_after_launch` enforces
-    // it on every instance Mjolnir adopts, whatever launched it.
-    args.extend([
-        "--metadata-options".to_owned(),
-        "HttpTokens=required".to_owned(),
-    ]);
-    args.extend(["--output".to_owned(), "json".to_owned()]);
-    Ok(CommandSpec::new("aws", args)
-        .purpose("launch EC2 session instance")
-        .stage(ProvisionStage::Provisioning)
-        .creates_target())
 }

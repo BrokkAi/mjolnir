@@ -5510,9 +5510,8 @@ impl CommandExecutor for Ec2PreviewExecutor {
 
 #[cfg(unix)]
 #[test]
-fn ec2_move_preview_defers_destination_checks_and_resolves_inherited_container_sizing() {
-    let short =
-        "ec2_move_preview_defers_destination_checks_and_resolves_inherited_container_sizing";
+fn retired_ec2_move_is_rejected_before_source_interruption() {
+    let short = "retired_ec2_move_is_rejected_before_source_interruption";
     if !isolated_test_child(&test_name(short), "MJ_MOVE_EC2_PREVIEW_CHILD") {
         return;
     }
@@ -5533,7 +5532,9 @@ fn ec2_move_preview_defers_destination_checks_and_resolves_inherited_container_s
         .insert("project".into(), local_bundle(repository.path()));
     config
         .targets
-        .insert("ec2".into(), super::destination::tests::ec2_target());
+        .insert("ec2".into(), serde_json::from_value(serde_json::json!({
+            "kind": "aws-ec2", "region": "us-east-1", "launch_template": "lt-old", "ssh_user": "ubuntu"
+        })).unwrap());
     let id = "0123456789abcdef0123456789abcdef";
     let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
     session.bundle_id = "project".into();
@@ -5568,68 +5569,17 @@ fn ec2_move_preview_defers_destination_checks_and_resolves_inherited_container_s
         .enable_all()
         .build()
         .unwrap();
-    let preparation = runtime
-        .block_on(controller.prepare_move_session_controlled(selection.clone(), &executor))
-        .unwrap();
-    assert_eq!(
-        preparation.destination_checks,
-        mj_core::state::DestinationChecks::AfterProvisioning
-    );
-    assert!(preparation.selection.clear_resource_allocation);
-    assert_eq!(preparation.selection.resource_allocation, None);
-    assert!(preparation.workspace.as_ref().unwrap().blockers.is_empty());
+    let before = controller.state.sessions[id].clone();
+    let error = runtime
+        .block_on(controller.prepare_move_session_controlled(selection, &executor))
+        .unwrap_err();
     assert!(
-        preparation
-            .selection
-            .workspace
-            .included_bytes(preparation.workspace.as_ref().unwrap())
-            > 64 * 1024
-    );
-    assert!(
-        crate::database::load_move_operation(id).unwrap().is_none(),
-        "preview creates no durable launch"
-    );
-    let mut explicit = selection;
-    explicit.resource_allocation = Some(SessionResourceAllocation::AwsEc2 {
-        instance_type: "m8i.large".into(),
-        vcpus: 2,
-        memory_bytes: 8 * 1024 * 1024 * 1024,
-    });
-    let preparation = runtime
-        .block_on(controller.prepare_move_session_controlled(explicit.clone(), &executor))
-        .unwrap();
-    assert_eq!(
-        preparation.selection.resource_allocation,
-        explicit.resource_allocation
-    );
-    assert!(!preparation.selection.clear_resource_allocation);
-
-    // A settings edit while EC2 boots must invalidate confirmation even when
-    // this controller still holds the original config snapshot.
-    controller.config.save().unwrap();
-    let mut operation = source_recovery_operation(&controller.state.sessions[id]);
-    operation.selection = preparation.selection;
-    operation.configuration_fingerprint = controller
-        .move_configuration_fingerprint(&operation.selection)
-        .unwrap();
-    controller
-        .verify_current_move_configuration(&operation)
-        .unwrap();
-    let mut changed = controller.config.clone();
-    let mj_core::config::TargetTemplate::AwsEc2 { region, .. } =
-        changed.targets.get_mut("ec2").unwrap()
-    else {
-        unreachable!()
-    };
-    *region = "us-west-2".into();
-    changed.save().unwrap();
-    assert!(
-        controller
-            .verify_current_move_configuration(&operation)
-            .is_err()
+        format!("{error:#}").contains(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
+        "{error:#}"
     );
     assert_eq!(
-        crate::database::load_session_state(id).unwrap(),
-        Some(SessionState::Running)
+        crate::database::load_session_record(id).unwrap().unwrap(),
+        before
     );
+    assert!(crate::database::load_move_operation(id).unwrap().is_none());
 }

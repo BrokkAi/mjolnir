@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import http.cookiejar
 import json
@@ -208,7 +209,8 @@ def daemon_request(
             fragment = reply["value"]
             if not fragment["bytes"]:
                 raise ScenarioFailure("empty daemon reply fragment")
-            assembled.extend(fragment["bytes"])
+            encoded = fragment["bytes"]
+            assembled.extend(base64.b64decode(encoded) if isinstance(encoded, str) else encoded)
             if fragment["finished"]:
                 return json.loads(assembled)
 

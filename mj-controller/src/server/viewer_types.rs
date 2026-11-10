@@ -1216,15 +1216,6 @@ pub struct ViewerTarget {
     pub recent_project_directories: Vec<String>,
 }
 
-/// EC2 size choices resolved for one target's launch template.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ViewerTargetResourceOptions {
-    pub options: Vec<SessionResourceAllocation>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_allocation: Option<SessionResourceAllocation>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerBundle {

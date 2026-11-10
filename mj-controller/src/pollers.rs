@@ -15,14 +15,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use mj_core::clock::epoch_seconds;
-use mj_core::config::Config;
 use mj_core::credentials::{
     CredentialSyncCause, CredentialSyncHandle, CredentialSyncReason, CredentialSyncSignal,
     CredentialSyncTarget,
 };
 use mj_core::state::{
-    ManagedSessionSnapshot, MaterializedSession, SessionRecord, SessionResourceAllocation,
-    SessionState, State,
+    ManagedSessionSnapshot, MaterializedSession, SessionRecord, SessionState, State,
 };
 
 use crate::controller::Controller;

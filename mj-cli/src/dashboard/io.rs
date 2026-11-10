@@ -1221,9 +1221,6 @@ impl DashboardContext {
             DashboardIoUpdate::ResumeRecord { session_id, result } => {
                 match self.dashboard.apply_resume_record(&session_id, *result) {
                     DashboardAction::None => {}
-                    DashboardAction::ResolveAwsResourceOptions {
-                        target_template_ids,
-                    } => self.resolve_aws_resource_options(target_template_ids),
                     action => tracing::warn!(
                         ?action,
                         "the resume wizard asked for an action its record loader cannot run"
@@ -1411,15 +1408,8 @@ impl DashboardContext {
             }
             DashboardIoUpdate::CreatedBundle { result } => match *result {
                 Ok(created) => {
-                    let followup = self
-                        .dashboard
+                    self.dashboard
                         .apply_created_bundle(self.controller.config.clone(), &created.bundle_id);
-                    if let DashboardAction::ResolveAwsResourceOptions {
-                        target_template_ids,
-                    } = followup
-                    {
-                        self.resolve_aws_resource_options(target_template_ids);
-                    }
                 }
                 Err(error) => {
                     self.dashboard.fail_bundle_creation(&error);
@@ -1446,12 +1436,8 @@ impl DashboardContext {
                     // Import completion can arrive after a tab switch. Keep
                     // the imported record globally visible, but only open
                     // the resume modal in the workspace that owns it.
-                    if self.session_in_active_workspace(&session_id)
-                        && let DashboardAction::ResolveAwsResourceOptions {
-                            target_template_ids,
-                        } = self.dashboard.begin_resume_for(&session_id)
-                    {
-                        self.resolve_aws_resource_options(target_template_ids);
+                    if self.session_in_active_workspace(&session_id) {
+                        self.dashboard.begin_resume_for(&session_id);
                     }
                 }
                 Err(error) => {

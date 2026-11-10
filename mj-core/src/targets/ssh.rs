@@ -869,25 +869,6 @@ pub fn validate_ssh(ssh: &SshTarget) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_aws(aws: &AwsTemplate) -> Result<()> {
-    validate_ssh(&aws.ssh)?;
-    for (name, value) in [
-        ("AWS profile", &aws.profile),
-        ("AWS region", &aws.region),
-        ("launch template", &aws.launch_template),
-    ] {
-        if value.is_empty()
-            || value.starts_with('-')
-            || !value
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
-        {
-            bail!("invalid {name}");
-        }
-    }
-    Ok(())
-}
-
 pub fn validate_executable(value: &str) -> Result<()> {
     if value.is_empty() || value.starts_with('-') || value.chars().any(char::is_whitespace) {
         bail!("invalid executable name");

@@ -1,4 +1,4 @@
-//! Editable container sizing and the EC2 instance selector.
+//! Editable container sizing.
 use super::*;
 use mj_chat::text_input::TextInput;
 
@@ -9,13 +9,6 @@ pub(crate) enum ResourcePicker<'a> {
     Container {
         editor: &'a ResourceEditor,
         save_as_default: Option<bool>,
-    },
-    Ec2 {
-        editor: &'a ResourceEditor,
-        options: &'a [SessionResourceAllocation],
-        selected: usize,
-        has_selection: bool,
-        loading: bool,
     },
 }
 
@@ -35,19 +28,6 @@ pub(crate) fn target_resources<'a, W: WizardDraft>(
         Some(ResourcePicker::Container {
             editor: wizard.resource_editor(),
             save_as_default: wizard.remember_container_size(),
-        })
-    } else if matches!(target, TargetTemplate::AwsEc2 { .. }) {
-        let options = wizard.aws_options().get(&id).map_or(&[][..], Vec::as_slice);
-        let selected = options
-            .iter()
-            .position(|option| Some(option) == wizard.resource_allocation())
-            .unwrap_or(0);
-        Some(ResourcePicker::Ec2 {
-            editor: wizard.resource_editor(),
-            options,
-            selected,
-            has_selection: wizard.resource_allocation().is_some(),
-            loading: !wizard.aws_options().contains_key(&id) && wizard.sizing_error().is_none(),
         })
     } else {
         None
@@ -72,24 +52,6 @@ pub(crate) fn declare_resource_controls(
                 );
             }
         }
-        Some(ResourcePicker::Ec2 {
-            editor,
-            options,
-            selected,
-            ..
-        }) => {
-            form.declare_with_enabled(
-                WizardControl::ResourceInstance,
-                ControlKind::ComboBox {
-                    len: options.len(),
-                    selected: editor
-                        .instances
-                        .selection(WizardControl::ResourceInstance, selected),
-                    expanded: editor.instances.is_open(WizardControl::ResourceInstance),
-                },
-                !options.is_empty(),
-            );
-        }
         None => {}
     }
 }
@@ -99,27 +61,14 @@ pub(crate) struct ResourceEditor {
     pub(crate) target_id: Option<String>,
     pub(crate) cpu: TextInput,
     pub(crate) memory: TextInput,
-    pub(crate) instances: ComboBoxState<WizardControl>,
-    pub(crate) instance_type: Option<String>,
 }
 
 impl ResourceEditor {
     pub(crate) fn draft_values(&self) -> Vec<String> {
-        vec![
-            self.cpu.to_string(),
-            self.memory.to_string(),
-            self.instance_type.clone().unwrap_or_default(),
-        ]
+        vec![self.cpu.to_string(), self.memory.to_string()]
     }
 
     pub(crate) fn reset(&mut self, allocation: Option<&SessionResourceAllocation>) {
-        self.instances = ComboBoxState::default();
-        self.instance_type = match allocation {
-            Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) => {
-                Some(instance_type.clone())
-            }
-            _ => None,
-        };
         if let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) = allocation {
             self.cpu = cpus.to_string().into();
             self.memory = memory_gib_text(*memory_bytes).into();

@@ -462,9 +462,7 @@ pub enum DashboardAction {
         session_id: String,
         kind: SessionOperationKind,
     },
-    ResolveAwsResourceOptions {
-        target_template_ids: Vec<String>,
-    },
+
     CreateBundle {
         sources: Vec<String>,
     },

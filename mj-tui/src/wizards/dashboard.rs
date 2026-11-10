@@ -223,7 +223,6 @@ impl DashboardState {
             Err(interaction) => interaction,
         };
         let action = wizard.route_extra_interaction(action);
-        let action = wizard.resource_editor_mut().instances.route(action);
         if let Some(interaction) = wizard.mounts_mut().access_combo.route(action) {
             return self.apply_wizard_interaction(wizard, interaction);
         }
@@ -266,29 +265,6 @@ impl DashboardState {
                 self.apply_wizard_field_edit(&mut wizard, id, edit);
                 self.keep(wizard)
             }
-            Interaction::ComboBoxCommit(WizardControl::ResourceInstance, index) => {
-                let id = nth_key(&self.config.targets, wizard.target());
-                let chosen = wizard
-                    .aws_options()
-                    .get(&id)
-                    .and_then(|options| options.get(index))
-                    .cloned();
-                if let Some(chosen) = chosen {
-                    let before = wizard.resource_editor().draft_values();
-                    wizard.form_mut().track_draft_part("resources", before);
-                    wizard.note_draft_change(self, DraftChange::ResourcesAdjusted);
-                    let (_, allocation, error) = wizard.sizing_mut();
-                    *allocation = Some(chosen.clone());
-                    *error = None;
-                    if let SessionResourceAllocation::AwsEc2 { instance_type, .. } = chosen {
-                        wizard.resource_editor_mut().instance_type = Some(instance_type);
-                    }
-                    let after = wizard.resource_editor().draft_values();
-                    wizard.form_mut().track_draft_part("resources", after);
-                }
-                self.keep(wizard)
-            }
-            Interaction::ComboBoxDismiss(WizardControl::ResourceInstance) => self.keep(wizard),
             Interaction::ComboBoxCommit(WizardControl::MountAccess, index) => {
                 wizard.note_draft_change(self, DraftChange::ReadOnlyToggled);
                 commit_mount_access(wizard.mounts_mut(), index);
@@ -401,15 +377,7 @@ impl DashboardState {
             self.cancel_modal();
             return DashboardAction::None;
         }
-        if id == WizardControl::ResourceInstance && wizard.step() == WizardStep::Target {
-            let selected = match target_resources(self, &wizard) {
-                Some(ResourcePicker::Ec2 { selected, .. }) => selected,
-                _ => return self.keep(wizard),
-            };
-            let mut wizard = wizard;
-            wizard.resource_editor_mut().instances.open(id, selected);
-            return self.keep(wizard);
-        }
+
         if wizard.step() == WizardStep::Mounts {
             return self.activate_wizard_mount(id, wizard);
         }
@@ -714,50 +682,5 @@ impl DashboardState {
             target_template_id,
             source,
         }
-    }
-
-    fn apply_wizard_aws_options<W: WizardDraft>(
-        &mut self,
-        mut wizard: W,
-        target_id: &str,
-        result: std::result::Result<Vec<SessionResourceAllocation>, String>,
-    ) {
-        if nth_key(&self.config.targets, wizard.target()) != target_id {
-            // Sizes for a target the draft is not on are cached and nothing
-            // else; a failure for such a target is not the draft's problem.
-            if let Ok(options) = result {
-                wizard.sizing_mut().0.insert(target_id.to_string(), options);
-                self.mode = wizard.into_mode();
-            }
-            return;
-        }
-        let previous = wizard.previous_allocation(self);
-        let selected_type =
-            wizard.resource_editor().instance_type.clone().or_else(|| {
-                match wizard.resource_allocation() {
-                    Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) => {
-                        Some(instance_type.clone())
-                    }
-                    _ => None,
-                }
-            });
-        let (aws_options, allocation, sizing_error) = wizard.sizing_mut();
-        apply_aws_options(
-            target_id,
-            result,
-            aws_options,
-            allocation,
-            sizing_error,
-            previous,
-            selected_type.as_deref(),
-        );
-        if let Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) =
-            wizard.resource_allocation()
-        {
-            let instance_type = instance_type.clone();
-            wizard.resource_editor_mut().instance_type = Some(instance_type);
-        }
-        wizard.resource_editor_mut().instances = ComboBoxState::default();
-        self.mode = wizard.into_mode();
     }
 }

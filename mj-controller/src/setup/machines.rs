@@ -87,33 +87,8 @@ pub fn probe_machine(
 ) -> Option<MachineProbe> {
     let outcome = match machine {
         Machine::Local { .. } => return None,
-        // An instance is launched per session, so there is no host to ask
-        // until then, and an EC2 machine runs a bare harness only. What can
-        // be checked is what a launch checks first: the AWS credentials and
-        // the launch template.
-        Machine::AwsEc2 { .. } => {
-            let (_, template) = machine_runtime(machine_id, machine, RuntimeKind::Bare)
-                .expect("an EC2 machine has a bare runtime");
-            MachineProbeOutcome::Answered(vec![
-                match crate::controller::verify_target_before_launch(&template, executor) {
-                    Ok(()) => RuntimeProbe {
-                        kind: RuntimeKind::Bare,
-                        status: CheckStatus::Ready,
-                        detail: "Each session launches its own instance from this template."
-                            .to_owned(),
-                        remediation: None,
-                    },
-                    Err(error) => RuntimeProbe {
-                        kind: RuntimeKind::Bare,
-                        status: CheckStatus::Fixable,
-                        detail: format!("{error:#}"),
-                        remediation: Some(
-                            "Sign in to AWS for this profile (for example `aws sso login`) and check that the launch template exists in its region.".to_owned(),
-                        ),
-                    },
-                },
-            ])
-        }
+        // Retired definitions never advertise a new runtime.
+        Machine::AwsEc2 { .. } => return None,
         Machine::Ssh { ssh, .. } => probe_ssh_machine(ssh, executor),
     };
     Some(MachineProbe {

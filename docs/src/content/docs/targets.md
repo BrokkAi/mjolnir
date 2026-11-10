@@ -54,7 +54,6 @@ command exercises container creation and removal.
 | --- | --- | --- | --- | --- | --- | --- |
 | `bare` | `local` (Linux or macOS controller machine) | none | Existing local directory, optionally an isolated Git clone | no | host-owned | Machine and user-selected directory persist; a managed clone is archived and retired on suspend. |
 | `bare` | an `ssh` machine (named remote Linux host) | none beyond host/account | Existing remote Git directory, optionally an isolated clone | no | host-owned | Host and user-selected directory persist; the managed clone and staging areas are retired on suspend. |
-| `bare` | an `aws-ec2` machine (your AWS account) | disposable EC2 instance | Bundle | controller-side directory snapshot | EC2 instance type | Instance is terminated after verified stop. |
 | `podman` | `local` (Linux/WSL2, or macOS with a rootless `podman machine`) | rootless container | Bundle | copy-on-write or read-only mounts | CPU and memory | Container and workspace storage are removed after verified stop. |
 | `podman` | an `ssh` machine | rootless container | Bundle | remote-host copy-on-write or read-only mounts | CPU and memory | Remote container and workspace storage are removed after verified stop. |
 | `docker` | `local` with a Linux Docker daemon (including a VM on macOS), or an `ssh` machine | Docker container | Bundle | copy-on-write or read-only OverlayFS views | CPU and memory | Container and managed workspace volume are removed after verified stop. |
@@ -88,7 +87,7 @@ chosen harness's controls:
 | `bare` on `local` | Preserve the profile and harness's configured approvals. |
 | `bare` on an SSH machine, `permissions = "guardian"` | Preserve configured approvals. |
 | `bare` on an SSH machine, `permissions = "yolo"` | Unconstrained. |
-| Every container runtime, and a bare runtime on an EC2 machine | Unconstrained inside the isolation boundary. |
+| Every container runtime | Unconstrained inside the isolation boundary. |
 
 The unconstrained translation is Codex `agent-full-access`, Claude Code
 `bypassPermissions` with its sandbox disabled, Kimi Code `auto`, Grok Build
@@ -127,7 +126,7 @@ is a project in its own right, identified by its path, and the whole session
 works in it. Nothing about it is captured in a checkpoint and no restore touches
 its files, because the folder belongs to you and not to a managed checkout. A
 committed Git checkout is still required wherever Mjolnir has to clone or move
-the project into a bundle workspace, and on SSH and EC2 targets, which address a
+the project into a bundle workspace, and on SSH targets, which address a
 project by the repository it shares with its sessions.
 
 Review captures changes from Git history, so a session in a local directory
@@ -310,36 +309,16 @@ are found without editing shell startup files.
 
 ## AWS EC2
 
-```toml
-[machines.fleet]
-kind = "aws-ec2"
-aws_profile = "default"
-region = "eu-west-1"
-launch_template = "lt-0123456789abcdef0"
-ssh_user = "ubuntu"
-address_source = "public-dns"
-
-[targets.aws]
-kind = "bare"
-machine = "fleet"
-```
-
-Mjolnir launches one instance per session from an existing launch template,
-discovers its configured public or private DNS/IP address, connects over SSH,
-and terminates it only after the recovery archive verifies. The launch template
-owns the AMI, networking, IAM, security groups, storage, and default instance
-type. The new-session wizard may select another allowed instance type for that
-session.
-
-Supplemental controller-side directories are transferred as point-in-time
-snapshots. They are not live mounts and changes on the instance do not write
-back to the source directory. See [AWS EC2](/aws/) for the required AWS CLI,
-permissions, launch-template contract, and connectivity.
+Create a persistent Podman host with `mj ec2 create c8id.16xlarge --zone us-east-1a`.
+It adds an SSH machine and Podman target. Sessions share that host and its build
+cache; closing a session removes its container. `mj ec2 list --region us-east-1`
+lists managed hosts and `mj ec2 destroy <name> --region us-east-1` terminates one.
+See [AWS EC2](/aws/) for storage, ZFS, networking, and lifecycle options.
 
 ## Bundles, clones, and workspace roots
 
 Managed targets—Podman, Docker, Apple Container, SSH Podman, SSH Docker, Apple
-Container over SSH, and EC2—clone a configured bundle into a new session
+Container over SSH—clone a configured bundle into a new session
 workspace. `primary_repo` is the agent's working directory and every other
 repository is an additional ACP workspace root. Every repository clones its
 network fetch remote's default branch. A controller-side `local` path supplies
@@ -379,7 +358,6 @@ absolute destination, and a read-only choice. The default destination is
 | Local Docker | Controller host | Managed OverlayFS volume. |
 | Apple Container | Controller host | Downgraded to read-only. |
 | SSH Podman | Remote container host | Podman's isolated overlay view. |
-| AWS EC2 | Controller host | Snapshot copy; no write-back. |
 | Local/SSH bare | — | Unsupported. |
 
 For Podman and Docker, NFS, SMB, FUSE, FAT-family, and existing overlay
@@ -403,8 +381,8 @@ minimum accepted size is 2 CPUs and 4 GiB. The per-session choice overrides the
 fallback. Later **Container settings** overrides win when that session's
 container is next created.
 
-EC2 uses an instance type rather than independent CPU and memory strings. Bare
-targets use the host directly and have no Mjolnir resource limit.
+The EC2 host instance type is chosen when the host is created. Bare targets
+use the host directly and have no Mjolnir resource limit.
 
 These choices are capacity controls. Mjolnir sums the CPU and memory limits of
 live containers that share a physical host, reserving one fifth of physical

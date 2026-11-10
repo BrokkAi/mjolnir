@@ -89,9 +89,7 @@ impl CacheHost {
             | targets::TargetTemplate::SshAppleContainer { ssh, .. } => {
                 Some(Self::Ssh(ssh.clone()))
             }
-            targets::TargetTemplate::LocalBare
-            | targets::TargetTemplate::AwsEc2(_)
-            | targets::TargetTemplate::SshBare { .. } => None,
+            targets::TargetTemplate::LocalBare | targets::TargetTemplate::SshBare { .. } => None,
         }
     }
 

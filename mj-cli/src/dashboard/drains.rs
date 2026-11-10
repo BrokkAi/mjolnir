@@ -89,7 +89,6 @@ impl DashboardContext {
             self.dashboard.set_profile_capabilities(capabilities);
         }
         self.drain_capacity_updates();
-        self.drain_aws_resource_options();
         self.drain_import_profiles();
         self.drain_import_tasks();
         self.drain_lifecycle_updates();
@@ -121,7 +120,6 @@ impl DashboardContext {
             self.runtime_config.take_delivered(),
             self.lifecycle.take_delivered(),
             self.capacity.take_delivered(),
-            self.aws_options.take_delivered(),
             self.import_profiles.take_delivered(),
             self.import_tasks.take_delivered(),
             self.dashboard_io.take_delivered(),
@@ -693,14 +691,6 @@ impl DashboardContext {
                 self.dashboard
                     .set_notice("Could not refresh target capacity: poller stopped.");
             }
-        }
-    }
-
-    pub(crate) fn drain_aws_resource_options(&mut self) {
-        while let Some((target_id, result)) = self.aws_options.next_ready() {
-            self.resolving_aws_resource_options.remove(&target_id);
-            self.dashboard
-                .apply_aws_resource_options(&target_id, result);
         }
     }
 

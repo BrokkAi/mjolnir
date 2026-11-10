@@ -863,7 +863,7 @@ it when it carries a setting of its own.
 
 | Field | TOML type | Required | Default | Accepted values |
 | --- | --- | --- | --- | --- |
-| `kind` | string enum | yes | none | `local`, `ssh`, or `aws-ec2`. Only the id `local` may hold `kind = "local"`. |
+| `kind` | string enum | yes | none | `local` or `ssh`. Only the id `local` may hold `kind = "local"`. |
 
 ### `local`
 
@@ -906,37 +906,13 @@ login home.
 Two machines may not describe the same SSH connection; one machine is one
 host.
 
-### `aws-ec2`
+### Persistent EC2 hosts
 
-```toml
-[machines.fleet]
-kind = "aws-ec2"
-aws_profile = "default"
-region = "eu-west-1"
-launch_template = "lt-0123456789abcdef0"
-# launch_template_version = "3"
-ssh_user = "ubuntu"
-address_source = "public-dns"
-# identity_file = "/home/me/.ssh/mjolnir-ec2"
-ssh_args = ["-o", "ServerAliveInterval=30"]
-```
-
-| Field | TOML type | Required | Default | Validation and behavior |
-| --- | --- | --- | --- | --- |
-| `aws_profile` | string | no | unset (runtime uses `"default"`) | AWS CLI profile; cannot be an empty string when set. |
-| `region` | string | yes | none | Non-blank AWS region. |
-| `launch_template` | string | yes | none | Non-blank launch-template ID or name. |
-| `launch_template_version` | string | no | unset (runtime uses `"$Default"`) | Cannot be an empty string when set. |
-| `ssh_user` | string | yes | none | Non-blank login user for the launched instance. |
-| `address_source` | string enum | no | `"public-dns"` | `public-dns`, `public-ip`, `private-dns`, or `private-ip`. |
-| `identity_file` | path string | no | unset (SSH/config default) | Private-key path passed to SSH; it is not required to be absolute. |
-| `ssh_args` | array of strings | no | empty | Additional SSH arguments, passed in order. Note the field name differs from an SSH machine's `extra_args`. |
-
-The launch template owns networking, security groups, storage, AMI, and any
-default instance type. The new-session wizard may override the instance type
-for one session. An EC2 machine runs a bare harness only: it accepts no
-container runtime and no build cache, because each session gets its own
-instance. See [AWS EC2](/aws/).
+`mj ec2 create <instance-type> --zone <zone>` provisions an SSH machine with a
+Podman target. `mj ec2 list --region <region>` lists hosts and
+`mj ec2 destroy <name> --region <region>` removes one. Instances outlive sessions.
+The former `aws-ec2` machine kind is read only for historical records and cannot
+launch sessions. Use [AWS EC2](/aws/) for command and storage options.
 
 ### Build cache `[machines.<id>.build_cache]`
 
@@ -1061,7 +1037,7 @@ permissions = "guardian"
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables sandbox checks and approval checks. Muse runs without permission checks under `yolo` too, unless its profile sets `muse_auto_review = true`. It has no meaning on `local`, where the harness keeps its configured approvals, or on an EC2 machine. |
+| `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables sandbox checks and approval checks. Muse runs without permission checks under `yolo` too, unless its profile sets `muse_auto_review = true`. It has no meaning on `local`, where the harness keeps its configured approvals, on other machines. |
 
 The new-session wizard asks for an existing absolute project directory on the
 runtime's machine. A local bare directory may be a plain folder and does not
@@ -1070,8 +1046,7 @@ there is no container or instance boundary; Muse's guardian is muse-acp's
 auto-review, see [Harness limitations](/profiles/#harness-limitations). On an
 SSH machine the wizard separately asks for an existing absolute remote Git
 directory; when **Create isolated checkout** is checked on the final review,
-the new checkout is created below the repository's own `.mj/clones/` tree. A
-bare runtime on an EC2 machine launches one instance per session. See
+the new checkout is created below the repository's own `.mj/clones/` tree. For EC2 hosts, `mj ec2 create` configures a persistent Podman runtime. See
 [SSH and SSH Podman](/ssh/) and [AWS EC2](/aws/).
 
 Review needs a committed Git checkout to capture changes. A local directory

@@ -13,6 +13,7 @@ mod api_commands;
 mod daemon;
 mod dashboard;
 mod desktop;
+mod ec2;
 mod go;
 mod hints;
 mod import;
@@ -111,6 +112,8 @@ enum Command {
     Acp(acp::AcpArgs),
     /// Diagnose platform and configuration prerequisites.
     Doctor(DoctorArgs),
+    /// Create, list, or destroy persistent EC2 hosts with rootless Podman.
+    Ec2(ec2::Ec2Args),
     /// Rerun agent and repository discovery, preserving existing configuration.
     Setup(SetupArgs),
     /// Adopt a native coding-agent session as a stopped Mjolnir session.
@@ -846,6 +849,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Node) => "node",
         Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
+        Some(Command::Ec2(_)) => "ec2",
         Some(Command::Setup(_)) => "setup",
         Some(Command::Import(_)) => "import",
         Some(Command::Recover(_)) => "recover",
@@ -1031,6 +1035,7 @@ async fn run_command(
                 .await
                 .map(|()| DashboardExit::Normal)
         }
+        Some(Command::Ec2(args)) => ec2::run(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Doctor(args)) => {
             if daemon::container::exec_in_container(&container_forwarded_args()).await? {
                 return Ok(DashboardExit::Normal);
