@@ -24,7 +24,9 @@ Use a normal SSH machine with a Podman runtime for persistent VMs. Reuse the AWS
 
 ## Outcomes & Retrospective
 
-The replacement is usable; the real smoke confirmed the remote worker, harness, ZFS cache mount, mbx path, and linker configuration. Implementation and initial focused tests pass; final review/push remain. The full CLI suite passed all tests, workspace clippy passed with warnings denied, and an isolated new CLI listed both real AWS hosts correctly. Details and resource identities are in `.agents/docs/ec2-managed-host-2026-11-09.md`.
+The C8id replacement is running as ec2-c8id16, with ZFS/lz4 mbx storage and mold verified by a real mj container session. Persistent EC2 create/list/destroy commands are published. Profile transfer now uses one compressed archive; the same measured profile packed/uploaded in about 13 seconds instead of 162 seconds. The VM-per-session launch/UI/probe path and legacy Move recovery were removed; the user explicitly confirmed that no legacy EC2 Moves exist and declined compatibility complexity. Passive historical formats and cleanup remain.
+
+Future EC2 creates automatically place Podman writable layers and the existing per-container /tmp volumes on local NVMe at /mnt/nvme/podman when supported. The user explicitly chose future VMs only, so the live host keeps its original Podman store. This final setup was validated with AWS boundary fixtures and compared with Morannon's actual configuration; the busy live host's separate-store smoke was cancelled before it ran a container. Full affected-crate suites and all 35 browser tests passed, with one loaded core timing-test failure passing its isolated rerun; workspace clippy and shell checks passed. Review was clean, the independently completed #1482 change was merged, and source was pushed as 9745824b5. No mj installation or release was requested or performed.
 
 ## Context and Orientation
 
@@ -74,7 +76,7 @@ Progress for expanded scope:
 
 - [x] (2026-11-09) Implemented archive streaming for SSH-bare and remote containers. Rust writer/system tar and real node transport passed with an archive over 8 MiB; the same 587 plugin files packed in 1.083 seconds and uploaded/extracted in 12.185 seconds versus 162.345 seconds for recursive scp.
 - [x] Remove legacy VM-per-session admission and provisioning surfaces; retain passive historical readers/cleanup and omit legacy Move recovery per the user.
-- [ ] Complete expanded validation, review, commit, and push.
+- [x] Complete expanded validation, review, commit, and push (source published at 9745824b5).
 
 Revision 2026-11-09: removed session-owned EC2 launch builders, instance-size controls, discovery/probes, and the launch-template script's config writer. Config availability now excludes the retired kind in new/resume/move admission and target lists. Historical config/locator/runtime JSON remains readable and existing Move destinations can only be discovered, adopted, or cleaned up; no stored launch request is executed. #1482 is assigned to another session and outside this work. The mold agent image published successfully (run 42750912583).
 
