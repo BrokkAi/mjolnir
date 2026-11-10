@@ -590,9 +590,6 @@ impl Controller {
         if session.state != SessionState::Provisioning {
             bail!("session {session_id} is not provisioning");
         }
-        if let Some(plan) = self.adopt_prepared_ec2_destination(session_id, github_token, executor)? {
-            return Ok(RepositorySetup { plan, managed_checkout: None });
-        }
         let preparation = (|| {
             let selected = self
                 .config

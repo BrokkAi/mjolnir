@@ -715,13 +715,12 @@ impl Controller {
             1,
             &mut assessment,
         );
-        let target = &self.config.targets[selection
-            .target_template_id
-            .as_ref()
-            .context("Move target missing")?];
-        if matches!(target, mj_core::config::TargetTemplate::AwsEc2 { .. }) {
-            return Ok(assessment);
-        }
+        let target = self.config.ensure_target_enabled(
+            selection
+                .target_template_id
+                .as_deref()
+                .context("Move target missing")?,
+        )?;
         if matches!(target, mj_core::config::TargetTemplate::LocalBare)
             && matches!(layout.backend, targets::TargetLocator::LocalBare { .. })
         {
@@ -841,7 +840,7 @@ impl Controller {
                     &mut assessment,
                 );
             }
-        } else if !matches!(target, mj_core::config::TargetTemplate::AwsEc2 { .. }) {
+        } else {
             let path = match target {
                 mj_core::config::TargetTemplate::SshBare {
                     workspace_prefix, ..
@@ -867,44 +866,6 @@ impl Controller {
             );
         }
         Ok(assessment)
-    }
-
-    pub(super) fn assess_prepared_destination(
-        &self,
-        operation: &MoveOperation,
-        assessment: &mut WorkspaceAssessment,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<()> {
-        let destination = operation
-            .prepared_destination
-            .as_ref()
-            .context("EC2 Move destination missing")?;
-        let backend = super::destination::prepared_backend(
-            destination
-                .target()
-                .context("EC2 Move target not checked")?,
-            &destination.runtime,
-            &operation.selection.session_id,
-        )?;
-        let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
-        super::super::execute_checked(
-            executor,
-            targets::locator_command(&backend, rsync_probe())
-                .purpose("check prepared EC2 Move transport"),
-        )?;
-        let targets::TargetLocator::AwsEc2 { workspace, .. } = &backend else {
-            bail!("prepared target is not EC2");
-        };
-        storage_probe(
-            executor,
-            targets::locator_command(&backend, storage_arguments(Path::new(workspace)))
-                .purpose("check prepared EC2 Move staging and workspace space"),
-            "Destination",
-            "destination",
-            2,
-            assessment,
-        );
-        operation.selection.workspace.validate(assessment)
     }
 
     pub(super) fn new_workspace_transfer(

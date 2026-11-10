@@ -1,99 +1,9 @@
-//! Compatibility recovery and cleanup for EC2 destinations accepted by older daemons.
-//! This module cannot launch an instance.
+//! Cleanup of a recorded EC2 destination; no provisioning or Move recovery.
 use super::*;
 use crate::targets::{self, CommandSpec};
-use mj_core::config::TargetTemplate;
-use mj_core::state::{
-    PreparedDestinationState, PreparedMoveDestination, TargetLocator, TargetRuntimeSettings,
-};
+use mj_core::state::{PreparedDestinationState, PreparedMoveDestination, TargetRuntimeSettings};
 
 impl Controller {
-    pub(super) fn recover_prepared_ec2_destination(
-        &self,
-        operation: &mut MoveOperation,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<()> {
-        executor.begin_resumable_work()?;
-        let result = self.recover_prepared_ec2_destination_inner(operation, executor);
-        let admission = executor.end_resumable_work("Move control transition");
-        admission?;
-        result
-    }
-
-    fn recover_prepared_ec2_destination_inner(
-        &self,
-        operation: &mut MoveOperation,
-        executor: &(impl CommandExecutor + Sync),
-    ) -> Result<()> {
-        let id = &operation.selection.session_id;
-        let template = self
-            .config
-            .targets
-            .get(
-                operation
-                    .selection
-                    .target_template_id
-                    .as_deref()
-                    .context("Move target missing")?,
-            )
-            .context("EC2 Move target disappeared")?;
-        ensure!(
-            matches!(template, TargetTemplate::AwsEc2 { .. }),
-            "Move preparation requires an EC2 target"
-        );
-        ensure!(
-            !executor.cancellation_requested(),
-            "Move cancelled before EC2 preparation"
-        );
-        let destination = operation
-            .prepared_destination
-            .as_ref()
-            .filter(|destination| destination.owns_resource())
-            .context(mj_core::config::LEGACY_EC2_TARGET_NOTICE)?
-            .clone();
-        if matches!(destination.state, PreparedDestinationState::LaunchPending) {
-            // An old accepted Move can recover an existing resource by its
-            // recorded identity. It must never replay a launch after retirement.
-            let instance_id = pending_instance_id(operation, &destination, executor)?;
-            operation.prepared_destination.as_mut().unwrap().state =
-                PreparedDestinationState::Created { instance_id };
-            crate::database::save_move_operation(operation)?;
-        }
-        if let PreparedDestinationState::Created { instance_id } = operation
-            .prepared_destination
-            .as_ref()
-            .unwrap()
-            .state
-            .clone()
-        {
-            executor.notify_notice("Booting EC2 destination");
-            let target =
-                super::super::backend::existing_ec2_locator(template, instance_id, executor)?;
-            let backend = prepared_backend(&target, &destination.runtime, id)?;
-            let targets::TargetLocator::AwsEc2 { ssh, workspace, .. } = &backend else {
-                unreachable!()
-            };
-            super::super::execute_checked(
-                executor,
-                targets::ssh_command(ssh, ["mkdir", "-p", workspace])
-                    .purpose("create prepared EC2 workspace"),
-            )?;
-            targets::install_git_plan(targets::ExecutionBoundary::Ssh(ssh)).execute(executor)?;
-            targets::install_rsync_plan(targets::ExecutionBoundary::Ssh(ssh)).execute(executor)?;
-            operation.prepared_destination.as_mut().unwrap().state =
-                PreparedDestinationState::Checked { target };
-            crate::database::save_move_operation(operation)?;
-        }
-        ensure!(
-            matches!(
-                operation.prepared_destination.as_ref().unwrap().state,
-                PreparedDestinationState::Checked { .. } | PreparedDestinationState::Adopted { .. }
-            ),
-            "EC2 destination cleanup is pending; source retained"
-        );
-        Ok(())
-    }
-
     /// One bounded cleanup attempt; the daemon retries durable failures with backoff.
     pub fn cleanup_prepared_move_destination(
         &self,
@@ -153,57 +63,6 @@ impl Controller {
         crate::database::save_move_operation(operation)?;
         Ok(())
     }
-
-    pub(in crate::controller) fn adopt_prepared_ec2_destination(
-        &mut self,
-        id: &str,
-        github_token: Option<&str>,
-        executor: &impl CommandExecutor,
-    ) -> Result<Option<targets::CommandPlan>> {
-        let Some(mut operation) = crate::database::load_move_operation(id)? else {
-            return Ok(None);
-        };
-        if operation.phase != MovePhase::ResumingDestination {
-            return Ok(None);
-        }
-        let Some(destination) = operation.prepared_destination.as_ref() else {
-            return Ok(None);
-        };
-        let target = destination
-            .target()
-            .context("prepared EC2 destination is not available for adoption")?
-            .clone();
-        let runtime = destination.runtime.clone();
-        let backend = prepared_backend(&target, &runtime, id)?;
-        // One rule for every instance Mjolnir adopts: a destination an older
-        // daemon recorded as checked never had IMDSv2 required, so it is
-        // required here too. The check is idempotent and costs one describe
-        // when the instance already requires it.
-        if let targets::TargetLocator::AwsEc2 {
-            profile,
-            region,
-            instance_id,
-            ..
-        } = &backend
-        {
-            super::super::backend::ensure_imdsv2(profile, region, instance_id, executor)?;
-        }
-        let bundle = self
-            .move_destination_bundle(id)?
-            .context("prepared EC2 Move bundle missing")?;
-        let plan = targets::provision_on_locator_plan(&backend, id, &bundle, github_token)?;
-        let session = self
-            .state
-            .sessions
-            .get_mut(id)
-            .context("EC2 Move session missing")?;
-        session.target = Some(target.clone());
-        session.target_runtime = Some(runtime);
-        operation.prepared_destination.as_mut().unwrap().state =
-            PreparedDestinationState::Adopted { target };
-        crate::database::adopt_move_destination(&operation, session)?;
-        Ok(Some(plan))
-    }
 }
 
 struct MoveCleanupExecutor<'a, E>(&'a E);
@@ -229,18 +88,6 @@ fn aws_access(runtime: &TargetRuntimeSettings) -> Result<(&str, &str)> {
         bail!("prepared destination has no AWS access settings");
     };
     Ok((profile, region))
-}
-
-pub(super) fn prepared_backend(
-    target: &TargetLocator,
-    runtime: &TargetRuntimeSettings,
-    id: &str,
-) -> Result<targets::TargetLocator> {
-    Ok(targets::TargetLocator::try_from(targets::RecordedTarget {
-        locator: target,
-        runtime: Some(runtime),
-        session_id: id,
-    })?)
 }
 
 fn pending_instance_id(
@@ -294,6 +141,3 @@ fn pending_instance_id(
     );
     Ok(ids[0].to_owned())
 }
-
-#[cfg(all(test, unix))]
-pub(super) mod tests;

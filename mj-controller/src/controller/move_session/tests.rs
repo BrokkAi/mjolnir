@@ -5532,7 +5532,9 @@ fn retired_ec2_move_is_rejected_before_source_interruption() {
         .insert("project".into(), local_bundle(repository.path()));
     config
         .targets
-        .insert("ec2".into(), super::destination::tests::ec2_target());
+        .insert("ec2".into(), serde_json::from_value(serde_json::json!({
+            "kind": "aws-ec2", "region": "us-east-1", "launch_template": "lt-old", "ssh_user": "ubuntu"
+        })).unwrap());
     let id = "0123456789abcdef0123456789abcdef";
     let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
     session.bundle_id = "project".into();
