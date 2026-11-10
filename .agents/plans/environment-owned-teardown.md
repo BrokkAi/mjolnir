@@ -163,3 +163,14 @@ storage cleanup keeps its existing quiescence path. The engine protocol and
 daemon notice regressions pass (5 affected tests), and affected-crate Clippy is
 clean. Evidence: `/tmp/mj-environment-review-tests.log` and
 `/tmp/mj-environment-review-clippy.log`.
+
+Review round 2 identified one ordering regression, reported by both reviewers:
+retained Move cleanup checked a managed-checkout reference after reclaiming it.
+The check now precedes environment retirement while holding the session's
+worker permit. A real isolated-store regression retains the same session's
+old managed checkout while its destination uses a different target, and proves
+that refusal leaves both checkout and worker evidence intact. This case and
+the existing successful retained-source cleanup pass. Affected-crate Clippy is
+clean. Evidence: `/tmp/mj-environment-retained-rerun.log`,
+`/tmp/mj-environment-retained-tests.log` (successful cleanup case), and
+`/tmp/mj-environment-retained-clippy.log`.

@@ -410,15 +410,6 @@ impl Controller {
                         .any(|session| session.target.is_some() && session.target == source.target),
                     "retained source is still referenced by an active session"
                 );
-                let environment = crate::database::retained_move_environment(operation_id)?
-                    .context("retained Move source has no recorded environment owner")?;
-                super::super::environment::retire_owned_environment(
-                    environment,
-                    &self.config,
-                    executor,
-                    super::super::BranchDisposition::Keep,
-                    super::super::CheckoutDisposition::Remove,
-                )?;
                 if let mj_core::state::Checkout::ManagedWorktree {
                     worktree: checkout, ..
                 } = source.checkout()
@@ -436,6 +427,15 @@ impl Controller {
                         "retained checkout is still referenced by a session"
                     );
                 }
+                let environment = crate::database::retained_move_environment(operation_id)?
+                    .context("retained Move source has no recorded environment owner")?;
+                super::super::environment::retire_owned_environment(
+                    environment,
+                    &self.config,
+                    executor,
+                    super::super::BranchDisposition::Keep,
+                    super::super::CheckoutDisposition::Remove,
+                )?;
                 crate::database::forget_retained_move_source(operation_id)
             },
         )
@@ -1159,6 +1159,76 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: 049656544: retained-source cleanup deleted a referenced checkout before refusing.
+    #[cfg(unix)]
+    #[test]
+    fn retained_source_reference_refusal_preserves_checkout_and_worker_files() {
+        use crate::controller::test_support::{
+            IsolatedTest, committed_repository, managed_worktree_session,
+            resume_compatibility_config, test_name,
+        };
+        const TEST: &str = "retained_source_reference_refusal_preserves_checkout_and_worker_files";
+        const CHILD: &str = "MJ_TEST_RETAINED_SOURCE_REFERENCE";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name(module_path!(), TEST))
+                .isolated_store(directory.path())
+                .env(CHILD, "1")
+                .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let repository = committed_repository();
+        let directory = tempfile::tempdir().unwrap();
+        let id = "11111111111111111111111111111111";
+        let mut source = managed_worktree_session(repository.path(), id);
+        source.target_template_id = "local-bare".into();
+        source.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: directory.path().join(id),
+        });
+        std::fs::create_dir_all(directory.path().join(id)).unwrap();
+        std::fs::write(directory.path().join(id).join("worker-evidence"), "keep").unwrap();
+        let checkout = source
+            .managed_worktree
+            .as_ref()
+            .unwrap()
+            .worktree_root
+            .clone();
+        std::fs::write(checkout.join("work-in-progress"), "keep").unwrap();
+        crate::database::save_session(&source).unwrap();
+        let mut operation = super::super::tests::source_recovery_operation(&source);
+        operation.workspace_transfer = Some(WorkspaceTransfer {
+            assessment: Default::default(),
+            source: Box::new(source.clone()),
+            source_stage: directory.path().join("source-stage"),
+            controller_stage: directory.path().join("controller-stage"),
+            phase: WorkspaceTransferPhase::Ready,
+        });
+        crate::database::save_move_operation(&operation).unwrap();
+        crate::database::retain_move_source(&operation).unwrap();
+        let mut destination = source.clone();
+        destination.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: directory.path().join("destination").join(id),
+        });
+        crate::database::save_session(&destination).unwrap();
+        let controller = Controller {
+            config: resume_compatibility_config(),
+            state: crate::database::load_state().unwrap(),
+        };
+        let error = controller
+            .cleanup_retained_move_source(id, &operation.operation_id, &targets::ProcessExecutor)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("retained checkout is still referenced"),
+            "{error:#}"
+        );
+        assert!(checkout.join("work-in-progress").exists());
+        assert!(directory.path().join(id).join("worker-evidence").exists());
+        assert_eq!(crate::database::retained_move_sources(id).unwrap().len(), 1);
+    }
 
     // Needs a POSIX shell.
     #[cfg(unix)]
