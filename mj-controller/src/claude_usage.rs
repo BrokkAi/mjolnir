@@ -13,11 +13,12 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use mj_core::credentials::CLAUDE_REFRESH_LOCK_WAIT;
+
 use crate::targets::{CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec};
 
 const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
-const REFRESH_LOCK_WAIT: Duration = Duration::from_secs(10);
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 // The reset-grant endpoint uses the CLI surface to determine eligibility.
 const USAGE_USER_AGENT: &str = "claude-cli/2.1.283 (external, cli)";
@@ -87,7 +88,7 @@ pub async fn query(
     container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
     let executor = Arc::new(CancellableProcessExecutor::with_timeout(
-        USAGE_TIMEOUT + REFRESH_LOCK_WAIT + REFRESH_TIMEOUT,
+        USAGE_TIMEOUT + CLAUDE_REFRESH_LOCK_WAIT + REFRESH_TIMEOUT,
     ));
     let _cancel = executor.cancel_on_drop();
     if cfg!(target_os = "macos") {
@@ -340,30 +341,12 @@ async fn refresh_and_retry(
     rejected_token: Option<String>,
     container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
-    // Claude 2.1.312 takes these two proper-lockfile directory locks during
-    // its own refresh. auth login's explicit exchange does not take them.
-    let canonical_home = tokio::fs::canonicalize(&home)
-        .await
-        .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
-    let mut legacy_path = canonical_home.as_os_str().to_os_string();
-    legacy_path.push(".lock");
-    let mut locks = Vec::new();
-    let deadline = tokio::time::Instant::now() + REFRESH_LOCK_WAIT;
-    for path in [
-        canonical_home.join(".oauth_refresh.lock"),
-        PathBuf::from(legacy_path),
-    ] {
-        locks.push(
-            crate::oauth_lock::OAuthRefreshLock::acquire(
-                path,
-                deadline.saturating_duration_since(tokio::time::Instant::now()),
-                Duration::from_secs(60),
-                Duration::from_secs(5),
-            )
-            .await
-            .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?,
-        );
-    }
+    let locks = mj_core::credentials::CredentialWriteGuard::acquire(
+        mj_core::config::HarnessKind::Claude,
+        &home.join(".credentials.json"),
+    )
+    .await
+    .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
     let active = read_credentials(&home).await?;
     if let Ok(token) = oauth_access_token(&active, mj_core::clock::epoch_millis())
         && rejected_token.as_deref() != Some(token)
@@ -427,7 +410,7 @@ async fn run_claude_refresh(
     credentials: Value,
     mut environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
-    locks: Vec<crate::oauth_lock::OAuthRefreshLock>,
+    locks: mj_core::credentials::CredentialWriteGuard,
     container: Option<crate::quota_runtime::ContainerCheck>,
 ) -> Result<(), ClaudeUsageError> {
     let oauth = &credentials["claudeAiOauth"];
@@ -496,11 +479,51 @@ fn successful_refresh_output(output: CommandOutput) -> Result<(), ClaudeUsageErr
     if output.status == 0 {
         Ok(())
     } else {
+        let category = [output.stderr.as_slice(), output.stdout.as_slice()]
+            .into_iter()
+            .find_map(claude_refresh_failure_category);
+        let detail = category
+            .map(|category| format!(": {category}"))
+            .unwrap_or_default();
         Err(ClaudeUsageError::Refresh(format!(
-            "Claude auth login exited with status {}",
-            output.status
+            "Claude auth login exited with status {}{detail}",
+            output.status,
         )))
     }
+}
+
+fn claude_refresh_failure_category(bytes: &[u8]) -> Option<&'static str> {
+    // Native auth login prints `Login failed: ${error.message}`. Axios can
+    // also dump request bodies containing tokens: never return captured text.
+    // Match complete status messages so token text or e.g. 4010 is not a status.
+    for line in String::from_utf8_lossy(bytes).lines().map(str::trim) {
+        let message = line
+            .strip_prefix("Login failed: ")
+            .or_else(|| line.strip_prefix("AxiosError: "));
+        match message {
+            Some("Request failed with status code 400") => return Some("HTTP 400 rejection"),
+            Some("Request failed with status code 401") => return Some("HTTP 401 rejection"),
+            Some("Request failed with status code 403") => return Some("HTTP 403 rejection"),
+            Some(message)
+                if message.starts_with("getaddrinfo ENOTFOUND ")
+                    || message.starts_with("getaddrinfo EAI_AGAIN ") =>
+            {
+                return Some("DNS lookup failure");
+            }
+            Some(message) if message.starts_with("connect ECONNREFUSED ") => {
+                return Some("network connection refused");
+            }
+            _ => {}
+        }
+        // Native auth login appends this fixed warning after a post-exchange
+        // policy refusal. The surrounding organization details stay private.
+        if line
+            == "The refresh token in CLAUDE_CODE_OAUTH_REFRESH_TOKEN was used for this attempt and cannot be used again; issue a new one to retry."
+        {
+            return Some("native sign-in policy refusal after token exchange");
+        }
+    }
+    None
 }
 
 fn oauth_access_token(credentials: &Value, now_ms: i64) -> Result<&str, ClaudeUsageError> {
@@ -951,6 +974,83 @@ Last 7d · 5966 requests · 78 sessions
         assert_eq!(
             parse_cli_usage("Current session: 6% left · resets Sep 18 at 6:20pm\n"),
             None
+        );
+    }
+
+    // Hard-won: #1485: discarded native failures hid the reason while raw Axios output can expose tokens.
+    #[test]
+    fn refresh_failure_categories_never_disclose_native_output() {
+        let cases = [
+            (
+                "Login failed: Request failed with status code 400",
+                ": HTTP 400 rejection",
+            ),
+            (
+                "AxiosError: Request failed with status code 401",
+                ": HTTP 401 rejection",
+            ),
+            (
+                "Login failed: Request failed with status code 403",
+                ": HTTP 403 rejection",
+            ),
+            (
+                "Login failed: getaddrinfo ENOTFOUND private.example",
+                ": DNS lookup failure",
+            ),
+            (
+                "Login failed: getaddrinfo EAI_AGAIN private.example",
+                ": DNS lookup failure",
+            ),
+            (
+                "Login failed: connect ECONNREFUSED 127.0.0.1:8443",
+                ": network connection refused",
+            ),
+            (
+                "Private organization refused sign-in\nThe refresh token in CLAUDE_CODE_OAUTH_REFRESH_TOKEN was used for this attempt and cannot be used again; issue a new one to retry.",
+                ": native sign-in policy refusal after token exchange",
+            ),
+            ("Login failed: Request failed with status code 4010", ""),
+            ("Login failed: provider sent private response 401", ""),
+            ("Login failed: unknown private failure", ""),
+            ("Login failed: Request failed with status code 500", ""),
+        ];
+        for (message, category) in cases {
+            // Simulate Axios's token-bearing request dump and independent
+            // stdout, including arbitrary bytes that must never be echoed.
+            let mut stderr = format!(
+                "{message}\nconfig: {{data: '{{\"refresh_token\":\"SECRET_REFRESH\"}}', headers: {{Authorization: 'Bearer SECRET_ACCESS'}}}}\n"
+            )
+            .into_bytes();
+            stderr.extend_from_slice(b"\xffFAILED_STDERR_SENTINEL");
+            for stderr_first in [true, false] {
+                let sentinel = b"FAILED_STDOUT_SENTINEL".to_vec();
+                let (stdout, stderr) = if stderr_first {
+                    (sentinel, stderr.clone())
+                } else {
+                    (stderr.clone(), sentinel)
+                };
+                let error = successful_refresh_output(CommandOutput {
+                    status: 7,
+                    stdout,
+                    stderr,
+                })
+                .unwrap_err();
+                assert_eq!(
+                    error,
+                    ClaudeUsageError::Refresh(format!(
+                        "Claude auth login exited with status 7{category}"
+                    )),
+                    "classification must return only fixed text for {message:?}"
+                );
+            }
+        }
+        assert!(
+            successful_refresh_output(CommandOutput {
+                status: 0,
+                stdout: b"Login failed: Request failed with status code 401".to_vec(),
+                stderr: b"SECRET_SUCCESS_SENTINEL".to_vec(),
+            })
+            .is_ok()
         );
     }
 

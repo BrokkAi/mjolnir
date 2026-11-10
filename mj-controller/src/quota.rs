@@ -595,6 +595,18 @@ async fn refresh_profile_with_cache_root(
                 "could not read the Codex configuration: {error}"
             )),
             CodexQuotaSource::ChatGptLogin => 'codex: {
+                // Serialize the expiry decision and every app-server request with
+                // other daemons and credential syncs using this login slot.
+                // Waiting for ownership is outside the RPC request timeout.
+                let _credential_guard = match mj_core::credentials::CredentialWriteGuard::acquire(
+                    HarnessKind::Codex,
+                    &credential_path,
+                )
+                .await
+                {
+                    Ok(guard) => guard,
+                    Err(error) => break 'codex Err(error),
+                };
                 let launcher = match container(codex_usage::host_has_codex(
                     cache_root.as_deref(),
                     host_path.as_deref(),
@@ -1115,12 +1127,11 @@ pub(crate) async fn ensure_fresh_kimi_token(
     }
 
     // Held until this function returns, released on drop.
-    let home = runtime
-        .credentials_path
-        .parent()
-        .and_then(Path::parent)
-        .context("Kimi Code credentials path has no home")?;
-    let _refresh_lock = KimiRefreshLock::acquire(home, KIMI_LOCK_WAIT).await?;
+    let _refresh_lock = mj_core::credentials::CredentialWriteGuard::acquire(
+        HarnessKind::Kimi,
+        &runtime.credentials_path,
+    )
+    .await?;
     let active = read_kimi_credentials(&runtime.credentials_path).await?;
     let changed_while_waiting = active.differs_from(&initial);
     if (!force && !active.needs_refresh())
@@ -1208,48 +1219,6 @@ fn required_string<'a>(payload: &'a Value, key: &str, context: &str) -> Result<&
         .filter(|value| !value.is_empty())
         .with_context(|| format!("{context} is missing {key}"))
 }
-
-/// The Kimi Code CLI serializes token refreshes with `proper-lockfile` on the
-/// directory `oauth/kimi-code.lock` (`stale: 5_000`): a holder keeps the
-/// directory's modification time moving, and a lock whose time stopped for
-/// longer than the stale window is abandoned and may be removed. Mjolnir takes
-/// the same directory the same way, so its refresh and the CLI's never spend
-/// the same single-use refresh token.
-struct KimiRefreshLock {
-    _lock: crate::oauth_lock::OAuthRefreshLock,
-}
-
-const KIMI_LOCK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
-const KIMI_LOCK_STALE_AFTER: Duration = Duration::from_secs(10);
-const KIMI_LOCK_WAIT: Duration = Duration::from_secs(60);
-
-impl KimiRefreshLock {
-    async fn acquire(home: &Path, wait: Duration) -> Result<Self> {
-        let oauth_dir = home.join("oauth");
-        tokio::fs::create_dir_all(&oauth_dir)
-            .await
-            .context("prepare Kimi Code OAuth lock")?;
-        // proper-lockfile locks `<file>.lock` for a file that must exist.
-        tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(oauth_dir.join("kimi-code"))
-            .await
-            .context("prepare Kimi Code OAuth lock sentinel")?;
-        Ok(Self {
-            _lock: crate::oauth_lock::OAuthRefreshLock::acquire(
-                oauth_dir.join("kimi-code.lock"),
-                wait,
-                KIMI_LOCK_STALE_AFTER,
-                KIMI_LOCK_HEARTBEAT_INTERVAL,
-            )
-            .await?,
-        })
-    }
-}
-
-#[cfg(test)]
-use crate::oauth_lock::{mtime as kimi_lock_mtime, touch as touch_kimi_lock};
 
 fn parse_kimi_usage(payload: &Value) -> (Vec<QuotaWindow>, Option<String>) {
     let mut windows = Vec::new();

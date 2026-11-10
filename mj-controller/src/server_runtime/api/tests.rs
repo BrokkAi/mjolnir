@@ -2073,6 +2073,14 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
             }),
             failure: None,
             outcomes: vec![mj_core::credentials::CredentialSyncOutcome {
+                unchanged_login: Some(
+                    mj_core::credentials::read_credential_file(
+                        HarnessKind::Codex,
+                        &home.path().join("auth.json"),
+                    )
+                    .unwrap()
+                    .0,
+                ),
                 session_id: "child-1".into(),
                 outcome: Ok(Vec::new()),
                 step_failures: Vec::new(),

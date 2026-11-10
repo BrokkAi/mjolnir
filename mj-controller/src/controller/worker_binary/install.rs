@@ -1147,7 +1147,7 @@ fn upload_profile_archive(
     file.rewind()?;
     let command = targets::ssh_command(ssh, [
         "sh", "-c",
-        "set -eu\numask 077\nmkdir -p -- \"$1\"\ntar -xzf - --no-same-owner --no-same-permissions -C \"$1\"\nchmod -R go-rwx -- \"$1\"",
+        "set -eu\numask 077\nmkdir -p -- \"$1\"\ntar -xzf - --no-same-owner --no-same-permissions -C \"$1\"\nchmod -R -- go-rwx \"$1\"",
         "mj-profile-archive", destination,
     ]).purpose("upload staged harness profile archive").stage(ProvisionStage::Syncing);
     let output = executor
@@ -1371,6 +1371,7 @@ mod profile_archive_tests {
     }
 
     // Hard-won: #1483: recursive scp spent 162 seconds on a 17 MB profile.
+    // Hard-won: #1187: BSD chmod treats -- after the mode as a filename.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn streamed_profile_roundtrips_through_system_tar_without_per_file_commands() {
         let (daemon_side, node_side) = tokio::io::duplex(64 * 1024);

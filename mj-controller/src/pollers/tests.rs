@@ -1400,6 +1400,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
         }),
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
+            unchanged_login: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(Vec::new()),
             step_failures: Vec::new(),
@@ -1429,6 +1430,7 @@ fn a_claude_authentication_failure_offers_the_long_lived_token() {
     // The advice also reaches a failed reconciliation, not only a clean one.
     let failed = CredentialSyncResult {
         outcomes: vec![CredentialSyncOutcome {
+            unchanged_login: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err("worker proxy disconnected".into()),
             step_failures: Vec::new(),
@@ -1457,6 +1459,7 @@ fn an_empty_prompt_notice_does_not_claim_authentication_failed() {
         }),
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
+            unchanged_login: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failures: Vec::new(),
@@ -1505,6 +1508,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         trigger: None,
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
+            unchanged_login: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Err(detail.to_owned()),
             step_failures: Vec::new(),
@@ -1546,6 +1550,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
         trigger: None,
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
+            unchanged_login: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failures: Vec::new(),
@@ -1571,6 +1576,7 @@ fn a_result_clears_only_the_failures_of_the_steps_it_checked() {
         trigger: None,
         failure: None,
         outcomes: vec![CredentialSyncOutcome {
+            unchanged_login: None,
             session_id: "018f9dd2-a3b4".into(),
             outcome: Ok(vec![CredentialSyncAction::Pushed]),
             step_failures,
@@ -2123,6 +2129,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             outcomes: outcome
                 .map(|outcome| {
                     vec![CredentialSyncOutcome {
+                        unchanged_login: None,
                         session_id: session_id.into(),
                         outcome,
                         step_failures: Vec::new(),
@@ -2167,6 +2174,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
             trigger: None,
             failure: None,
             outcomes: vec![CredentialSyncOutcome {
+                unchanged_login: None,
                 session_id: session_id.into(),
                 outcome: Err("worker proxy disconnected".into()),
                 step_failures: Vec::new(),
@@ -2377,6 +2385,7 @@ fn a_result_about_one_sessions_aws_renewal_does_not_end_other_sessions_failures(
     };
 
     let outcome = |session: &str, detail: Option<&str>| CredentialSyncOutcome {
+        unchanged_login: None,
         session_id: session.into(),
         outcome: Ok(Vec::new()),
         step_failures: detail
