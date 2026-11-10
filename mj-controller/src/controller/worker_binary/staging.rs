@@ -81,6 +81,8 @@ pub(super) fn stage_claude_keychain_login(
         {
             return Ok(());
         }
+        // Staged whole, refresh token included: nothing on a Mac renews a
+        // Keychain login in a container copy (`copies_omit_refresh_token`).
         if let Some(credentials) = crate::setup::claude_keychain_credentials(executor)? {
             let path = destination.join(profile.kind.credential_file_name());
             mj_core::credentials::write_credential_file(profile.kind, &path, &credentials)

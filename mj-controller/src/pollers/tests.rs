@@ -597,6 +597,87 @@ async fn a_held_profile_is_not_probed_by_the_schedule_or_by_a_refresh() {
     ));
 }
 
+/// #1490: the daemon renews a Claude grant when under half of its 8 h access
+/// token remains, even while the usage API holds the profile's probes, because
+/// session copies hold no refresh token and cannot do it themselves.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn a_held_claude_profile_still_renews_its_grant_early() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("bin");
+    let home = directory.path().join("home");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    // A stand-in for `claude auth login` that exchanges the refresh token it
+    // is given for a fresh 8 h login, as the real command does.
+    let claude = bin.join("claude");
+    std::fs::write(
+        &claude,
+        r#"#!/bin/sh
+test "$CLAUDE_CODE_OAUTH_REFRESH_TOKEN" = refresh-1 || exit 3
+expires=$(( $(date +%s) * 1000 + 28800000 ))
+printf '{"claudeAiOauth":{"accessToken":"access-2","refreshToken":"refresh-2","expiresAt":%s,"scopes":["user:inference"]}}' "$expires" > "$CLAUDE_CONFIG_DIR/.credentials.json"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let credentials = home.join(".credentials.json");
+    let expires_in_an_hour = mj_core::clock::epoch_millis() + 3_600_000;
+    std::fs::write(
+        &credentials,
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"access-1","refreshToken":"refresh-1","expiresAt":{expires_in_an_hour},"scopes":["user:inference"]}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let mut held = stored_report("claude1", QUOTA_REFRESH_INTERVAL.as_secs() + 600);
+    held.harness = mj_core::config::HarnessKind::Claude;
+    held.rate_limited_until_epoch_seconds = Some(epoch_seconds() + 3_600);
+    let (profiles, mut updates) = poller_with_store(vec![held.clone()]);
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    profiles.send_replace(QuotaRefreshBatch {
+        generation: 1,
+        refresh: false,
+        profiles: vec![QuotaRefreshRequest {
+            profile_id: "claude1".into(),
+            harness: mj_core::config::HarnessKind::Claude,
+            auth_scheme: mj_core::config::AuthScheme::NativeLogin,
+            source_home: home.clone(),
+            environment: [("PATH".to_owned(), path)].into(),
+            cwd: PathBuf::from("."),
+            codex_source: crate::quota::CodexQuotaSource::UsagePriced {
+                provider: String::new(),
+            },
+            runtime: crate::quota::QuotaRuntimeConfig::host(),
+        }],
+    });
+    // The held report is published and the usage API is not asked.
+    let QuotaUpdate::Report(outcome) = next_update(&mut updates).await else {
+        panic!("the held report is published");
+    };
+    assert_eq!(outcome.report, held);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while std::fs::read_to_string(&credentials)
+        .unwrap()
+        .contains("access-1")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the grant was not renewed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        std::fs::read_to_string(&credentials)
+            .unwrap()
+            .contains("refresh-2")
+    );
+    assert_quiet(&mut updates).await;
+}
+
 #[test]
 fn a_manual_quota_refresh_completes_when_the_daemon_finishes_a_later_cycle() {
     // The surface remembers the daemon's cycle count when it asks.

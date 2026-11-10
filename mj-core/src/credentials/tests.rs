@@ -953,3 +953,118 @@ fn a_kimi_token_refusal_is_an_auth_failure() {
         "The token was rejected by the linter; see the log."
     ));
 }
+
+/// A Claude login with the given expiry whose refresh token is `refresh`, or
+/// none, as a harness copy holds it.
+fn claude_login(expires_at: i64, refresh: Option<&str>) -> Vec<u8> {
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&claude_credentials(expires_at)).unwrap();
+    let oauth = json["claudeAiOauth"].as_object_mut().unwrap();
+    match refresh {
+        Some(token) => oauth.insert("refreshToken".into(), token.into()),
+        None => oauth.remove("refreshToken"),
+    };
+    serde_json::to_vec(&json).unwrap()
+}
+
+#[test]
+fn a_claude_harness_copy_omits_the_refresh_token_and_nothing_else() {
+    let host = claude_login(1_000, Some("host-refresh"));
+    let copy = credential_copy_for_harness(HarnessKind::Claude, &host);
+    let json: serde_json::Value = serde_json::from_slice(&copy).unwrap();
+    assert!(
+        !json["claudeAiOauth"]
+            .as_object()
+            .unwrap()
+            .contains_key("refreshToken")
+    );
+    assert_eq!(json["claudeAiOauth"]["accessToken"], "access");
+    assert_eq!(json["claudeAiOauth"]["expiresAt"], 1_000);
+    assert_eq!(json["claudeAiOauth"]["scopes"][0], "user:inference");
+    // The copy is stable, so equal inputs have equal fingerprints.
+    assert_eq!(
+        copy,
+        credential_copy_for_harness(HarnessKind::Claude, &host)
+    );
+
+    // `""` means "login ended" to Claude Code, so it is never written, and an
+    // existing one is not turned into a missing key.
+    let ended = claude_login(1_000, Some(""));
+    assert_eq!(
+        credential_copy_for_harness(HarnessKind::Claude, &ended).as_ref(),
+        ended.as_slice()
+    );
+    // Other harnesses and unreadable documents keep their bytes.
+    let codex = codex_credentials("2026-01-01T00:00:00Z");
+    assert_eq!(
+        credential_copy_for_harness(HarnessKind::Codex, &codex).as_ref(),
+        codex.as_slice()
+    );
+    assert_eq!(
+        credential_copy_for_harness(HarnessKind::Claude, b"synthetic credentials").as_ref(),
+        b"synthetic credentials"
+    );
+}
+
+/// #1490: a copy without the refresh token never takes the profile's login
+/// from it, however late it expires, and a copy staged before that rule, which
+/// still holds the refresh token, is replaced at the same expiry.
+#[tokio::test]
+async fn claude_installs_never_drop_the_hosts_refresh_token_and_converge_copies() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = directory.path().join("host/.credentials.json");
+    let session = directory.path().join("session/.credentials.json");
+    for path in [&host, &session] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    }
+    let with_token = claude_login(1_000, Some("host-refresh"));
+    let stripped = credential_copy_for_harness(HarnessKind::Claude, &with_token).into_owned();
+    std::fs::write(&host, &with_token).unwrap();
+
+    // (b) A later-expiring copy without the token does not replace the host.
+    let later_stripped = claude_login(9_000, None);
+    let outcome = install_credentials_if_newer(HarnessKind::Claude, &host, &later_stripped)
+        .await
+        .unwrap();
+    assert!(!outcome.installed);
+    assert_eq!(std::fs::read(&host).unwrap(), with_token);
+    // A later copy that carries its own login does.
+    let own_login = claude_login(9_000, Some("session-refresh"));
+    assert!(
+        install_credentials_if_newer(HarnessKind::Claude, &host, &own_login)
+            .await
+            .unwrap()
+            .installed
+    );
+    std::fs::write(&host, &with_token).unwrap();
+
+    // (a) A copy holding the host's refresh token at the same expiry is
+    // replaced by the stripped copy, but only under the session-copy rule.
+    std::fs::write(&session, &with_token).unwrap();
+    assert!(
+        !install_credentials_if_newer(HarnessKind::Claude, &session, &stripped)
+            .await
+            .unwrap()
+            .installed
+    );
+    let outcome = install_session_credentials(HarnessKind::Claude, &session, &stripped)
+        .await
+        .unwrap();
+    assert!(outcome.installed);
+    assert_eq!(std::fs::read(&session).unwrap(), stripped);
+
+    // An older delivery never replaces a copy that expires later (it may be a
+    // login of its own that the daemon has yet to pull), nor does a delivery
+    // that carries a token at the same expiry.
+    let newer_own = claude_login(2_000, Some("session-refresh"));
+    std::fs::write(&session, &newer_own).unwrap();
+    for incoming in [&stripped, &with_token] {
+        assert!(
+            !install_session_credentials(HarnessKind::Claude, &session, incoming)
+                .await
+                .unwrap()
+                .installed
+        );
+        assert_eq!(std::fs::read(&session).unwrap(), newer_own);
+    }
+}

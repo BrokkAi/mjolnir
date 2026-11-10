@@ -2802,6 +2802,133 @@ async fn a_clean_later_pass_replaces_the_failure_an_earlier_one_reported() {
     assert_eq!(puller.outcome, Ok(vec![CredentialSyncAction::Pulled]));
 }
 
+/// A Claude login as the sync sees it. A copy without `refresh` is what a
+/// harness holds since #1490.
+fn claude_login(expires_at: i64, access: &str, refresh: Option<&str>) -> Vec<u8> {
+    let mut oauth = serde_json::json!({
+        "accessToken": access,
+        "expiresAt": expires_at,
+        "scopes": ["user:inference"],
+    });
+    if let Some(refresh) = refresh {
+        oauth["refreshToken"] = refresh.into();
+    }
+    serde_json::to_vec(&serde_json::json!({ "claudeAiOauth": oauth })).unwrap()
+}
+
+/// [`codex_sync_target`] for a Claude profile whose session holds `login`,
+/// which the fixture serves back and records pushes over at `received`.
+#[cfg(unix)]
+fn claude_sync_target(
+    home: &std::path::Path,
+    session_id: &str,
+    login: &[u8],
+    received: &std::path::Path,
+) -> CredentialSyncTarget {
+    let mut target = codex_sync_target(home, session_id, "2026-09-25T20:00:00.000Z", received);
+    target.profile_id = "claude1".into();
+    target.harness = mj_core::config::HarnessKind::Claude;
+    std::fs::write(received, login).unwrap();
+    let session = CredentialSnapshot::of(mj_core::config::HarnessKind::Claude, login);
+    target.spec.args[4] = session.fingerprint;
+    target.spec.args[5] = session.freshness_epoch_ms.unwrap().to_string();
+    target
+}
+
+/// #1490: a session copy holds no refresh token, so the sync must converge a
+/// copy that still holds the host's, never let a copy without one replace the
+/// host, and adopt a copy that carries a newer login of its own, then hand it
+/// back without the token.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn claude_sync_converges_copies_to_the_hosts_login_without_its_refresh_token() {
+    let host_login = claude_login(2_000, "access-host", Some("refresh-host"));
+    let stripped_host = mj_core::credentials::credential_copy_for_harness(
+        mj_core::config::HarnessKind::Claude,
+        &host_login,
+    )
+    .into_owned();
+    // (session copy, expected pushes, expected pulls, host after)
+    let own_login = claude_login(3_000, "access-own", Some("refresh-own"));
+    let stripped_own = mj_core::credentials::credential_copy_for_harness(
+        mj_core::config::HarnessKind::Claude,
+        &own_login,
+    )
+    .into_owned();
+    #[allow(clippy::type_complexity, reason = "one-off table of scenarios")]
+    let cases: [(&str, Vec<u8>, Vec<CredentialSyncAction>, &[u8], &[u8]); 5] = [
+        // (a) staged before the rule: the host's own bytes, token included.
+        (
+            "pre-upgrade copy",
+            host_login.clone(),
+            vec![CredentialSyncAction::Pushed],
+            &host_login,
+            &stripped_host,
+        ),
+        // Already converged.
+        (
+            "converged copy",
+            stripped_host.clone(),
+            vec![],
+            &host_login,
+            &stripped_host,
+        ),
+        // An older copy catches up.
+        (
+            "older copy",
+            claude_login(1_000, "access-old", None),
+            vec![CredentialSyncAction::Pushed],
+            &host_login,
+            &stripped_host,
+        ),
+        // (b) later expiry but no refresh token: neither side changes.
+        (
+            "later copy without a refresh token",
+            claude_login(9_000, "access-later", None),
+            vec![],
+            &host_login,
+            &claude_login(9_000, "access-later", None),
+        ),
+        // (c) an in-session login: adopted, then returned without the token.
+        (
+            "copy with its own newer login",
+            own_login.clone(),
+            // The pull makes a second pass; the fixture's worker keeps
+            // reporting its first state, so that pass pushes again. The host
+            // holding the session's login proves the pull.
+            vec![CredentialSyncAction::Pushed],
+            &own_login,
+            &stripped_own,
+        ),
+    ];
+    for (name, session_login, actions, host_after, session_after) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let received = scratch.path().join("session-login");
+        let canonical = home.path().join(".credentials.json");
+        std::fs::write(&canonical, &host_login).unwrap();
+        let target = claude_sync_target(home.path(), "claude-session", &session_login, &received);
+
+        let outcomes = reconcile_profile(&[target], Some("claude-session")).await;
+
+        let outcome = outcomes
+            .iter()
+            .find(|o| o.session_id == "claude-session")
+            .unwrap();
+        assert_eq!(outcome.outcome, Ok(actions), "{name}: {outcomes:?}");
+        assert_eq!(
+            std::fs::read(&canonical).unwrap(),
+            host_after,
+            "{name}: host"
+        );
+        assert_eq!(
+            std::fs::read(&received).unwrap(),
+            session_after,
+            "{name}: session"
+        );
+    }
+}
+
 #[cfg(unix)]
 // Hard-won: #1485: a credential read could overwrite a host login refreshed while the relay request was in flight.
 #[tokio::test]

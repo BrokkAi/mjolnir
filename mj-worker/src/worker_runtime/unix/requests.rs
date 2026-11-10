@@ -317,7 +317,7 @@ async fn apply_install_credentials(
         .decode(data.as_bytes())
         .context("decode credential payload")?;
     validate_credential_payload(endpoint.harness, &bytes)?;
-    let installed = mj_core::credentials::install_credentials_if_newer(
+    let installed = mj_core::credentials::install_session_credentials(
         endpoint.harness,
         &endpoint.marker,
         &bytes,

@@ -90,10 +90,65 @@ pub struct CredentialInstall {
     pub installed: bool,
 }
 
+/// Who owns the destination file, which decides what may replace it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstallPolicy {
+    /// The profile's own login: only a strictly newer copy replaces it, and a
+    /// copy without a refresh token never replaces one that has it, because
+    /// that would drop the grant the daemon alone refreshes.
+    Canonical,
+    /// A harness's copy of the login. Also replaced by a same-expiry copy
+    /// without a refresh token, which is how a copy staged before the daemon
+    /// became the only refresher converges (#1490).
+    SessionCopy,
+}
+
+fn replaces(
+    policy: InstallPolicy,
+    kind: HarnessKind,
+    current: (&CredentialSnapshot, &[u8]),
+    incoming: (&CredentialSnapshot, &[u8]),
+) -> bool {
+    if reconcile(current.0, incoming.0) == SyncAction::Pull {
+        return policy == InstallPolicy::SessionCopy
+            || !(super::credential_holds_refresh_token(kind, current.1)
+                && !super::credential_holds_refresh_token(kind, incoming.1));
+    }
+    policy == InstallPolicy::SessionCopy
+        && kind == HarnessKind::Claude
+        && !super::credential_holds_refresh_token(kind, incoming.1)
+        && current.0.present
+        && current.0.freshness_epoch_ms.is_some()
+        && current.0.freshness_epoch_ms == incoming.0.freshness_epoch_ms
+        && current.0.fingerprint != incoming.0.fingerprint
+}
+
+/// Install a copy into the profile's own login, only when it is newer and does
+/// not lose the refresh token the current one holds.
 pub async fn install_credentials_if_newer(
     kind: HarnessKind,
     path: &Path,
     bytes: &[u8],
+) -> Result<CredentialInstall> {
+    install_credentials(kind, path, bytes, InstallPolicy::Canonical).await
+}
+
+/// Install a delivered copy into a harness's own credential file: newer
+/// copies replace it, and so does a same-expiry copy without a refresh token.
+/// A worker applies this to the controller's pushes.
+pub async fn install_session_credentials(
+    kind: HarnessKind,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<CredentialInstall> {
+    install_credentials(kind, path, bytes, InstallPolicy::SessionCopy).await
+}
+
+async fn install_credentials(
+    kind: HarnessKind,
+    path: &Path,
+    bytes: &[u8],
+    policy: InstallPolicy,
 ) -> Result<CredentialInstall> {
     validate_credential_payload(kind, bytes)?;
     let guard = CredentialWriteGuard::acquire(kind, path).await?;
@@ -103,9 +158,14 @@ pub async fn install_credentials_if_newer(
         // Blocking writes cannot be cancelled: ownership follows the write.
         let _guard = guard;
         refuse_symlinked_token("credential", &path)?;
-        let (current, _) = read_credential_file(kind, &path)?;
+        let (current, current_bytes) = read_credential_file(kind, &path)?;
         let incoming = CredentialSnapshot::of(kind, &bytes);
-        if reconcile(&current, &incoming) == SyncAction::Pull {
+        if replaces(
+            policy,
+            kind,
+            (&current, &current_bytes),
+            (&incoming, &bytes),
+        ) {
             write_credential_file(kind, &path, &bytes)?;
             Ok(CredentialInstall {
                 snapshot: incoming,

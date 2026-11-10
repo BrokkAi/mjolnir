@@ -18,7 +18,7 @@ use mj_core::credentials::CLAUDE_REFRESH_LOCK_WAIT;
 use crate::targets::{CancellableProcessExecutor, CommandExecutor, CommandOutput, CommandSpec};
 
 const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
-const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 // The reset-grant endpoint uses the CLI surface to determine eligibility.
 const USAGE_USER_AGENT: &str = "claude-cli/2.1.283 (external, cli)";
@@ -354,11 +354,113 @@ async fn refresh_and_retry(
         drop(locks);
         return query_api(client, usage_url, token).await;
     }
+    let credentials = renew_locked(
+        active,
+        home.clone(),
+        environment,
+        executor,
+        locks,
+        container,
+    )
+    .await?;
+    let token = oauth_access_token(&credentials, mj_core::clock::epoch_millis())
+        .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
+    query_api(client, usage_url, token).await
+}
+
+/// Claude access tokens last 8 hours (observed: `expiresAt` is the issue time
+/// plus 8 h). The daemon refreshes when less than half of that remains, which
+/// leaves every session copy, none of which can refresh, 4 hours of valid token
+/// while no daemon runs (#1490).
+pub(crate) const GRANT_REFRESH_LEAD: Duration = Duration::from_secs(4 * 60 * 60);
+
+/// What [`refresh_grant_if_due`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GrantRefresh {
+    /// Nothing to refresh: no login here, or it carries no refresh token.
+    NotRefreshable,
+    /// Enough lifetime remains. The login becomes due at this epoch time.
+    Current { due_at_ms: i64 },
+    /// The login was renewed, by this call or by another daemon that held the
+    /// native lock first. `expires_at_ms` is the new expiry.
+    Renewed {
+        by_this_call: bool,
+        expires_at_ms: Option<i64>,
+    },
+}
+
+/// Renew the profile's login when less than [`GRANT_REFRESH_LEAD`] of its
+/// access token remains, under the native refresh locks with a reread, so only
+/// one of several daemons sharing the home exchanges the refresh token. This
+/// is the grant's only refresher: copies handed to harnesses carry no refresh
+/// token. The decision does not consult the usage API's rate-limit hold, which
+/// covers usage requests only.
+pub(crate) async fn refresh_grant_if_due(
+    home: PathBuf,
+    environment: HashMap<String, String>,
+    executor: Arc<dyn CommandExecutor + Send + Sync>,
+    container: Option<crate::quota_runtime::ContainerCheck>,
+    now_ms: i64,
+) -> Result<GrantRefresh, ClaudeUsageError> {
+    let lead_ms = i64::try_from(GRANT_REFRESH_LEAD.as_millis()).unwrap_or(i64::MAX);
+    let due_at = |credentials: &Value| -> Option<i64> {
+        if !oauth_has_refresh_token(credentials) {
+            return None;
+        }
+        Some(oauth_expires_at(credentials.get("claudeAiOauth")?)? - lead_ms)
+    };
+    let credentials = match read_credentials(&home).await {
+        Ok(credentials) => credentials,
+        Err(ClaudeUsageError::NotSignedIn) => return Ok(GrantRefresh::NotRefreshable),
+        Err(error) => return Err(error),
+    };
+    let Some(due_at_ms) = due_at(&credentials) else {
+        return Ok(GrantRefresh::NotRefreshable);
+    };
+    if due_at_ms > now_ms {
+        return Ok(GrantRefresh::Current { due_at_ms });
+    }
+    let locks = mj_core::credentials::CredentialWriteGuard::acquire(
+        mj_core::config::HarnessKind::Claude,
+        &home.join(".credentials.json"),
+    )
+    .await
+    .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
+    let active = read_credentials(&home).await?;
+    match due_at(&active) {
+        None => return Ok(GrantRefresh::NotRefreshable),
+        Some(due_at_ms) if due_at_ms > now_ms => {
+            // Another daemon or Claude Code renewed it while this one waited.
+            let expires_at_ms = active.get("claudeAiOauth").and_then(oauth_expires_at);
+            return Ok(GrantRefresh::Renewed {
+                by_this_call: false,
+                expires_at_ms,
+            });
+        }
+        Some(_) => {}
+    }
+    let renewed = renew_locked(active, home, environment, executor, locks, container).await?;
+    Ok(GrantRefresh::Renewed {
+        by_this_call: true,
+        expires_at_ms: renewed.get("claudeAiOauth").and_then(oauth_expires_at),
+    })
+}
+
+/// Run `claude auth login` with the stored refresh token while the caller
+/// holds the native locks, and return the credentials it left. Fails when the
+/// access token did not change.
+async fn renew_locked(
+    active: Value,
+    home: PathBuf,
+    mut environment: HashMap<String, String>,
+    executor: Arc<dyn CommandExecutor + Send + Sync>,
+    locks: mj_core::credentials::CredentialWriteGuard,
+    container: Option<crate::quota_runtime::ContainerCheck>,
+) -> Result<Value, ClaudeUsageError> {
     let before = active
         .pointer("/claudeAiOauth/accessToken")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let mut environment = environment;
     environment.insert(
         "CLAUDE_CONFIG_DIR".into(),
         home.to_string_lossy().into_owned(),
@@ -385,7 +487,7 @@ async fn refresh_and_retry(
             ClaudeUsageError::Refresh("Claude auth login did not renew the access token".to_owned())
         }));
     }
-    query_api(client, usage_url, token).await
+    Ok(credentials)
 }
 
 /// On macOS, read Claude's quota through its Keychain-aware CLI.

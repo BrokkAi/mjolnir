@@ -1,5 +1,6 @@
 use super::*;
 use crate::session_manager::{RelayConnectionJob, RelayJobDeferred, SessionManagerControl};
+use mj_core::credentials::{credential_copy_for_harness, credential_holds_refresh_token};
 
 /// How a reconciliation reaches each session's worker.
 #[derive(Clone)]
@@ -2427,11 +2428,25 @@ pub(super) async fn reconcile_credentials(
         }
         return Ok(None);
     }
+    let kind = target.harness;
     let mut current = canonical.clone();
     let mut bytes = canonical_bytes.to_owned();
     let mut unchanged = true;
     loop {
-        match reconcile(&current, &session) {
+        // What the session should hold: the profile's login, as a harness may
+        // hold it. For Claude that omits the refresh token, so the copy can
+        // never spend the grant the daemon alone refreshes (#1490).
+        let desired_bytes = if kind.copies_omit_refresh_token() {
+            credential_copy_for_harness(kind, &bytes).into_owned()
+        } else {
+            bytes.clone()
+        };
+        let desired = if current.present {
+            CredentialSnapshot::of(kind, &desired_bytes)
+        } else {
+            CredentialSnapshot::absent()
+        };
+        match session_copy_action(kind, &current, &desired, &session) {
             SyncAction::None => {
                 if current.present
                     && session.present
@@ -2447,17 +2462,34 @@ pub(super) async fn reconcile_credentials(
                 }
                 // Only this original, identical snapshot can identify the login
                 // the failing session held. A concurrent refresh is not evidence
-                // that the newly observed login was refused.
+                // that the newly observed login was refused. A copy without the
+                // refresh token holds the same login.
                 return Ok((unchanged
                     && current.present
                     && session.present
-                    && current.fingerprint == session.fingerprint)
+                    && session.fingerprint == desired.fingerprint)
                     .then_some(current));
             }
             SyncAction::Push => {
-                let installed = client.install_credentials(&bytes).await?;
-                if installed.present && installed.fingerprint == current.fingerprint {
+                let installed = client.install_credentials(&desired_bytes).await?;
+                if installed.present && installed.fingerprint == desired.fingerprint {
+                    log_credential_transfer("pushed", target, &session, &installed);
                     actions.push(CredentialSyncAction::Pushed);
+                    return Ok(None);
+                }
+                if kind.copies_omit_refresh_token()
+                    && installed == session
+                    && installed.freshness_epoch_ms == desired.freshness_epoch_ms
+                {
+                    // A worker that predates the same-expiry delivery rule
+                    // keeps the copy it has. It converges when the next
+                    // refresh moves the profile's expiry forward, which that
+                    // worker does accept.
+                    tracing::debug!(
+                        session_id = %target.session_id,
+                        profile_id = %target.profile_id,
+                        "the session's worker keeps its same-expiry credential copy; it will take the next refresh"
+                    );
                     return Ok(None);
                 }
                 anyhow::ensure!(
@@ -2469,15 +2501,28 @@ pub(super) async fn reconcile_credentials(
             }
             SyncAction::Pull => {
                 let received = client.read_credentials().await?;
-                validate_credential_payload(target.harness, &received).with_context(|| {
+                validate_credential_payload(kind, &received).with_context(|| {
                     format!(
                         "session {} returned an unusable credential file",
                         target.session_id
                     )
                 })?;
-                let incoming = CredentialSnapshot::of(target.harness, &received);
+                let incoming = CredentialSnapshot::of(kind, &received);
+                // A copy without the refresh token cannot become the
+                // profile's login, however late it expires.
+                if kind.copies_omit_refresh_token()
+                    && current.present
+                    && !credential_holds_refresh_token(kind, &received)
+                {
+                    tracing::debug!(
+                        session_id = %target.session_id,
+                        profile_id = %target.profile_id,
+                        "the session's credential copy expires later but holds no refresh token; leaving both alone"
+                    );
+                    return Ok(None);
+                }
                 let installed = mj_core::credentials::install_credentials_if_newer(
-                    target.harness,
+                    kind,
                     canonical_path,
                     &received,
                 )
@@ -2489,15 +2534,22 @@ pub(super) async fn reconcile_credentials(
                     )
                 })?;
                 if installed.installed {
+                    log_credential_transfer("pulled", target, &current, &installed.snapshot);
                     actions.push(CredentialSyncAction::Pulled);
-                    return Ok(None);
+                    if !kind.copies_omit_refresh_token() {
+                        return Ok(None);
+                    }
+                    // The adopted login still sits in the session with its
+                    // refresh token: fall through to reread the profile and
+                    // push the copy without it back.
+                } else {
+                    anyhow::ensure!(
+                        installed.snapshot != current || incoming != session,
+                        "profile {} retained its credentials without accepting the newer session login or observing a changed snapshot",
+                        target.profile_id
+                    );
+                    session = incoming;
                 }
-                anyhow::ensure!(
-                    installed.snapshot != current || incoming != session,
-                    "profile {} retained its credentials without accepting the newer session login or observing a changed snapshot",
-                    target.profile_id
-                );
-                session = incoming;
             }
         }
         // A destination retained a different generation. Reconcile that actual
@@ -2505,11 +2557,59 @@ pub(super) async fn reconcile_credentials(
         // Every repeat follows a changed snapshot; no lock spans relay I/O.
         unchanged = false;
         let path = canonical_path.to_owned();
-        let kind = target.harness;
         (current, bytes) = tokio::task::spawn_blocking(move || read_credential_file(kind, &path))
             .await
             .context("reread profile credentials task stopped")??;
     }
+}
+
+/// Which way a session's copy and the profile's login converge. `desired` is
+/// the profile's login as the session may hold it.
+///
+/// A harness whose copies omit the refresh token never lets a copy replace the
+/// profile unless it is strictly newer (it carries its own login): a copy that
+/// merely expires later has no refresh token to adopt. Otherwise the session
+/// is pushed whenever it differs from `desired`, so a copy staged before that
+/// rule, which still holds the refresh token, converges at the same expiry.
+fn session_copy_action(
+    kind: mj_core::config::HarnessKind,
+    canonical: &CredentialSnapshot,
+    desired: &CredentialSnapshot,
+    session: &CredentialSnapshot,
+) -> SyncAction {
+    let action = reconcile(canonical, session);
+    if !kind.copies_omit_refresh_token() || action == SyncAction::Pull {
+        return action;
+    }
+    if !canonical.present {
+        return action;
+    }
+    if !session.present {
+        return SyncAction::Push;
+    }
+    if session.fingerprint == desired.fingerprint
+        || (canonical.freshness_epoch_ms.is_none() && session.freshness_epoch_ms.is_none())
+    {
+        return SyncAction::None;
+    }
+    SyncAction::Push
+}
+
+/// Record which way a login moved, never its bytes.
+fn log_credential_transfer(
+    direction: &str,
+    target: &CredentialSyncTarget,
+    old: &CredentialSnapshot,
+    new: &CredentialSnapshot,
+) {
+    tracing::info!(
+        direction,
+        profile_id = %target.profile_id,
+        session_id = %target.session_id,
+        old_expires_at_ms = ?old.freshness_epoch_ms,
+        new_expires_at_ms = ?new.freshness_epoch_ms,
+        "synchronized a harness login"
+    );
 }
 
 /// The export of a profile with no logins.

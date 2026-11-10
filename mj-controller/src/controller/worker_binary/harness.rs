@@ -228,6 +228,7 @@ pub(super) fn stage_profile(
         }
         Ok(())
     })?;
+    strip_staged_refresh_token(harness, destination)?;
     // `codex app-server` refuses `--profile`, so a Codex profile overlay
     // reaches the session already layered into the staged `config.toml`.
     if profile.codex_profile.is_some()
@@ -258,6 +259,36 @@ pub(super) fn stage_profile(
         if catalog.exists() {
             copy_profile_entry(&catalog, &destination.join(".data/muse/model-catalog"))?;
         }
+    }
+    Ok(())
+}
+
+/// Every staged copy of a login is made here (sessions, reviewers, sub-agents
+/// and capability probes), so this is where a harness copy loses the refresh
+/// token that only the daemon may spend (#1490).
+pub(super) fn strip_staged_refresh_token(
+    harness: mj_core::config::HarnessKind,
+    destination: &Path,
+) -> Result<()> {
+    if !harness.copies_omit_refresh_token() {
+        return Ok(());
+    }
+    let path = destination.join(harness.credential_file_name());
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read staged login {}", path.display()));
+        }
+    };
+    let copy = mj_core::credentials::credential_copy_for_harness(harness, &bytes);
+    if copy.as_ref() != bytes.as_slice() {
+        mj_core::credentials::write_credential_file(harness, &path, &copy).with_context(|| {
+            format!(
+                "remove the refresh token from staged login {}",
+                path.display()
+            )
+        })?;
     }
     Ok(())
 }

@@ -17,7 +17,8 @@
 
 mod locking;
 pub use locking::{
-    CLAUDE_REFRESH_LOCK_WAIT, CredentialInstall, CredentialWriteGuard, install_credentials_if_newer,
+    CLAUDE_REFRESH_LOCK_WAIT, CredentialInstall, CredentialWriteGuard,
+    install_credentials_if_newer, install_session_credentials,
 };
 
 use crate::hex::lower_hex;
@@ -225,6 +226,70 @@ pub fn credential_freshness(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
 /// Anything unparseable is `None` rather than a guess.
 pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
     kind.credential_expiry_ms(&serde_json::from_slice(bytes).ok()?)
+}
+
+impl HarnessKind {
+    /// Whether the credential copies this host hands to a harness process omit
+    /// the refresh token, so the daemon stays the grant's only refresher.
+    ///
+    /// Claude Code refreshes five minutes before `expiresAt`, under a lock that
+    /// covers only its own config directory. Every copy that carries the
+    /// rotating single-use refresh token can therefore spend it, and a refresh
+    /// inside a copy nobody pulls back leaves the host holding a spent token
+    /// (#1490). Without the key, Claude Code never refreshes or writes the file
+    /// and rereads a replaced one by modification time.
+    ///
+    /// Not on macOS: there the host login lives in the Keychain, not in the
+    /// profile home. The credential sync never reads or writes it, and the
+    /// daemon does not refresh it, so a stripped container copy could not be
+    /// renewed and would die after one access-token lifetime. Copies staged
+    /// from the Keychain keep their refresh token and refresh themselves, as
+    /// before.
+    pub fn copies_omit_refresh_token(self) -> bool {
+        self == Self::Claude && self.keeps_login_in_home(crate::config::HarnessHost::current())
+    }
+}
+
+/// The bytes of a Claude credential copy without `claudeAiOauth.refreshToken`.
+/// The key is removed, never set to `""`, which Claude Code reads as "login
+/// ended"; an existing `""` is left alone. Callers decide whether a copy is
+/// stripped ([`HarnessKind::copies_omit_refresh_token`]). Other harnesses, and
+/// a document that is not Claude's JSON shape, are unchanged.
+pub fn credential_copy_for_harness(kind: HarnessKind, bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    use std::borrow::Cow;
+
+    if !credential_holds_refresh_token(kind, bytes) {
+        return Cow::Borrowed(bytes);
+    }
+    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Cow::Borrowed(bytes);
+    };
+    let Some(oauth) = json
+        .get_mut("claudeAiOauth")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Cow::Borrowed(bytes);
+    };
+    oauth.remove("refreshToken");
+    match serde_json::to_vec(&json) {
+        Ok(stripped) => Cow::Owned(stripped),
+        Err(_) => Cow::Borrowed(bytes),
+    }
+}
+
+/// Whether a Claude credential carries a refresh token its holder could
+/// spend. An empty string is the "login ended" marker, not a token. Other
+/// harnesses report none here.
+pub fn credential_holds_refresh_token(kind: HarnessKind, bytes: &[u8]) -> bool {
+    kind == HarnessKind::Claude
+        && serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()
+            .and_then(|json| {
+                json.pointer("/claudeAiOauth/refreshToken")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|token| !token.is_empty())
+            })
+            .unwrap_or(false)
 }
 
 /// Muse's Meta login records its access-token expiry in epoch seconds. A

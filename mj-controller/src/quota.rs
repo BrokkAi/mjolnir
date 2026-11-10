@@ -478,6 +478,115 @@ fn log_quota_change(previous: Option<&ProfileQuota>, report: &ProfileQuota) {
     }
 }
 
+/// Where a check that starts a harness runs it: on this host, or in the
+/// configured container runtime when the host lacks the harness.
+fn quota_container(
+    runtime: &QuotaRuntimeConfig,
+    source_home: &Path,
+    host_has_harness: bool,
+) -> Result<Option<crate::quota_runtime::ContainerCheck>> {
+    Ok(
+        match crate::quota_runtime::QuotaRuntime::current(runtime, host_has_harness)? {
+            crate::quota_runtime::QuotaRuntime::Host => None,
+            crate::quota_runtime::QuotaRuntime::Container(runtime) => {
+                Some(crate::quota_runtime::ContainerCheck {
+                    runtime,
+                    home: source_home.to_owned(),
+                })
+            }
+        },
+    )
+}
+
+/// What the daemon's early Claude grant refresh decided for one profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeGrantCheck {
+    /// Nothing to do for this profile now. `due_at_ms` is when to look again.
+    Waiting { due_at_ms: Option<i64> },
+    /// The login was renewed; the credential sync pushes it to sessions.
+    Renewed,
+    /// The refresh failed. The error is already logged with its safe category.
+    Failed,
+}
+
+/// Renew a Claude profile's grant ahead of its expiry (#1490). The daemon is
+/// the only refresher: session copies carry no refresh token. This is the
+/// decision's one owner and runs apart from the usage probe, so a 429 hold on
+/// the usage API never postpones it.
+pub async fn refresh_claude_grant(request: &QuotaRefreshRequest, now_ms: i64) -> ClaudeGrantCheck {
+    // macOS keeps the login in the Keychain, which only Claude Code reads.
+    if request.harness != HarnessKind::Claude
+        || !request.auth_scheme.uses_native_login_file()
+        || cfg!(target_os = "macos")
+    {
+        return ClaudeGrantCheck::Waiting { due_at_ms: None };
+    }
+    let environment = request
+        .environment
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<HashMap<_, _>>();
+    let host_path = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
+    let container = match quota_container(
+        &request.runtime,
+        &request.source_home,
+        claude_usage::host_has_claude(host_path.as_deref()),
+    ) {
+        Ok(container) => container,
+        Err(error) => {
+            tracing::warn!(
+                profile_id = %request.profile_id,
+                error = %format!("{error:#}"),
+                "could not choose where to refresh the Claude login"
+            );
+            return ClaudeGrantCheck::Failed;
+        }
+    };
+    let executor = std::sync::Arc::new(crate::targets::CancellableProcessExecutor::with_timeout(
+        mj_core::credentials::CLAUDE_REFRESH_LOCK_WAIT + claude_usage::REFRESH_TIMEOUT,
+    ));
+    let _cancel = executor.cancel_on_drop();
+    match claude_usage::refresh_grant_if_due(
+        request.source_home.clone(),
+        environment,
+        executor,
+        container,
+        now_ms,
+    )
+    .await
+    {
+        Ok(claude_usage::GrantRefresh::NotRefreshable) => {
+            ClaudeGrantCheck::Waiting { due_at_ms: None }
+        }
+        Ok(claude_usage::GrantRefresh::Current { due_at_ms }) => ClaudeGrantCheck::Waiting {
+            due_at_ms: Some(due_at_ms),
+        },
+        Ok(claude_usage::GrantRefresh::Renewed {
+            by_this_call,
+            expires_at_ms,
+        }) => {
+            tracing::info!(
+                profile_id = %request.profile_id,
+                new_expires_at_ms = ?expires_at_ms,
+                refreshed_by_this_daemon = by_this_call,
+                "refreshed the Claude login ahead of expiry"
+            );
+            ClaudeGrantCheck::Renewed
+        }
+        Err(error) => {
+            tracing::warn!(
+                profile_id = %request.profile_id,
+                %error,
+                "could not refresh the Claude login ahead of expiry"
+            );
+            ClaudeGrantCheck::Failed
+        }
+    }
+}
+
 async fn refresh_profile_with_cache_root(
     request: QuotaRefreshRequest,
     mut codex_client: Option<CodexUsageClient>,
@@ -520,19 +629,7 @@ async fn refresh_profile_with_cache_root(
     // Only the checks that start a harness program consult the runtime, each
     // saying whether this host already has the harness it would start.
     let container =
-        |host_has_harness: bool| -> Result<Option<crate::quota_runtime::ContainerCheck>> {
-            Ok(
-                match crate::quota_runtime::QuotaRuntime::current(&runtime, host_has_harness)? {
-                    crate::quota_runtime::QuotaRuntime::Host => None,
-                    crate::quota_runtime::QuotaRuntime::Container(runtime) => {
-                        Some(crate::quota_runtime::ContainerCheck {
-                            runtime,
-                            home: source_home.clone(),
-                        })
-                    }
-                },
-            )
-        };
+        |host_has_harness: bool| quota_container(&runtime, &source_home, host_has_harness);
     let environment = environment.into_iter().collect::<HashMap<_, _>>();
     // The PATH a host check's program is found on: the profile's own when it
     // sets one, as the subprocess then receives it, else the daemon's.

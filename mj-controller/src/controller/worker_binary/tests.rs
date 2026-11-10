@@ -5687,6 +5687,15 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             continue;
         }
         stage_profile(&profile, &launch.harness_home).unwrap();
+        // #1490: a staged Claude login never carries the refresh token the
+        // daemon alone may spend; the profile's own file keeps it.
+        if kind.copies_omit_refresh_token() {
+            let staged: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&endpoint).unwrap()).unwrap();
+            assert!(staged["claudeAiOauth"].get("refreshToken").is_none());
+            assert_eq!(staged["claudeAiOauth"]["accessToken"], "access-1");
+            assert_eq!(std::fs::read(&canonical).unwrap(), login_bytes(kind, 1));
+        }
 
         // The profile's login rotates while the session runs.
         std::fs::write(&canonical, login_bytes(kind, 2)).unwrap();

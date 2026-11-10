@@ -69,14 +69,27 @@ pub fn spawn_quota_refresher(
         // The cache identity each profile was last adopted under. A changed
         // identity is a changed profile, whose report no longer applies.
         let mut identities: std::collections::BTreeMap<String, String> = Default::default();
+        // When each Claude profile's grant is next looked at, in epoch
+        // milliseconds. No entry means "at the next cycle".
+        let mut grant_checks: std::collections::BTreeMap<String, i64> = Default::default();
         loop {
             let now = epoch_seconds();
-            let wake = batch
+            let probe_wake = batch
                 .profiles
                 .iter()
                 .map(|request| next_probe_at(quotas.report(&request.profile_id)))
                 .min()
                 .map(|due| Duration::from_secs(due.saturating_sub(now).max(5)));
+            let grant_wake = grant_checks.values().min().map(|due| {
+                Duration::from_millis(
+                    due.saturating_sub(mj_core::clock::epoch_millis()).max(0) as u64
+                )
+                .max(Duration::from_secs(5))
+            });
+            let wake = match (probe_wake, grant_wake) {
+                (Some(probe), Some(grant)) => Some(probe.min(grant)),
+                (probe, grant) => probe.or(grant),
+            };
             tokio::select! {
                 _ = tokio::time::sleep(wake.unwrap_or_default()), if wake.is_some() => {}
                 changed = profiles_rx.changed() => {
@@ -90,6 +103,9 @@ pub fn spawn_quota_refresher(
                     }
                 }
             }
+            // The grant refresh comes first, so a probe uses the new token, and
+            // ignores the usage API's hold: that covers usage requests only.
+            refresh_claude_grants(&batch.profiles, &mut grant_checks).await;
             let now = epoch_seconds();
             let due = batch
                 .profiles
@@ -117,6 +133,56 @@ pub fn spawn_quota_refresher(
         quotas.shutdown().await;
     });
     (profiles_tx, updates_rx)
+}
+
+/// Renew each Claude profile's grant that is due (see
+/// [`crate::quota::refresh_claude_grant`]), concurrently, and record when to
+/// look at each again. A failed refresh waits one probe interval, so a rejected
+/// grant is retried at the pace of the quota probe rather than in a loop.
+async fn refresh_claude_grants(
+    profiles: &[QuotaRefreshRequest],
+    checks: &mut std::collections::BTreeMap<String, i64>,
+) {
+    let now_ms = mj_core::clock::epoch_millis();
+    checks.retain(|id, _| profiles.iter().any(|request| &request.profile_id == id));
+    let mut tasks = tokio::task::JoinSet::new();
+    for request in profiles {
+        if checks
+            .get(&request.profile_id)
+            .is_some_and(|due| *due > now_ms)
+        {
+            continue;
+        }
+        let request = request.clone();
+        tasks.spawn(async move {
+            let check = crate::quota::refresh_claude_grant(&request, now_ms).await;
+            (request.profile_id, check)
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        let (profile_id, check) = match result {
+            Ok(output) => output,
+            Err(error) => {
+                tracing::warn!(%error, "Claude grant refresh task failed");
+                continue;
+            }
+        };
+        match check {
+            crate::quota::ClaudeGrantCheck::Waiting {
+                due_at_ms: Some(due_at_ms),
+            } => {
+                checks.insert(profile_id, due_at_ms);
+            }
+            crate::quota::ClaudeGrantCheck::Waiting { due_at_ms: None }
+            | crate::quota::ClaudeGrantCheck::Renewed => {
+                checks.remove(&profile_id);
+            }
+            crate::quota::ClaudeGrantCheck::Failed => {
+                let retry = i64::try_from(QUOTA_REFRESH_INTERVAL.as_millis()).unwrap_or(i64::MAX);
+                checks.insert(profile_id, now_ms.saturating_add(retry));
+            }
+        }
+    }
 }
 
 /// Bring the manager in line with a new batch: drop profiles that left or
