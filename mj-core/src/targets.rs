@@ -1959,9 +1959,7 @@ impl CommandPlan {
                     .context("remote container command has no SSH command argument")?;
                 *remote = format!("{read_and_export} exec {remote}");
             }
-            TargetTemplate::LocalBare
-            | TargetTemplate::AwsEc2(_)
-            | TargetTemplate::SshBare { .. } => {
+            TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
                 bail!("target does not support inherited container environment")
             }
         }
@@ -2463,23 +2461,12 @@ pub struct SshTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AwsTemplate {
-    pub profile: String,
-    pub region: String,
-    pub launch_template: String,
-    pub launch_template_version: Option<String>,
-    pub instance_type: Option<String>,
-    pub ssh: SshTarget,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TargetTemplate {
     LocalBare,
     LocalPodman(ContainerTemplate),
     LocalDocker(ContainerTemplate),
     AppleContainer(ContainerTemplate),
-    AwsEc2(AwsTemplate),
     SshBare {
         ssh: SshTarget,
         #[serde(default = "default_ssh_prefix")]
@@ -2621,7 +2608,7 @@ impl TargetTemplate {
             Self::SshAppleContainer { ssh, container } => {
                 Some((ImageHost::SshAppleContainer(ssh.clone()), container))
             }
-            Self::LocalBare | Self::AwsEc2(_) | Self::SshBare { .. } => None,
+            Self::LocalBare | Self::SshBare { .. } => None,
         }
     }
 }
@@ -2797,7 +2784,6 @@ pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<Stri
         | TargetTemplate::SshAppleContainer { .. } => {
             bail!("container targets use the session's recorded container workspace")
         }
-        TargetTemplate::AwsEc2(_) => Ok(aws_workspace(session_id)),
         TargetTemplate::SshBare {
             workspace_prefix, ..
         } => {

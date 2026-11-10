@@ -55,6 +55,7 @@ fn runtime_view(
     }
 }
 use super::*;
+use mj_core::config::Config;
 
 fn podman_controller(state: SessionState) -> Controller {
     let session_id = "0123456789abcdef0123456789abcdef";

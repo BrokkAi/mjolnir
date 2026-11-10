@@ -1689,6 +1689,7 @@ fn version_one_podman_config_upgrades_to_isolated_workspace_storage() {
     .unwrap();
 
     let config = Config::load_from(&path).unwrap();
+
     assert_eq!(config.version, CONFIG_VERSION);
     let TargetTemplate::LocalPodman { container } = &config.targets["podman"] else {
         panic!("version-one Podman target changed kind")
@@ -2835,6 +2836,15 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
     fs::write(&path, VERSION_TEN_CONFIG).unwrap();
 
     let config = Config::load_from(&path).unwrap();
+    assert!(config.enabled_target("aws").is_none());
+    assert!(!config.enabled_targets().any(|(id, _)| id == "aws"));
+    assert!(
+        config
+            .ensure_target_enabled("aws")
+            .unwrap_err()
+            .to_string()
+            .contains(LEGACY_EC2_TARGET_NOTICE)
+    );
     assert_eq!(config.version, CONFIG_VERSION);
     assert_eq!(
         config.machines.keys().collect::<Vec<_>>(),

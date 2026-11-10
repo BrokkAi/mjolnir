@@ -81,6 +81,11 @@ fn fixture() -> (Controller, MoveOperation) {
         controller_stage: "/controller-stage".into(),
         phase: WorkspaceTransferPhase::Planned,
     });
+    let mut destination = pending_launch_recorded_by_an_older_daemon("stored-client-token");
+    destination.state = PreparedDestinationState::Created {
+        instance_id: INSTANCE.into(),
+    };
+    operation.prepared_destination = Some(destination);
     crate::database::save_move_operation(&operation).unwrap();
     (Controller { config, state }, operation)
 }
@@ -88,9 +93,6 @@ fn fixture() -> (Controller, MoveOperation) {
 #[derive(Default)]
 struct Ec2 {
     commands: Mutex<Vec<CommandSpec>>,
-    tokens: Mutex<std::collections::BTreeSet<String>>,
-    lose_ack: AtomicBool,
-    refuse_launch: AtomicBool,
     fail_boot: AtomicBool,
     fail_cleanup: AtomicBool,
     /// The instance allows IMDSv1 until `modify-instance-metadata-options`
@@ -119,43 +121,10 @@ impl CommandExecutor for Ec2 {
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+        assert!(!command.args.iter().any(|arg| arg == "run-instances"));
         self.commands.lock().unwrap().push(command.clone());
         let mut stdout = Vec::new();
         match command.purpose.as_str() {
-            "resolve immutable EC2 launch template version" => {
-                stdout =
-                    br#"{"LaunchTemplateId":"lt-0123456789abcdef0","VersionNumber":7}"#.to_vec()
-            }
-            "launch EC2 Move destination" => {
-                if self.refuse_launch.load(Ordering::SeqCst) {
-                    return Ok(targets::CommandOutput {
-                        status: 1,
-                        stdout: Vec::new(),
-                        stderr:
-                            b"An error occurred (UnauthorizedOperation) when calling RunInstances"
-                                .to_vec(),
-                    });
-                }
-                self.tokens
-                    .lock()
-                    .unwrap()
-                    .insert(argument(&command.args, "--client-token")?.into());
-                assert!(matches!(
-                    crate::database::load_move_operation(ID)?
-                        .unwrap()
-                        .prepared_destination
-                        .unwrap()
-                        .state,
-                    PreparedDestinationState::LaunchPending
-                ));
-                if self.lose_ack.swap(false, Ordering::SeqCst) {
-                    bail!("launch accepted; acknowledgement lost");
-                }
-                stdout = format!(
-                    r#"{{"Instances":[{{"InstanceId":"{INSTANCE}","MetadataOptions":{{"HttpTokens":"required"}}}}]}}"#
-                )
-                .into_bytes();
-            }
             "wait for EC2 session instance to run" => {
                 assert!(
                     self.resumable.load(Ordering::SeqCst),
@@ -252,90 +221,6 @@ impl CommandExecutor for Ec2 {
 }
 
 #[test]
-fn ec2_preparation_persists_launch_before_boot_and_reuses_the_checked_instance() {
-    if !isolated("ec2_preparation_persists_launch_before_boot_and_reuses_the_checked_instance") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let (mut controller, mut operation) = fixture();
-    let TargetTemplate::AwsEc2 {
-        launch_template, ..
-    } = controller.config.targets.get_mut("ec2").unwrap()
-    else {
-        unreachable!()
-    };
-    *launch_template = "named-move-template".into();
-    let cloud = Ec2::default();
-    controller
-        .prepare_ec2_move_destination(&mut operation, &cloud)
-        .unwrap();
-    // Reconstruct the operation, as a replacement daemon does.
-    let mut recovered = crate::database::load_move_operation(ID).unwrap().unwrap();
-    controller
-        .prepare_ec2_move_destination(&mut recovered, &cloud)
-        .unwrap();
-    assert_eq!(cloud.tokens.lock().unwrap().len(), 1);
-    let commands = cloud.commands.lock().unwrap();
-    assert!(commands.iter().any(|command| command.purpose
-        == "resolve immutable EC2 launch template version"
-        && argument(&command.args, "--launch-template-name").unwrap() == "named-move-template"));
-    let launches: Vec<_> = commands
-        .iter()
-        .filter(|c| c.purpose == "launch EC2 Move destination")
-        .collect();
-    assert_eq!(launches.len(), 1);
-    assert!(
-        launches[0]
-            .args
-            .iter()
-            .any(|a| a.contains("LaunchTemplateId=lt-0123456789abcdef0,Version=7"))
-    );
-    assert_eq!(
-        argument(&launches[0].args, "--client-token").unwrap().len(),
-        64
-    );
-    assert_eq!(
-        argument(&launches[0].args, "--metadata-options").unwrap(),
-        "HttpTokens=required"
-    );
-    assert_eq!(
-        crate::database::load_session_record(ID).unwrap().unwrap(),
-        controller.state.sessions[ID]
-    );
-}
-
-#[test]
-fn a_lost_ec2_launch_acknowledgement_cannot_create_a_second_instance() {
-    if !isolated("a_lost_ec2_launch_acknowledgement_cannot_create_a_second_instance") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let (controller, mut operation) = fixture();
-    let cloud = Ec2 {
-        lose_ack: AtomicBool::new(true),
-        ..Default::default()
-    };
-    assert!(
-        controller
-            .prepare_ec2_move_destination(&mut operation, &cloud)
-            .is_err()
-    );
-    let mut recovered = crate::database::load_move_operation(ID).unwrap().unwrap();
-    controller
-        .prepare_ec2_move_destination(&mut recovered, &cloud)
-        .unwrap();
-    assert_eq!(
-        cloud.tokens.lock().unwrap().len(),
-        1,
-        "both launches use the same idempotent attempt"
-    );
-    assert_eq!(
-        recovered.prepared_destination.unwrap().instance_id(),
-        Some(INSTANCE)
-    );
-}
-
-#[test]
 fn failed_ec2_boot_cleans_up_without_stopping_the_source() {
     if !isolated("failed_ec2_boot_cleans_up_without_stopping_the_source") {
         return;
@@ -347,7 +232,7 @@ fn failed_ec2_boot_cleans_up_without_stopping_the_source() {
         ..Default::default()
     };
     let error = controller
-        .prepare_ec2_move_destination(&mut operation, &cloud)
+        .recover_prepared_ec2_destination(&mut operation, &cloud)
         .unwrap_err();
     let result = controller
         .finish_move_result(&mut operation, Err(error), &cloud)
@@ -375,15 +260,10 @@ fn cancellation_after_a_lost_launch_acknowledgement_only_discovers_and_terminate
     }
     let _writer = crate::database::install_isolated_test_writer();
     let (controller, mut operation) = fixture();
-    let cloud = Ec2 {
-        lose_ack: AtomicBool::new(true),
-        ..Default::default()
-    };
-    assert!(
-        controller
-            .prepare_ec2_move_destination(&mut operation, &cloud)
-            .is_err()
-    );
+    operation.prepared_destination =
+        Some(pending_launch_recorded_by_an_older_daemon("uncertain-ack"));
+    crate::database::save_move_operation(&operation).unwrap();
+    let cloud = Ec2::default();
     controller
         .cleanup_prepared_move_destination(&mut operation, &cloud)
         .unwrap();
@@ -395,7 +275,7 @@ fn cancellation_after_a_lost_launch_acknowledgement_only_discovers_and_terminate
             .iter()
             .filter(|c| c.purpose == "launch EC2 Move destination")
             .count(),
-        1
+        0
     );
     assert!(matches!(
         operation.prepared_destination.unwrap().state,
@@ -420,7 +300,7 @@ fn failed_ec2_cleanup_remains_durable_and_can_be_retried() {
         ..Default::default()
     };
     let error = controller
-        .prepare_ec2_move_destination(&mut operation, &cloud)
+        .recover_prepared_ec2_destination(&mut operation, &cloud)
         .unwrap_err();
     let result = controller
         .finish_move_result(&mut operation, Err(error), &cloud)
@@ -468,7 +348,7 @@ fn insufficient_ec2_destination_space_fails_before_source_interruption() {
         ..Default::default()
     };
     controller
-        .prepare_ec2_move_destination(&mut operation, &cloud)
+        .recover_prepared_ec2_destination(&mut operation, &cloud)
         .unwrap();
     let mut assessment = operation
         .workspace_transfer
@@ -503,7 +383,7 @@ fn destination_adoption_preserves_the_created_instance_and_handoff_identity() {
     let (mut controller, mut operation) = fixture();
     let cloud = Ec2::default();
     controller
-        .prepare_ec2_move_destination(&mut operation, &cloud)
+        .recover_prepared_ec2_destination(&mut operation, &cloud)
         .unwrap();
     let archives = tempfile::tempdir().unwrap();
     operation.handoff = Some(write_network_checkpoint_archive(archives.path(), ID, 0));
@@ -532,7 +412,6 @@ fn destination_adoption_preserves_the_created_instance_and_handoff_identity() {
             .state,
         PreparedDestinationState::Adopted { .. }
     ));
-    assert_eq!(cloud.tokens.lock().unwrap().len(), 1);
 }
 
 // A destination an older daemon recorded as `Checked` skipped the IMDSv2
@@ -546,7 +425,7 @@ fn adopting_a_checked_destination_requires_imdsv2_on_its_instance() {
     let _writer = crate::database::install_isolated_test_writer();
     let (mut controller, mut operation) = fixture();
     controller
-        .prepare_ec2_move_destination(&mut operation, &Ec2::default())
+        .recover_prepared_ec2_destination(&mut operation, &Ec2::default())
         .unwrap();
     assert!(matches!(
         operation.prepared_destination.as_ref().unwrap().state,
@@ -581,19 +460,6 @@ fn adopting_a_checked_destination_requires_imdsv2_on_its_instance() {
 }
 
 #[test]
-fn ambiguous_ec2_launch_errors_retain_ownership_for_reconciliation() {
-    assert!(!launch_was_refused(
-        b"connection closed before launch response"
-    ));
-    assert!(!launch_was_refused(
-        b"An error occurred (InternalError) when calling RunInstances"
-    ));
-    assert!(launch_was_refused(
-        b"An error occurred (UnauthorizedOperation) when calling RunInstances"
-    ));
-}
-
-#[test]
 fn ec2_orphan_scan_respects_prepared_and_ambiguous_move_ownership() {
     if !isolated("ec2_orphan_scan_respects_prepared_and_ambiguous_move_ownership") {
         return;
@@ -602,7 +468,7 @@ fn ec2_orphan_scan_respects_prepared_and_ambiguous_move_ownership() {
     let (controller, mut operation) = fixture();
     let cloud = Ec2::default();
     controller
-        .prepare_ec2_move_destination(&mut operation, &cloud)
+        .recover_prepared_ec2_destination(&mut operation, &cloud)
         .unwrap();
     struct Scan;
     impl CommandExecutor for Scan {
@@ -651,45 +517,6 @@ fn ec2_orphan_scan_respects_prepared_and_ambiguous_move_ownership() {
 }
 
 #[test]
-fn an_ec2_retry_after_confirmed_cleanup_uses_a_new_launch_attempt() {
-    if !isolated("an_ec2_retry_after_confirmed_cleanup_uses_a_new_launch_attempt") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let (mut controller, mut operation) = fixture();
-    let cloud = Ec2 {
-        fail_boot: AtomicBool::new(true),
-        ..Default::default()
-    };
-    let error = controller
-        .prepare_ec2_move_destination(&mut operation, &cloud)
-        .unwrap_err();
-    controller
-        .finish_move_result(&mut operation, Err(error), &cloud)
-        .unwrap();
-    cloud.fail_boot.store(false, Ordering::SeqCst);
-    let mut recovered = crate::database::load_move_operation(ID).unwrap().unwrap();
-    controller
-        .prepare_ec2_move_destination(&mut recovered, &cloud)
-        .unwrap();
-    assert_eq!(cloud.tokens.lock().unwrap().len(), 2);
-    let commands = cloud.commands.lock().unwrap();
-    let terminated = commands
-        .iter()
-        .position(|c| c.purpose == "confirm EC2 Move destination termination")
-        .unwrap();
-    let retried = commands
-        .iter()
-        .rposition(|c| c.purpose == "launch EC2 Move destination")
-        .unwrap();
-    assert!(terminated < retried);
-    assert_eq!(
-        crate::database::load_session_state(ID).unwrap(),
-        Some(SessionState::Running)
-    );
-}
-
-#[test]
 fn ec2_boot_interrupted_by_daemon_handoff_resumes_the_same_owned_instance() {
     if !isolated("ec2_boot_interrupted_by_daemon_handoff_resumes_the_same_owned_instance") {
         return;
@@ -702,7 +529,7 @@ fn ec2_boot_interrupted_by_daemon_handoff_resumes_the_same_owned_instance() {
         ..Default::default()
     };
     let error = controller
-        .prepare_ec2_move_destination(&mut operation, &cloud)
+        .recover_prepared_ec2_destination(&mut operation, &cloud)
         .unwrap_err();
     assert!(error.to_string().contains("daemon handoff"));
     let mut recovered = crate::database::load_move_operation(ID).unwrap().unwrap();
@@ -717,7 +544,7 @@ fn ec2_boot_interrupted_by_daemon_handoff_resumes_the_same_owned_instance() {
     cloud.fail_boot.store(false, Ordering::SeqCst);
     cloud.handoff.store(false, Ordering::SeqCst);
     controller
-        .prepare_ec2_move_destination(&mut recovered, &cloud)
+        .recover_prepared_ec2_destination(&mut recovered, &cloud)
         .unwrap();
     assert_eq!(
         cloud
@@ -727,93 +554,11 @@ fn ec2_boot_interrupted_by_daemon_handoff_resumes_the_same_owned_instance() {
             .iter()
             .filter(|c| c.purpose == "launch EC2 Move destination")
             .count(),
-        1
+        0
     );
     assert_eq!(
         recovered.prepared_destination.unwrap().instance_id(),
         Some(INSTANCE)
-    );
-}
-
-#[test]
-fn a_refused_ec2_retry_preserves_ownership_of_a_previously_accepted_launch() {
-    if !isolated("a_refused_ec2_retry_preserves_ownership_of_a_previously_accepted_launch") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let (mut controller, mut operation) = fixture();
-    let cloud = Ec2 {
-        lose_ack: AtomicBool::new(true),
-        ..Default::default()
-    };
-    assert!(
-        controller
-            .prepare_ec2_move_destination(&mut operation, &cloud)
-            .is_err()
-    );
-    let mut recovered = crate::database::load_move_operation(ID).unwrap().unwrap();
-    cloud.refuse_launch.store(true, Ordering::SeqCst);
-    let error = controller
-        .prepare_ec2_move_destination(&mut recovered, &cloud)
-        .unwrap_err();
-    assert!(matches!(
-        recovered.prepared_destination.as_ref().unwrap().state,
-        PreparedDestinationState::LaunchPending
-    ));
-    controller
-        .finish_move_result(&mut recovered, Err(error), &cloud)
-        .unwrap();
-    assert!(matches!(
-        recovered.prepared_destination.unwrap().state,
-        PreparedDestinationState::Released
-    ));
-    assert_eq!(
-        cloud
-            .commands
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|c| c.purpose == "terminate exact EC2 session instance")
-            .count(),
-        1
-    );
-    assert_eq!(cloud.tokens.lock().unwrap().len(), 1);
-    assert_eq!(
-        crate::database::load_session_state(ID).unwrap(),
-        Some(SessionState::Running)
-    );
-}
-
-#[test]
-fn a_first_ec2_launch_refusal_releases_an_attempt_without_cleanup() {
-    if !isolated("a_first_ec2_launch_refusal_releases_an_attempt_without_cleanup") {
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let (mut controller, mut operation) = fixture();
-    let cloud = Ec2 {
-        refuse_launch: AtomicBool::new(true),
-        ..Default::default()
-    };
-    let error = controller
-        .prepare_ec2_move_destination(&mut operation, &cloud)
-        .unwrap_err();
-    controller
-        .finish_move_result(&mut operation, Err(error), &cloud)
-        .unwrap();
-    assert!(matches!(
-        operation.prepared_destination.unwrap().state,
-        PreparedDestinationState::Released
-    ));
-    assert!(cloud.tokens.lock().unwrap().is_empty());
-    assert!(
-        cloud
-            .commands
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|c| c.purpose != "terminate exact EC2 session instance"
-                && c.purpose != "reconcile EC2 Move launch acknowledgement")
     );
 }
 
@@ -841,10 +586,8 @@ fn pending_launch_recorded_by_an_older_daemon(token: &str) -> PreparedMoveDestin
 }
 
 #[test]
-fn an_older_pending_launch_is_replayed_exactly_and_imdsv2_is_enforced_on_the_instance() {
-    if !isolated(
-        "an_older_pending_launch_is_replayed_exactly_and_imdsv2_is_enforced_on_the_instance",
-    ) {
+fn an_older_pending_launch_is_only_queried_and_imdsv2_is_enforced_on_the_instance() {
+    if !isolated("an_older_pending_launch_is_only_queried_and_imdsv2_is_enforced_on_the_instance") {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
@@ -858,14 +601,18 @@ fn an_older_pending_launch_is_replayed_exactly_and_imdsv2_is_enforced_on_the_ins
         ..Default::default()
     };
     controller
-        .prepare_ec2_move_destination(&mut operation, &cloud)
+        .recover_prepared_ec2_destination(&mut operation, &cloud)
         .unwrap();
     let commands = cloud.commands.lock().unwrap();
-    let launch = commands
-        .iter()
-        .find(|command| command.purpose == "launch EC2 Move destination")
-        .unwrap();
-    assert_eq!(launch.args, recorded.launch_args, "replayed as recorded");
+    assert!(
+        commands
+            .iter()
+            .any(|command| command.purpose == "reconcile EC2 Move launch acknowledgement")
+    );
+    assert_eq!(
+        operation.prepared_destination.as_ref().unwrap().launch_args,
+        recorded.launch_args
+    );
     let purposes = commands
         .iter()
         .map(|command| command.purpose.as_str())
@@ -898,7 +645,7 @@ fn a_created_destination_found_after_a_crash_is_checked_before_it_boots() {
         ..Default::default()
     };
     controller
-        .prepare_ec2_move_destination(&mut operation, &cloud)
+        .recover_prepared_ec2_destination(&mut operation, &cloud)
         .unwrap();
     let commands = cloud.commands.lock().unwrap();
     assert!(
@@ -931,7 +678,7 @@ fn a_destination_that_cannot_require_imdsv2_fails_the_move_and_is_terminated() {
         ..Default::default()
     };
     let error = controller
-        .prepare_ec2_move_destination(&mut operation, &cloud)
+        .recover_prepared_ec2_destination(&mut operation, &cloud)
         .unwrap_err();
     assert!(
         format!("{error:#}").contains("could not require IMDSv2"),

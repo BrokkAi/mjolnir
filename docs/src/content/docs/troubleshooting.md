@@ -52,7 +52,7 @@ cannot review merged work with an older version.
 
 If `config.toml` does not exist, run `mj` and open **prefix+s Settings** to add or detect
 an agent profile. Local target choices are supplied automatically.
-Managed container and EC2 sessions also need a bundle; a bare session selects
+Managed container sessions also need a bundle; a bare session selects
 an existing directory instead. Only an SSH bare directory must be a committed
 Git project.
 
@@ -170,7 +170,7 @@ PATH = "/opt/my-tools/bin:/usr/local/bin:/usr/bin:/bin"
 
 After changing a profile's environment, restart the worker or stop and resume
 the session; an already running worker does not continuously reread shell
-startup files. Bare sessions on this machine, SSH, and EC2 do not launch an
+startup files. Bare sessions on this machine and SSH do not launch an
 ambient harness from this path: they use the exact Mjolnir-managed version,
 Node-based harnesses reuse Node.js 22 or newer with npm and npx when present;
 otherwise Mjolnir downloads its pinned Node.js itself. Kimi, Grok, Muse, and
@@ -251,8 +251,8 @@ Then follow the target-specific result:
   [Apple container](/apple-container/).
 - **SSH Podman:** run the Podman prerequisite and image checks on the remote
   host as the same user selected by SSH. See [SSH and SSH Podman](/ssh/).
-- **EC2:** verify the configured AWS profile, region, launch template, SSH
-  user, address source, and reachability. See [AWS EC2](/aws/).
+- **EC2:** check the host with `mj ec2 list --region <region>`, then verify its SSH
+  connection and Podman runtime. See [AWS EC2](/aws/).
 
 If the runtime works but the harness bridge does not, the image likely lacks a
 required binary, Node version, writable Mjolnir directories, or ordinary

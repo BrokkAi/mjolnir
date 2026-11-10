@@ -764,7 +764,7 @@ fn batched_preflight_parser_keeps_multiline_and_noisy_probe_output() {
 }
 
 #[test]
-fn managed_resource_identity_args_build_container_labels_and_ec2_tags() {
+fn managed_resource_identity_args_build_container_labels() {
     let instance = mj_core::config::instance_identity();
     assert_eq!(
         managed_resource_identity_args(ManagedResourceKind::Container, SESSION),
@@ -775,15 +775,6 @@ fn managed_resource_identity_args_build_container_labels_and_ec2_tags() {
             "dev.mj.managed=true".to_owned(),
             "--label".to_owned(),
             format!("dev.mj.instance={instance}"),
-        ]
-    );
-    assert_eq!(
-        managed_resource_identity_args(ManagedResourceKind::Ec2Instance, SESSION),
-        vec![
-            "--tag-specifications".to_owned(),
-            format!(
-                "ResourceType=instance,Tags=[{{Key=dev.mj.session,Value=018f9dd2-a3b4-7c8d-9000-123456789abc}},{{Key=dev.mj.managed,Value=true}},{{Key=dev.mj.instance,Value={instance}}}]"
-            ),
         ]
     );
 }
@@ -2581,17 +2572,6 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
             },
             "create SSH session workspace",
         ),
-        (
-            TargetTemplate::AwsEc2(AwsTemplate {
-                profile: "work".to_owned(),
-                region: "us-east-2".to_owned(),
-                launch_template: "hel-dev".to_owned(),
-                launch_template_version: None,
-                instance_type: None,
-                ssh: ssh(),
-            }),
-            "launch EC2 session instance",
-        ),
     ];
     for (template, purpose) in creating {
         let plan = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
@@ -2621,12 +2601,11 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
             plan.commands.len()
         );
         // Cloning a bundle happens against a target that already exists.
-        assert_eq!(
+        assert!(
             remainder
                 .commands
                 .iter()
-                .any(|command| command.purpose.starts_with("clone ")),
-            !matches!(template, TargetTemplate::AwsEc2(_)),
+                .any(|command| command.purpose.starts_with("clone "))
         );
     }
 
@@ -2641,33 +2620,7 @@ fn every_provisioning_plan_names_the_command_that_creates_its_target() {
 }
 
 #[test]
-fn aws_plan_tags_instance_and_close_uses_recorded_id() {
-    let template = TargetTemplate::AwsEc2(AwsTemplate {
-        profile: "work".to_owned(),
-        region: "us-east-2".to_owned(),
-        launch_template: "hel-dev".to_owned(),
-        launch_template_version: Some("3".to_owned()),
-        instance_type: Some("m8i-flex.2xlarge".into()),
-        ssh: ssh(),
-    });
-    let provision = provision_plan(&template, SESSION, &bundle(), &[], None).unwrap();
-    assert_eq!(provision.commands.len(), 1);
-    assert!(
-        provision.commands[0].args.windows(2).any(|args| args
-            == managed_resource_identity_args(ManagedResourceKind::Ec2Instance, SESSION))
-    );
-    assert!(
-        provision.commands[0]
-            .args
-            .windows(2)
-            .any(|args| { args == ["--instance-type", "m8i-flex.2xlarge"] })
-    );
-    assert!(
-        provision.commands[0]
-            .args
-            .windows(2)
-            .any(|args| args == ["--metadata-options", "HttpTokens=required"])
-    );
+fn legacy_ec2_close_uses_recorded_id() {
     let close = close_plan(
         &TargetLocator::AwsEc2 {
             profile: "work".to_owned(),

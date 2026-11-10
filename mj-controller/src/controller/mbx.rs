@@ -261,7 +261,6 @@ fn supported_host(target: &targets::TargetTemplate) -> Option<(CacheHost, Target
         targets::TargetTemplate::AppleContainer(_)
         | targets::TargetTemplate::SshAppleContainer { .. }
         | targets::TargetTemplate::LocalBare
-        | targets::TargetTemplate::AwsEc2(_)
         | targets::TargetTemplate::SshBare { .. } => return None,
     };
     Some((CacheHost::for_target(target)?, settings))

@@ -95,9 +95,6 @@ fn machine_defaults(kind: &str) -> Value {
                 .clone(),
             );
         }
-        "aws-ec2" => {
-            object.extend(json!({"aws_profile":null,"region":"","launch_template":"","launch_template_version":null,"ssh_user":"ubuntu","address_source":"public-dns","identity_file":null,"ssh_args":[]}).as_object().unwrap().clone());
-        }
         // This machine, which has nothing to connect to.
         _ => {
             object.insert("build_cache".to_owned(), build_cache_defaults());
@@ -749,7 +746,7 @@ pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "kind" if path.first().is_some_and(|key| key == "profiles") => {
             &["codex", "claude", "kimi", "grok", "muse", "opencode", "dsh"]
         }
-        "kind" if path.first().is_some_and(|key| key == "machines") => &["local", "ssh", "aws-ec2"],
+        "kind" if path.first().is_some_and(|key| key == "machines") => &["local", "ssh"],
         "kind" => &["bare", "podman", "docker", "apple-container"],
         _ => &[],
     };

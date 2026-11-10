@@ -2082,7 +2082,7 @@ impl Controller {
                     .context("Move cleanup intent missing")?
                     .prepared_destination;
             }
-            self.prepare_ec2_move_destination(operation, executor)?;
+            self.recover_prepared_ec2_destination(operation, executor)?;
             self.verify_current_move_configuration(operation)?;
             if matches!(
                 self.state.sessions[&id].state,

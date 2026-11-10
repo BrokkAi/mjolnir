@@ -28,7 +28,7 @@ The replacement is usable; the real smoke confirmed the remote worker, harness, 
 
 ## Context and Orientation
 
-`mj-cli/src/main.rs` declares the clap command tree, logging command names, and dispatch. Add `mj-cli/src/ec2.rs` for command arguments and the provisioning workflow. This is a one-shot CLI operation and must not block any dashboard or daemon event loop; run blocking cloud/SSH work with supervised `spawn_blocking`. `mj-core/src/config.rs` owns `Config::update`; `mj-core/src/config/machines.rs` defines SSH machines and stored targets; `mj-core/src/config/targets.rs` defines resolved SSH Podman targets. `mj-core/src/subprocess.rs` provides `run_with_input` and output draining; all child process capture uses it. Existing AWS EC2 launch-template provisioning lives in the controller and must retain its semantics.
+`mj-cli/src/main.rs` declares the clap command tree, logging command names, and dispatch. Add `mj-cli/src/ec2.rs` for command arguments and the provisioning workflow. This is a one-shot CLI operation and must not block any dashboard or daemon event loop; run blocking cloud/SSH work with supervised `spawn_blocking`. `mj-core/src/config.rs` owns `Config::update`; `mj-core/src/config/machines.rs` defines SSH machines and stored targets; `mj-core/src/config/targets.rs` defines resolved SSH Podman targets. `mj-core/src/subprocess.rs` provides `run_with_input` and output draining; all child process capture uses it. Historical EC2 locators and cleanup remain readable; new sessions use persistent SSH/Podman hosts.
 
 ## Plan of Work
 
@@ -75,3 +75,7 @@ Progress for expanded scope:
 - [x] (2026-11-09) Implemented archive streaming for SSH-bare and remote containers. Rust writer/system tar and real node transport passed with an archive over 8 MiB; the same 587 plugin files packed in 1.083 seconds and uploaded/extracted in 12.185 seconds versus 162.345 seconds for recursive scp.
 - [ ] Remove legacy VM-per-session admission and provisioning surfaces while preserving historical readers/cleanup.
 - [ ] Complete expanded validation, review, commit, and push.
+
+Revision 2026-11-09: removed session-owned EC2 launch builders, instance-size controls, discovery/probes, and the launch-template script's config writer. Config availability now excludes the retired kind in new/resume/move admission and target lists. Historical config/locator/runtime JSON remains readable and existing Move destinations can only be discovered, adopted, or cleaned up; no stored launch request is executed. #1482 is assigned to another session and outside this work. The mold agent image published successfully (run 42750912583).
+
+Revision 2026-11-09: the focused Rust regressions passed (14 controller, two core, two CLI); all 35 affected browser tests passed after updating the single removed EC2 scenario. The retained RunsOn script test passed and no longer writes mj configuration. Final full suites for core/client/controller/TUI/CLI and workspace clippy are in progress; review runs in parallel.

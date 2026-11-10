@@ -454,16 +454,4 @@ impl DashboardState {
         }
         self.notices.set(format!("Could not use project: {error}"));
     }
-
-    pub fn apply_aws_resource_options(
-        &mut self,
-        target_id: &str,
-        result: std::result::Result<Vec<SessionResourceAllocation>, String>,
-    ) {
-        match self.mode.clone() {
-            Mode::New(wizard) => self.apply_wizard_aws_options(wizard, target_id, result),
-            Mode::Resume(wizard) => self.apply_wizard_aws_options(wizard, target_id, result),
-            _ => {}
-        }
-    }
 }

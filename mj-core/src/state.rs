@@ -1678,7 +1678,6 @@ pub const BASELINE_CONTAINER_CPUS: u64 = 4;
 pub const BASELINE_CONTAINER_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MINIMUM_CONTAINER_CPUS: u64 = 2;
 pub const MINIMUM_CONTAINER_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const PREFERRED_AWS_CPUS: u64 = 8;
 const MINIMUM_HOST_MEMORY_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const GIB_BYTES: u128 = 1024 * 1024 * 1024;
 
@@ -1893,25 +1892,6 @@ pub fn default_container_size(
         }),
         limits,
     )
-}
-
-/// The TUI's preferred EC2 size: retain the same instance type if offered,
-/// else choose 8 vCPUs, else the first offered option.
-pub fn preferred_aws_allocation<'a>(
-    options: &'a [SessionResourceAllocation],
-    previous: Option<&SessionResourceAllocation>,
-) -> Option<&'a SessionResourceAllocation> {
-    if let Some(SessionResourceAllocation::AwsEc2 { instance_type, .. }) = previous
-        && let Some(option) = options.iter().find(|option| {
-            matches!(option, SessionResourceAllocation::AwsEc2 { instance_type: candidate, .. } if candidate == instance_type)
-        })
-    {
-        return Some(option);
-    }
-    options
-        .iter()
-        .find(|option| allocation_cpus(option) == PREFERRED_AWS_CPUS)
-        .or_else(|| options.first())
 }
 
 fn default_session_workspace_id() -> String {

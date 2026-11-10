@@ -666,25 +666,13 @@ impl Controller {
                 .targets
                 .get(&session.target_template_id)
                 .context("target template disappeared during provisioning")?;
-            if matches!(template, TargetTemplate::AwsEc2 { .. }) {
-                for resource in &session.additional_mounts {
-                    ensure!(
-                        resource.source.is_dir(),
-                        "attached resource source is not a directory: {}",
-                        resource.source.display()
-                    );
-                }
-            }
+
             let mut target = backend_target(
                 template,
                 session.resource_allocation.as_ref(),
                 ContainerOverrides::for_session(&session),
             )?;
-            let mut runtime_mounts = if matches!(target, targets::TargetTemplate::AwsEc2(_)) {
-                Vec::new()
-            } else {
-                session.additional_mounts.clone()
-            };
+            let mut runtime_mounts = session.additional_mounts.clone();
             // The mounts this container runs with, not the ones the session
             // stores: a forced downgrade belongs to the host the container
             // lands on, so it is decided here every time and never written
@@ -1512,7 +1500,7 @@ fn cleanup_failed_provision_named(
 fn provisioned_locator_named(
     target: &targets::TargetTemplate,
     session_id: &str,
-    create_output: Option<&CommandOutput>,
+    _create_output: Option<&CommandOutput>,
     name: &str,
 ) -> Option<targets::TargetLocator> {
     let container_id = || Some(name.to_owned());
@@ -1558,17 +1546,6 @@ fn provisioned_locator_named(
             ssh: ssh.clone(),
             workspace: targets::workspace_for(target, session_id).ok()?,
             worker_id: None,
-        },
-        targets::TargetTemplate::AwsEc2(aws) => targets::TargetLocator::AwsEc2 {
-            profile: aws.profile.clone(),
-            region: aws.region.clone(),
-            instance_id: serde_json::from_slice::<serde_json::Value>(&create_output?.stdout)
-                .ok()?
-                .pointer("/Instances/0/InstanceId")?
-                .as_str()?
-                .to_owned(),
-            ssh: aws.ssh.clone(),
-            workspace: targets::workspace_for(target, session_id).ok()?,
         },
     })
 }

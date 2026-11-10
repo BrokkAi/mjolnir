@@ -250,11 +250,6 @@ pub(crate) fn render_picker(
     surfaces: &mut FrameSurfaces,
 ) {
     let popup = wizard_modal(frame, surfaces, area);
-    let instance_rows = if matches!(navigation.resources, Some(ResourcePicker::Ec2 { .. })) {
-        3
-    } else {
-        0
-    };
     let container_option_rows = matches!(
         navigation.resources,
         Some(ResourcePicker::Container {
@@ -277,7 +272,7 @@ pub(crate) fn render_picker(
         ))
         .min(
             body.height
-                .saturating_sub(help.len() as u16 + u16::from(!help.is_empty()) + instance_rows)
+                .saturating_sub(help.len() as u16 + u16::from(!help.is_empty()))
                 .saturating_sub(container_option_rows)
                 .max(1)
                 .min(body.height),
@@ -314,7 +309,6 @@ pub(crate) fn render_picker(
         .collect::<Vec<_>>();
     let help_y = list_area
         .bottom()
-        .saturating_add(instance_rows)
         .saturating_add(u16::from(!help.is_empty()));
     let help_height = (help.len() as u16).min(body.bottom().saturating_sub(help_y));
     let help_area = Rect::new(body.x, help_y, body.width, help_height);
@@ -384,49 +378,6 @@ pub(crate) fn render_picker(
                     WizardControl::RememberContainerSize,
                 );
             }
-        }
-        Some(ResourcePicker::Ec2 {
-            editor,
-            options,
-            selected,
-            has_selection,
-            loading,
-        }) => {
-            let label_y = list_area.bottom().saturating_add(1);
-            let label = Rect::new(body.x, label_y, body.width, 1).intersection(body);
-            let field =
-                Rect::new(body.x, label_y.saturating_add(1), body.width, 1).intersection(body);
-            frame.render_widget(Paragraph::new("Instance type:"), label);
-            let selected = editor
-                .instances
-                .selection(WizardControl::ResourceInstance, selected);
-            let lines = options
-                .iter()
-                .map(|option| Line::raw(resource_allocation_description(Some(option))))
-                .collect::<Vec<_>>();
-            let value = if loading {
-                "Loading instance types…".into()
-            } else if options.is_empty() {
-                "No instance types available".into()
-            } else if has_selection || editor.instances.is_open(WizardControl::ResourceInstance) {
-                resource_allocation_description(options.get(selected))
-            } else {
-                "Choose an instance type".into()
-            };
-            ComboBox::render(
-                frame,
-                popup,
-                field,
-                &ComboBox::display_value(&value),
-                &lines,
-                selected,
-                editor.instances.is_open(WizardControl::ResourceInstance),
-                !options.is_empty(),
-                " Instance types ",
-                PopupSide::Above,
-                form,
-                WizardControl::ResourceInstance,
-            );
         }
         None => {}
     }

@@ -60,61 +60,6 @@ fn failed(stderr: impl AsRef<[u8]>) -> CommandOutput {
 // Hard-won: #1266: a working Claude Bedrock profile was reported as needing subscription login.
 #[test]
 fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
-    // Fixture shapes follow aws-cli v2, EC2 JSON, OpenSSH, and Docker CLI
-    // output; the Podman-limit lines match the production remote probe.
-    let aws = FakeExecutor::new([
-        Ok(output(
-            b"aws-cli/2.15.40 Python/3.11.6 Linux/5.10.205 exe/x86_64 prompt/off\n",
-        )),
-        Ok(output(
-            br#"{"UserId":"AIDAEXAMPLE","Account":"123456789012","Arn":"arn:aws:iam::123456789012:user/doctor"}"#,
-        )),
-        Ok(output(
-            br#"{"LaunchTemplates":[{"LaunchTemplateId":"lt-0123456789abcdef0","LaunchTemplateName":"mjolnir","CreateTime":"2026-01-01T00:00:00+00:00","CreatedBy":"arn:aws:iam::123456789012:user/doctor","DefaultVersionNumber":7,"LatestVersionNumber":7}]}"#,
-        )),
-        // `--query ...MetadataOptions.HttpTokens --output text` of a template
-        // version that allows IMDSv1.
-        Ok(output(b"optional\n")),
-    ]);
-    let aws_check = aws_target_check(
-        "production",
-        None,
-        "us-east-2",
-        "lt-0123456789abcdef0",
-        Some("7"),
-        &aws,
-    );
-    let aws_commands = aws.commands.borrow();
-    assert_eq!(
-        aws_commands[1]
-            .args
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        [
-            "--profile",
-            "default",
-            "--region",
-            "us-east-2",
-            "sts",
-            "get-caller-identity",
-            "--output",
-            "json",
-        ]
-    );
-    assert!(
-        aws_commands[2]
-            .args
-            .contains(&"--launch-template-ids".to_owned())
-    );
-    assert!(
-        aws_commands[3]
-            .args
-            .windows(2)
-            .any(|args| args == ["--versions", "7"])
-    );
-    drop(aws_commands);
-
     let ssh = RuntimeSshTarget {
         destination: "dev@docker.example.test".to_owned(),
         ssh_args: Vec::new(),
@@ -190,7 +135,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         },
     );
     let subagent_checks = subagent_policy_checks(Ok(&config));
-    let mut checks = vec![aws_check, docker_check, podman_check, missing_ssh_check];
+    let mut checks = vec![docker_check, podman_check, missing_ssh_check];
     checks.extend(subagent_checks);
 
     // External Git distributions vary their version suffixes. Exercise the
@@ -367,9 +312,6 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
                 "bash: line 1: docker: command not found",
             ),
         ]))),
-        // spot: AWS credentials, then the launch template
-        Ok(output(br#"{"Account":"123456789012"}"#)),
-        Ok(output(b"{}")),
     ]);
     checks.extend(machine_runtime_checks(Ok(&machines), &probes));
     assert!(probes.responses.borrow().is_empty());
@@ -380,7 +322,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
             .iter()
             .map(|command| command.program.as_str())
             .collect::<Vec<_>>(),
-        ["ssh", "ssh", "ssh", "aws", "aws"],
+        ["ssh", "ssh", "ssh"],
         "one SSH call per host"
     );
 

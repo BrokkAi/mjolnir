@@ -806,6 +806,30 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
         "{detail}"
     );
     assert_eq!(controller.state.sessions[session_id], previous);
+    controller.config.targets.insert("retired-ec2".into(), serde_json::from_value(serde_json::json!({
+        "kind": "aws-ec2", "region": "us-east-1", "launch_template": "lt-old", "ssh_user": "ubuntu"
+    })).unwrap());
+    let error = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(controller.resume_session_controlled(
+            session_id,
+            "codex",
+            "retired-ec2",
+            SessionResumeOptions {
+                additional_mounts: None,
+                resource_allocation: None,
+                discard_queue: false,
+            },
+            &RefusingExecutor("retired EC2 resume must not execute a command"),
+        ))
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
+        "{error:#}"
+    );
+    assert_eq!(controller.state.sessions[session_id], previous);
 }
 /// Records what it ran and blocks every command on a barrier sized to
 /// both lanes, so a run only finishes if the second lane started before

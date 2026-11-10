@@ -28,7 +28,7 @@ use crate::dashboard::io::{
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
-use crate::pollers::{LifecycleSuccess, spawn_aws_resource_options_resolution};
+use crate::pollers::LifecycleSuccess;
 use crate::short_id;
 
 struct MbxInstallCompletion {
@@ -1575,9 +1575,7 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::IgnoreNestedRepositoriesAndSuspend { session_id } => {
             start_suspension(context, session_id, true, true);
         }
-        DashboardAction::ResolveAwsResourceOptions {
-            target_template_ids,
-        } => context.resolve_aws_resource_options(target_template_ids),
+
         DashboardAction::CreateBundle { sources } => {
             context.dashboard.set_notice("Preparing project…");
             spawn_create_bundle(
@@ -2018,23 +2016,6 @@ impl DashboardContext {
             kind,
             cancelled,
             updates: self.lifecycle_updates_tx.clone(),
-        }
-    }
-
-    /// Resolves the instance sizes a deployment target offers, once per target.
-    pub(crate) fn resolve_aws_resource_options(&mut self, target_template_ids: Vec<String>) {
-        for target_template_id in target_template_ids {
-            if self
-                .resolving_aws_resource_options
-                .insert(target_template_id.clone())
-            {
-                spawn_aws_resource_options_resolution(
-                    self.controller.config.clone(),
-                    target_template_id,
-                    self.aws_resource_options_tx.clone(),
-                    self.critical_operations.clone(),
-                );
-            }
         }
     }
 }

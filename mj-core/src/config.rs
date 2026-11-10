@@ -957,6 +957,10 @@ impl Config {
 // Version 20 adds daemon placement; 21 adds review counts; 22 adds the session
 // GitHub credential default. Older strict
 // configuration readers reject the new fields instead of dropping them.
+/// Historical per-session EC2 records remain readable, but new work uses a
+/// persistent SSH machine with a container runtime.
+pub const LEGACY_EC2_TARGET_NOTICE: &str = "Per-session EC2 targets were removed. Choose a persistent Podman target, or create one with `mj ec2 create <instance-type> --zone <zone>`.";
+
 pub const CONFIG_VERSION: u32 = 22;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
@@ -1625,15 +1629,15 @@ impl Config {
     pub fn enabled_targets(&self) -> impl Iterator<Item = (&str, &TargetTemplate)> {
         self.targets
             .iter()
-            .filter(|(id, _)| !self.disabled_targets.contains(*id))
+            .filter(|(id, _)| self.enabled_target(id).is_some())
             .map(|(id, target)| (id.as_str(), target))
     }
 
     /// One runtime when it exists and is available for new work.
     pub fn enabled_target(&self, id: &str) -> Option<&TargetTemplate> {
-        self.targets
-            .get(id)
-            .filter(|_| !self.disabled_targets.contains(id))
+        self.targets.get(id).filter(|target| {
+            target.launch_refusal().is_none() && !self.disabled_targets.contains(id)
+        })
     }
 
     /// Refuse new work on runtime `id` when it is not configured or is
@@ -1643,6 +1647,9 @@ impl Config {
             .targets
             .get(id)
             .with_context(|| format!("unknown target template {id:?}"))?;
+        if let Some(notice) = target.launch_refusal() {
+            bail!("{notice}");
+        }
         if self.disabled_targets.contains(id) {
             return Err(crate::refusal::Refusal::precondition(format!(
                 "runtime {id:?} is turned off; turn it on in Settings › Runtimes or choose another"

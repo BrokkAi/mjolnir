@@ -312,11 +312,10 @@ Select an existing Git project on the Mac when starting a session. Workspaces
 and checkpoints follow the same SSH-bare lifecycle described below. Closing
 a session does not shut down the Mac or stop other sessions.
 
-For EC2, provision the Mac instance and Dedicated Host yourself, then use its
-SSH address in this configuration. Use the SSH machine kind for this persistent
-host: the `aws-ec2` machine kind owns disposable instances and terminates them
-on session teardown. This SSH configuration does not allocate or release AWS
-hosts, install Xcode, or manage signing identities.
+For EC2 Macs, provision the instance and Dedicated Host yourself, then use its
+SSH address in this configuration. The host persists after sessions close.
+This SSH configuration does not allocate or release AWS hosts, install Xcode,
+or manage signing identities. For Linux EC2 Podman hosts, use `mj ec2 create`.
 
 When developing from source, provide a worker built from the same source
 revision as the controller. `MJ_WORKER_DIR` accepts
