@@ -70,8 +70,8 @@ struct CreateArgs {
     /// Encrypted gp3 root disk size in GiB; separate from local SSDs.
     #[arg(long, default_value_t = 200)]
     disk_gib: u32,
-    /// Format local instance-store SSDs as one striped ZFS pool for mbx,
-    /// with lz4 compression. Cache is recreated empty after stop/start.
+    /// Require local NVMe storage (used automatically when available).
+    /// ZFS/lz4 holds Podman and mbx; stop/start clears this storage.
     #[arg(long)]
     zfs_cache: bool,
     /// Print the created host as JSON. Progress still goes to stderr.
@@ -335,6 +335,12 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
     } else {
         bail!("instance type does not support Ubuntu amd64 or arm64")
     };
+    let local_nvme = instance_type["InstanceStorageInfo"]["TotalSizeInGB"]
+        .as_u64()
+        .is_some_and(|size| size > 0)
+        && instance_type["InstanceStorageInfo"]["NvmeSupport"]
+            .as_str()
+            .is_some_and(|support| support != "unsupported");
     if args.zfs_cache {
         ensure!(
             instance_type["InstanceStorageInfo"]["TotalSizeInGB"]
@@ -440,7 +446,7 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             .as_str()
             .context("AWS returned no security group ID")?;
         cloud.ec2("authorize-security-group-ingress", json!({"GroupId":group_id,"IpPermissions":[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":cidr}]}]}))?;
-        let bootstrap = bootstrap(args.zfs_cache);
+        let bootstrap = bootstrap(local_nvme);
         let launched = cloud.ec2("run-instances", json!({
             "ImageId":ami,"InstanceType":args.instance_type,"MinCount":1,"MaxCount":1,
             "KeyName":key_name,"ClientToken":record.operation,"Placement":{"AvailabilityZone":args.zone},
@@ -507,7 +513,7 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             &mj_controller::targets::ProcessExecutor,
             &(&ssh).into(),
         )?;
-        let cache = args.zfs_cache.then(|| TargetBuildCache {
+        let cache = local_nvme.then(|| TargetBuildCache {
             directory: Some(CACHE_DIRECTORY.into()),
             ..Default::default()
         });
@@ -516,7 +522,7 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
             build_cache: cache,
         };
-        if args.zfs_cache {
+        if local_nvme {
             eprintln!("Installing mj's pinned mbx on the new host.");
             mj_controller::controller::install_mbx(
                 &machine,
@@ -975,7 +981,9 @@ elif op == 'describe-instances':
         instances.append(old)
     response = {'Reservations':[{'Instances':instances}] if instances else [], 'Padding':'x'*70000}
 elif op == 'describe-instance-types':
-    response = {'InstanceTypes':[{'ProcessorInfo':{'SupportedArchitectures':['x86_64']}}]}
+    kind = {'ProcessorInfo':{'SupportedArchitectures':['x86_64']}}
+    if (root/'nvme').exists(): kind['InstanceStorageInfo'] = {'TotalSizeInGB':3800,'NvmeSupport':'required'}
+    response = {'InstanceTypes':[kind]}
 elif op == 'describe-subnets':
     response = {'Subnets':[{'SubnetId':'subnet-test','VpcId':'vpc-test','AvailabilityZone':'us-east-1a'}]}
 elif op == 'get-parameter': response = {'Parameter':{'Value':'ami-test'}}
@@ -994,6 +1002,14 @@ elif op == 'run-instances':
     assert request['MetadataOptions']['HttpTokens'] == 'required'
     assert request['BlockDeviceMappings'][0]['Ebs']['DeleteOnTermination'] is True
     assert request['BlockDeviceMappings'][0]['Ebs']['Encrypted'] is True
+    import base64
+    bootstrap = base64.b64decode(request['UserData']).decode()
+    if (root/'nvme').exists():
+        assert 'graphroot = "/mnt/nvme/podman"' in bootstrap
+        assert 'mount_program = "/usr/bin/fuse-overlayfs"' in bootstrap
+        assert 'Requires=mj-ec2-cache.service' in bootstrap
+    else:
+        assert '/mnt/nvme/podman' not in bootstrap
     if (root/'fail-launch').exists(): sys.exit('InsufficientInstanceCapacity')
     tags = next(t['Tags'] for t in request['TagSpecifications'] if t['ResourceType']=='instance')
     assert next(t['Value'] for t in tags if t['Key']=='mj:operation') == request['ClientToken']
@@ -1187,6 +1203,7 @@ print(json.dumps(response))
         let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
         let bin = fixture.join("bin");
         let root = config_dir().join("ec2");
+        fs::write(bin.join("nvme"), "").unwrap();
         fs::write(bin.join("fail-launch"), "").unwrap();
         let error = create(create_args(), &root).unwrap_err();
         assert!(format!("{error:#}").contains("InsufficientInstanceCapacity"));

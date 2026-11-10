@@ -9,7 +9,7 @@ until `mj ec2 destroy` terminates it.
 Use the AWS CLI credentials already configured on your controller, plus OpenSSH:
 
 ```console
-mj ec2 create c8id.16xlarge --zone us-east-1a --name builder --zfs-cache
+mj ec2 create c8id.16xlarge --zone us-east-1a --name builder
 mj ec2 list
 mj new --workspace work --profile codex --target builder --bundle project
 mj ec2 destroy builder
@@ -32,17 +32,25 @@ controller's discovered public IPv4, or the explicit `--ssh-cidr`. It requires
 IMDSv2 and uses an encrypted 200 GiB gp3 root disk; `--disk-gib` changes its size.
 The image supplies the root filesystem (ext4); it is separate from local SSDs.
 
-`--zfs-cache` requires an instance type with local NVMe SSDs, such as C8id or
-M8id. It creates a striped ZFS pool using only devices identified as EC2 instance
-storage, mounts it at `/mnt/nvme`, and places mbx at `/mnt/nvme/mbx`. The pool
-uses lz4 compression, 128 KiB records, `xattr=sa`, and relative access times.
-The host gets mj's pinned mbx and mold, and its mbx configuration selects
-`path:/usr/bin/mold`. The standard agent image also contains mold; containers
-share the host's cache and configuration through mj's normal build-cache setup.
-Session files and Podman storage stay on EBS. Local SSD contents survive a
-reboot but are lost on stop/start, hibernation, or termination; a boot service
-recreates an empty cache after stop/start. It imports an existing cache pool
-and refuses to format disks carrying other signatures.
+Instances with local NVMe SSDs, such as C8id or M8id, automatically use those
+SSDs for a striped ZFS pool. Only devices identified as EC2 instance storage
+enter the pool; EBS remains the OS disk. `--zfs-cache` additionally refuses an
+instance type without suitable local NVMe storage.
+
+The pool mounts at `/mnt/nvme` with lz4 compression, 128 KiB records,
+`xattr=sa`, and relative access times. Podman's writable layers and named
+volumes live at `/mnt/nvme/podman`, using rootless OverlayFS through
+`fuse-overlayfs`. Each mj container has its own Podman volume mounted at `/tmp`,
+so both its workspace layer and temporary files use NVMe. mbx lives at
+`/mnt/nvme/mbx`; the host gets mj's pinned mbx and mold and selects
+`path:/usr/bin/mold`. The standard agent image includes mold too.
+
+Local SSD contents survive a reboot but are lost on stop/start, hibernation,
+or termination, including all container workspaces and `/tmp` volumes. Suspend
+sessions to verified checkpoints before stopping the host when their work must
+survive. A boot service imports the existing pool or recreates empty storage
+after instance-store loss. Rootless user services wait for it; disks with
+unrelated signatures are never formatted.
 
 `list` shows tagged hosts and unfinished local creates. With no `--region`, it
 queries regions in your saved provisioning records for the selected AWS profile,

@@ -1,4 +1,4 @@
-# Only EC2 instance-store devices may enter this pool; EBS holds the OS and work.
+# Only EC2 instance-store devices may enter this pool; EBS holds the OS.
 cat > /usr/local/sbin/mj-ec2-cache <<'CACHE'
 #!/bin/bash
 set -euo pipefail
@@ -28,11 +28,12 @@ if ! zpool list -H -o name mjcache >/dev/null 2>&1; then
 fi
 zfs mount -a
 install -d -o ubuntu -g ubuntu /mnt/nvme/mbx
+install -d -m 0700 -o ubuntu -g ubuntu /mnt/nvme/podman
 CACHE
 chmod 0755 /usr/local/sbin/mj-ec2-cache
 cat > /etc/systemd/system/mj-ec2-cache.service <<'UNIT'
 [Unit]
-Description=Prepare local NVMe ZFS build cache
+Description=Prepare local NVMe ZFS container storage and build cache
 After=zfs-import.target
 Before=multi-user.target
 [Service]
@@ -42,8 +43,31 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
+# Linger services must not initialize a replacement store on EBS while ZFS imports.
+install -d /etc/systemd/system/user@1000.service.d
+cat > /etc/systemd/system/user@1000.service.d/mj-nvme.conf <<'UNIT'
+[Unit]
+Requires=mj-ec2-cache.service
+After=mj-ec2-cache.service
+UNIT
 systemctl daemon-reload
 systemctl enable --now mj-ec2-cache.service
 install -d -o ubuntu -g ubuntu /home/ubuntu/.config/mbx
 printf 'cache_dir = "/mnt/nvme/mbx"\n\n[linker]\ndefault = "path:/usr/bin/mold"\n' > /home/ubuntu/.config/mbx/config.toml
 chown ubuntu:ubuntu /home/ubuntu/.config/mbx/config.toml
+
+# Configure storage before the first Podman command initializes its database.
+# Each mj container's existing dedicated /tmp volume lives under this graphroot.
+install -d -m 0700 -o ubuntu -g ubuntu /home/ubuntu/.config/containers
+cat > /home/ubuntu/.config/containers/storage.conf <<'STORAGE'
+[storage]
+driver = "overlay"
+runroot = "/run/user/1000/containers"
+graphroot = "/mnt/nvme/podman"
+
+[storage.options.overlay]
+mount_program = "/usr/bin/fuse-overlayfs"
+mountopt = "nodev"
+STORAGE
+chown ubuntu:ubuntu /home/ubuntu/.config/containers/storage.conf
+chmod 0600 /home/ubuntu/.config/containers/storage.conf
