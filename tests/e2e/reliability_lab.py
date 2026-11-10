@@ -346,6 +346,8 @@ class PtyClient:
 
 
 class Lab:
+    """One isolated mj instance driven through a reliability scenario."""
+
     def __init__(self, hel: pathlib.Path, scenario: str, seed: int, *, watchdog: bool = True):
         """Prepare a lab for one scenario, seed and `hel` binary."""
         self.hel = hel.resolve()
