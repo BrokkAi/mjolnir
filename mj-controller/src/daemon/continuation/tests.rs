@@ -1167,7 +1167,7 @@ async fn background_work_defers_continuation_and_its_end_brings_a_fresh_check() 
             .decisions[0]
             .technical
             .as_ref()
-            .is_some_and(|t| t["trigger"] == "driver-stopped")
+            .is_some_and(|t| t["trigger"] == "eligibility-restored")
     }));
     cancellation.cancel();
     task.await.unwrap().unwrap();
@@ -2172,6 +2172,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
     for case in [
         "ready",
         "assessment-reconnect",
+        "waiting-reconnect",
         "failure",
         "identity",
         "input",
@@ -2462,6 +2463,64 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             remote.shutdown.shutdown().await.unwrap();
             continue;
         }
+        if case == "waiting-reconnect" {
+            let mut disconnected = blocked.clone();
+            disconnected.connected = false;
+            remote
+                .publisher
+                .publish("one".into(), disconnected)
+                .await
+                .unwrap();
+            receive(&mut updates).await;
+            // The owner can finish while no worker is connected; no active
+            // waiter or additional provider check is needed to preserve it.
+            publish_report(&identity, report.clone());
+            assert!(preparations.try_recv().is_err());
+            assert!(remote.requests.recv().now_or_never().is_none());
+            let mut reconnected = blocked.clone();
+            reconnected
+                .snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .background_commands
+                .push(mj_core::relay::BackgroundCommand {
+                    id: "still-running".into(),
+                    started_at_ms: 1,
+                    command: "sleep infinity".into(),
+                    can_stop: true,
+                });
+            remote
+                .publisher
+                .publish("one".into(), reconnected.clone())
+                .await
+                .unwrap();
+            receive(&mut updates).await;
+            observed(classifications.recv())
+                .await
+                .unwrap()
+                .send(Ok(ContinuationVerdict {
+                    quota_limit: 0.99,
+                    unfinished: 0.0,
+                    no_input_needed: 0.0,
+                }))
+                .unwrap();
+            // A new publication with the same turn/evidence must join the
+            // resumed decision, rather than start another classification.
+            reconnected
+                .snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .latest_ordinal += 1;
+            remote
+                .publisher
+                .publish("one".into(), reconnected)
+                .await
+                .unwrap();
+            receive(&mut updates).await;
+            assert!(classifications.try_recv().is_err());
+        }
         if case == "identity" {
             config.profiles.get_mut("claude").unwrap().home = home.path().join("other-account");
             let sessions = state.owner().controller().state.clone();
@@ -2559,6 +2618,16 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
         } else {
             assert_eq!(recovery.reset_at_ms, Some(reset * 1000));
             assert_eq!(recovery.retry_at_ms, Some((reset + 60) * 1000));
+        }
+        if case == "waiting-reconnect" {
+            assert!(
+                preparations.try_recv().is_err(),
+                "reconnect prepares the quota decision once"
+            );
+            assert!(
+                classifications.try_recv().is_err(),
+                "reconnect classifies the same turn once"
+            );
         }
         reply
             .send(Err("end isolated scheduling probe".into()))

@@ -38,6 +38,11 @@ impl Phase {
     }
 }
 
+enum DeferredReason {
+    Continue,
+    Quota,
+}
+
 struct Pending {
     phase: Phase,
     diagnostic: Option<mj_core::jev::Attempt>,
@@ -640,9 +645,9 @@ fn spawn_with_gate(
     let (tx, rx) = coalesced_update_channel();
     let task = tokio::spawn(async move {
         let mut seen = BTreeMap::<String, Option<String>>::new();
-        // Ended turns whose continuation waits for a background command,
-        // agent or goal to stop moving the session on.
-        let mut deferred = BTreeMap::<String, String>::new();
+        // An ordinary continuation waits for its driver to stop; quota
+        // recovery can also wait for the same turn to reconnect.
+        let mut deferred = BTreeMap::<String, (String, DeferredReason)>::new();
         // A refused admission must not consume a completed-turn trigger.
         let mut admission_deferred = BTreeMap::<String, Option<String>>::new();
         let mut pending = BTreeMap::<String, Pending>::new();
@@ -728,22 +733,24 @@ fn spawn_with_gate(
                     if view.connected && completed.is_none() {
                         seen.insert(id.clone(), None);
                     }
-                    if deferred.get(&id).is_some_and(|key| Some(key) != completed.as_ref()) {
+                    if deferred.get(&id).is_some_and(|(key, _)| Some(key) != completed.as_ref()) {
                         deferred.remove(&id);
                     }
                     if let Some(p) = pending.get_mut(&id) {
-                        let unchanged = check_eligible(&view)
-                            && (environment.allowed)(&id)
+                        let same_frontier = (environment.allowed)(&id)
                             && view.snapshot.as_ref().is_some_and(|s| {
                                 s.operational.continuation.user_command_id.as_ref() == Some(&p.user)
                                     && s.operational.continuation.completed_command_id.as_ref()
                                         == Some(&p.completed)
                             })
                             && evidence_ordinal(&view) == p.evidence_ordinal;
-                        if unchanged {
+                        if same_frontier && check_eligible(&view) {
                             p.view = view.clone();
                             publish(&tx, &environment, id, view, true);
                             continue;
+                        }
+                        if same_frontier && !view.connected && matches!(p.phase, Phase::WaitingQuota) {
+                            deferred.insert(id.clone(), (p.completed.clone(), DeferredReason::Quota));
                         }
                         let previous = pending.remove(&id).expect("pending request");
                         if !matches!(previous.phase, Phase::Submitting(_)) {
@@ -765,9 +772,11 @@ fn spawn_with_gate(
                     let new_completion = if let Some(a) = worker_assessment {
                         assessed.get(&id).copied() != Some(a.revision)
                     } else { (bootstrap || previous.is_some_and(|old| old != completed)) && completed.is_some() };
-                    // Whatever held a deferred continuation has stopped: ask
-                    // again, since the conversation may have moved on.
-                    let released = !new_completion && deferred.contains_key(&id) && eligible(&view);
+                    // Each deferred decision retains its own eligibility rule.
+                    let released = !new_completion && deferred.get(&id).is_some_and(|(_, reason)| match reason {
+                        DeferredReason::Continue => eligible(&view),
+                        DeferredReason::Quota => quota_schedulable(&view),
+                    });
                     let admission_retry = admission_deferred.remove(&id).is_some_and(|key| key == completed);
                     if (new_completion || released || admission_retry) && check_eligible(&view) && (environment.allowed)(&id) {
                         let Ok(upgrade_work) = gate.enter_unless_draining("automatic continuation") else {
@@ -792,7 +801,7 @@ fn spawn_with_gate(
                         if let Some(diagnostic) = &diagnostic {
                             diagnostic.update(None, serde_json::json!({
                                 "turn": if self_started { "self-started" } else { "prompted" },
-                                "trigger": if released { "driver-stopped" } else if bootstrap { "daemon-attachment" } else { "turn-ended" },
+                                "trigger": if released { "eligibility-restored" } else if bootstrap { "daemon-attachment" } else { "turn-ended" },
                             }));
                         }
                         let request_diagnostic = diagnostic.clone();
@@ -1074,7 +1083,7 @@ fn spawn_with_gate(
                                     diagnostic.update(None, serde_json::json!({"deferred_by": driver_name(&p.view)}));
                                     diagnostic.finish("deferred", "Something else is still moving the session on. Mj will check again once it stops.");
                                 }
-                                deferred.insert(id.clone(), p.completed.clone());
+                                deferred.insert(id.clone(), (p.completed.clone(), DeferredReason::Continue));
                                 publish(&tx, &environment, id, p.view, false);
                             } else {
                                 if let Some(diagnostic) = &p.diagnostic {
