@@ -366,14 +366,15 @@ pub(super) async fn run_daemon_runtime(
             }
         })
     };
-    let mut update_feed = continuation::spawn(state.clone(), manager_updates, cancellation.clone());
-
     let (delegation_services, mut delegation_task) = super::delegation::spawn(
         state.clone(),
         manager_control.clone(),
         delegation_updates,
         cancellation.clone(),
     );
+    // Recovery can inspect the initial turn immediately. Install the quota
+    // owner and its current profile identities before starting that reader.
+    let mut update_feed = continuation::spawn(state.clone(), manager_updates, cancellation.clone());
 
     // CPU publication is bounded and reconstructed from workers. It holds no
     // admission during handoff and exits with the daemon's cancellation token.

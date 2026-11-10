@@ -12,13 +12,35 @@ use tokio::task::{AbortHandle, JoinSet};
 enum Outcome {
     Classified(Result<mj_core::continuation::ContinuationVerdict>),
     QuotaPrepared(Result<Box<quota::Plan>>),
+    QuotaChanged(Result<()>),
     Submitted(Result<Box<ManagedSessionView>>),
 }
 
+enum Phase {
+    Checking(crate::upgrade::Work),
+    WaitingQuota,
+    Submitting(crate::upgrade::Work),
+}
+
+impl Phase {
+    fn work(&self) -> &crate::upgrade::Work {
+        match self {
+            Self::Checking(work) | Self::Submitting(work) => work,
+            Self::WaitingQuota => unreachable!("quota waits hold no admission"),
+        }
+    }
+
+    fn submitting(self) -> Self {
+        match self {
+            Self::Checking(work) | Self::Submitting(work) => Self::Submitting(work),
+            Self::WaitingQuota => unreachable!("quota waits must readmit before submission"),
+        }
+    }
+}
+
 struct Pending {
-    _upgrade_work: crate::upgrade::Work,
+    phase: Phase,
     diagnostic: Option<mj_core::jev::Attempt>,
-    submitting: bool,
     generation: u64,
     abort: AbortHandle,
     view: ManagedSessionView,
@@ -719,7 +741,7 @@ fn spawn_with_gate(
                             continue;
                         }
                         let previous = pending.remove(&id).expect("pending request");
-                        if !previous.submitting {
+                        if !matches!(previous.phase, Phase::Submitting(_)) {
                             if let Some(diagnostic) = &previous.diagnostic {
                                 diagnostic.finish("stale", "Session evidence or runtime state changed before this check completed; no action was taken.");
                             }
@@ -730,9 +752,14 @@ fn spawn_with_gate(
                         // Its atomic frontier guard still lets new input win.
                     }
                     let worker_assessment = view.snapshot.as_ref().filter(|s| unified(s)).and_then(|s| s.operational.assessment.as_ref()).filter(|a| a.current() && a.verdict.is_some());
+                    // A quota wait is restartable from this durable turn. Legacy
+                    // workers have no persisted verdict, so attachment reuses the
+                    // normal classifier; its frontier and eligibility guards still
+                    // decide whether anything may be submitted.
+                    let bootstrap = previous.is_none() && !driven(&view);
                     let new_completion = if let Some(a) = worker_assessment {
                         assessed.insert(id.clone(), a.revision) != Some(a.revision)
-                    } else { previous.is_some_and(|old| old != completed) && completed.is_some() };
+                    } else { (bootstrap || previous.is_some_and(|old| old != completed)) && completed.is_some() };
                     // Whatever held a deferred continuation has stopped: ask
                     // again, since the conversation may have moved on.
                     let released = !new_completion && deferred.contains_key(&id) && eligible(&view);
@@ -754,7 +781,7 @@ fn spawn_with_gate(
                         if let Some(diagnostic) = &diagnostic {
                             diagnostic.update(None, serde_json::json!({
                                 "turn": if self_started { "self-started" } else { "prompted" },
-                                "trigger": if released { "driver-stopped" } else { "turn-ended" },
+                                "trigger": if released { "driver-stopped" } else if bootstrap { "daemon-attachment" } else { "turn-ended" },
                             }));
                         }
                         let request_diagnostic = diagnostic.clone();
@@ -813,9 +840,8 @@ fn spawn_with_gate(
                         pending.insert(
                             id.clone(),
                             Pending {
-                                _upgrade_work: upgrade_work,
+                                phase: Phase::Checking(upgrade_work),
                                 diagnostic,
-                                submitting: false,
                                 generation: epoch,
                                 abort,
                                 view: view.clone(),
@@ -842,19 +868,60 @@ fn spawn_with_gate(
                             if pending.get(&id).is_none_or(|p| p.generation != epoch) {
                                 continue;
                             }
-                            let p = pending.remove(&id).expect("current request");
+                            let mut p = pending.remove(&id).expect("current request");
                             let result = match result {
+                                Outcome::QuotaChanged(result) => {
+                                    if let Err(error) = result {
+                                        tracing::warn!(session=%id, %error, "quota publication wait failed");
+                                        publish(&tx, &environment, id, p.view, false);
+                                        continue;
+                                    }
+                                    if !(environment.allowed)(&id) || !quota_schedulable(&p.view) {
+                                        publish(&tx, &environment, id, p.view, false);
+                                        continue;
+                                    }
+                                    let Ok(work) = gate.enter_unless_draining("quota recovery") else {
+                                        admission_deferred.insert(id.clone(), Some(p.completed.clone()));
+                                        publish(&tx, &environment, id, p.view, false);
+                                        continue;
+                                    };
+                                    let env = environment.clone();
+                                    let session = id.clone();
+                                    let view = p.view.clone();
+                                    let task_work = work.clone();
+                                    p.phase = Phase::Checking(work);
+                                    let abort = jobs.spawn(async move {
+                                        let _work = task_work;
+                                        let result = (env.quota)(session.clone(), view).await;
+                                        (session, epoch, Outcome::QuotaPrepared(result.map(Box::new)))
+                                    });
+                                    pending.insert(id, Pending { abort, ..p });
+                                    continue;
+                                }
                                 Outcome::QuotaPrepared(result) => {
                                     match result {
+                                        Ok(recovery) if matches!(recovery.as_ref(), quota::Plan::Pending(_)) => {
+                                            let quota::Plan::Pending(wait) = *recovery else { unreachable!() };
+                                            // The turn is durable and will be reconsidered after
+                                            // a restart. Waiting for a provider must not hold
+                                            // daemon handoff admission.
+                                            p.phase = Phase::WaitingQuota;
+                                            let session = id.clone();
+                                            let abort = jobs.spawn(async move {
+                                                (session, epoch, Outcome::QuotaChanged(wait.wait().await))
+                                            });
+                                            publish(&tx, &environment, id.clone(), p.view.clone(), true);
+                                            pending.insert(id, Pending { abort, ..p });
+                                        }
                                         Ok(recovery) if (environment.allowed)(&id) && quota_schedulable(&p.view) => {
                                             let env = environment.clone(); let session = id.clone(); let view = p.view.clone();
-                                            let task_work = p._upgrade_work.clone();
+                                            let task_work = p.phase.work().clone();
                                             let abort = jobs.spawn(async move {
                                                 let _task_work = task_work;
                                                 let result = quota::schedule(&env, &session, view, *recovery).await;
                                                 (session, epoch, Outcome::Submitted(result))
                                             });
-                                            pending.insert(id, Pending { abort, submitting: true, ..p });
+                                            pending.insert(id, Pending { abort, phase: p.phase.submitting(), ..p });
                                         }
                                         result => {
                                             tracing::warn!(session=%id, ?result, "quota recovery could not be scheduled");
@@ -898,7 +965,7 @@ fn spawn_with_gate(
                                 let env = environment.clone();
                                 let session = id.clone();
                                 let view = p.view.clone();
-                                let task_work = p._upgrade_work.clone();
+                                let task_work = p.phase.work().clone();
                                             let abort = jobs.spawn(async move {
                                                 let _task_work = task_work;
                                     let result = (env.quota)(session.clone(), view).await;
@@ -907,7 +974,7 @@ fn spawn_with_gate(
                                 if let Some(diagnostic) = &p.diagnostic {
                                     diagnostic.finish("applied", "Quota exhaustion identified; resolving the reset deadline without an LLM.");
                                 }
-                                pending.insert(id, Pending { abort, submitting: false, ..p });
+                                pending.insert(id, Pending { abort, ..p });
                                 continue;
                             }
                             let continuing = result.as_ref().is_ok_and(|v| v.should_continue())
@@ -922,7 +989,7 @@ fn spawn_with_gate(
                                 let completed = p.completed.clone();
                                 let evidence_frontier = p.evidence_ordinal;
                                 let diagnostic = p.diagnostic.clone();
-                                let task_work = p._upgrade_work.clone();
+                                let task_work = p.phase.work().clone();
                                             let abort = jobs.spawn(async move {
                                                 let _task_work = task_work;
                                     let outcome = tokio::time::timeout(Duration::from_secs(15), async {
@@ -986,7 +1053,7 @@ fn spawn_with_gate(
                                     }
                                     (submit_id, epoch, Outcome::Submitted(outcome))
                                 });
-                                pending.insert(id, Pending { abort, submitting: true, ..p });
+                                pending.insert(id, Pending { abort, phase: p.phase.submitting(), ..p });
                             } else if result.as_ref().is_ok_and(|v| v.should_continue())
                                 && continuation_allowed(&p.view)
                                 && driven(&p.view)
@@ -1030,6 +1097,18 @@ fn spawn_with_gate(
                             rechecks.insert(id.clone());
                         }
                     }
+                    if gate.is_draining() {
+                        let waiting = pending.iter()
+                            .filter(|(_, p)| matches!(p.phase, Phase::WaitingQuota))
+                            .map(|(id, _)| id.clone())
+                            .collect::<Vec<_>>();
+                        for id in waiting {
+                            let p = pending.remove(&id).expect("quota waiter");
+                            p.abort.abort();
+                            admission_deferred.insert(id.clone(), Some(p.completed.clone()));
+                            publish(&tx, &environment, id, p.view, false);
+                        }
+                    }
                     let invalid: Vec<_> = pending
                         .keys()
                         .filter(|id| !(environment.allowed)(id))
@@ -1037,7 +1116,7 @@ fn spawn_with_gate(
                         .collect();
                     for id in invalid {
                         let p = pending.remove(&id).unwrap();
-                        if !p.submitting {
+                        if !matches!(p.phase, Phase::Submitting(_)) {
                             if let Some(diagnostic) = &p.diagnostic {
                                 diagnostic.finish("cancelled", "Continuation was disabled or a session lifecycle operation took ownership.");
                             }
@@ -1082,7 +1161,7 @@ fn spawn_with_gate(
                             (session, epoch, Outcome::Submitted(result))
                         });
                         retry_after.insert(id.clone(), std::time::Instant::now() + Duration::from_secs(30));
-                        pending.insert(id.clone(), Pending { _upgrade_work: upgrade_work, diagnostic: None, submitting: true, generation: epoch, abort,
+                        pending.insert(id.clone(), Pending { phase: Phase::Submitting(upgrade_work), diagnostic: None, generation: epoch, abort,
                             view: view.clone(), user: recovery.user_command_id.clone(), completed: recovery.completed_command_id.clone(), evidence_ordinal: evidence_ordinal(view) });
                     }
                     for (id, view) in &latest {

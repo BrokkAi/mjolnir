@@ -22,7 +22,7 @@ use mj_core::profile_capabilities::{
 use mj_core::worker_launch::ProfileConfig;
 use sha2::{Digest, Sha256};
 
-use crate::quota::ProfileQuota;
+use crate::quota::{ProfileQuota, QuotaReportMap};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -33,7 +33,7 @@ type ModelProbe = dyn Fn(String, String) -> BoxFuture<'static, Result<ProfileCon
 type Attempt = Shared<BoxFuture<'static, Result<ProbeOutcome, AttemptError>>>;
 type CacheKey = (String, Option<String>);
 type NoticeCallback = Arc<dyn Fn(String) + Send + Sync>;
-pub(crate) type QuotaReports = Arc<Mutex<BTreeMap<String, ProfileQuota>>>;
+pub(crate) type QuotaReports = Arc<Mutex<QuotaReportMap>>;
 
 /// How long the legacy upgrade waits for every offering profile's first
 /// quota report before treating profiles without one as subscriptions.
@@ -323,7 +323,12 @@ impl ProfileCatalog {
         let mut priced = BTreeSet::new();
         let mut unknown = BTreeSet::new();
         for (id, harness) in profiles {
-            match ProfileQuota::billing_for(*harness, reports.get(id)) {
+            match ProfileQuota::billing_for(
+                *harness,
+                reports
+                    .get(id)
+                    .and_then(|publication| publication.report.as_ref()),
+            ) {
                 QuotaBilling::Usage => {
                     priced.insert(id.clone());
                 }
@@ -3726,6 +3731,23 @@ mod tests {
         catalog
     }
 
+    fn published_reports(
+        reports: impl IntoIterator<Item = (String, ProfileQuota)>,
+    ) -> QuotaReportMap {
+        reports
+            .into_iter()
+            .map(|(id, report)| {
+                (
+                    id,
+                    crate::quota::QuotaReportPublication {
+                        cache_identity: "test-identity".into(),
+                        report: Some(report),
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn upgraded_models(path: &Path) -> Vec<String> {
         Config::load_from(path)
             .unwrap()
@@ -3741,13 +3763,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("custom-config.toml");
         // The OpenCode profile's real report is `n/a`, not an API label.
-        let reports: QuotaReports = Arc::new(Mutex::new(BTreeMap::from([
+        let reports: QuotaReports = Arc::new(Mutex::new(published_reports(BTreeMap::from([
             (
                 "codex".to_owned(),
                 subscription_report("codex", HarnessKind::Codex),
             ),
             ("openrouter".to_owned(), not_reported("openrouter")),
-        ])));
+        ]))));
         let catalog = billing_catalog(&path, reports.clone());
         let upgrade = {
             let catalog = Arc::clone(&catalog);
@@ -3764,7 +3786,7 @@ mod tests {
     async fn legacy_upgrade_treats_an_opencode_profile_without_a_report_as_usage_priced() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("custom-config.toml");
-        let reports: QuotaReports = Arc::new(Mutex::new(BTreeMap::from([
+        let reports: QuotaReports = Arc::new(Mutex::new(published_reports(BTreeMap::from([
             (
                 "codex".to_owned(),
                 subscription_report("codex", HarnessKind::Codex),
@@ -3773,7 +3795,7 @@ mod tests {
                 "sonnet".to_owned(),
                 subscription_report("sonnet", HarnessKind::Claude),
             ),
-        ])));
+        ]))));
         let catalog = billing_catalog(&path, reports);
         catalog.upgrade_legacy_review(1).await.unwrap();
         assert_eq!(upgraded_models(&path), ["gpt-6.1-terra", "gpt-6.1-sol"]);
@@ -3784,10 +3806,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("custom-config.toml");
         // The selected OpenAI profile's quota probe never reports.
-        let reports: QuotaReports = Arc::new(Mutex::new(BTreeMap::from([(
+        let reports: QuotaReports = Arc::new(Mutex::new(published_reports(BTreeMap::from([(
             "sonnet".to_owned(),
             subscription_report("sonnet", HarnessKind::Claude),
-        )])));
+        )]))));
         let catalog = billing_catalog(&path, reports.clone());
         let error = catalog.upgrade_legacy_review(1).await.unwrap_err();
         assert!(
@@ -3798,7 +3820,10 @@ mod tests {
         // A report that arrives before the next attempt lets it finish.
         reports.lock().unwrap().insert(
             "codex".into(),
-            subscription_report("codex", HarnessKind::Codex),
+            crate::quota::QuotaReportPublication {
+                cache_identity: "test-identity".into(),
+                report: Some(subscription_report("codex", HarnessKind::Codex)),
+            },
         );
         catalog.upgrade_legacy_review(2).await.unwrap();
         assert_eq!(upgraded_models(&path), ["gpt-6.1-terra", "gpt-6.1-sol"]);

@@ -1,11 +1,13 @@
 use super::*;
 use crate::quota::{ProfileQuota, QuotaRefreshRequest};
 use crate::server::api::{SubagentBackend, SubagentCandidate};
+use crate::server_runtime::api::{QuotaRead, QuotaWait};
 use mj_core::continuation::QuotaRecovery;
 use mj_core::state::{MoveSessionRequest, QuotaMoveContinuation};
 
 #[derive(Debug)]
 pub(super) enum Plan {
+    Pending(QuotaWait),
     Wait(QuotaRecovery),
     Move {
         request: Box<MoveSessionRequest>,
@@ -165,16 +167,19 @@ pub(super) async fn prepare(
     let identity = request.cache_identity();
     let observed = state
         .quota_report_backend()
-        .map(|backend| backend.quota_report(&profile_id))
-        .transpose();
+        .context("quota report service is unavailable")
+        .and_then(|backend| backend.quota_report(&profile_id, &identity));
     let cached = tokio::task::spawn_blocking(move || crate::database::load_quota_cache(&identity))
         .await
         .context("read cached quota resets")?;
-    let observed = match observed {
-        Ok(report) => report.flatten().filter(|report| report.error.is_none()),
+    let (observed, wait) = match observed {
+        Ok(QuotaRead::Ready(report)) => {
+            (Some(report).filter(|report| report.error.is_none()), None)
+        }
+        Ok(QuotaRead::Pending(wait)) => (None, Some(wait)),
         Err(error) => {
             tracing::warn!(session=id, %error, "quota report unavailable; consulting last known resets");
-            None
+            (None, None)
         }
     };
     let cached = match cached {
@@ -229,6 +234,11 @@ pub(super) async fn prepare(
         .collect();
     let now_ms = mj_core::clock::epoch_millis();
     let reset = crate::quota::recovery_reset(&windows, explicit, now_ms / 1000, consumed);
+    if reset.is_none()
+        && let Some(wait) = wait
+    {
+        return Ok(Plan::Pending(wait));
+    }
     // These are retained poller observations, not a provider query made for
     // this recovery. Attribute the selected reset after model filtering.
     let used_cache = reset.is_some_and(|reset| {
@@ -399,6 +409,7 @@ pub(super) async fn schedule(
             .await?;
         let current = handle.view();
         let recovery = match &plan {
+            Plan::Pending(_) => bail!("quota report has not been published yet"),
             Plan::Wait(r) => r,
             Plan::Move { abstention, .. } => abstention,
         };

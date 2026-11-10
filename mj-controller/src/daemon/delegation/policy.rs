@@ -1,7 +1,7 @@
 //! Backend inputs are maintained independently of any control surface.
 use super::*;
 use crate::pollers::*;
-use crate::quota::ProfileQuota;
+use crate::quota::{ProfileQuota, QuotaReportMap, QuotaReportPublication};
 use crate::server_runtime::profile_catalog::ProfileCatalog;
 use crate::worker_client::CredentialSyncCoordinator;
 use std::time::SystemTime;
@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, watch};
 #[derive(Clone)]
 pub(crate) struct Services {
     pub backend: Arc<ApiBackend>,
-    pub quotas: watch::Receiver<BTreeMap<String, ProfileQuota>>,
+    pub quotas: watch::Receiver<QuotaReportMap>,
     refresh: mpsc::Sender<()>,
 }
 impl Services {
@@ -23,9 +23,9 @@ pub(super) struct Policy {
     pub services: Services,
     state: Arc<RuntimeState>,
     catalog: Arc<ProfileCatalog>,
-    reports: Arc<std::sync::Mutex<BTreeMap<String, ProfileQuota>>>,
+    reports: Arc<std::sync::Mutex<QuotaReportMap>>,
     rejected: Arc<std::sync::Mutex<mj_core::credentials::RejectedLogins>>,
-    quotas_tx: watch::Sender<BTreeMap<String, ProfileQuota>>,
+    quotas_tx: watch::Sender<QuotaReportMap>,
     profiles_tx: watch::Sender<QuotaRefreshBatch>,
     pub quota_rx: mpsc::Receiver<QuotaUpdate>,
     pub refresh_rx: mpsc::Receiver<()>,
@@ -66,7 +66,8 @@ impl Policy {
             state.profile_catalog.set(catalog.clone()).is_ok(),
             "daemon catalogue installed once"
         );
-        let reports = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let reports = Arc::new(std::sync::Mutex::new(QuotaReportMap::new()));
+        let (quotas_tx, quotas) = watch::channel(QuotaReportMap::new());
         catalog.set_quota_reports(reports.clone());
         let rejected = Arc::new(std::sync::Mutex::new(
             mj_core::credentials::RejectedLogins::default(),
@@ -80,10 +81,10 @@ impl Policy {
             )
             .with_profile_catalog(catalog.clone())
             .with_quota_reports(reports.clone())
+            .with_quota_publications(quotas.clone())
             .with_rejected_logins(rejected.clone()),
         );
         state.install_report_backend(&backend);
-        let (quotas_tx, quotas) = watch::channel(BTreeMap::new());
         let (refresh, refresh_rx) = mpsc::channel(1);
         // A surface's Refresh reaches this poller through the daemon.
         state.attach_quota_refresh(refresh.clone());
@@ -157,29 +158,31 @@ impl Policy {
         );
         if force || self.published != controller.config.profiles {
             self.published.clone_from(&controller.config.profiles);
-            let removed = {
-                let mut reports = self.reports.lock().expect("quota reports poisoned");
-                let removed = reports
-                    .keys()
-                    .filter(|id| controller.config.enabled_profile(id).is_none())
-                    .cloned()
-                    .collect::<Vec<_>>();
-                reports.retain(|id, _| controller.config.enabled_profile(id).is_some());
-                self.quotas_tx.send_replace(reports.clone());
-                removed
-            };
-            if !removed.is_empty() {
-                let mut health = crate::profile_health::shared()
-                    .lock()
-                    .expect("profile health poisoned");
-                for id in removed {
-                    health.forget_quota(&id);
-                }
-            }
-            self.probing
-                .retain(|id| controller.config.enabled_profile(id).is_some());
-            self.publish_quotas();
         }
+        let desired = self
+            .batch
+            .profiles
+            .iter()
+            .map(|request| (request.profile_id.clone(), request.cache_identity()))
+            .collect::<BTreeMap<_, _>>();
+        let changed = {
+            let mut reports = self.reports.lock().expect("quota reports poisoned");
+            let changed = reconcile_quota_publications(&mut reports, &desired);
+            if !changed.is_empty() {
+                self.quotas_tx.send_replace(reports.clone());
+            }
+            changed
+        };
+        if !changed.is_empty() {
+            let mut health = crate::profile_health::shared()
+                .lock()
+                .expect("profile health poisoned");
+            for id in changed {
+                health.forget_quota(&id);
+            }
+        }
+        self.probing.retain(|id| desired.contains_key(id));
+        self.publish_quotas();
     }
     /// Tell every attached surface what the daemon knows about quota.
     fn publish_quotas(&self) {
@@ -202,13 +205,28 @@ impl Policy {
         match update {
             QuotaUpdate::Refreshing { profile_ids } => self.probing.extend(profile_ids),
             QuotaUpdate::Report(outcome) => {
+                let profile_id = outcome.report.profile_id.clone();
+                let accepted = {
+                    let mut reports = self.reports.lock().expect("quota reports poisoned");
+                    let accepted = publish_quota_outcome(&mut reports, &outcome);
+                    if accepted {
+                        self.quotas_tx.send_replace(reports.clone());
+                    }
+                    accepted
+                };
+                if !accepted {
+                    tracing::debug!(
+                        profile_id,
+                        "discarding quota result for an obsolete profile identity"
+                    );
+                    return;
+                }
                 if outcome.credentials_changed {
                     self.credentials
                         .handle()
-                        .sync_profile_now(&outcome.report.profile_id, None);
+                        .sync_profile_now(&profile_id, None);
                 }
-                self.probing.remove(&outcome.report.profile_id);
-                let profile_id = outcome.report.profile_id.clone();
+                self.probing.remove(&profile_id);
                 // A usage-priced profile has no allowance to run out of.
                 let windows = outcome.report.error.is_none().then(|| {
                     if outcome.report.is_usage_priced() {
@@ -217,11 +235,6 @@ impl Policy {
                         outcome.report.windows.clone()
                     }
                 });
-                {
-                    let mut reports = self.reports.lock().expect("quota reports poisoned");
-                    reports.insert(profile_id.clone(), outcome.report);
-                    self.quotas_tx.send_replace(reports.clone());
-                }
                 if let Some(windows) = windows {
                     crate::profile_health::shared()
                         .lock()
@@ -269,18 +282,106 @@ impl Policy {
     }
 }
 
-fn surface_quota_reports(
-    reports: &BTreeMap<String, ProfileQuota>,
-) -> BTreeMap<String, ProfileQuota> {
+fn publish_quota_outcome(
+    reports: &mut QuotaReportMap,
+    outcome: &crate::quota::QuotaRefreshOutcome,
+) -> bool {
+    let Some(publication) = reports.get_mut(&outcome.report.profile_id) else {
+        return false;
+    };
+    if publication.cache_identity != outcome.cache_identity {
+        return false;
+    }
+    publication.report = Some(outcome.report.clone());
+    true
+}
+
+fn reconcile_quota_publications(
+    reports: &mut QuotaReportMap,
+    desired: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut changed = reports
+        .keys()
+        .filter(|id| !desired.contains_key(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    reports.retain(|id, _| desired.contains_key(id));
+    for (id, identity) in desired {
+        if reports
+            .get(id)
+            .is_none_or(|old| old.cache_identity != *identity)
+        {
+            reports.insert(
+                id.clone(),
+                QuotaReportPublication {
+                    cache_identity: identity.clone(),
+                    report: None,
+                },
+            );
+            changed.push(id.clone());
+        }
+    }
+    changed
+}
+
+fn surface_quota_reports(reports: &QuotaReportMap) -> BTreeMap<String, ProfileQuota> {
     reports
         .iter()
-        .map(|(id, report)| (id.clone(), crate::quota::surface_quota_report(report)))
+        .filter_map(|(id, publication)| {
+            publication
+                .report
+                .as_ref()
+                .map(|report| (id.clone(), crate::quota::surface_quota_report(report)))
+        })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: #1487: an old quota result repopulated an edited profile's slot.
+    #[test]
+    fn quota_result_from_old_profile_identity_cannot_repopulate_edited_slot() {
+        let mut reports = BTreeMap::from([(
+            "codex".to_owned(),
+            QuotaReportPublication {
+                cache_identity: "old-profile".into(),
+                report: Some(ProfileQuota {
+                    profile_id: "codex".into(),
+                    harness: mj_core::config::HarnessKind::Codex,
+                    windows: Vec::new(),
+                    paid_credits: None,
+                    banked_resets: None,
+                    extra: None,
+                    error: None,
+                    refreshed_at_epoch_seconds: 0,
+                    rate_limited_until_epoch_seconds: None,
+                }),
+            },
+        )]);
+        let outcome = crate::quota::QuotaRefreshOutcome {
+            cache_identity: "old-profile".into(),
+            report: ProfileQuota {
+                profile_id: "codex".into(),
+                harness: mj_core::config::HarnessKind::Codex,
+                windows: Vec::new(),
+                paid_credits: None,
+                banked_resets: None,
+                extra: None,
+                error: Some("old request failed".into()),
+                refreshed_at_epoch_seconds: 1,
+                rate_limited_until_epoch_seconds: None,
+            },
+            credentials_changed: false,
+        };
+        reconcile_quota_publications(
+            &mut reports,
+            &BTreeMap::from([("codex".into(), "edited-profile".into())]),
+        );
+        assert!(!publish_quota_outcome(&mut reports, &outcome));
+        assert!(reports["codex"].report.is_none());
+    }
 
     #[test]
     fn published_quota_snapshot_keeps_claude_fable_and_hides_other_scopes() {

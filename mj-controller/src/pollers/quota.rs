@@ -141,7 +141,7 @@ async fn adopt_profiles(
         if identities.get(&request.profile_id) == Some(&identity) {
             continue;
         }
-        identities.insert(request.profile_id.clone(), identity);
+        identities.insert(request.profile_id.clone(), identity.clone());
         quotas.forget(&request.profile_id).await;
         let load = cache.clone();
         let for_request = request.clone();
@@ -164,6 +164,7 @@ async fn adopt_profiles(
         );
         quotas.seed(stored.clone());
         let outcome = QuotaRefreshOutcome {
+            cache_identity: identity,
             report: stored,
             credentials_changed: false,
         };

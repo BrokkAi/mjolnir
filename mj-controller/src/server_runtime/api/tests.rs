@@ -153,6 +153,7 @@ struct RecordingExports {
     registered: std::sync::Mutex<Option<crate::controller::RegisterSubagentRequest>>,
     override_call: std::sync::Mutex<Option<(String, Vec<mj_core::subagent::ReviewOverride>)>>,
     base_call: std::sync::Mutex<Option<(String, String, Option<String>)>>,
+    quota_publications: tokio::sync::watch::Sender<crate::quota::QuotaReportMap>,
 }
 
 impl ExportRuntime for RecordingExports {
@@ -264,12 +265,25 @@ async fn selection_backend_refusing(
             quota("codex-high", HarnessKind::Codex, &[60, 55]),
         ),
         ("deepseek".to_owned(), usage_priced("deepseek")),
-    ]);
+    ])
+    .into_iter()
+    .map(|(id, report)| {
+        (
+            id,
+            crate::quota::QuotaReportPublication {
+                cache_identity: "test-identity".into(),
+                report: Some(report),
+            },
+        )
+    })
+    .collect();
+    let (quota_publications, quota_updates) = tokio::sync::watch::channel(quotas.clone());
     let exports = Arc::new(RecordingExports {
         parent: parent_record("parent-1", "parent"),
         registered: std::sync::Mutex::new(None),
         override_call: std::sync::Mutex::new(None),
         base_call: std::sync::Mutex::new(None),
+        quota_publications,
     });
     let backend = Arc::new(
         ApiBackend::new(
@@ -284,9 +298,48 @@ async fn selection_backend_refusing(
         )
         .with_profile_catalog(catalog)
         .with_quota_reports(Arc::new(std::sync::Mutex::new(quotas)))
+        .with_quota_publications(quota_updates)
         .with_rejected_logins(Arc::new(std::sync::Mutex::new(rejected_logins))),
     );
     (backend, exports)
+}
+
+#[tokio::test]
+async fn quota_reader_waits_for_matching_publication_and_returns_completed_errors() {
+    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
+    let completed = {
+        let mut reports = backend.quota_reports.lock().unwrap();
+        reports
+            .get_mut("codex-high")
+            .unwrap()
+            .report
+            .take()
+            .unwrap()
+    };
+    let pending = backend.quota_report("codex-high", "test-identity").unwrap();
+    let crate::server_runtime::api::QuotaRead::Pending(wait) = pending else {
+        panic!("pending profile unexpectedly had a completed report");
+    };
+
+    // Publishing after lookup must wake the receiver returned by that lookup.
+    {
+        let mut reports = backend.quota_reports.lock().unwrap();
+        let report = reports.get_mut("codex-high").unwrap();
+        report.report = Some(completed);
+        let report = report.report.as_mut().unwrap();
+        report.error = Some("provider temporarily unavailable".into());
+        exports.quota_publications.send_replace(reports.clone());
+    }
+    wait.wait().await.unwrap();
+    let crate::server_runtime::api::QuotaRead::Ready(report) =
+        backend.quota_report("codex-high", "test-identity").unwrap()
+    else {
+        panic!("completed provider error remained pending");
+    };
+    assert_eq!(
+        report.error.as_deref(),
+        Some("provider temporarily unavailable")
+    );
 }
 
 const SAME_MODELS: &[(&str, &[&str])] = &[
@@ -340,15 +393,31 @@ async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the
     {
         let mut reports = backend.quota_reports.lock().unwrap();
         for report in reports.values_mut() {
-            for window in &mut report.windows {
+            for window in &mut report.report.as_mut().unwrap().windows {
                 window.remaining_percent = Some(0);
             }
         }
-        reports.get_mut("parent").unwrap().banked_resets = Some(100);
-        reports.get_mut("parent").unwrap().paid_credits =
-            mj_client::quota::PaidCredits::limited(0.0);
-        reports.get_mut("codex-high").unwrap().paid_credits =
-            mj_client::quota::PaidCredits::limited(12.75);
+        reports
+            .get_mut("parent")
+            .unwrap()
+            .report
+            .as_mut()
+            .unwrap()
+            .banked_resets = Some(100);
+        reports
+            .get_mut("parent")
+            .unwrap()
+            .report
+            .as_mut()
+            .unwrap()
+            .paid_credits = mj_client::quota::PaidCredits::limited(0.0);
+        reports
+            .get_mut("codex-high")
+            .unwrap()
+            .report
+            .as_mut()
+            .unwrap()
+            .paid_credits = mj_client::quota::PaidCredits::limited(12.75);
     }
     let result = backend
         .execute_subagent_tool("parent-1".into(), spawn_with())
@@ -6094,7 +6163,18 @@ async fn oracle_backend(exports: Arc<OracleExports>) -> Arc<ApiBackend> {
             quota("codex-high", HarnessKind::Codex, &[60, 55]),
         ),
         ("deepseek".to_owned(), usage_priced("deepseek")),
-    ]);
+    ])
+    .into_iter()
+    .map(|(id, report)| {
+        (
+            id,
+            crate::quota::QuotaReportPublication {
+                cache_identity: "test-identity".into(),
+                report: Some(report),
+            },
+        )
+    })
+    .collect();
     let (submitted, _delivered) = mpsc::unbounded_channel();
     let mut view = ready_view("model");
     view.snapshot
