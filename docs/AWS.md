@@ -1,10 +1,84 @@
 # AWS EC2 machines
 
-This is the setup guide for a Mjolnir `aws-ec2` machine: a disposable EC2 instance
-that Mjolnir launches for one session and terminates when the session is suspended
-or destroyed.
+Mjolnir supports persistent EC2 hosts running Podman, and disposable EC2
+instances launched separately for each bare session.
 
-## What Mjolnir does, and does not, manage
+## Persistent Podman hosts
+
+Use the AWS CLI credentials already configured on your controller, plus OpenSSH:
+
+```console
+mj ec2 create c8id.16xlarge --zone us-east-1a --name builder --zfs-cache
+mj ec2 list
+mj new --workspace work --profile codex --target builder --bundle project
+mj ec2 destroy builder
+```
+
+`create` launches the current official Ubuntu 24.04 image for the instance's
+CPU architecture, installs rootless Podman, waits for EC2 status checks and
+cloud-init, then adds an SSH machine and a Podman target to your configuration.
+Raw SSH sessions are disabled for this host; SSH is still used to manage Podman.
+The VM stays running across session suspension and destruction. Its on-demand
+compute, storage, and network charges continue until you stop or destroy it.
+
+The instance type is required. `--zone` is required and supplies the region;
+`--region` can override region inference. `--aws-profile` selects AWS credentials,
+independently of mj's harness profiles. The default subnet must have an internet
+gateway; use `--subnet` for another public subnet in that zone. The command
+creates a tagged Elastic IP (stable across stop/start), a dedicated SSH key,
+and a security group allowing SSH only from the
+controller's discovered public IPv4, or the explicit `--ssh-cidr`. It requires
+IMDSv2 and uses an encrypted 200 GiB gp3 root disk; `--disk-gib` changes its size.
+The image supplies the root filesystem (ext4); it is separate from local SSDs.
+
+`--zfs-cache` requires an instance type with local NVMe SSDs, such as C8id or
+M8id. It creates a striped ZFS pool using only devices identified as EC2 instance
+storage, mounts it at `/mnt/nvme`, and places mbx at `/mnt/nvme/mbx`. The pool
+uses lz4 compression, 128 KiB records, `xattr=sa`, and relative access times.
+The host gets mj's pinned mbx and mold, and its mbx configuration selects
+`path:/usr/bin/mold`. The standard agent image also contains mold; containers
+share the host's cache and configuration through mj's normal build-cache setup.
+Session files and Podman storage stay on EBS. Local SSD contents survive a
+reboot but are lost on stop/start, hibernation, or termination; a boot service
+recreates an empty cache after stop/start. It imports an existing cache pool
+and refuses to format disks carrying other signatures.
+
+`list` shows tagged hosts and unfinished local creates. With no `--region`, it
+queries regions in your saved provisioning records for the selected AWS profile,
+or the AWS CLI default when there are no records. Pass `--region` to discover
+hosts created from another controller. Add `--json` for machine-readable output
+on `create` and `list`.
+
+Every create prints an operation ID and cleanup command before allocating cloud
+resources. If bootstrap, target registration, or a cloud request fails, the
+owned resources and SSH key remain available for inspection. Use `list`, then
+`destroy <operation-id>` to clean up before retrying. A lost launch response is
+recoverable through the same operation's AWS tags; do not manually retry an
+uncertain launch with a fresh client token.
+
+`destroy` accepts a target name, instance ID, or operation ID. It permanently
+terminates the selected managed VM, including all sessions and its root disk,
+then releases its tagged Elastic IP and removes only its tagged security
+group/key pair, matching mj configuration,
+and local key files. It preserves credentials and configuration until cloud
+termination succeeds, and can be repeated after partial cleanup. It does not
+terminate VMs without the `mj:managed-by=mj-ec2` ownership tag. Any session
+records on a destroyed host retain their transcript but can no longer reach
+that host; suspend or destroy sessions first when you want their recovery data
+or normal session cleanup preserved.
+
+AWS permissions include EC2 instance/image/subnet/type discovery, tagged key
+pair and security group creation/deletion, ingress authorization, launching,
+status checks, termination, Elastic IP allocation/association/release, and SSM `GetParameter` for the public Ubuntu image.
+No IAM role or VPC is created.
+
+## Disposable instances per session
+
+The rest of this guide describes an `aws-ec2` machine: a disposable EC2 instance
+that Mjolnir launches for one bare session and terminates when the session is
+suspended or destroyed.
+
+## Launch-template ownership
 
 Mjolnir provisions a session by shelling out to the `aws` CLI. Opening a session
 on an `aws-ec2` machine runs:
@@ -59,8 +133,9 @@ Suspending or destroying the session runs the matching, idempotent:
 aws --profile <aws_profile> --region <region> ec2 terminate-instances --instance-ids <instance-id>
 ```
 
-Beyond launching, tagging, describing, and terminating the session instance,
-Mjolnir does not provision AWS infrastructure. It does not create a launch
+For the disposable launch-template workflow, beyond launching, tagging,
+describing, and terminating the session instance, Mjolnir does not provision
+AWS infrastructure. It does not create a launch
 template, security group, key pair, VPC, or IAM role, and it does not manage
 AMIs. Prepare those resources before you point a target at AWS.
 
