@@ -14,8 +14,8 @@ use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
 use mj_core::config::Machine;
 use mj_core::state::{BuildCacheOff, BuildCachePreview};
 
-const MBX_X86_64_SHA256: &str = "c375135e2a3916f58da1b47537b6a954159eeacd55523d9a618b42259bd89014";
-const MBX_AARCH64_SHA256: &str = "ae4d66308c706ffbf912beb45b3166cf1cfda4d3efd23273262791235d0accf5";
+const MBX_X86_64_SHA256: &str = "b523a9324d50fd434e355fc7a5af5f7155d62854dd6a5a74173d52655f168d45";
+const MBX_AARCH64_SHA256: &str = "900844b980f9e3daf778d38a19046281cc35e07108a9c821befef6130846df1f";
 
 const PROFILE_SCRIPT: &str = r#"set -eu
 login_shell=
@@ -109,6 +109,17 @@ pub struct MbxInstallResult {
     pub kind: MbxInstallKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InstallDestination {
+    Supported {
+        program: PathBuf,
+        kind: MbxInstallKind,
+    },
+    Unsupported {
+        program: PathBuf,
+    },
+}
+
 /// The login-profile change shown before and after installing mbx.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MbxProfileDetails {
@@ -126,6 +137,13 @@ struct ProfileSelection {
 
 /// The install action to show for the current read-only cache preview.
 pub fn install_kind(preview: &BuildCachePreview) -> Option<MbxInstallKind> {
+    // A profile path is populated only when destination selection supports
+    // installing or upgrading this host's mbx.
+    preview.mbx_profile_file.as_ref()?;
+    install_candidate_kind(preview)
+}
+
+pub(super) fn install_candidate_kind(preview: &BuildCachePreview) -> Option<MbxInstallKind> {
     // The pinned release is a static Linux executable.
     if matches!(
         &preview.off_reason,
@@ -165,7 +183,13 @@ fn install_mbx_with(
 
     check_cancelled(executor)?;
     let existing = probe_native_version(&host, executor)?;
-    let (program, kind) = destination(&home, existing.as_ref())?;
+    let (program, kind) = match destination(&home, existing.as_ref())? {
+        InstallDestination::Supported { program, kind } => (program, kind),
+        InstallDestination::Unsupported { program } => bail!(
+            "mbx at {} is managed outside Mjolnir's install locations. Upgrade it with its package manager (for mise, run `mise upgrade`).",
+            program.display()
+        ),
+    };
     ensure!(
         program.is_absolute(),
         "the selected mbx destination is not absolute"
@@ -256,9 +280,12 @@ fn host_architecture(host: &CacheHost, executor: &impl CommandExecutor) -> Resul
     }
 }
 
-fn destination(home: &Path, existing: Option<&NativeMbx>) -> Result<(PathBuf, MbxInstallKind)> {
+fn destination(home: &Path, existing: Option<&NativeMbx>) -> Result<InstallDestination> {
     let Some(existing) = existing else {
-        return Ok((home.join(".local/bin/mbx"), MbxInstallKind::Install));
+        return Ok(InstallDestination::Supported {
+            program: home.join(".local/bin/mbx"),
+            kind: MbxInstallKind::Install,
+        });
     };
     ensure!(
         existing.program.is_absolute(),
@@ -269,12 +296,14 @@ fn destination(home: &Path, existing: Option<&NativeMbx>) -> Result<(PathBuf, Mb
         .iter()
         .any(|directory| existing.program.strip_prefix(directory).is_ok())
     {
-        return Ok((existing.program.clone(), MbxInstallKind::Upgrade));
+        return Ok(InstallDestination::Supported {
+            program: existing.program.clone(),
+            kind: MbxInstallKind::Upgrade,
+        });
     }
-    bail!(
-        "mbx at {} is managed outside Mjolnir's install locations. Upgrade it with its package manager (for mise, run `mise upgrade`).",
-        existing.program.display()
-    )
+    Ok(InstallDestination::Unsupported {
+        program: existing.program.clone(),
+    })
 }
 
 fn transfer_binary(
@@ -410,15 +439,18 @@ fn run_setup(host: &CacheHost, program: &Path, executor: &impl CommandExecutor) 
 pub(super) fn login_profile_details(
     host: &CacheHost,
     executor: &impl CommandExecutor,
-) -> Result<MbxProfileDetails> {
+) -> Result<Option<MbxProfileDetails>> {
     let home = canonical_home(host, executor)?;
     let existing = probe_native_version(host, executor)?;
-    let (program, _) = destination(&home, existing.as_ref())?;
+    let program = match destination(&home, existing.as_ref())? {
+        InstallDestination::Supported { program, .. } => program,
+        InstallDestination::Unsupported { .. } => return Ok(None),
+    };
     let binary_dir = program
         .parent()
         .context("the selected mbx path has no parent directory")?;
     let selection = inspect_profile_selection(host, binary_dir, executor)?;
-    Ok(profile_details(&selection, binary_dir))
+    Ok(Some(profile_details(&selection, binary_dir)))
 }
 
 fn inspect_profile_selection(
@@ -805,7 +837,7 @@ mod tests {
     ) -> BuildCachePreview {
         BuildCachePreview {
             native_mbx: native_mbx.map(str::to_owned),
-            mbx_profile_file: None,
+            mbx_profile_file: Some("~/.profile".into()),
             mbx_profile_warning: None,
             mbx_manual_path_line: None,
             directory: None,
@@ -828,7 +860,14 @@ mod tests {
             install_kind(&cache_preview(Some("1.21.0"), None)),
             Some(MbxInstallKind::Upgrade)
         );
+        assert_eq!(
+            install_kind(&cache_preview(Some("1.22.0"), None)),
+            Some(MbxInstallKind::Upgrade)
+        );
         assert_eq!(install_kind(&cache_preview(Some(MBX_VERSION), None)), None);
+        let mut external = cache_preview(Some("1.22.0"), None);
+        external.mbx_profile_file = None;
+        assert_eq!(install_kind(&external), None);
         // A Mac reports its own older mbx, which the Linux release cannot
         // replace, as well as having none.
         for native in [None, Some("1.16.0")] {
@@ -851,10 +890,10 @@ mod tests {
         let home = Path::new("/home/build");
         assert_eq!(
             destination(home, None).unwrap(),
-            (
-                PathBuf::from("/home/build/.local/bin/mbx"),
-                MbxInstallKind::Install
-            )
+            InstallDestination::Supported {
+                program: PathBuf::from("/home/build/.local/bin/mbx"),
+                kind: MbxInstallKind::Install,
+            }
         );
         for path in ["/home/build/.local/bin/mbx", "/home/build/.cargo/bin/mbx"] {
             assert_eq!(
@@ -866,18 +905,26 @@ mod tests {
                     })
                 )
                 .unwrap(),
-                (PathBuf::from(path), MbxInstallKind::Upgrade)
+                InstallDestination::Supported {
+                    program: PathBuf::from(path),
+                    kind: MbxInstallKind::Upgrade,
+                }
             );
         }
-        let error = destination(
+        let unsupported = destination(
             home,
             Some(&NativeMbx {
                 program: PathBuf::from("/home/build/.local/share/mise/installs/mbx/1.21/bin/mbx"),
                 version: "1.21.0".into(),
             }),
         )
-        .unwrap_err();
-        assert!(format!("{error:#}").contains("mise upgrade"));
+        .unwrap();
+        assert_eq!(
+            unsupported,
+            InstallDestination::Unsupported {
+                program: PathBuf::from("/home/build/.local/share/mise/installs/mbx/1.21/bin/mbx")
+            }
+        );
     }
 
     #[test]

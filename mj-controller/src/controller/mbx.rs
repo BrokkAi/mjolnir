@@ -29,8 +29,8 @@ use mj_core::state::{
     SessionBuildCache,
 };
 
-/// The minimum mbx version whose cache format Mjolnir can share.
-pub(crate) const MBX_VERSION: &str = "1.22.0";
+/// Release installed by Mjolnir when a user installs or upgrades host mbx.
+pub(crate) const MBX_VERSION: &str = "1.30.0";
 
 const MBX_COPY_RELATIVE: &str = ".mjolnir/bin/mbx";
 /// mbx's running totals, relative to the cache directory.
@@ -278,8 +278,9 @@ pub fn preview_build_cache(
     };
     let settings = machine.build_cache().cloned().unwrap_or_default();
     let mut preview = inspect(&host, &settings, Freshness::Fresh, executor)?.preview;
-    if install::install_kind(&preview).is_some() {
-        let profile = install::login_profile_details(&host, executor)?;
+    if install::install_candidate_kind(&preview).is_some()
+        && let Some(profile) = install::login_profile_details(&host, executor)?
+    {
         preview.mbx_profile_file = Some(profile.file);
         preview.mbx_profile_warning = profile.warning;
         preview.mbx_manual_path_line = profile.manual_path_line;
@@ -315,9 +316,7 @@ pub(crate) fn apply_machine_build_cache(
     } else {
         match classify_native_mbx(probe_native_version(&host, executor)?) {
             NativeMbxStatus::Compatible(native) => Some(native),
-            NativeMbxStatus::Absent
-            | NativeMbxStatus::TooOld(_)
-            | NativeMbxStatus::Unknown { .. } => None,
+            NativeMbxStatus::Absent | NativeMbxStatus::Unknown { .. } => None,
         }
     };
     let Some(native) = native else {
@@ -413,7 +412,6 @@ pub(crate) enum DoctorHostMbxStatus {
     Unsupported(String),
     Absent,
     Compatible(String),
-    TooOld(String),
     Unknown(String),
 }
 
@@ -421,7 +419,6 @@ pub(crate) enum DoctorHostMbxStatus {
 enum NativeMbxStatus {
     Absent,
     Compatible(NativeMbx),
-    TooOld(NativeMbx),
     Unknown { version: String, reason: String },
 }
 
@@ -430,10 +427,7 @@ fn classify_native_mbx(native: Option<NativeMbx>) -> NativeMbxStatus {
         return NativeMbxStatus::Absent;
     };
     match semver::Version::parse(&native.version) {
-        Ok(_) if version_at_least(&native.version, MBX_VERSION) => {
-            NativeMbxStatus::Compatible(native)
-        }
-        Ok(_) => NativeMbxStatus::TooOld(native),
+        Ok(_) => NativeMbxStatus::Compatible(native),
         Err(_) => NativeMbxStatus::Unknown {
             reason: format!(
                 "the host reported an unrecognized mbx version {:?}",
@@ -456,10 +450,6 @@ fn cache_unavailable_reason(status: &NativeMbxStatus) -> String {
         NativeMbxStatus::Absent => {
             "mbx is not installed on the container host. Install mbx from Settings › Setup › Machines to enable the shared build cache.".into()
         }
-        NativeMbxStatus::TooOld(native) => format!(
-            "host mbx {} is older than the minimum supported version {}; upgrade mbx from Settings › Setup › Machines to enable the shared build cache",
-            native.version, MBX_VERSION
-        ),
         NativeMbxStatus::Unknown { reason, .. } => format!(
             "{reason}; install or upgrade mbx from Settings › Setup › Machines to enable the shared build cache"
         ),
@@ -519,7 +509,6 @@ pub(crate) fn doctor_host_mbx(
                     NativeMbxStatus::Compatible(native) => {
                         DoctorHostMbxStatus::Compatible(native.version)
                     }
-                    NativeMbxStatus::TooOld(native) => DoctorHostMbxStatus::TooOld(native.version),
                     NativeMbxStatus::Unknown { reason, .. } => DoctorHostMbxStatus::Unknown(reason),
                 },
             )
@@ -575,7 +564,6 @@ fn inspect_host(
         NativeMbxStatus::Compatible(native) => native,
         status => {
             let native_version = match &status {
-                NativeMbxStatus::TooOld(native) => Some(native.version.clone()),
                 NativeMbxStatus::Unknown { version, .. } => Some(version.clone()),
                 NativeMbxStatus::Absent | NativeMbxStatus::Compatible(_) => None,
             };
@@ -1461,6 +1449,7 @@ mod tests {
     fn native_host() -> Vec<(&'static str, i32, &'static str)> {
         vec![
             ("$resolved\" --version", 0, "/usr/local/bin/mbx\nmbx 1.22.0"),
+            ("hel-mbx-home", 0, "/home/dev"),
             (
                 "mbx cache dir --json",
                 0,
@@ -1920,13 +1909,13 @@ mod tests {
         windows,
         ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
     )]
-    fn an_older_native_mbx_must_not_share_the_store() {
+    fn an_unrecognized_native_mbx_must_not_share_the_store() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
             (
                 "$resolved\" --version",
                 0,
-                "/home/jonathan/.local/bin/mbx\nmbx 1.15.0",
+                "/home/jonathan/.local/bin/mbx\nmbx unknown",
             ),
             ("hel-mbx-home", 0, "/home/jonathan"),
         ]);
@@ -1937,7 +1926,8 @@ mod tests {
         assert!(matches!(
             preview.off_reason,
             Some(BuildCacheOff::Unavailable(reason))
-                if reason.contains("1.15.0") && reason.contains("Settings › Setup › Machines")
+                if reason.contains("unrecognized mbx version")
+                    && reason.contains("Settings › Setup › Machines")
         ));
     }
 
@@ -2257,16 +2247,16 @@ mod tests {
             version: version.into(),
         };
         assert!(matches!(
+            classify_native_mbx(Some(native("1.22.0"))),
+            NativeMbxStatus::Compatible(_)
+        ));
+        assert!(matches!(
             classify_native_mbx(Some(native(MBX_VERSION))),
             NativeMbxStatus::Compatible(_)
         ));
         assert!(matches!(
-            classify_native_mbx(Some(native("1.23.0"))),
-            NativeMbxStatus::Compatible(_)
-        ));
-        assert!(matches!(
             classify_native_mbx(Some(native("1.15.0"))),
-            NativeMbxStatus::TooOld(_)
+            NativeMbxStatus::Compatible(_)
         ));
         assert!(matches!(
             classify_native_mbx(Some(native("not-a-version"))),
@@ -2795,7 +2785,7 @@ while [ ! -e "$3" ]; do sleep 0.01; done"#;
         windows,
         ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
     )]
-    fn absent_or_too_old_native_mbx_leaves_the_existing_cache_copy() {
+    fn absent_or_unrecognized_native_mbx_leaves_the_existing_cache_copy() {
         struct ProbeAnswer {
             status: i32,
             stdout: Vec<u8>,
@@ -2824,7 +2814,7 @@ while [ ! -e "$3" ]; do sleep 0.01; done"#;
             },
             ProbeAnswer {
                 status: 0,
-                stdout: "/opt/old/mbx\nmbx 1.21.0".into(),
+                stdout: "/opt/old/mbx\nmbx unknown".into(),
             },
         ] {
             let result = sync_current_mbx_binary(&CacheHost::Local, &cache, &answer).unwrap();
@@ -2844,8 +2834,9 @@ while [ ! -e "$3" ]; do sleep 0.01; done"#;
         let preview = preview_build_cache(&configured_local_machine(), &executor)
             .unwrap()
             .unwrap();
-        assert_eq!(preview.native_mbx.as_deref(), Some(MBX_VERSION));
+        assert_eq!(preview.native_mbx.as_deref(), Some("1.22.0"));
         assert_eq!(preview.mbx_profile_file, None);
+        assert_eq!(install::install_kind(&preview), None);
         assert_eq!(
             preview.directory,
             Some(PathBuf::from("/mnt/fast/mbx-cache"))
