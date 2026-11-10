@@ -18,7 +18,8 @@ Logins should remain usable when several Mjolnir background servers (daemons) sh
 - [x] (2026-11-10) Implement shared guard, refresh consumers and asynchronous relay installs with isolated regressions.
 - [x] (2026-11-10) Integrated review corrections preserve authoritative OpenCode exports and unconditional credential-symlink refusal; parent fixed a remaining test-helper argument mismatch after the sync handback.
 - [x] (2026-11-10) Add safe Claude HTTP-rejection, DNS, connection-refusal and native-policy failure categories without echoing captured output.
-- [ ] Focused tests running with stable core/controller/worker package selection.
+- [x] (2026-11-10) First focused run compiled and passed 117 controller cases; three failures exposed fixture/result expectations and a subprocess-start issue.
+- [ ] Correct the failed cases and review P1: reconcile retained newer destinations immediately, and carry immutable matched-login evidence into rejection tracking.
 - [ ] Run final touched-crate suites, workspace clippy and formatting; review, commit and push.
 
 ## Surprises & Discoveries
@@ -38,7 +39,7 @@ The initial investigation is read-only against live state. Regression tests must
 ## Outcomes & Retrospective
 
 
-Investigation has established two concurrency defects, but their causal link to the user's observed outages remains unproven. Shared ownership and destination-owned installation are implemented. Independent review found and corrected the symlink no-write case. Integrated review corrected OpenCode exports and a worker test-helper mismatch. Claude diagnostics now classify only exact native/Axios-shaped messages into fixed text; unknown messages retain the generic exit status. The secret-output regression covers both streams, token-bearing request dumps and invalid UTF-8. Focused validation has started.
+Investigation has established two concurrency defects, but their causal link to the user's observed outages remains unproven. Shared ownership and destination-owned installation are implemented. Independent review found and corrected the symlink no-write case. Integrated review corrected OpenCode exports and a worker test-helper mismatch. Claude diagnostics now classify only exact native/Axios-shaped messages into fixed text; unknown messages retain the generic exit status. The secret-output regression covers both streams, token-bearing request dumps and invalid UTF-8. The first focused run passed 117 controller cases and failed three; core and worker tests were not reached. Early review on d8f21f06f found that a skipped stale install could produce an empty action result and cause rejection tracking to label a newer login refused. This is being corrected before rerunning the failing cases.
 
 ## Context and Orientation
 
@@ -98,3 +99,5 @@ Evidence revision (2026-11-10): confirm concurrent daemon instances sharing nati
 User clarification and integration revision (2026-11-10): Claude is worst affected, OpenAI is second, and Kimi usage is too sparse to judge. Add finite allowlisted Claude error categories without logging raw output, so future failures are distinguishable. Preserve authoritative OpenCode empty exports and reject marker symlinks even when reconciliation would skip a write.
 
 Diagnostics revision (2026-11-10): finish safe fixed-text Claude categories and begin focused elevated validation. Preserve sensitive-output handling; do not claim to recover old discarded errors.
+
+Review revision (2026-11-10): the user requested review concurrently with tests, authorizing candidate commit d8f21f06f before test completion. Accept review P1. Retry reconciliation only after an actual snapshot transition; carry the original unchanged matching snapshot in session outcomes and record that fingerprint, never whichever file happens to be current when the result is consumed. This removes the rejection-observation race as well as the stale-install empty-result case. No action or timestamp is fabricated to suppress rejection.

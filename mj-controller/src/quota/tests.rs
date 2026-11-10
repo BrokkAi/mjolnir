@@ -548,7 +548,15 @@ for line in sys.stdin:
         result = {}
     print(json.dumps({'id': message['id'], 'result': result}), flush=True)
 "#;
-    let (mut environment, first_log) = fake_codex_app_server(directory.path(), script);
+    // Fake commands are read by /bin/sh, so invoke Python explicitly rather
+    // than relying on the source file's shebang.
+    let python_script = directory.path().join("quota-server.py");
+    std::fs::write(&python_script, script).unwrap();
+    let launcher = format!(
+        "exec /usr/bin/python3 {} \"$@\"\n",
+        mj_core::targets::posix_quote(python_script.to_str().unwrap())
+    );
+    let (mut environment, first_log) = fake_codex_app_server(directory.path(), &launcher);
     environment.insert(
         "CODEX_REFRESH_SOCKET".into(),
         socket_path.to_string_lossy().into_owned(),
@@ -570,11 +578,20 @@ for line in sys.stdin:
     .env(CHILD_HOME, directory.path())
     .env(CHILD_ENV, serde_json::to_string(&environment).unwrap())
     .isolated_store(&directory.path().join("child-instance"));
-    let child = tokio::task::spawn_blocking(move || child.output());
-    let (mut control, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
-        .await
-        .expect("first process entered its refresh")
-        .unwrap();
+    let mut child = tokio::task::spawn_blocking(move || child.output());
+    let (mut control, _) = tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(20), listener.accept()) => {
+            result.expect("first process entered its refresh").unwrap()
+        }
+        result = &mut child => {
+            let output = result.unwrap();
+            panic!(
+                "first quota process exited before its refresh: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    };
     assert_eq!(control.read_u8().await.unwrap(), b'R');
 
     let second_log = directory.path().join("second.jsonl");
@@ -593,7 +610,7 @@ for line in sys.stdin:
     );
     assert!(!second_log.exists(), "waiting must precede app-server RPCs");
 
-    let (unrelated_environment, _) = fake_codex_app_server(unrelated.path(), script);
+    let (unrelated_environment, _) = fake_codex_app_server(unrelated.path(), &launcher);
     let independent = tokio::time::timeout(
         Duration::from_secs(20),
         poll_codex_profile(unrelated.path(), unrelated_environment),

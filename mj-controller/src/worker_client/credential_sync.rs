@@ -780,6 +780,7 @@ pub(super) fn merge_step_outcome(
     let outcome = outcomes
         .entry(session_id.to_owned())
         .or_insert_with(|| CredentialSyncOutcome {
+            unchanged_login: None,
             session_id: session_id.to_owned(),
             outcome: Ok(Vec::new()),
             step_failures: Vec::new(),
@@ -808,6 +809,7 @@ pub(super) fn merge_step_outcome(
 /// The outcome of a woken renewal that never answered.
 fn unknown_renewal_outcome(session_id: &str) -> CredentialSyncOutcome {
     CredentialSyncOutcome {
+        unchanged_login: None,
         session_id: session_id.to_owned(),
         outcome: Ok(Vec::new()),
         step_failures: vec![StepFailure {
@@ -948,6 +950,7 @@ pub(super) enum GithubSync {
 /// failure of each step that failed. Every step runs whether or not another
 /// failed.
 pub(super) struct SessionSync {
+    pub(super) unchanged_login: Option<CredentialSnapshot>,
     pub(super) actions: Vec<CredentialSyncAction>,
     pub(super) failures: Vec<StepFailure>,
     /// The AWS profile the session's worker was staged with, when the work
@@ -1161,7 +1164,10 @@ async fn reconcile_target(
             }
         }
         Ok(Some(SessionSync {
-            actions, failures, ..
+            actions,
+            failures,
+            unchanged_login,
+            ..
         })) => {
             if let Some(failure) = joined_failures(&failures) {
                 tracing::warn!(
@@ -1176,6 +1182,7 @@ async fn reconcile_target(
                 pulled: actions.contains(&CredentialSyncAction::Pulled),
                 clean: failures.is_empty(),
                 outcome: Some(CredentialSyncOutcome {
+                    unchanged_login,
                     session_id: target.session_id.clone(),
                     outcome: Ok(actions),
                     step_failures: failures,
@@ -1194,6 +1201,7 @@ async fn reconcile_target(
                 pulled: false,
                 clean: false,
                 outcome: Some(CredentialSyncOutcome {
+                    unchanged_login: None,
                     session_id: target.session_id.clone(),
                     outcome: Err(format!("{error:#}")),
                     step_failures: Vec::new(),
@@ -1296,6 +1304,7 @@ pub(super) async fn aws_cycle(
                     failure: None,
                     partial: true,
                     outcomes: vec![CredentialSyncOutcome {
+                        unchanged_login: None,
                         session_id: session_id.clone(),
                         outcome: Ok(held.actions.clone()),
                         step_failures: failures,
@@ -1326,6 +1335,7 @@ pub(super) async fn aws_cycle(
             return (
                 session_id,
                 Ok(Some(SessionSync {
+                    unchanged_login: None,
                     actions: withdrawn,
                     failures: vec![StepFailure {
                         step: SyncStep::Aws,
@@ -1537,6 +1547,7 @@ impl RenewalTasks {
                 failure: None,
                 partial: true,
                 outcomes: vec![CredentialSyncOutcome {
+                    unchanged_login: None,
                     session_id: session_id.clone(),
                     outcome: Ok(Vec::new()),
                     step_failures: vec![StepFailure {
@@ -1664,6 +1675,7 @@ pub(super) async fn renew_session_aws(
         merge_aws_cycle(&mut outcomes, &target.session_id, result);
         let mut report = outcomes.remove(&target.session_id).or_else(|| {
             checked.then(|| CredentialSyncOutcome {
+                unchanged_login: None,
                 session_id: target.session_id.clone(),
                 outcome: Ok(Vec::new()),
                 step_failures: Vec::new(),
@@ -2035,6 +2047,7 @@ async fn run_work(
         SyncWork::Full(canonical) => reconcile_on(client, target, &canonical).await,
         SyncWork::Aws(aws) => {
             let mut sync = SessionSync {
+                unchanged_login: None,
                 actions: Vec::new(),
                 failures: Vec::new(),
                 staged_profile: None,
@@ -2063,6 +2076,7 @@ async fn run_work(
                 "the worker reported an AWS profile name that is not valid. Restart the session to stage its AWS configuration again"
             );
             Ok(SessionSync {
+                unchanged_login: None,
                 actions: Vec::new(),
                 failures: Vec::new(),
                 staged_profile: Some(profile),
@@ -2083,13 +2097,17 @@ pub(super) async fn reconcile_on(
     canonical: &SessionCanonical,
 ) -> Result<SessionSync> {
     let mut sync = SessionSync {
+        unchanged_login: None,
         actions: Vec::new(),
         failures: Vec::new(),
         staged_profile: None,
     };
     reconcile_aws_step(client, &canonical.aws, &mut sync).await;
     let SessionSync {
-        actions, failures, ..
+        actions,
+        failures,
+        unchanged_login,
+        ..
     } = &mut sync;
     let mut note = |step: SyncStep, label: &str, error: String| {
         failures.push(StepFailure {
@@ -2102,7 +2120,7 @@ pub(super) async fn reconcile_on(
     if !target.skips_login_file_sync {
         match &canonical.login {
             Ok(login) => {
-                if let Err(error) = reconcile_credentials(
+                match reconcile_credentials(
                     client,
                     target,
                     &login.path,
@@ -2112,11 +2130,12 @@ pub(super) async fn reconcile_on(
                 )
                 .await
                 {
-                    note(
+                    Ok(snapshot) => *unchanged_login = snapshot,
+                    Err(error) => note(
                         SyncStep::HarnessLogin,
                         "harness login",
                         format!("{error:#}"),
-                    );
+                    ),
                 }
             }
             Err(error) => note(SyncStep::HarnessLogin, "harness login", error.clone()),
@@ -2394,67 +2413,103 @@ pub(super) async fn reconcile_credentials(
     canonical: &CredentialSnapshot,
     canonical_bytes: &[u8],
     actions: &mut Vec<CredentialSyncAction>,
-) -> Result<()> {
-    let session = client.credential_state().await?;
+) -> Result<Option<CredentialSnapshot>> {
+    let mut session = client.credential_state().await?;
     if target.harness.keeps_logins_in_database() {
         if let Some(bytes) = stored_logins_push(canonical, canonical_bytes, &session) {
             let installed = client.install_credentials(bytes).await?;
-            // OpenCode's empty export (`[]`) is the authoritative deletion
-            // payload and remains a present staged export on the worker.
-            let expected = CredentialSnapshot::of(target.harness, bytes);
-            if installed == expected {
-                actions.push(CredentialSyncAction::Pushed);
-            }
-        }
-        return Ok(());
-    }
-    match reconcile(canonical, &session) {
-        SyncAction::None => {
-            if canonical.present
-                && session.present
-                && canonical.fingerprint != session.fingerprint
-                && canonical.freshness_epoch_ms.is_none()
-                && session.freshness_epoch_ms.is_none()
+            // An empty export is still a present staged file on the worker.
+            if installed.present
+                && installed.fingerprint == mj_core::credentials::credential_fingerprint(bytes)
             {
-                tracing::warn!(
-                    session_id = %target.session_id,
-                    profile_id = %target.profile_id,
-                    "credential copies differ but neither reports a refresh time; leaving both alone"
-                );
-            }
-        }
-        SyncAction::Push => {
-            let installed = client.install_credentials(canonical_bytes).await?;
-            if installed == *canonical {
                 actions.push(CredentialSyncAction::Pushed);
             }
         }
-        SyncAction::Pull => {
-            let bytes = client.read_credentials().await?;
-            validate_credential_payload(target.harness, &bytes).with_context(|| {
-                format!(
-                    "session {} returned an unusable credential file",
+        return Ok(None);
+    }
+    let mut current = canonical.clone();
+    let mut bytes = canonical_bytes.to_owned();
+    let mut unchanged = true;
+    loop {
+        match reconcile(&current, &session) {
+            SyncAction::None => {
+                if current.present
+                    && session.present
+                    && current.fingerprint != session.fingerprint
+                    && current.freshness_epoch_ms.is_none()
+                    && session.freshness_epoch_ms.is_none()
+                {
+                    tracing::warn!(
+                        session_id = %target.session_id,
+                        profile_id = %target.profile_id,
+                        "credential copies differ but neither reports a refresh time; leaving both alone"
+                    );
+                }
+                // Only this original, identical snapshot can identify the login
+                // the failing session held. A concurrent refresh is not evidence
+                // that the newly observed login was refused.
+                return Ok((unchanged
+                    && current.present
+                    && session.present
+                    && current.fingerprint == session.fingerprint)
+                    .then_some(current));
+            }
+            SyncAction::Push => {
+                let installed = client.install_credentials(&bytes).await?;
+                if installed.present && installed.fingerprint == current.fingerprint {
+                    actions.push(CredentialSyncAction::Pushed);
+                    return Ok(None);
+                }
+                anyhow::ensure!(
+                    installed != session,
+                    "session {} retained its credentials without accepting the newer profile login or reporting a changed snapshot",
                     target.session_id
+                );
+                session = installed;
+            }
+            SyncAction::Pull => {
+                let received = client.read_credentials().await?;
+                validate_credential_payload(target.harness, &received).with_context(|| {
+                    format!(
+                        "session {} returned an unusable credential file",
+                        target.session_id
+                    )
+                })?;
+                let incoming = CredentialSnapshot::of(target.harness, &received);
+                let installed = mj_core::credentials::install_credentials_if_newer(
+                    target.harness,
+                    canonical_path,
+                    &received,
                 )
-            })?;
-            let installed = mj_core::credentials::install_credentials_if_newer(
-                target.harness,
-                canonical_path,
-                &bytes,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "install fresher credentials from session {} for profile {}",
-                    target.session_id, target.profile_id
-                )
-            })?;
-            if installed.installed {
-                actions.push(CredentialSyncAction::Pulled);
+                .await
+                .with_context(|| {
+                    format!(
+                        "install fresher credentials from session {} for profile {}",
+                        target.session_id, target.profile_id
+                    )
+                })?;
+                if installed.installed {
+                    actions.push(CredentialSyncAction::Pulled);
+                    return Ok(None);
+                }
+                anyhow::ensure!(
+                    installed.snapshot != current || incoming != session,
+                    "profile {} retained its credentials without accepting the newer session login or observing a changed snapshot",
+                    target.profile_id
+                );
+                session = incoming;
             }
         }
+        // A destination retained a different generation. Reconcile that actual
+        // state now, rather than turning a stale decision into a clean check.
+        // Every repeat follows a changed snapshot; no lock spans relay I/O.
+        unchanged = false;
+        let path = canonical_path.to_owned();
+        let kind = target.harness;
+        (current, bytes) = tokio::task::spawn_blocking(move || read_credential_file(kind, &path))
+            .await
+            .context("reread profile credentials task stopped")??;
     }
-    Ok(())
 }
 
 /// The export of a profile with no logins.
