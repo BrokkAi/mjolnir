@@ -580,7 +580,7 @@ fn config_with(targets: impl IntoIterator<Item = (&'static str, TargetTemplate)>
     windows,
     ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
 )]
-fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
+fn doctor_accepts_older_shared_container_host_mbx() {
     let config = config_with([
         (
             "podman",
@@ -605,18 +605,15 @@ fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
     assert_eq!(checks.len(), 1);
     let check = &checks[0];
     assert_eq!(check.id, "build-cache.local");
-    assert_eq!(check.status, CheckStatus::Warning);
+    assert_eq!(check.status, CheckStatus::Ready);
     assert!(check.detail.contains("1.15.0"));
-    assert!(check.detail.contains(crate::controller::MBX_VERSION));
-    assert!(check.detail.contains("run without the shared build cache"));
-    assert!(check.detail.contains("docker, podman"));
     assert!(
         check
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains("Upgrade mbx")
+            .detail
+            .contains("compatible with the shared build cache")
     );
+    assert!(!check.detail.contains("1.30.0"));
+    assert!(check.detail.contains("docker, podman"));
     assert_eq!(executor.commands.borrow().len(), 2);
     assert!(
         all_ready(&checks),
@@ -624,18 +621,11 @@ fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
     );
 
     let json = serde_json::to_value(check).unwrap();
-    assert_eq!(json["status"], "warning");
-    assert!(
-        json["remediation"]
-            .as_str()
-            .unwrap()
-            .contains(crate::controller::MBX_VERSION)
-    );
+    assert_eq!(json["status"], "ready");
     let mut human = Vec::new();
     render_human(&checks, &mut human).unwrap();
     let human = String::from_utf8(human).unwrap();
-    assert!(human.contains("warning Build cache on local"));
-    assert!(human.contains("remediation: Upgrade mbx"));
+    assert!(human.contains("ready Build cache on local"));
 }
 
 #[test]
@@ -652,10 +642,7 @@ fn doctor_distinguishes_compatible_absent_and_uncheckable_host_mbx() {
     )]);
     for (response, expected_status, expected_text) in [
         (
-            Ok(output(format!(
-                "/usr/local/bin/mbx\nmbx {}",
-                crate::controller::MBX_VERSION
-            ))),
+            Ok(output("/usr/local/bin/mbx\nmbx 1.22.0")),
             CheckStatus::Ready,
             "compatible",
         ),

@@ -331,8 +331,9 @@ pub(crate) enum DashboardIoUpdate {
     SpinnerStyleSaved {
         result: std::result::Result<Config, String>,
     },
-    DetachedSessionState {
+    TerminalDraft {
         session_id: String,
+        revision: u64,
         result: std::result::Result<(), String>,
     },
     ReadReceipt {
@@ -1390,19 +1391,18 @@ impl DashboardContext {
                     Err(error) => self.dashboard.set_notice(format!("Paste failed: {error}")),
                 }
             }
-            DashboardIoUpdate::DetachedSessionState { session_id, result } => match result {
-                Ok(()) => {
-                    self.draft_save_failures.remove(&session_id);
+            DashboardIoUpdate::TerminalDraft { session_id, revision, result } => {
+                self.composer_drafts.complete(&session_id, revision, result.is_ok());
+                match result {
+                    Ok(()) => { self.draft_save_failures.remove(&session_id); }
+                    Err(error) => {
+                        let message = format!("Could not confirm saved draft for {}: {error}", self.session_notice_name(&session_id));
+                        self.draft_save_failures.insert(session_id.clone(), message.clone());
+                        self.dashboard.set_notice(message);
+                    }
                 }
-                Err(error) => {
-                    let message = format!(
-                        "Could not confirm saved draft and read status for {}: {error}",
-                        self.session_notice_name(&session_id)
-                    );
-                    self.draft_save_failures.insert(session_id, message.clone());
-                    self.dashboard.set_notice(message);
-                }
-            },
+                self.flush_composer_draft(&session_id, false);
+            }
             DashboardIoUpdate::ReadReceipt { session_id, result } => {
                 self.finish_read_receipt(session_id, result);
             }
@@ -2476,8 +2476,9 @@ mod tests {
                         released.await;
                         Ok(())
                     },
-                    move |result| DashboardIoUpdate::DetachedSessionState {
+                    move |result| DashboardIoUpdate::TerminalDraft {
                         session_id: id.to_string(),
+                        revision: 1,
                         result,
                     },
                 ));
@@ -2501,7 +2502,7 @@ mod tests {
             for _ in 0..64 {
                 assert!(matches!(
                     results.recv().await,
-                    Some(DashboardIoUpdate::DetachedSessionState { result: Ok(()), .. })
+                    Some(DashboardIoUpdate::TerminalDraft { result: Ok(()), .. })
                 ));
             }
             assert!(
@@ -2522,8 +2523,9 @@ mod tests {
             updates,
             Duration::from_millis(20),
             std::future::pending::<Result<()>>(),
-            |result| DashboardIoUpdate::DetachedSessionState {
+            |result| DashboardIoUpdate::TerminalDraft {
                 session_id: "muse".into(),
+                revision: 1,
                 result,
             },
         );
@@ -2532,7 +2534,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let Some(DashboardIoUpdate::DetachedSessionState {
+        let Some(DashboardIoUpdate::TerminalDraft {
             result: Err(error), ..
         }) = results.recv().await
         else {

@@ -263,33 +263,22 @@ pub(super) async fn handle_action(
             .await?;
             Ok(DaemonReply::Ordinal(frontier))
         }
-        DaemonAction::PersistDetachedSessionState {
+        DaemonAction::PersistTerminalDraft {
             client_id,
-            workspace_id,
             session_id,
-            through,
             owner_pid,
+            revision,
             draft,
         } => {
             blocking(move || {
-                let receipt = crate::database::persist_read_receipt(
-                    &client_id,
-                    &workspace_id,
-                    &session_id,
-                    through,
-                )
-                .map(|_| ());
-                // Draft durability is independent of receipt validity. A
-                // stale or malformed receipt must never discard typed text.
-                let saved_draft = crate::database::save_detached_session_draft(
-                    &workspace_id,
+                crate::database::save_terminal_draft(
                     &session_id,
                     &client_id,
                     owner_pid,
+                    revision,
                     draft,
                 )
-                .map(|_| ());
-                receipt.and(saved_draft)
+                .map(|_| ())
             })
             .await?;
             Ok(DaemonReply::Done)

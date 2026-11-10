@@ -4470,11 +4470,34 @@ fn only_resumable_sessions_can_move_to_a_new_workspace() {
     let mut stopped = session("session-stopped", "project-1");
     stopped.workspace_id = source.id.clone();
     save_session_to(&database, &stopped).unwrap();
+    save_terminal_draft_in(
+        &mut open(&database).unwrap(),
+        &stopped.id,
+        "terminal-a",
+        1234,
+        1,
+        &DetachedSessionDraft {
+            text: "kept across resume placement".into(),
+            inherited_input: None,
+        },
+    )
+    .unwrap();
+    let draft_id = list_detached_drafts_at(&database, &source.id).unwrap()[0]
+        .id
+        .clone();
 
     reassign_resumable_session_workspace_at(&database, &stopped.id, &destination.id).unwrap();
     assert_eq!(
         workspace_for_session_at(&database, &stopped.id).unwrap(),
         Some(destination.id.clone())
+    );
+    let moved_drafts = list_detached_drafts_at(&database, &destination.id).unwrap();
+    assert_eq!(moved_drafts.len(), 1);
+    assert_eq!(moved_drafts[0].id, draft_id);
+    assert!(
+        list_detached_drafts_at(&database, &source.id)
+            .unwrap()
+            .is_empty()
     );
     reassign_resumable_session_workspace_at(&database, &stopped.id, &destination.id).unwrap();
 
@@ -4488,6 +4511,41 @@ fn only_resumable_sessions_can_move_to_a_new_workspace() {
     assert!(
         reassign_resumable_session_workspace_at(&database, &stopped.id, "missing-workspace")
             .is_err()
+    );
+}
+
+#[test]
+fn assigning_new_session_workspace_moves_managed_terminal_draft() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let destination = create_workspace_at(&database, "Assigned").unwrap();
+    let record = session("session-assigned", "project-1");
+    save_session_to(&database, &record).unwrap();
+    save_terminal_draft_in(
+        &mut open(&database).unwrap(),
+        &record.id,
+        "terminal-a",
+        1234,
+        1,
+        &DetachedSessionDraft {
+            text: "keep across initial placement".into(),
+            inherited_input: None,
+        },
+    )
+    .unwrap();
+    let draft_id = list_detached_drafts_at(&database, DEFAULT_WORKSPACE_ID).unwrap()[0]
+        .id
+        .clone();
+
+    assign_new_session_workspace_at(&database, &record.id, &destination.id).unwrap();
+
+    let drafts = list_detached_drafts_at(&database, &destination.id).unwrap();
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].id, draft_id);
+    assert!(
+        list_detached_drafts_at(&database, DEFAULT_WORKSPACE_ID)
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -4584,12 +4642,12 @@ fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
         save_session_to(&database, &record).unwrap();
         set_session_draft_input_at(&database, &record.id, &record.draft_input).unwrap();
 
-        let saved = save_detached_session_draft_in(
+        save_terminal_draft_in(
             &mut open(&database).unwrap(),
-            &workspace.id,
             &record.id,
             "tui-client-a",
             1234,
+            1,
             &DetachedSessionDraft {
                 text: current.into(),
                 inherited_input: Some(record.draft_input.clone()),
@@ -4601,7 +4659,6 @@ fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
         assert!(reloaded.sessions[&record.id].draft_input.is_empty());
         let drafts = list_detached_drafts_at(&database, &workspace.id).unwrap();
         if current.is_empty() {
-            assert!(saved.is_none());
             assert!(drafts.is_empty());
         } else {
             assert_eq!(drafts.len(), 1);
@@ -4609,7 +4666,7 @@ fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
             assert_eq!(drafts[0].source, "tui-client-a");
             assert_eq!(drafts[0].owner_pid, Some(1234));
             // Explicit recovery is still supported after retiring the seed.
-            recover_detached_draft_at(&database, &saved.unwrap()).unwrap();
+            recover_detached_draft_at(&database, &drafts[0].id).unwrap();
             assert_eq!(
                 load_state_from(&database).unwrap().sessions[&record.id].draft_input,
                 current
@@ -4630,12 +4687,12 @@ fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
     set_session_draft_input_at(&database, &record.id, &record.draft_input).unwrap();
     let mut connection = open(&database).unwrap();
 
-    save_detached_session_draft_in(
+    save_terminal_draft_in(
         &mut connection,
-        &workspace.id,
         &record.id,
         "tui-client-a",
         1234,
+        1,
         &DetachedSessionDraft {
             text: String::new(),
             inherited_input: Some("older inherited input".into()),
@@ -4647,12 +4704,12 @@ fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
         record.draft_input
     );
 
-    let result = save_detached_session_draft_in(
+    let result = save_terminal_draft_in(
         &mut connection,
-        &workspace.id,
         &record.id,
-        "",
-        1234,
+        "failing-client",
+        0,
+        1,
         &DetachedSessionDraft {
             text: "must survive the failed save".into(),
             inherited_input: Some(record.draft_input.clone()),
@@ -4670,8 +4727,9 @@ fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
     );
 }
 
+// Hard-won: #1486: a moved composer must retire its inherited seed without a client workspace snapshot.
 #[test]
-fn a_detached_client_cannot_retire_a_draft_in_another_workspace() {
+fn a_moved_session_retires_its_inherited_seed_on_first_terminal_save() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let owner = create_workspace_at(&database, "Owner").unwrap();
@@ -4680,14 +4738,15 @@ fn a_detached_client_cannot_retire_a_draft_in_another_workspace() {
     record.workspace_id = owner.id.clone();
     save_session_to(&database, &record).unwrap();
     set_session_draft_input_at(&database, &record.id, "inherited input").unwrap();
+    set_sessions_workspace_at(&database, std::slice::from_ref(&record.id), &previous.id).unwrap();
 
-    for text in ["", "unsent in the previous workspace"] {
-        save_detached_session_draft_in(
+    for (revision, text) in [(1, ""), (2, "unsent after moving")] {
+        save_terminal_draft_in(
             &mut open(&database).unwrap(),
-            &previous.id,
             &record.id,
             "old-client",
             1234,
+            revision,
             &DetachedSessionDraft {
                 text: text.into(),
                 inherited_input: Some("inherited input".into()),
@@ -4696,13 +4755,203 @@ fn a_detached_client_cannot_retire_a_draft_in_another_workspace() {
         .unwrap();
         assert_eq!(
             load_state_from(&database).unwrap().sessions[&record.id].draft_input,
-            "inherited input"
+            ""
         );
     }
-    // Draft durability stays independent of stale workspace/read receipts.
     let drafts = list_detached_drafts_at(&database, &previous.id).unwrap();
     assert_eq!(drafts.len(), 1);
-    assert_eq!(drafts[0].text, "unsent in the previous workspace");
+    assert_eq!(drafts[0].text, "unsent after moving");
+    assert!(
+        list_detached_drafts_at(&database, &owner.id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// Hard-won: #1486: workspace snapshots could block inherited-seed retirement after a move.
+#[test]
+fn moving_session_keeps_terminal_draft_canonical_across_workspace_close_and_late_saves() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let source = create_workspace_at(&database, "Source").unwrap();
+    let destination = create_workspace_at(&database, "Destination").unwrap();
+    let mut record = session("session-moved", "project-1");
+    record.workspace_id = source.id.clone();
+    save_session_to(&database, &record).unwrap();
+
+    let save = |revision, text: &str| {
+        save_terminal_draft_in(
+            &mut open(&database).unwrap(),
+            &record.id,
+            "terminal-a",
+            1234,
+            revision,
+            &DetachedSessionDraft {
+                text: text.into(),
+                inherited_input: None,
+            },
+        )
+    };
+    save(1, "unchanged composer").unwrap();
+    let draft_id = list_detached_drafts_at(&database, &source.id).unwrap()[0]
+        .id
+        .clone();
+
+    set_sessions_workspace_at(&database, std::slice::from_ref(&record.id), &destination.id)
+        .unwrap();
+    let moved = list_detached_drafts_at(&database, &destination.id).unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].id, draft_id);
+    assert_eq!(moved[0].text, "unchanged composer");
+    close_workspace_at(&database, &source.id).unwrap();
+
+    // A delayed old-workspace edit follows the session's canonical placement.
+    save(2, "newer edit").unwrap();
+    // A stale lower revision cannot restore the removed source placement.
+    save(1, "old text").unwrap();
+    save(3, "latest edit").unwrap();
+
+    assert!(
+        list_detached_drafts_at(&database, &source.id)
+            .unwrap()
+            .is_empty()
+    );
+    let latest = list_detached_drafts_at(&database, &destination.id).unwrap();
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].id, draft_id);
+    assert_eq!(latest[0].text, "latest edit");
+    let connection = open(&database).unwrap();
+    let (revision, workspace_id): (i64, String) = connection
+        .query_row(
+            "SELECT revision, workspace_id FROM detached_drafts WHERE draft_id = ?1",
+            [&draft_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(revision, 3);
+    assert_eq!(workspace_id, destination.id);
+}
+
+#[test]
+fn terminal_draft_revisions_keep_one_row_and_ignore_late_cleared_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Drafts").unwrap();
+    let mut record = session("session-1", "project-1");
+    record.workspace_id = workspace.id.clone();
+    record.draft_input = "adopt me".into();
+    save_session_to(&database, &record).unwrap();
+
+    let save = |revision, text: &str| {
+        save_terminal_draft_in(
+            &mut open(&database).unwrap(),
+            &record.id,
+            "terminal-a",
+            1234,
+            revision,
+            &DetachedSessionDraft {
+                text: text.into(),
+                inherited_input: (revision == 1).then(|| "adopt me".into()),
+            },
+        )
+    };
+    save(1, "first draft").unwrap();
+    let row_id = list_detached_drafts_at(&database, &workspace.id).unwrap()[0]
+        .id
+        .clone();
+    save(2, "newer draft").unwrap();
+    save(3, "").unwrap();
+    save(2, "late nonempty draft").unwrap();
+
+    assert!(
+        list_detached_drafts_at(&database, &workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+    let connection = open(&database).unwrap();
+    let (id, revision, text): (String, i64, String) = connection
+        .query_row(
+            "SELECT draft_id, revision, text FROM detached_drafts
+              WHERE source='terminal-a' AND workspace_id=?1 AND session_id=?2",
+            params![workspace.id, record.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(id, row_id);
+    assert_eq!(revision, 3);
+    assert!(text.is_empty());
+    assert!(
+        load_state_from(&database).unwrap().sessions[&record.id]
+            .draft_input
+            .is_empty()
+    );
+
+    save(4, "terminal-a restored").unwrap();
+    save_terminal_draft_in(
+        &mut open(&database).unwrap(),
+        &record.id,
+        "terminal-b",
+        5678,
+        1,
+        &DetachedSessionDraft {
+            text: "independent client".into(),
+            inherited_input: None,
+        },
+    )
+    .unwrap();
+    let visible = list_detached_drafts_at(&database, &workspace.id).unwrap();
+    assert_eq!(visible.len(), 2);
+}
+
+#[test]
+fn terminal_draft_recovery_survives_identical_save_but_new_text_reopens_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let workspace = create_workspace_at(&database, "Drafts").unwrap();
+    let mut record = session("session-1", "project-1");
+    record.workspace_id = workspace.id.clone();
+    record.draft_input = "seed".into();
+    save_session_to(&database, &record).unwrap();
+    let save = |revision, text: &str| {
+        save_terminal_draft_in(
+            &mut open(&database).unwrap(),
+            &record.id,
+            "terminal-a",
+            1234,
+            revision,
+            &DetachedSessionDraft {
+                text: text.into(),
+                inherited_input: Some("seed".into()),
+            },
+        )
+    };
+    save(1, "seed").unwrap();
+    let draft_id = list_detached_drafts_at(&database, &workspace.id).unwrap()[0]
+        .id
+        .clone();
+    recover_detached_draft_at(&database, &draft_id).unwrap();
+
+    // Lost ACK retry after recovery must not compare-clear the recovered seed.
+    save(1, "seed").unwrap();
+    save(2, "seed").unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].draft_input,
+        "seed"
+    );
+    assert!(
+        list_detached_drafts_at(&database, &workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+    save(3, "new unsent edit").unwrap();
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions[&record.id].draft_input,
+        "seed"
+    );
+    let visible = list_detached_drafts_at(&database, &workspace.id).unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id, draft_id);
+    assert_eq!(visible[0].text, "new unsent edit");
 }
 
 #[test]

@@ -363,21 +363,7 @@ fn build_cache_checks(
                     id,
                     title,
                     format!(
-                        "Host mbx {version} is compatible with Mjolnir's mbx {} for targets {targets}.",
-                        crate::controller::MBX_VERSION
-                    ),
-                ),
-                crate::controller::DoctorHostMbxStatus::TooOld(version) => DoctorCheck::warning(
-                    id,
-                    title,
-                    format!(
-                        "Host mbx {version} is older than the minimum supported version {}; sessions on targets {targets} run without the shared build cache.",
-                        crate::controller::MBX_VERSION
-                    ),
-                    format!(
-                        "Upgrade mbx on {} to {} or newer from Settings › Setup › Machines, then rerun `mj doctor`.",
-                        host.host,
-                        crate::controller::MBX_VERSION
+                        "Host mbx {version} is compatible with the shared build cache for targets {targets}."
                     ),
                 ),
                 crate::controller::DoctorHostMbxStatus::Unknown(error) => DoctorCheck::warning(

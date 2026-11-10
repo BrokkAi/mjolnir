@@ -1892,18 +1892,36 @@ async fn run_workspace_dashboard(
             Ok(DashboardExit::Normal)
         }
     };
+    let dashboard_drop_finished_at = std::time::Instant::now();
+    let attachment_shutdown_started_at = std::time::Instant::now();
     attachment_cancellation.cancel();
     if let Err(error) = attachment.task.await {
         tracing::warn!(%error, "workspace attachment task failed");
     }
+    let attachment_shutdown = attachment_shutdown_started_at.elapsed();
+    let detach_connect_started_at = std::time::Instant::now();
+    let detach_connect;
+    let mut detach_request = std::time::Duration::ZERO;
     match daemon::connect_existing().await {
         Ok(mut current_daemon) => {
+            detach_connect = detach_connect_started_at.elapsed();
+            let detach_request_started_at = std::time::Instant::now();
             if let Err(error) = current_daemon.detach(client_id).await {
                 tracing::warn!(%error, "could not detach dashboard from workspace");
             }
+            detach_request = detach_request_started_at.elapsed();
         }
-        Err(error) => tracing::warn!(%error, "daemon unavailable while dashboard detached"),
+        Err(error) => {
+            detach_connect = detach_connect_started_at.elapsed();
+            tracing::warn!(%error, "daemon unavailable while dashboard detached");
+        }
     }
+    dashboard::record_attachment_teardown(
+        dashboard_drop_finished_at,
+        attachment_shutdown,
+        detach_connect,
+        detach_request,
+    );
     result
 }
 

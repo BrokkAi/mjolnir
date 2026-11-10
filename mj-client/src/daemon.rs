@@ -708,12 +708,11 @@ pub enum DaemonAction {
         session_id: String,
         through: u64,
     },
-    PersistDetachedSessionState {
+    PersistTerminalDraft {
         client_id: String,
-        workspace_id: String,
         session_id: String,
-        through: u64,
         owner_pid: u32,
+        revision: u64,
         draft: mj_core::storage::DetachedSessionDraft,
     },
     RecordAbandonedPrompt {
@@ -1973,28 +1972,26 @@ impl DaemonClient {
         }
     }
 
-    pub async fn persist_detached_session_state(
+    pub async fn persist_terminal_draft(
         &mut self,
         client_id: String,
-        workspace_id: String,
         session_id: String,
-        through: u64,
         owner_pid: u32,
+        revision: u64,
         draft: mj_core::storage::DetachedSessionDraft,
     ) -> Result<()> {
         match self
-            .request(DaemonAction::PersistDetachedSessionState {
+            .request(DaemonAction::PersistTerminalDraft {
                 client_id,
-                workspace_id,
                 session_id,
-                through,
                 owner_pid,
+                revision,
                 draft,
             })
             .await?
         {
             DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected detached-session-state reply {reply:?}"),
+            reply => bail!("unexpected terminal-draft reply {reply:?}"),
         }
     }
 
@@ -3003,7 +3000,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Client views no longer decode forwarding phases or turn-review resolutions;
 // reviewer capture actions no longer carry turn scope or baselines.
 // RuntimeSessionView carries policy-owned config keys; older strict readers reject them.
-pub const PROTOCOL_VERSION: u32 = 84;
+// Terminal draft persistence carries per-client revisions and clear tombstones.
+pub const PROTOCOL_VERSION: u32 = 85;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
