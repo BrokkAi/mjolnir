@@ -601,6 +601,9 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             config.disabled_targets.insert(raw);
             Ok(())
         })?;
+        // Provisioning is complete. Image warming owns only its image gate,
+        // so destroying the registered host never waits for this download.
+        drop(_lock);
         eprintln!(
             "Registered Podman target {}. Preloading {image}.",
             record.target
@@ -1110,6 +1113,9 @@ elif args == ['image', 'prune', '-f']:
 elif args and args[0] == 'pull':
     config = pathlib.Path(os.environ['MJ_CONFIG_DIR'])/'config.toml'
     assert config.exists() and 'builder' in config.read_text(), 'host must be registered before preloading'
+    # Hard-won: c66e5f4: a slow preload held the operation lock and blocked destroy.
+    with (config.parent/'ec2'/'locks'/'builder.lock').open('a') as operation:
+        fcntl.flock(operation, fcntl.LOCK_EX | fcntl.LOCK_NB)
     locks = list((pathlib.Path(os.environ['MJ_DATA_DIR'])/'image-pulls').glob('*.lock'))
     assert len(locks) == 1, 'preload must use the shared mj image gate'
     with locks[0].open('a') as gate:
