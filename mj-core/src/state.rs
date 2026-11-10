@@ -1191,6 +1191,39 @@ pub fn allocation_memory(allocation: &SessionResourceAllocation) -> u64 {
 }
 
 impl TargetLocator {
+    /// Physical accounting identity: engine, SSH destination (None for local), container.
+    pub fn cpu_container_scope(&self) -> Option<(&str, Option<&str>, &str)> {
+        match self {
+            Self::LocalPodman { container_id, .. } => Some(("podman", None, container_id)),
+            Self::LocalDocker { container_id, .. } => Some(("docker", None, container_id)),
+            Self::AppleContainer { container_id, .. } => Some(("apple", None, container_id)),
+            Self::SshPodman {
+                host, container_id, ..
+            } => Some(("podman", Some(host), container_id)),
+            Self::SshDocker {
+                host, container_id, ..
+            } => Some(("docker", Some(host), container_id)),
+            Self::SshAppleContainer {
+                host, container_id, ..
+            } => Some(("apple", Some(host), container_id)),
+            _ => None,
+        }
+    }
+
+    /// Same physical accounting scope, including after an owner moves targets.
+    pub fn shares_cpu_container(&self, other: &Self) -> bool {
+        self.cpu_container_scope()
+            .is_some_and(|scope| Some(scope) == other.cpu_container_scope())
+    }
+    /// Container placement includes borrowed workers: each can survive its owner moving.
+    pub fn cpu_accounting(&self) -> crate::cpu_usage::CpuAccountingMode {
+        if self.cpu_container_scope().is_some() {
+            crate::cpu_usage::CpuAccountingMode::Container
+        } else {
+            crate::cpu_usage::CpuAccountingMode::ProcessTree
+        }
+    }
+
     /// Whether this locator owns a container rather than borrowing one.
     pub const fn owns_container(&self) -> bool {
         match self {

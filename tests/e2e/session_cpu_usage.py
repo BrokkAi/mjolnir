@@ -6,6 +6,7 @@ import math
 import os
 import pathlib
 import re
+import subprocess
 import time
 
 from reliability_lab import Lab, PtyClient, ScenarioFailure
@@ -47,6 +48,136 @@ class CpuLab(Lab):
                 return value["usage"]
             time.sleep(0.2)
         raise ScenarioFailure(f"CPU sample did not settle: {value}")
+
+    def container_id(self, session_id):
+        reply = self.daemon_request({"action": "session_record", "arguments": {"session_id": session_id}})
+        return reply["value"]["target"]["container_id"]
+
+    @staticmethod
+    def container_cpu_usec(container_id):
+        result = subprocess.run(
+            ["podman", "exec", container_id, "cat", "/sys/fs/cgroup/cpu.stat"],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+        for line in result.stdout.splitlines():
+            key, value = line.split()
+            if key == "usage_usec":
+                return int(value)
+        raise ScenarioFailure(f"container cpu.stat has no usage_usec: {result.stdout!r}")
+
+    def run_container_sibling(self, workspace, tui):
+        status, response = self.request("POST", "/api/actions", {
+            "action": "new", "workspace_id": workspace, "profile_id": "fake",
+            "bundle_id": "fixture", "target_id": "podman", "title": "container-cpu-sibling",
+        })
+        assert status == 202, response
+        snapshot = self.wait_snapshot(
+            lambda value: any(row.get("title") == "container-cpu-sibling" and row.get("state") == "running"
+                              for row in value.get("sessions", [])),
+            "running container CPU session",
+        )
+        session_id = next(row["id"] for row in snapshot["sessions"]
+                          if row.get("title") == "container-cpu-sibling" and row["state"] == "running")
+        baseline = self.wait_cpu(session_id, lambda _: True, timeout=60)
+        assert baseline["scope"] == "container", baseline
+        container_id = self.container_id(session_id)
+        before_usec = self.container_cpu_usec(container_id)
+        started = time.monotonic()
+        # This command is launched by the test driver through Podman exec, so
+        # its CPU is in the session container but outside the worker's process tree.
+        burner = r'''import multiprocessing, os, time
+def burn():
+    end = time.monotonic() + 12
+    value = 1
+    while time.monotonic() < end:
+        value = (value * 3 + 1) % 1000003
+count = max(1, (os.cpu_count() + 49) // 50)
+children = [multiprocessing.Process(target=burn) for _ in range(count)]
+for child in children: child.start()
+for child in children: child.join()
+assert all(child.exitcode == 0 for child in children)
+'''
+        command = subprocess.Popen(
+            ["podman", "exec", container_id, "python3", "-c", burner],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            during = None
+            during_usec = before_usec
+            deadline = time.monotonic() + 25
+            while time.monotonic() < deadline:
+                sample = self.cpu(session_id)
+                if (sample and sample["state"] == "measured"
+                        and sample["usage"]["scope"] == "container"
+                        and sample["usage"]["recent_permille"] > 0):
+                    during = sample["usage"]
+                    during_usec = self.container_cpu_usec(container_id)
+                    assert during_usec - before_usec >= 500_000, (before_usec, during_usec)
+                    break
+                if command.poll() is not None:
+                    raise ScenarioFailure("sibling burner exited before a container CPU sample appeared")
+                time.sleep(0.2)
+            if during is None:
+                raise ScenarioFailure(f"container sibling CPU was not sampled: {self.cpu(session_id)}")
+            returncode = command.wait(timeout=20)
+            stderr = command.stderr.read()
+            if returncode:
+                raise ScenarioFailure(f"Podman sibling burner failed: {stderr}")
+
+            # The final direct cgroup read is after the burner has exited. The
+            # feed exposes rates rather than a cumulative total, so compare its
+            # sampled rate with the independently measured monotonic total delta.
+            after_usec = self.container_cpu_usec(container_id)
+            elapsed = time.monotonic() - started
+            delta_usec = after_usec - before_usec
+            assert delta_usec > 1_000_000, (before_usec, after_usec)
+            online_cpus = during["online_cpus"]
+            direct_permille = 1000 * delta_usec / (elapsed * 1_000_000 * online_cpus)
+            assert direct_permille > 0
+            assert direct_permille / 4 <= during["recent_permille"] <= direct_permille * 4, {
+                "feed_during_sibling": during,
+                "direct_cgroup_delta_usec": delta_usec,
+                "elapsed_secs": elapsed,
+                "direct_permille": direct_permille,
+            }
+            covered = during["hourly_covered_secs"]
+            after = self.wait_cpu(
+                session_id,
+                lambda usage: usage["scope"] == "container" and usage["hourly_covered_secs"] > covered,
+                timeout=20,
+            )
+            direct_hourly_permille = (
+                1000 * delta_usec
+                / (1_000_000 * after["hourly_covered_secs"] * after["online_cpus"])
+            )
+            assert direct_hourly_permille > 0
+            assert direct_hourly_permille / 4 <= after["hourly_permille"] <= direct_hourly_permille * 4, {
+                "feed_after_exit": after,
+                "direct_cgroup_delta_usec": delta_usec,
+                "direct_hourly_permille": direct_hourly_permille,
+            }
+            evidence = {
+                "scope": after["scope"],
+                "feed_during_sibling": during,
+                "feed_after_exit": after,
+                "cgroup_before_usec": before_usec,
+                "cgroup_at_sample_usec": during_usec,
+                "cgroup_after_exit_usec": after_usec,
+                "cgroup_delta_usec": delta_usec,
+                "direct_permille": round(direct_permille, 2),
+                "elapsed_secs": round(elapsed, 2),
+            }
+            (self.root / "container-cpu-evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
+            print(json.dumps(evidence, indent=2), flush=True)
+            assert "container-cpu-sibling" in tui.text()
+        finally:
+            if command.poll() is None:
+                command.terminate()
+                try:
+                    command.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    command.kill()
+                    command.wait()
 
     def run_cpu(self):
         print("Preparing isolated cpu-test instance", flush=True)
@@ -100,7 +231,7 @@ class CpuLab(Lab):
         tui.send(f"\x1b[<0;{column};{row+1}M\x1b[<0;{column};{row+1}m".encode())
         tui.wait_for("CPU by session…")
         tui.send(b"4")
-        tui.wait_for("hourly /", timeout=10)
+        tui.wait_for("hourly", timeout=10)
         assert "cpu-burner" in tui.text()
         covered = usage["hourly_covered_secs"]
         self.command("daemon", "restart")
@@ -121,7 +252,7 @@ class CpuLab(Lab):
         evidence = {"busy": usage, "after_daemon_restart": after, "idle": idle, "load_delay_secs": round(load_delay, 2)}
         (self.root / "cpu-evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
         print(json.dumps(evidence, indent=2), flush=True)
-        tui.wait_for("0% recent", timeout=max(0.1, idle_started + 20 - time.monotonic()))
+        tui.wait_for("% recent", timeout=max(0.1, idle_started + 20 - time.monotonic()))
         tui.send(b"\x1b")
         deadline = idle_started + 20
         while True:
@@ -136,6 +267,8 @@ class CpuLab(Lab):
         assert evidence["idle_delay_secs"] <= 20, evidence
         (self.root / "cpu-evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
         print(json.dumps(evidence, indent=2), flush=True)
+        # Hard-won: b7d5c8399: process-tree sampling missed CPU burned by an independent container exec.
+        self.run_container_sibling(workspace, tui)
         self.stop_daemon()
 
 

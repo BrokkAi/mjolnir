@@ -953,15 +953,17 @@ pub async fn run_daemon_owned(
     // from has to travel back here to stop the daemon.
     let (fatal_tx, mut fatal_rx) = mpsc::channel(1);
     let (cpu_tx, cpu_rx) = tokio::sync::watch::channel(Ok(None));
-    let cpu_task = tokio::spawn(crate::cpu_usage::sample_cpu(cpu_tx));
-    let cpu_abort = cpu_task.abort_handle();
+    let cpu_task = tokio::spawn(crate::cpu_usage::sample_cpu(
+        cpu_tx,
+        config.cpu_accounting.clone(),
+    ));
     struct StopCpu(tokio::task::AbortHandle);
     impl Drop for StopCpu {
         fn drop(&mut self) {
             self.0.abort();
         }
     }
-    let _stop_cpu = StopCpu(cpu_abort);
+    let _stop_cpu = StopCpu(cpu_task.abort_handle());
     let cpu_fatal = fatal_tx.clone();
     let cpu_session_id = config.session_id.clone();
     tokio::spawn(async move {

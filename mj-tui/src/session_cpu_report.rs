@@ -1,7 +1,7 @@
 //! A live, selectable CPU report grouped by machine.
 //!
 //! A parent's row shows its tree total (itself plus its listed sub-agents) and
-//! its own share. Listed sub-agents appear below their parent.
+//! its accounting scope. Listed sub-agents appear below their parent.
 use crate::DashboardState;
 use crate::session_view::clamp_permille;
 use mj_chat::theme;
@@ -44,6 +44,7 @@ pub(crate) struct MachineReport {
     pub(crate) metric: CpuMetric,
     /// The machine's total of `metric`.
     pub(crate) total_permille: u32,
+    pub(crate) partial: bool,
     /// Display rows include blank root separators. `row_map` is `None` for
     /// those separators and maps session rows to `session_ids` otherwise.
     pub(crate) lines: Vec<Line<'static>>,
@@ -54,9 +55,10 @@ pub(crate) struct MachineReport {
 impl MachineReport {
     pub(crate) fn tab_label(&self) -> String {
         format!(
-            "{} · {} {}",
+            "{} · {}{} {}",
             self.key,
             format_cpu_permille(clamp_permille(self.total_permille)),
+            if self.partial { "+" } else { "" },
             self.metric.label()
         )
     }
@@ -91,33 +93,20 @@ pub(crate) fn report_groups(dashboard: &DashboardState, metric: CpuMetric) -> Ve
         groups.entry(machine).or_default().push(session);
     }
 
-    let own_share = |session: &SessionRecord| match dashboard.session_cpu.get(&session.id) {
-        Some(SessionCpuView::Measured { usage }) => {
-            Some(metric.pick(usage.hourly_permille, usage.recent_permille))
-        }
-        _ => None,
-    };
     let tree_share = |session: &SessionRecord| tree_permille(dashboard, &session.id, metric);
-    let listed: BTreeSet<String> = groups
-        .values()
-        .flatten()
-        .map(|session| session.id.clone())
-        .collect();
-    let nested: BTreeSet<String> = listed
-        .iter()
-        .flat_map(|id| dashboard.cpu_children(id))
-        .filter(|child| listed.contains(child))
-        .collect();
 
     groups
         .into_iter()
         .map(|(key, mut sessions)| {
-            // The machine total sums each listed session's own share once.
-            let total_permille = sessions
+            let total = dashboard.cpu_total(sessions.iter().map(|session| session.id.as_str()));
+            let total_permille = metric.pick(total.hourly_permille, total.recent_permille);
+            // Nest only within the same machine; moved children retain their own tab.
+            let local: BTreeSet<_> = sessions.iter().map(|session| session.id.clone()).collect();
+            let nested: BTreeSet<_> = local
                 .iter()
-                .filter_map(|session| own_share(session))
-                .map(u32::from)
-                .sum();
+                .flat_map(|id| dashboard.cpu_children(id))
+                .filter(|id| local.contains(id))
+                .collect();
             sessions.retain(|session| !nested.contains(&session.id));
             sessions.sort_by(|a, b| {
                 tree_share(b)
@@ -129,6 +118,7 @@ pub(crate) fn report_groups(dashboard: &DashboardState, metric: CpuMetric) -> Ve
                 key,
                 metric,
                 total_permille,
+                partial: total.is_partial(),
                 lines: Vec::new(),
                 row_map: Vec::new(),
                 session_ids: Vec::new(),
@@ -138,7 +128,7 @@ pub(crate) fn report_groups(dashboard: &DashboardState, metric: CpuMetric) -> Ve
                     report.lines.push(Line::default());
                     report.row_map.push(None);
                 }
-                push_tree(dashboard, session, &listed, 1, &mut report);
+                push_tree(dashboard, session, &local, 1, &mut report);
             }
             report
         })
@@ -168,9 +158,10 @@ pub(crate) fn report_lines(dashboard: &DashboardState, metric: CpuMetric) -> Vec
         }
         lines.push(Line::styled(
             format!(
-                "{}  {} {}",
+                "{}  {}{} {}",
                 group.key,
                 format_cpu_permille(clamp_permille(group.total_permille)),
+                if group.partial { "+" } else { "" },
                 metric.label()
             ),
             Style::default()
@@ -215,13 +206,35 @@ fn cpu_summary_of(
     session_id: &str,
     metric: Option<CpuMetric>,
 ) -> CpuSummary {
+    if let Some(owner) = dashboard.cpu_included_in(session_id) {
+        return CpuSummary {
+            main: "included in parent".into(),
+            muted: true,
+            detail: dashboard
+                .state
+                .sessions
+                .get(&owner)
+                .map(|session| crate::render::session_name(session).to_owned()),
+            tree: false,
+        };
+    }
     let rollup = dashboard.cpu_rollup(session_id);
-    let own = dashboard.session_cpu.get(session_id);
+    let sample = dashboard
+        .cpu_sample(session_id)
+        .map(|usage| SessionCpuView::Measured { usage });
+    let own = sample
+        .as_ref()
+        .or_else(|| dashboard.session_cpu.get(session_id));
     if rollup.has_descendants() && rollup.measured > 0 {
         let marker = if rollup.is_partial() { "+" } else { "" };
         let own_text = match own {
             Some(SessionCpuView::Measured { usage }) => format!(
-                "own {}",
+                "{} {}",
+                if usage.scope == mj_core::cpu_usage::CpuSampleScope::Container {
+                    "container"
+                } else {
+                    "process tree"
+                },
                 format_cpu_permille(
                     metric
                         .unwrap_or(CpuMetric::Recent)
@@ -258,13 +271,20 @@ fn cpu_summary_of(
         Some(SessionCpuView::Measured { usage }) => {
             // The covered period qualifies only the hourly average.
             let seconds = usage.hourly_covered_secs;
-            let detail = (seconds < 3600 && metric != Some(CpuMetric::Recent)).then(|| {
+            let mut detail = (seconds < 3600 && metric != Some(CpuMetric::Recent)).then(|| {
                 if seconds < 60 {
                     format!("{seconds}s")
                 } else {
                     format!("{}m", seconds / 60)
                 }
             });
+            let scope = match usage.scope {
+                mj_core::cpu_usage::CpuSampleScope::Container => "container",
+                mj_core::cpu_usage::CpuSampleScope::ProcessTree => "process tree",
+            };
+            detail = Some(
+                detail.map_or_else(|| scope.to_owned(), |period| format!("{scope}; {period}")),
+            );
             let main = match metric {
                 Some(metric) => format!(
                     "{} {}",

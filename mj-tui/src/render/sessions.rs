@@ -636,7 +636,7 @@ const MIN_NAME_CELLS_WITH_CPU: usize = 8;
 
 /// The CPU text a row shows, or `None` below the display threshold (1.0%).
 fn cpu_row_label(cpu: Option<crate::session_view::CpuShare>) -> Option<String> {
-    cpu.filter(|share| share.permille >= 10)
+    cpu.filter(|share| share.included || share.permille >= 10)
         .map(|share| share.label())
 }
 
