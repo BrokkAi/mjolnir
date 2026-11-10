@@ -21,7 +21,7 @@ The observable result is that deleting an unreachable child, restarting the daem
 - [x] Register worker leases before file staging and boot; retirement/registration concurrency regression passes.
 - [x] Route physical teardown through the environment owner across Destroy, Suspend, Resume, Move, failed startup and recovery. Predictable provisioning targets are reserved before creation. Unknown legacy orphan ownership permits stopping only and reports retained files.
 - [x] Run isolated regressions, full touched-crate suites, and workspace Clippy.
-- [ ] Complete review, commit final corrections, and push.
+- [x] (2026-11-10) Review passed after two correction rounds; committed and pushed through a49ba3920.
 - [ ] Install and apply the fix to the affected live session only after installation is authorized.
 
 ## Surprises & Discoveries
@@ -56,7 +56,7 @@ The migration is breaking. Older readers and writers do not understand independe
 
 ## Outcomes & Retrospective
 
-The user approved the broader refactor. Environment ownership, startup admission, typed checkout deletion authority, and shared teardown are implemented locally and are being integrated and validated. The two principal regressions passed before the path-storage and admission refinements. No live state has been changed and no code has been pushed or installed. Upstream was merged at c69e8327a. A focused run passed 202 lifecycle, Resume, Move, provisioning and schema cases. The full four-crate run passed core, CLI, TUI, startup/upgrade and integration suites; the controller run passed 2,498 cases with 13 fixture/expectation failures. Those failures and all subsequently changed provisioning/branch cases passed in a 47-case rerun. Workspace `cargo clippy --all-targets -- -D warnings` passes. Browser notice tests also pass. Remaining work is review and push.
+The user approved the broader refactor. Environment ownership, startup admission, typed checkout deletion authority, and shared teardown are implemented locally and are being integrated and validated. The two principal regressions passed before the path-storage and admission refinements. No live state has been changed and no code has been pushed or installed. Upstream was merged at c69e8327a. A focused run passed 202 lifecycle, Resume, Move, provisioning and schema cases. The full four-crate run passed core, CLI, TUI, startup/upgrade and integration suites; the controller run passed 2,498 cases with 13 fixture/expectation failures. Those failures and all subsequently changed provisioning/branch cases passed in a 47-case rerun. Workspace `cargo clippy --all-targets -- -D warnings` passes. Browser notice tests also pass. Review passed on 49c7babbb; upstream was merged and the result pushed as a49ba3920. Installation remains pending explicit authorization.
 
 ## Context and Orientation
 
@@ -174,3 +174,9 @@ the existing successful retained-source cleanup pass. Affected-crate Clippy is
 clean. Evidence: `/tmp/mj-environment-retained-rerun.log`,
 `/tmp/mj-environment-retained-tests.log` (successful cleanup case), and
 `/tmp/mj-environment-retained-clippy.log`.
+
+Final review is clean through `49c7babbb`. Upstream `9907bf540` merged without
+conflicts; `a49ba3920` is on origin/master. The macOS/Windows nightly workflow
+was dispatched for this code. Implementation, validation, review and push are
+complete. The live store and affected session remain unchanged pending the
+user's installation instruction, because revision 122 is a breaking upgrade.
