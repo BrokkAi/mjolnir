@@ -277,7 +277,6 @@ pub(super) fn advance_client_read_frontier_at(
 /// Persist one revision of a terminal's composer while retiring its unchanged
 /// legacy seed on the first accepted save.
 pub fn save_terminal_draft(
-    workspace_id: &str,
     session_id: &str,
     source: &str,
     owner_pid: u32,
@@ -287,13 +286,11 @@ pub fn save_terminal_draft(
     let revision =
         i64::try_from(revision).context("terminal draft revision exceeds SQLite range")?;
     ensure!(revision > 0, "terminal draft revision must be positive");
-    let workspace_id = workspace_id.to_owned();
     let session_id = session_id.to_owned();
     let source = source.to_owned();
     submit_database_write("save_terminal_draft", move |connection| {
         save_terminal_draft_in(
             connection,
-            &workspace_id,
             &session_id,
             &source,
             owner_pid,
@@ -305,7 +302,6 @@ pub fn save_terminal_draft(
 
 pub(super) fn save_terminal_draft_in(
     connection: &mut Connection,
-    workspace_id: &str,
     session_id: &str,
     source: &str,
     owner_pid: u32,
@@ -346,10 +342,8 @@ pub(super) fn save_terminal_draft_in(
     {
         transaction.execute(
             "UPDATE sessions SET draft_input = ''
-              WHERE session_id = ?1 AND draft_input = ?2
-                AND EXISTS (SELECT 1 FROM session_contexts
-                             WHERE session_id = ?1 AND workspace_id = ?3)",
-            params![session_id, inherited, workspace_id],
+              WHERE session_id = ?1 AND draft_input = ?2",
+            params![session_id, inherited],
         )?;
     }
     if let Some((draft_id, _)) = existing {

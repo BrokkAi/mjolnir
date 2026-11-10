@@ -2290,8 +2290,8 @@ fn discard_session_composer(
     drafts.discard(session_id);
 }
 
-/// Queue a draft using the last known context even after its session leaves
-/// the current feed. Receipt durability is owned separately by ReadReceipts.
+/// Queue a draft for a known session even after it leaves the current feed.
+/// Receipt durability is owned separately by ReadReceipts.
 struct TerminalDraftState<'a> {
     client_id: &'a str,
     session_id: &'a str,
@@ -2307,17 +2307,22 @@ fn record_terminal_draft_state(
     updates: &UnboundedSender<DashboardIoUpdate>,
     tracker: CriticalOperationTracker,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let Some(session) = controller.state.sessions.get(draft.session_id).or(departed) else {
+    if controller
+        .state
+        .sessions
+        .get(draft.session_id)
+        .or(departed)
+        .is_none()
+    {
         dashboard.set_notice(format!(
             "Could not save draft for {}: unknown session",
             short_id(draft.session_id)
         ));
         return None;
-    };
+    }
     let session_name = io::session_notice_name(&controller.state, draft.session_id);
     Some(io::spawn_terminal_draft_persist(
         draft.client_id.to_owned(),
-        session.workspace_id.clone(),
         io::NamedSession {
             id: draft.session_id.to_owned(),
             name: session_name,

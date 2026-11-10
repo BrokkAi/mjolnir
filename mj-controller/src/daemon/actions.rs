@@ -265,7 +265,6 @@ pub(super) async fn handle_action(
         }
         DaemonAction::PersistTerminalDraft {
             client_id,
-            workspace_id,
             session_id,
             owner_pid,
             revision,
@@ -273,7 +272,6 @@ pub(super) async fn handle_action(
         } => {
             blocking(move || {
                 crate::database::save_terminal_draft(
-                    &workspace_id,
                     &session_id,
                     &client_id,
                     owner_pid,

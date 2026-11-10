@@ -710,7 +710,6 @@ pub enum DaemonAction {
     },
     PersistTerminalDraft {
         client_id: String,
-        workspace_id: String,
         session_id: String,
         owner_pid: u32,
         revision: u64,
@@ -1976,7 +1975,6 @@ impl DaemonClient {
     pub async fn persist_terminal_draft(
         &mut self,
         client_id: String,
-        workspace_id: String,
         session_id: String,
         owner_pid: u32,
         revision: u64,
@@ -1985,7 +1983,6 @@ impl DaemonClient {
         match self
             .request(DaemonAction::PersistTerminalDraft {
                 client_id,
-                workspace_id,
                 session_id,
                 owner_pid,
                 revision,
@@ -1994,7 +1991,7 @@ impl DaemonClient {
             .await?
         {
             DaemonReply::Done => Ok(()),
-            reply => bail!("unexpected detached-session-state reply {reply:?}"),
+            reply => bail!("unexpected terminal-draft reply {reply:?}"),
         }
     }
 

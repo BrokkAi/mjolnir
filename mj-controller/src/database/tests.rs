@@ -4472,7 +4472,6 @@ fn only_resumable_sessions_can_move_to_a_new_workspace() {
     save_session_to(&database, &stopped).unwrap();
     save_terminal_draft_in(
         &mut open(&database).unwrap(),
-        &source.id,
         &stopped.id,
         "terminal-a",
         1234,
@@ -4524,7 +4523,6 @@ fn assigning_new_session_workspace_moves_managed_terminal_draft() {
     save_session_to(&database, &record).unwrap();
     save_terminal_draft_in(
         &mut open(&database).unwrap(),
-        DEFAULT_WORKSPACE_ID,
         &record.id,
         "terminal-a",
         1234,
@@ -4646,7 +4644,6 @@ fn detaching_retires_inherited_input_even_after_the_composer_is_cleared() {
 
         save_terminal_draft_in(
             &mut open(&database).unwrap(),
-            &workspace.id,
             &record.id,
             "tui-client-a",
             1234,
@@ -4692,7 +4689,6 @@ fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
 
     save_terminal_draft_in(
         &mut connection,
-        &workspace.id,
         &record.id,
         "tui-client-a",
         1234,
@@ -4710,7 +4706,6 @@ fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
 
     let result = save_terminal_draft_in(
         &mut connection,
-        &workspace.id,
         &record.id,
         "failing-client",
         0,
@@ -4732,8 +4727,9 @@ fn detaching_preserves_a_newer_recovery_and_rolls_back_when_saving_fails() {
     );
 }
 
+// Hard-won: #1486: a moved composer must retire its inherited seed without a client workspace snapshot.
 #[test]
-fn a_detached_client_cannot_retire_a_draft_in_another_workspace() {
+fn a_moved_session_retires_its_inherited_seed_on_first_terminal_save() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let owner = create_workspace_at(&database, "Owner").unwrap();
@@ -4742,11 +4738,11 @@ fn a_detached_client_cannot_retire_a_draft_in_another_workspace() {
     record.workspace_id = owner.id.clone();
     save_session_to(&database, &record).unwrap();
     set_session_draft_input_at(&database, &record.id, "inherited input").unwrap();
+    set_sessions_workspace_at(&database, std::slice::from_ref(&record.id), &previous.id).unwrap();
 
-    for (revision, text) in [(1, ""), (2, "unsent in the previous workspace")] {
+    for (revision, text) in [(1, ""), (2, "unsent after moving")] {
         save_terminal_draft_in(
             &mut open(&database).unwrap(),
-            &previous.id,
             &record.id,
             "old-client",
             1234,
@@ -4759,19 +4755,20 @@ fn a_detached_client_cannot_retire_a_draft_in_another_workspace() {
         .unwrap();
         assert_eq!(
             load_state_from(&database).unwrap().sessions[&record.id].draft_input,
-            "inherited input"
+            ""
         );
     }
-    let drafts = list_detached_drafts_at(&database, &owner.id).unwrap();
+    let drafts = list_detached_drafts_at(&database, &previous.id).unwrap();
     assert_eq!(drafts.len(), 1);
-    assert_eq!(drafts[0].text, "unsent in the previous workspace");
+    assert_eq!(drafts[0].text, "unsent after moving");
     assert!(
-        list_detached_drafts_at(&database, &previous.id)
+        list_detached_drafts_at(&database, &owner.id)
             .unwrap()
             .is_empty()
     );
 }
 
+// Hard-won: #1486: workspace snapshots could block inherited-seed retirement after a move.
 #[test]
 fn moving_session_keeps_terminal_draft_canonical_across_workspace_close_and_late_saves() {
     let directory = tempfile::tempdir().unwrap();
@@ -4782,10 +4779,9 @@ fn moving_session_keeps_terminal_draft_canonical_across_workspace_close_and_late
     record.workspace_id = source.id.clone();
     save_session_to(&database, &record).unwrap();
 
-    let save = |workspace_id: &str, revision, text: &str| {
+    let save = |revision, text: &str| {
         save_terminal_draft_in(
             &mut open(&database).unwrap(),
-            workspace_id,
             &record.id,
             "terminal-a",
             1234,
@@ -4796,7 +4792,7 @@ fn moving_session_keeps_terminal_draft_canonical_across_workspace_close_and_late
             },
         )
     };
-    save(&source.id, 1, "unchanged composer").unwrap();
+    save(1, "unchanged composer").unwrap();
     let draft_id = list_detached_drafts_at(&database, &source.id).unwrap()[0]
         .id
         .clone();
@@ -4810,10 +4806,10 @@ fn moving_session_keeps_terminal_draft_canonical_across_workspace_close_and_late
     close_workspace_at(&database, &source.id).unwrap();
 
     // A delayed old-workspace edit follows the session's canonical placement.
-    save(&source.id, 2, "newer edit").unwrap();
+    save(2, "newer edit").unwrap();
     // A stale lower revision cannot restore the removed source placement.
-    save(&source.id, 1, "old text").unwrap();
-    save(&destination.id, 3, "latest edit").unwrap();
+    save(1, "old text").unwrap();
+    save(3, "latest edit").unwrap();
 
     assert!(
         list_detached_drafts_at(&database, &source.id)
@@ -4849,7 +4845,6 @@ fn terminal_draft_revisions_keep_one_row_and_ignore_late_cleared_writes() {
     let save = |revision, text: &str| {
         save_terminal_draft_in(
             &mut open(&database).unwrap(),
-            &workspace.id,
             &record.id,
             "terminal-a",
             1234,
@@ -4894,7 +4889,6 @@ fn terminal_draft_revisions_keep_one_row_and_ignore_late_cleared_writes() {
     save(4, "terminal-a restored").unwrap();
     save_terminal_draft_in(
         &mut open(&database).unwrap(),
-        &workspace.id,
         &record.id,
         "terminal-b",
         5678,
@@ -4921,7 +4915,6 @@ fn terminal_draft_recovery_survives_identical_save_but_new_text_reopens_it() {
     let save = |revision, text: &str| {
         save_terminal_draft_in(
             &mut open(&database).unwrap(),
-            &workspace.id,
             &record.id,
             "terminal-a",
             1234,

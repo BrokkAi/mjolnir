@@ -1019,7 +1019,6 @@ pub(crate) struct NamedSession {
 /// One revisioned owner write; the cache sequences and coalesces each session.
 pub(crate) fn spawn_terminal_draft_persist(
     client_id: String,
-    workspace_id: String,
     session: NamedSession,
     revision: u64,
     draft: DetachedSessionDraft,
@@ -1041,7 +1040,6 @@ pub(crate) fn spawn_terminal_draft_persist(
                 .await?
                 .persist_terminal_draft(
                     client_id,
-                    workspace_id,
                     persisted_session_id,
                     std::process::id(),
                     revision,
