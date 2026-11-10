@@ -23,3 +23,9 @@ The user reported slow deployment of 85e2d8a9f8798bc50e1b00b854c7301c on the rep
 ## Validation
 
 The CLI AWS integration fixture runs in isolated child processes, never loading real AWS credentials. It checks direct JSON request/response contracts, official image ownership, binary public-key encoding, idempotent client tokens, >64 KiB responses, wrong-account refusal, cleanup after a rejected launch, and retention of configuration/key material until successful cloud termination. The new binary was also run as `--instance ec2-host-test ec2 list --region us-east-1 --json` against real AWS inventory, correctly listing the stopped original and running replacement. Full CLI tests and workspace clippy are recorded in the ExecPlan as validation completes.
+
+## Review follow-up
+
+The CLI now allocates a tagged Elastic IP for future creates, after cloud-init completes and before publishing the ready machine. Destruction releases the address after terminating the VM. The already active manually provisioned C8id host retains its auto-assigned address to avoid interrupting the user's sessions; after a later stop/start its configured address must be refreshed before reconnecting. Review also caught a race between instance status and SSH readiness; both EC2 entry points now use the existing shared readiness policy. A saved host is resolved by its operation, so a terminated historical VM with the same target name no longer makes destroy ambiguous.
+
+A controlled transfer of one 17 MiB incompressible synthetic file from the controller to the same EC2 host took 17.466 seconds (0.97 MiB/s), including a new SSH connection. The comparable real profile transfer took 162.345 seconds. Thus bandwidth accounts for some cost, while file-by-file transport contributes most of the delay. The synthetic source and destination were removed after the transfer finished; no credentials or profile contents were used by that experiment.

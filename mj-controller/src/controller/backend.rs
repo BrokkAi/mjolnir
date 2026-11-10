@@ -1234,6 +1234,20 @@ fn wait_for_ssh_ready(
     }
 }
 
+/// Wait for a newly provisioned EC2 host using the same readiness policy as
+/// session-owned instances. Call from supervised blocking work.
+pub fn wait_for_ec2_ssh(executor: &impl CommandExecutor, ssh: &SshTarget) -> Result<()> {
+    wait_for_ssh_ready(
+        executor,
+        &crate::targets::ssh_command(ssh, ["true"])
+            .purpose("wait for EC2 SSH availability")
+            .stage(ProvisionStage::Booting),
+        AWS_SSH_READY_TIMEOUT,
+        Instant::now,
+        std::thread::sleep,
+    )
+}
+
 pub(super) fn locator_after_provision_named(
     canonical: &TargetTemplate,
     backend: &targets::TargetTemplate,
@@ -1534,15 +1548,7 @@ pub(super) fn ec2_locator_after_launch(
         destination: format!("{ssh_user}@{address}"),
         ssh_args: targets::ssh_args_with_identity(ssh_args, identity_file.as_deref()),
     };
-    wait_for_ssh_ready(
-        executor,
-        &crate::targets::ssh_command(&ssh, ["true"])
-            .purpose("wait for EC2 SSH availability")
-            .stage(ProvisionStage::Booting),
-        AWS_SSH_READY_TIMEOUT,
-        Instant::now,
-        std::thread::sleep,
-    )?;
+    wait_for_ec2_ssh(executor, &ssh)?;
     Ok(TargetLocator::AwsEc2 {
         instance_id,
         address: Some(address),

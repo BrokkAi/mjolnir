@@ -467,6 +467,10 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             .as_str()
             .context("instance has no public IPv4; use a public subnet")?;
         let ssh = connection(&record, root, host)?;
+        mj_controller::controller::wait_for_ec2_ssh(
+            &mj_controller::targets::ProcessExecutor,
+            &(&ssh).into(),
+        )?;
         let output = checked(
             &mut ssh_command(
                 &ssh,
@@ -480,6 +484,29 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
                 .any(|line| line.trim() == "true"),
             "Podman did not report rootless operation"
         );
+        // Attach the persistent address after cloud-init's package downloads
+        // finish, before publishing a host that can accept session launches.
+        let address = cloud.ec2(
+            "allocate-address",
+            json!({
+                "Domain":"vpc", "TagSpecifications":[tags(&record,"elastic-ip")]
+            }),
+        )?;
+        let allocation = address["AllocationId"]
+            .as_str()
+            .context("AWS returned no Elastic IP allocation ID")?;
+        let host = address["PublicIp"]
+            .as_str()
+            .context("AWS returned no Elastic IP address")?;
+        cloud.ec2(
+            "associate-address",
+            json!({"InstanceId":id,"AllocationId":allocation}),
+        )?;
+        let ssh = connection(&record, root, host)?;
+        mj_controller::controller::wait_for_ec2_ssh(
+            &mj_controller::targets::ProcessExecutor,
+            &(&ssh).into(),
+        )?;
         let cache = args.zfs_cache.then(|| TargetBuildCache {
             directory: Some(CACHE_DIRECTORY.into()),
             ..Default::default()
@@ -489,6 +516,13 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
             build_cache: cache,
         };
+        if args.zfs_cache {
+            eprintln!("Installing mj's pinned mbx on the new host.");
+            mj_controller::controller::install_mbx(
+                &machine,
+                &mj_controller::targets::ProcessExecutor,
+            )?;
+        }
         Config::update(|config| {
             ensure!(
                 !config.machines.contains_key(&record.target)
@@ -540,13 +574,6 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             config.disabled_targets.insert(raw);
             Ok(())
         })?;
-        if args.zfs_cache {
-            eprintln!("Installing mj's pinned mbx on the new host.");
-            mj_controller::controller::install_mbx(
-                &machine,
-                &mj_controller::targets::ProcessExecutor,
-            )?;
-        }
         Ok(
             json!({"instance_id":id,"target":record.target,"region":record.region,"zone":args.zone,"instance_type":args.instance_type,"public_ip":host,"zfs_cache":args.zfs_cache,"operation":record.operation}),
         )
@@ -732,14 +759,20 @@ fn destroy(args: DestroyArgs, root: &Path) -> Result<()> {
     let matches: Vec<_> = instances
         .iter()
         .filter(|i| {
+            if let Some(record) = saved.first() {
+                return tag(i, "mj:operation").as_deref() == Some(&record.operation);
+            }
             i["InstanceId"] == args.host
                 || tag(i, "mj:target").as_deref() == Some(&args.host)
                 || tag(i, "mj:operation").as_deref() == Some(&args.host)
-                || saved
-                    .first()
-                    .is_some_and(|r| tag(i, "mj:operation").as_deref() == Some(&r.operation))
         })
         .collect();
+    let live: Vec<_> = matches
+        .iter()
+        .copied()
+        .filter(|i| i["State"]["Name"] != "terminated")
+        .collect();
+    let matches = if live.is_empty() { matches } else { live };
     ensure!(
         matches.len() <= 1,
         "multiple VMs match {}; use an instance or operation ID",
@@ -826,6 +859,22 @@ fn destroy(args: DestroyArgs, root: &Path) -> Result<()> {
                 .is_some_and(Vec::is_empty),
             "saved instance {id} exists without expected ownership tags; restore its tags before destroying it"
         );
+    }
+    let addresses = cloud.ec2(
+        "describe-addresses",
+        json!({"Filters":managed_filters(Some(&record.operation))}),
+    )?;
+    for address in addresses["Addresses"]
+        .as_array()
+        .context("AWS returned no Addresses")?
+    {
+        if let Some(association) = address["AssociationId"].as_str() {
+            cloud.ec2("disassociate-address", json!({"AssociationId":association}))?;
+        }
+        cloud.ec2(
+            "release-address",
+            json!({"AllocationId":address["AllocationId"]}),
+        )?;
     }
     let filters = managed_filters(Some(&record.operation));
     let groups = cloud.ec2("describe-security-groups", json!({"Filters":filters}))?;
@@ -918,7 +967,13 @@ state = root/'instance.json'
 if op == 'get-caller-identity': response = {'Account':(root/'account').read_text() if (root/'account').exists() else '123456789012'}
 elif op == 'describe-instances':
     instance = json.loads(state.read_text()) if state.exists() else None
-    response = {'Reservations':[{'Instances':[instance]}] if instance else [], 'Padding':'x'*70000}
+    instances = [instance] if instance else []
+    if (root/'historical').exists() and instance:
+        import copy
+        old=copy.deepcopy(instance);old['InstanceId']='i-old';old['State']['Name']='terminated'
+        next(t for t in old['Tags'] if t['Key']=='mj:operation')['Value']='f'*32
+        instances.append(old)
+    response = {'Reservations':[{'Instances':instances}] if instances else [], 'Padding':'x'*70000}
 elif op == 'describe-instance-types':
     response = {'InstanceTypes':[{'ProcessorInfo':{'SupportedArchitectures':['x86_64']}}]}
 elif op == 'describe-subnets':
@@ -945,6 +1000,16 @@ elif op == 'run-instances':
     instance = {'InstanceId':'i-test','State':{'Name':'running'},'Placement':request['Placement'],'InstanceType':request['InstanceType'],'PublicIpAddress':'192.0.2.1','Tags':tags}
     state.write_text(json.dumps(instance))
     response = {'Instances':[instance]}
+elif op == 'allocate-address':
+    response = {'AllocationId':'eipalloc-test','PublicIp':'192.0.2.7','Tags':request['TagSpecifications'][0]['Tags']}
+    (root/'address.json').write_text(json.dumps(response))
+elif op == 'associate-address':
+    address=json.loads((root/'address.json').read_text());address['AssociationId']='eipassoc-test';(root/'address.json').write_text(json.dumps(address))
+elif op == 'describe-addresses':
+    response={'Addresses':[json.loads((root/'address.json').read_text())] if (root/'address.json').exists() else []}
+elif op == 'disassociate-address':
+    address=json.loads((root/'address.json').read_text());address.pop('AssociationId');(root/'address.json').write_text(json.dumps(address))
+elif op == 'release-address': (root/'address.json').unlink()
 elif op == 'terminate-instances':
     if (root/'fail-terminate').exists(): sys.exit('termination refused')
     assert request['InstanceIds'] == ['i-test']
@@ -972,7 +1037,10 @@ print(json.dumps(response))
         fs::create_dir(&bin).unwrap();
         for (name, body) in [
             ("aws", AWS_FIXTURE),
-            ("ssh", "#!/bin/sh\nprintf 'status: done\\ntrue\\n'\n"),
+            (
+                "ssh",
+                "#!/bin/sh\ncase \"$*\" in *MJOLNIR-SSH-SESSION-STARTED*) printf 'MJOLNIR-SSH-SESSION-STARTED\\n';; esac\nprintf 'status: done\\ntrue\\n'\n",
+            ),
         ] {
             let path = bin.join(name);
             fs::write(&path, body).unwrap();
@@ -987,6 +1055,7 @@ print(json.dumps(response))
             .env("MJ_CONFIG_DIR", directory.path().join("config"))
             .env("MJ_DATA_DIR", directory.path().join("data"))
             .env("MJ_INSTANCE", "ec2-fixture")
+            .env("MJ_SSH_CONTROL_MASTER", "0")
             .env("PATH", std::env::join_paths(paths).unwrap());
         checked(&mut command, &[]).unwrap();
         true
@@ -1018,7 +1087,13 @@ print(json.dumps(response))
         let root = config_dir().join("ec2");
         create(create_args(), &root).unwrap();
         let record = records(&root).unwrap().pop().unwrap();
+        // Hard-won: #1481: a terminated VM with the same target blocked teardown.
+        fs::write(bin.join("historical"), "").unwrap();
         let before = Config::load().unwrap();
+        let Some(Machine::Ssh { ssh, .. }) = before.machines.get("builder") else {
+            panic!("missing SSH machine");
+        };
+        assert_eq!(ssh.host, "192.0.2.7");
         assert!(matches!(
             before.targets.get("builder"),
             Some(TargetTemplate::SshPodman { .. })
@@ -1070,14 +1145,22 @@ print(json.dumps(response))
         );
         assert!(Config::load().unwrap().targets.contains_key("builder"));
         assert!(record.directory(&root).unwrap().join("id_ed25519").exists());
-        assert!(bin.join("key.json").exists() && bin.join("group.json").exists());
+        assert!(
+            bin.join("key.json").exists()
+                && bin.join("group.json").exists()
+                && bin.join("address.json").exists()
+        );
         fs::remove_file(bin.join("fail-terminate")).unwrap();
         destroy(destroy_args(), &root).unwrap();
         let after = Config::load().unwrap();
         assert!(!after.machines.contains_key("builder") && !after.targets.contains_key("builder"));
         assert!(after.machines.contains_key("other"));
         assert!(!record.directory(&root).unwrap().exists());
-        assert!(!bin.join("key.json").exists() && !bin.join("group.json").exists());
+        assert!(
+            !bin.join("key.json").exists()
+                && !bin.join("group.json").exists()
+                && !bin.join("address.json").exists()
+        );
         let calls: Vec<Value> = fs::read_to_string(bin.join("calls"))
             .unwrap()
             .lines()

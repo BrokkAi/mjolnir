@@ -83,6 +83,7 @@ pub(crate) use backend::backend_locator;
 pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 pub(crate) use backend::validate_resource_allocation;
+pub use backend::wait_for_ec2_ssh;
 pub(crate) use backend::{
     LocalEngineReadiness, is_missing_command, local_engine_readiness, verify_target_before_launch,
 };

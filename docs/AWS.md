@@ -25,7 +25,8 @@ The instance type is required. `--zone` is required and supplies the region;
 `--region` can override region inference. `--aws-profile` selects AWS credentials,
 independently of mj's harness profiles. The default subnet must have an internet
 gateway; use `--subnet` for another public subnet in that zone. The command
-creates a dedicated SSH key and security group allowing SSH only from the
+creates a tagged Elastic IP (stable across stop/start), a dedicated SSH key,
+and a security group allowing SSH only from the
 controller's discovered public IPv4, or the explicit `--ssh-cidr`. It requires
 IMDSv2 and uses an encrypted 200 GiB gp3 root disk; `--disk-gib` changes its size.
 The image supplies the root filesystem (ext4); it is separate from local SSDs.
@@ -57,7 +58,8 @@ uncertain launch with a fresh client token.
 
 `destroy` accepts a target name, instance ID, or operation ID. It permanently
 terminates the selected managed VM, including all sessions and its root disk,
-then removes only its tagged security group/key pair, matching mj configuration,
+then releases its tagged Elastic IP and removes only its tagged security
+group/key pair, matching mj configuration,
 and local key files. It preserves credentials and configuration until cloud
 termination succeeds, and can be repeated after partial cleanup. It does not
 terminate VMs without the `mj:managed-by=mj-ec2` ownership tag. Any session
@@ -67,7 +69,7 @@ or normal session cleanup preserved.
 
 AWS permissions include EC2 instance/image/subnet/type discovery, tagged key
 pair and security group creation/deletion, ingress authorization, launching,
-status checks, termination, and SSM `GetParameter` for the public Ubuntu image.
+status checks, termination, Elastic IP allocation/association/release, and SSM `GetParameter` for the public Ubuntu image.
 No IAM role or VPC is created.
 
 ## Disposable instances per session

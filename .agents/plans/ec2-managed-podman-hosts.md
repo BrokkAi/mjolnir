@@ -59,3 +59,7 @@ Revision 2026-11-09: initial plan after account and repository discovery.
 Revision 2026-11-09: incorporated the user's C8id/local-NVMe/ZFS/mold and Podman-only choices, completed provisioning evidence, and diagnosed the separate recursive-scp profile-sync delay. The initial full CLI suite passed 243 tests and found one missing --json help description; that description was corrected. Workspace clippy passed its initial run. Final focused and integration validation follows the last changes.
 
 Revision 2026-11-09: final CLI validation passed (all tests); workspace clippy passed. Added wrong-account refusal coverage and corrected the initial help-description failure. Review and remote publication are the remaining steps.
+
+Revision 2026-11-09: review found address lifetime, SSH-readiness, and terminated-name-reuse defects. Future creates reserve a tagged Elastic IP and publish configuration only after SSH, cloud-init, and requested mbx installation are ready. The controller's existing EC2 SSH wait is shared rather than duplicated. The active manually provisioned host keeps its address to preserve live connections. Revalidate the CLI and controller crates and workspace clippy after these fixes.
+
+Revision 2026-11-09: the review regressions and help-surface check passed, and workspace clippy passed after the fixes. The expanded final CLI/controller suites are still running; request the second review in parallel, and do not push before both required validation and review are complete.
