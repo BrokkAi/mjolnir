@@ -72,6 +72,10 @@ pub fn spawn_quota_refresher(
 ) {
     let (profiles_tx, mut profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
     let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(32);
+    // Grant renewal is its own task: a slow lock, container start or
+    // `claude auth login` must not hold up a probe, and a usage hold must
+    // not hold up a renewal.
+    spawn_claude_grant_refresher(profiles_tx.subscribe(), QUOTA_REFRESH_INTERVAL);
     tokio::spawn(async move {
         // A daemon that stopped mid-check left its quota container running;
         // this instance owns it, and nothing else will remove it. Unit tests
@@ -93,29 +97,14 @@ pub fn spawn_quota_refresher(
         // The cache identity each profile was last adopted under. A changed
         // identity is a changed profile, whose report no longer applies.
         let mut identities: std::collections::BTreeMap<String, String> = Default::default();
-        // When each Claude profile's grant is next looked at, in epoch
-        // milliseconds, under the identity the schedule was made for. No
-        // entry means "at the next cycle".
-        let mut grant_checks: std::collections::BTreeMap<String, (String, i64)> =
-            Default::default();
         loop {
             let now = epoch_seconds();
-            let probe_wake = batch
+            let wake = batch
                 .profiles
                 .iter()
                 .map(|request| next_probe_at(quotas.report(&request.profile_id)))
                 .min()
                 .map(|due| Duration::from_secs(due.saturating_sub(now).max(5)));
-            let grant_wake = grant_checks.values().map(|(_, due)| due).min().map(|due| {
-                Duration::from_millis(
-                    due.saturating_sub(mj_core::clock::epoch_millis()).max(0) as u64
-                )
-                .max(Duration::from_secs(5))
-            });
-            let wake = match (probe_wake, grant_wake) {
-                (Some(probe), Some(grant)) => Some(probe.min(grant)),
-                (probe, grant) => probe.or(grant),
-            };
             tokio::select! {
                 _ = tokio::time::sleep(wake.unwrap_or_default()), if wake.is_some() => {}
                 changed = profiles_rx.changed() => {
@@ -129,9 +118,6 @@ pub fn spawn_quota_refresher(
                     }
                 }
             }
-            // The grant refresh comes first, so a probe uses the new token, and
-            // ignores the usage API's hold: that covers usage requests only.
-            refresh_claude_grants(&batch, &mut grant_checks).await;
             let now = epoch_seconds();
             let due = batch
                 .profiles
@@ -161,63 +147,121 @@ pub fn spawn_quota_refresher(
     (profiles_tx, updates_rx)
 }
 
-/// Renew each Claude profile's grant that is due (see
-/// [`crate::quota::refresh_claude_grant`]), concurrently, and record when to
-/// look at each again.
-pub(super) async fn refresh_claude_grants(
-    batch: &QuotaRefreshBatch,
-    checks: &mut std::collections::BTreeMap<String, (String, i64)>,
+/// The least a profile's renewal task waits after a check. A grant whose
+/// login is already due again after a renewal would otherwise renew in a
+/// loop. This is a back-off, not a limit: the due time otherwise decides.
+const CLAUDE_GRANT_MINIMUM_WAIT: Duration = Duration::from_secs(5);
+
+/// Keep every Claude profile's grant renewed (#1490): the daemon is the only
+/// refresher, because session copies hold no refresh token. This task is the
+/// one owner of that decision. It follows the same batches as the quota
+/// poller (`profiles` and `grants`) and runs one task per profile request, so
+/// a slow renewal never delays another profile's. `recheck` is how long a task
+/// sleeps at most, so a login file replaced behind its back is seen within one
+/// interval. Task failures are logged.
+pub(super) fn spawn_claude_grant_refresher(
+    mut batches: tokio::sync::watch::Receiver<QuotaRefreshBatch>,
+    recheck: Duration,
 ) {
-    let now_ms = mj_core::clock::epoch_millis();
-    let requests = batch
-        .profiles
-        .iter()
-        .chain(&batch.grants)
-        .map(|request| (request.profile_id.as_str(), request.cache_identity()))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    // A schedule belongs to the profile as it was configured: a profile
-    // reconfigured under the same ID (another home) starts over.
-    checks.retain(|id, (identity, _)| requests.get(id.as_str()) == Some(identity));
-    let mut tasks = tokio::task::JoinSet::new();
-    for request in batch.profiles.iter().chain(&batch.grants) {
-        if checks
-            .get(&request.profile_id)
-            .is_some_and(|(_, due)| *due > now_ms)
-        {
-            continue;
+    tokio::spawn(async move {
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut running: std::collections::BTreeMap<tokio::task::Id, QuotaRefreshRequest> =
+            Default::default();
+        loop {
+            let batch = batches.borrow_and_update().clone();
+            for request in batch.profiles.iter().chain(&batch.grants) {
+                if running.values().any(|running| running == request) {
+                    continue;
+                }
+                let handle = tasks.spawn(renew_claude_grant_when_due(
+                    request.clone(),
+                    batches.clone(),
+                    recheck,
+                ));
+                running.insert(handle.id(), request.clone());
+            }
+            tokio::select! {
+                changed = batches.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+                Some(joined) = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                    match joined {
+                        // The task saw its request leave or change.
+                        Ok((id, ())) => {
+                            running.remove(&id);
+                        }
+                        // A panicked task stays listed, so it is not restarted
+                        // in a loop; its request changing replaces it.
+                        Err(error) => tracing::error!(
+                            %error,
+                            "a Claude grant renewal task failed; it is not restarted until its profile changes"
+                        ),
+                    }
+                }
+            }
         }
-        let request = request.clone();
-        tasks.spawn(async move {
-            let check = crate::quota::refresh_claude_grant(&request, now_ms).await;
-            (request.profile_id.clone(), request.cache_identity(), check)
-        });
-    }
-    while let Some(result) = tasks.join_next().await {
-        let (profile_id, identity, check) = match result {
-            Ok(output) => output,
-            Err(error) => {
-                tracing::warn!(%error, "Claude grant refresh task failed");
-                continue;
+        // The feed closed: let renewals in flight finish rather than cut a
+        // refresh-token exchange short.
+        while let Some(joined) = tasks.join_next().await {
+            if let Err(error) = joined {
+                tracing::error!(%error, "a Claude grant renewal task failed");
             }
+        }
+    });
+}
+
+/// One profile's renewal loop. Nothing is cached between wakes: each one reads
+/// the login file again through [`crate::quota::refresh_claude_grant`]. It
+/// ends when the profile leaves the batch or is configured differently.
+async fn renew_claude_grant_when_due(
+    request: QuotaRefreshRequest,
+    mut batches: tokio::sync::watch::Receiver<QuotaRefreshBatch>,
+    recheck: Duration,
+) {
+    loop {
+        let current = {
+            let batch = batches.borrow_and_update();
+            batch
+                .profiles
+                .iter()
+                .chain(&batch.grants)
+                .find(|candidate| candidate.profile_id == request.profile_id)
+                .cloned()
         };
-        // Every profile the refresher handles keeps a scheduled check, so the
-        // poller wakes for it whether or not any probe is due. With no due
-        // time (no login or refresh token yet, no readable expiry) or a
-        // failure, look again after one probe interval.
-        let recheck = now_ms
-            .saturating_add(i64::try_from(QUOTA_REFRESH_INTERVAL.as_millis()).unwrap_or(i64::MAX));
-        match check {
-            crate::quota::ClaudeGrantCheck::NotApplicable => {
-                checks.remove(&profile_id);
-            }
+        if current.as_ref() != Some(&request) {
+            return;
+        }
+        let now_ms = mj_core::clock::epoch_millis();
+        let wait = match crate::quota::refresh_claude_grant(&request, now_ms).await {
+            // Applicability follows from the request, so only a changed
+            // batch can alter it.
+            crate::quota::ClaudeGrantCheck::NotApplicable => None,
             crate::quota::ClaudeGrantCheck::Waiting {
                 due_at_ms: Some(due_at_ms),
-            } => {
-                checks.insert(profile_id, (identity, due_at_ms));
-            }
+            } => Some(
+                Duration::from_millis(due_at_ms.saturating_sub(now_ms).max(0) as u64)
+                    .max(CLAUDE_GRANT_MINIMUM_WAIT)
+                    .min(recheck),
+            ),
+            // No login or refresh token yet, no readable expiry, or a failed
+            // renewal: look again after one interval.
             crate::quota::ClaudeGrantCheck::Waiting { due_at_ms: None }
-            | crate::quota::ClaudeGrantCheck::Failed => {
-                checks.insert(profile_id, (identity, recheck));
+            | crate::quota::ClaudeGrantCheck::Failed => Some(recheck),
+        };
+        let sleep = async {
+            match wait {
+                Some(wait) => tokio::time::sleep(wait).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = sleep => {}
+            changed = batches.changed() => {
+                if changed.is_err() {
+                    return;
+                }
             }
         }
     }
