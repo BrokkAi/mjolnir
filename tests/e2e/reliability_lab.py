@@ -347,6 +347,7 @@ class PtyClient:
 
 class Lab:
     def __init__(self, hel: pathlib.Path, scenario: str, seed: int, *, watchdog: bool = True):
+        """Prepare a lab for one scenario, seed and `hel` binary."""
         self.hel = hel.resolve()
         self.scenario = scenario
         self.seed = seed
@@ -1163,6 +1164,7 @@ pull_policy = "never"
                     os.kill(pid, signal.SIGKILL)
 
     def run(self) -> None:
+        """Run the scenario against a freshly prepared isolated instance."""
         port = self.prepare()
         first = self.start_tui("tui-1")
         first.wait_for("Sessions")
