@@ -279,7 +279,6 @@ impl RuntimeState {
                     // add an admission hold of its own.
                     let cleanup_state = state.clone();
                     let mut result = match mj_core::runtime::spawn_off_async_workers(async move {
-                        let mut destroy_warnings = Vec::new();
                         if let Some(intent_id) = superseded_restart_intent {
                             if matches!(
                                 kind,
@@ -297,7 +296,7 @@ impl RuntimeState {
                                     return Err(error);
                                 }
                                 tracing::warn!(session_id = %operation_id, error = format!("{error:#}"), "Destroy could not remove retained container upgrade resources");
-                                destroy_warnings.push(format!("Cleanup of retained container upgrade resources failed during Destroy for session {operation_id}. Resources may remain; details are in the daemon logs."));
+                                cleanup_state.push_public_notice(&operation_id, format!("Cleanup of retained container upgrade resources failed during Destroy for session {operation_id}. Resources may remain; details are in the daemon logs."));
                             }
                             cleanup_state
                                 .release_restart_intent(&operation_id, &intent_id)
@@ -323,11 +322,7 @@ impl RuntimeState {
                         } else {
                             None
                         };
-                        let mut result = operation(operation_state, operation_id, cancelled).await?;
-                        if let DaemonLifecycleResult::Destroy(outcome) = &mut result {
-                            outcome.warnings.extend(destroy_warnings);
-                        }
-                        Ok(result)
+                        operation(operation_state, operation_id, cancelled).await
                     })
                     .await
                     {

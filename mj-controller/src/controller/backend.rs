@@ -1127,16 +1127,37 @@ pub(crate) fn backend_locator(
     session: &SessionRecord,
     config: &Config,
 ) -> Result<targets::TargetLocator> {
-    let runtime = if session.target_runtime.is_some() || targets::locator_needs_connection(locator)
-    {
-        Some(session.target_runtime_settings(config)?)
+    recorded_backend_locator(
+        locator,
+        &session.id,
+        &session.target_template_id,
+        session.target_runtime.as_ref(),
+        config,
+    )
+}
+
+pub(super) fn recorded_backend_locator(
+    locator: &TargetLocator,
+    session_id: &str,
+    target_template_id: &str,
+    runtime: Option<&mj_core::state::TargetRuntimeSettings>,
+    config: &Config,
+) -> Result<targets::TargetLocator> {
+    let runtime = if runtime.is_some() || targets::locator_needs_connection(locator) {
+        Some(mj_core::state::target_runtime_settings_for(
+            session_id,
+            target_template_id,
+            Some(locator),
+            runtime,
+            config,
+        )?)
     } else {
         None
     };
     Ok(targets::TargetLocator::try_from(targets::RecordedTarget {
         locator,
         runtime: runtime.as_deref(),
-        session_id: &session.id,
+        session_id,
     })?)
 }
 

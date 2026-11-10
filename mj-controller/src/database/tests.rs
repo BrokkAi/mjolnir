@@ -5708,7 +5708,7 @@ pub(super) fn register_test_subagent(
 ) -> Result<()> {
     let mut connection = open(path)?;
     let tx = connection.transaction()?;
-    insert_session(&tx, session)?;
+    super::state_io::insert_session_with_parent(&tx, session, Some(&relation.parent_session_id))?;
     super::usage::record_child_accounting(&tx, relation)?;
     tx.execute(
         "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES (?1,?2,?3,?4)",
@@ -5724,7 +5724,6 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     child.title = "child session".into();
     let mut state = State::default();
     state.sessions.insert(parent.id.clone(), parent.clone());
-    state.sessions.insert(child.id.clone(), child.clone());
     let relation = mj_core::subagent::SubagentRecord {
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
@@ -5744,6 +5743,7 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
     };
     save_state_to(path, &state).unwrap();
     register_test_subagent(path, &child, &relation).unwrap();
+    state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(child.id.clone(), relation.into());
     save_state_to(path, &state).unwrap();
     (parent, child)
@@ -7475,6 +7475,7 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
             params![id, group, forward],
         ).unwrap();
     }
+    schema::drop_environment_schema(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN no_github_credentials;

@@ -20,49 +20,74 @@ impl Controller {
         else {
             return Ok(());
         };
-        let mut instance_id = destination.instance_id().map(str::to_owned);
-        operation.prepared_destination.as_mut().unwrap().state =
-            PreparedDestinationState::CleanupPending {
-                instance_id: instance_id.clone(),
-            };
-        crate::database::save_move_operation(operation)?;
-        if instance_id.is_none() {
-            instance_id = Some(pending_instance_id(operation, &destination, executor)?);
-            operation.prepared_destination.as_mut().unwrap().state =
-                PreparedDestinationState::CleanupPending {
-                    instance_id: instance_id.clone(),
-                };
-            crate::database::save_move_operation(operation)?;
-        }
-        let instance_id = instance_id.unwrap();
-        let (profile, region) = aws_access(&destination.runtime)?;
-        super::super::execute_checked(
+        let environment = if let PreparedDestinationState::Adopted { target } = &destination.state {
+            crate::database::worker_environments(&operation.selection.session_id)?
+                .into_iter()
+                .find(|environment| {
+                    environment
+                        .placement
+                        .target
+                        .as_ref()
+                        .is_some_and(|stored| stored.same_resource(target))
+                })
+                .context("adopted Move destination has no durable environment owner")?
+        } else {
+            crate::database::prepared_move_environment(&operation.operation_id)?
+                .context("prepared Move destination has no durable environment owner")?
+        };
+        super::super::environment::retire_owned_environment(
+            environment,
+            &self.config,
             executor,
-            targets::terminate_ec2_instance_command(profile, region, &instance_id)?,
-        )?;
-        // Confirm termination before releasing durable resource ownership.
-        super::super::execute_checked(
-            executor,
-            CommandSpec::new(
-                "aws",
-                [
-                    "--profile",
-                    profile,
-                    "--region",
-                    region,
-                    "ec2",
-                    "wait",
-                    "instance-terminated",
-                    "--instance-ids",
-                    &instance_id,
-                ],
-            )
-            .purpose("confirm EC2 Move destination termination"),
+            super::super::BranchDisposition::Keep,
+            super::super::CheckoutDisposition::Remove,
         )?;
         operation.prepared_destination.as_mut().unwrap().state = PreparedDestinationState::Released;
         crate::database::save_move_operation(operation)?;
         Ok(())
     }
+}
+
+pub(in crate::controller) fn destroy_prepared_environment(
+    authority: &super::super::environment::Reclamation,
+    session_id: &str,
+    destination: &PreparedMoveDestination,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    ensure!(
+        destination.owns_resource()
+            && !matches!(destination.state, PreparedDestinationState::Adopted { .. }),
+        "adopted destinations must be reclaimed through their worker environment"
+    );
+    let instance_id = match destination.instance_id() {
+        Some(id) => id.to_owned(),
+        None => pending_instance_id(session_id, destination, executor)?,
+    };
+    authority.record_prepared_instance(&instance_id)?;
+    let (profile, region) = aws_access(&destination.runtime)?;
+    super::super::execute_checked(
+        executor,
+        targets::terminate_ec2_instance_command(profile, region, &instance_id)?,
+    )?;
+    super::super::execute_checked(
+        executor,
+        CommandSpec::new(
+            "aws",
+            [
+                "--profile",
+                profile,
+                "--region",
+                region,
+                "ec2",
+                "wait",
+                "instance-terminated",
+                "--instance-ids",
+                &instance_id,
+            ],
+        )
+        .purpose("confirm EC2 Move destination termination"),
+    )?;
+    Ok(())
 }
 
 struct MoveCleanupExecutor<'a, E>(&'a E);
@@ -91,7 +116,7 @@ fn aws_access(runtime: &TargetRuntimeSettings) -> Result<(&str, &str)> {
 }
 
 fn pending_instance_id(
-    operation: &MoveOperation,
+    session_id: &str,
     destination: &PreparedMoveDestination,
     executor: &impl CommandExecutor,
 ) -> Result<String> {
@@ -110,10 +135,7 @@ fn pending_instance_id(
                 "describe-instances",
                 "--filters",
                 &format!("Name=client-token,Values={token}"),
-                &format!(
-                    "Name=tag:dev.mj.session,Values={}",
-                    operation.selection.session_id
-                ),
+                &format!("Name=tag:dev.mj.session,Values={}", session_id),
                 "Name=tag:dev.mj.managed,Values=true",
                 "--output",
                 "json",

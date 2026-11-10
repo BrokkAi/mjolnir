@@ -410,17 +410,15 @@ impl Controller {
                         .any(|session| session.target.is_some() && session.target == source.target),
                     "retained source is still referenced by an active session"
                 );
-                if let Some(locator) = &source.target {
-                    let backend =
-                        super::super::backend::backend_locator(locator, source, &self.config)?;
-                    targets::retire_move_target_plan(&backend, session_id)?.execute(executor)?;
-                    self.release_retired_move_target(
-                        source,
-                        &backend,
-                        self.state.sessions.get(session_id),
-                        executor,
-                    );
-                }
+                let environment = crate::database::retained_move_environment(operation_id)?
+                    .context("retained Move source has no recorded environment owner")?;
+                super::super::environment::retire_owned_environment(
+                    environment,
+                    &self.config,
+                    executor,
+                    super::super::BranchDisposition::Keep,
+                    super::super::CheckoutDisposition::Remove,
+                )?;
                 if let mj_core::state::Checkout::ManagedWorktree {
                     worktree: checkout, ..
                 } = source.checkout()
@@ -437,57 +435,10 @@ impl Controller {
                         }),
                         "retained checkout is still referenced by a session"
                     );
-                    super::super::worktree::retire_managed_worktree(executor, checkout)?;
                 }
                 crate::database::forget_retained_move_source(operation_id)
             },
         )
-    }
-
-    /// Release the mbx build state of a target a Move has just retired,
-    /// keeping whatever the placement the session goes on running in,
-    /// `live`, can still build in. When that placement cannot be resolved,
-    /// nothing is released: a stale target costs disk until mbx ages it out,
-    /// while a wrong release costs a live session its build output.
-    fn release_retired_move_target(
-        &self,
-        retired: &mj_core::state::SessionRecord,
-        backend: &targets::TargetLocator,
-        live: Option<&mj_core::state::SessionRecord>,
-        executor: &impl CommandExecutor,
-    ) {
-        let Some(release) = super::super::mbx::release::BuildStateRelease::for_target(
-            retired,
-            backend,
-            &self.config,
-        ) else {
-            return;
-        };
-        let live_backend = match live
-            .and_then(|live| live.target.as_ref().map(|target| (live, target)))
-        {
-            None => None,
-            Some((live, target)) => {
-                match super::super::backend::backend_locator(target, live, &self.config) {
-                    Ok(backend) => Some((live, backend)),
-                    Err(error) => {
-                        tracing::warn!(
-                            session_id = %retired.id,
-                            error = format!("{error:#}"),
-                            "the Move's live target could not be resolved, so the retired target's build state is kept"
-                        );
-                        return;
-                    }
-                }
-            }
-        };
-        if let Some(release) = release.excluding(
-            live_backend
-                .as_ref()
-                .map(|(live, backend)| (*live, backend)),
-        ) {
-            release.run(executor);
-        }
     }
 
     /// Each repository of a Move's workspace transfer, under the id the source
@@ -1127,26 +1078,16 @@ impl Controller {
             executor.notify_notice(&format!("Excluded files remain in the stopped source. Inspect with mj move-sources --session {id}; remove with mj move-sources --session {id} --cleanup {} --yes", operation.operation_id));
         } else {
             // Operate on the saved resource identity, never on the destination.
-            // cleanup_stopped_target persists, so use the target/checkout
-            // primitives directly and leave the active session row untouched.
-            let source = &transfer.source;
-            if let Some(locator) = &source.target {
-                let backend =
-                    super::super::backend::backend_locator(locator, source, &self.config)?;
-                targets::retire_move_target_plan(&backend, id)?.execute(executor)?;
-                self.release_retired_move_target(
-                    source,
-                    &backend,
-                    self.state.sessions.get(id),
-                    executor,
-                );
-            }
-            if let mj_core::state::Checkout::ManagedWorktree {
-                worktree: checkout, ..
-            } = source.checkout()
-            {
-                super::super::worktree::retire_managed_worktree(executor, checkout)?;
-            }
+            // The accepted source owner survives publication of the destination.
+            let environment = crate::database::move_source_environment(&operation.operation_id)?
+                .context("Move source has no recorded environment owner")?;
+            super::super::environment::retire_owned_environment(
+                environment,
+                &self.config,
+                executor,
+                super::super::BranchDisposition::Keep,
+                super::super::CheckoutDisposition::Remove,
+            )?;
         }
         if transfer.controller_stage.exists() {
             std::fs::remove_dir_all(&transfer.controller_stage)?;
@@ -1189,28 +1130,14 @@ impl Controller {
                 if let Some(locator) = &current.target
                     && Some(locator) != prepared.as_ref()
                 {
-                    let backend =
-                        super::super::backend::backend_locator(locator, current, &self.config)?;
-                    targets::retire_move_target_plan(&backend, id)?.execute(executor)?;
+                    super::super::environment::retire_session_environment(
+                        current,
+                        &self.config,
+                        executor,
+                        super::super::BranchDisposition::Keep,
+                    )?;
                     // The source becomes the session again, so it is the
                     // placement whose build state must survive.
-                    self.release_retired_move_target(
-                        current,
-                        &backend,
-                        Some(&transfer.source),
-                        executor,
-                    );
-                }
-                let source_checkout = transfer.source.checkout();
-                let source_worktree = match source_checkout {
-                    mj_core::state::Checkout::ManagedWorktree { worktree, .. } => Some(worktree),
-                    _ => None,
-                };
-                if let Ok(mj_core::state::Checkout::ManagedWorktree { worktree, .. }) =
-                    self.state.checkout(id)
-                    && Some(worktree) != source_worktree
-                {
-                    super::super::worktree::retire_managed_worktree(executor, worktree)?;
                 }
                 let mut source = (*transfer.source).clone();
                 source.state = SessionState::Error;
@@ -1218,7 +1145,10 @@ impl Controller {
                     "{error:#}; source environment retained for Move retry"
                 ));
                 source.updated_at = now();
-                crate::database::save_resumed_session(&source, None)?;
+                let environment =
+                    crate::database::move_source_environment(&operation.operation_id)?
+                        .context("Move rollback lost its source environment")?;
+                crate::database::restore_resumed_session(&source, &environment.id)?;
                 self.state.sessions.insert(id.clone(), source);
                 Ok(error)
             },

@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 121;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 122;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -427,7 +427,7 @@ const ACCOUNTING_MIGRATION_SQL: &str = "
             ) STRICT;
 ";
 
-fn migrate_schema(connection: &Connection) -> Result<()> {
+pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     let state = read_schema_state(connection)?;
     let version = state.revision;
     if version > SCHEMA_VERSION {
@@ -2322,6 +2322,22 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: physical worker ownership survives logical session deletion.
+    // Older writers can erase that evidence and remove a live worker's files.
+    if version < 122 {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute_batch(include_str!("environments.sql"))?;
+        super::environments::backfill_environments(&transaction)?;
+        super::environments::backfill_move_environments(&transaction)?;
+        transaction.execute(
+            "UPDATE schema_compatibility SET minimum_compatible_version=122 WHERE singleton=1",
+            [],
+        )?;
+        transaction.execute("INSERT INTO schema_migrations(version,applied_at) VALUES (122,strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [])?;
+        transaction.pragma_update(None, "user_version", 122)?;
+        transaction.commit()?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2754,7 +2770,34 @@ pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible
 /// Revision 121's triggers name tables that historical fixtures drop or
 /// reshape, so a fixture older than 121 removes them first.
 #[cfg(test)]
+pub(super) fn drop_environment_schema(connection: &Connection) {
+    for (table, column) in [
+        ("session_moves", "source_environment_id"),
+        ("retained_move_sources", "environment_id"),
+    ] {
+        if legacy_schema::table_has_column(connection, table, column).unwrap() {
+            connection
+                .execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column};"))
+                .unwrap();
+        }
+    }
+    connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS environment_report_registered;
+        DROP TRIGGER IF EXISTS environment_report_updated;
+        DROP TRIGGER IF EXISTS reclaimed_environment_owner_deleted;
+        DROP TRIGGER IF EXISTS reclaimed_environment_binding_deleted;
+        DROP TABLE IF EXISTS environment_reports;
+        DROP TABLE IF EXISTS environment_bindings;
+        DROP TABLE IF EXISTS environment_workers;
+        DROP TABLE IF EXISTS environments;",
+        )
+        .unwrap();
+}
+
+#[cfg(test)]
 pub(super) fn drop_session_row_triggers(connection: &Connection) {
+    drop_environment_schema(connection);
     connection
         .execute_batch(
             "DROP TRIGGER IF EXISTS session_rows_deleted;
@@ -2813,6 +2856,9 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
 /// Historical fixtures must remove review columns introduced afterward.
 #[cfg(test)]
 pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
+    if version < 122 {
+        drop_environment_schema(connection);
+    }
     if version < 121 {
         drop_session_row_triggers(connection);
     }
@@ -3280,7 +3326,7 @@ mod reader_tests {
         let upgraded = open_writer(&path).unwrap();
         let schema = read_schema_state(&upgraded).unwrap();
         assert!(schema.ensure_supported_by(63).is_err());
-        upgraded.execute("INSERT INTO retained_move_sources VALUES ('move-one','session-one','{}','[]','now')", []).unwrap();
+        upgraded.execute("INSERT INTO retained_move_sources(operation_id,session_id,source_json,exclusions_json,created_at) VALUES ('move-one','session-one','{}','[]','now')", []).unwrap();
         drop(upgraded);
         let reopened = open_writer(&path).unwrap();
         let count: i64 = reopened
@@ -3788,6 +3834,9 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 122 {
+            drop_environment_schema(&connection);
+        }
         if version < 111 {
             connection
                 .execute_batch(
@@ -3939,6 +3988,7 @@ mod reader_tests {
         let mut session = super::super::tests::session("existing", "project");
         save_session_to(&path, &session).unwrap();
         let connection = Connection::open(&path).unwrap();
+        drop_environment_schema(&connection);
         connection
             .execute_batch(
                 "ALTER TABLE sessions DROP COLUMN no_github_credentials;
@@ -4444,6 +4494,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         let connection = open_writer(&path).unwrap();
+        drop_environment_schema(&connection);
         // Rewind to revision 115, then store what a revision-115 build kept:
         // a top-level prompt, a child's spawn instructions and a destroyed
         // session's prompt.
@@ -4581,6 +4632,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         let connection = open_writer(&path).unwrap();
+        drop_environment_schema(&connection);
         // Rewind to revision 116 and store what a revision-116 build left:
         // intents of a closed child, of a stopped session that still names a
         // container, of a failed child and of a live session.
@@ -4711,6 +4763,8 @@ mod reader_tests {
                     advance_test_schema(&path, SCHEMA_VERSION + 1, SCHEMA_VERSION);
                 }
                 let raw = Connection::open(&path).unwrap();
+                drop_environment_schema(&raw);
+                drop_environment_schema(&raw);
                 raw.execute_batch(alteration).unwrap();
                 let before: i64 = raw
                     .query_row("PRAGMA schema_version", [], |row| row.get(0))

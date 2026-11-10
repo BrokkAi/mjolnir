@@ -513,6 +513,14 @@ pub(super) fn parse_materialized_execution(
 /// Only a flow that authors the whole record — creation, import, resume, or
 /// orphan adoption — may use this.
 pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    insert_session_with_parent(tx, session, None)
+}
+
+pub(super) fn insert_session_with_parent(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    parent: Option<&str>,
+) -> Result<()> {
     let previous_error = super::events::previous_session_error(tx, &session.id)?;
     let canonical_bundle =
         super::projects::session_project_id(tx, &session.id, &session.bundle_id)?;
@@ -657,7 +665,7 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
          ON CONFLICT(session_id) DO NOTHING",
         [session.id.as_str()],
     )?;
-    replace_targets(tx, session)?;
+    replace_targets_with_parent(tx, session, parent)?;
     replace_mounts(tx, &session.id, &session.additional_mounts)?;
     replace_checkpoint(tx, session)?;
     super::events::record_session_fault_transition(tx, session, previous_error)?;
@@ -793,6 +801,15 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
 }
 
 pub(super) fn replace_targets(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+    replace_targets_with_parent(tx, session, None)
+}
+
+fn replace_targets_with_parent(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    parent: Option<&str>,
+) -> Result<()> {
+    super::environments::capture_session_environment(tx, session, parent)?;
     tx.execute(
         "DELETE FROM session_targets WHERE session_id = ?1",
         [session.id.as_str()],
@@ -824,11 +841,18 @@ pub(super) fn replace_checkpoint(tx: &Transaction<'_>, session: &SessionRecord) 
     Ok(())
 }
 
-pub(super) fn insert_target(
-    tx: &Transaction<'_>,
-    session_id: &str,
-    target: &TargetLocator,
-) -> Result<()> {
+pub(super) struct StoredTargetValues<'a> {
+    pub kind: &'static str,
+    pub host: Option<&'a str>,
+    pub resource: Option<&'a str>,
+    pub address: Option<&'a str>,
+    pub workspace: Option<Vec<u8>>,
+    pub worker_id: Option<&'a str>,
+    pub workspace_storage: Option<String>,
+    pub borrowed_from: Option<&'a str>,
+}
+
+pub(super) fn stored_target_values(target: &TargetLocator) -> Result<StoredTargetValues<'_>> {
     let (kind, host, resource, address, workspace, worker_id, workspace_storage, borrowed_from) =
         match target {
             TargetLocator::LocalBare { worker_root } => (
@@ -952,6 +976,33 @@ pub(super) fn insert_target(
                 borrowed_from.as_deref(),
             ),
         };
+    Ok(StoredTargetValues {
+        kind,
+        host,
+        resource,
+        address,
+        workspace,
+        worker_id,
+        workspace_storage,
+        borrowed_from,
+    })
+}
+
+pub(super) fn insert_target(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    target: &TargetLocator,
+) -> Result<()> {
+    let StoredTargetValues {
+        kind,
+        host,
+        resource,
+        address,
+        workspace,
+        worker_id,
+        workspace_storage,
+        borrowed_from,
+    } = stored_target_values(target)?;
     tx.execute(
         "INSERT INTO session_targets(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
@@ -979,6 +1030,18 @@ fn load_targets_selected(
     state: &mut State,
     id: Option<&str>,
 ) -> Result<()> {
+    for (session_id, target) in read_targets(connection, id)? {
+        if let Some(session) = state.sessions.get_mut(&session_id) {
+            session.target = Some(target);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn read_targets(
+    connection: &Connection,
+    id: Option<&str>,
+) -> Result<BTreeMap<String, TargetLocator>> {
     let predicate = if id.is_some() {
         " WHERE session_id=?1"
     } else {
@@ -991,78 +1054,76 @@ fn load_targets_selected(
         .map(|id| vec![id as &dyn rusqlite::ToSql])
         .unwrap_or_default();
     let rows = statement.query_map(arguments.as_slice(), |row| {
-        let session_id: String = row.get(0)?;
-        let kind: String = row.get(1)?;
-        let host: Option<String> = row.get(2)?;
-        let resource: Option<String> = row.get(3)?;
-        let address: Option<String> = row.get(4)?;
-        let workspace = row.get_ref(5)?.blob_or_null()?.map(blob_to_path);
-        let worker_id: Option<String> = row.get(6)?;
-        let workspace_storage = row
-            .get::<_, Option<String>>(7)?
-            .map(|serialized| {
-                serde_json::from_str(&serialized).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
-                })
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let borrowed_from: Option<String> = row.get(8)?;
-        let target = match kind.as_str() {
-            "local-bare" => TargetLocator::LocalBare {
-                worker_root: workspace.unwrap(),
-            },
-            "local-podman" => TargetLocator::LocalPodman {
-                borrowed_from,
-                container_id: resource.unwrap(),
-                workspace_storage,
-            },
-            "local-docker" => TargetLocator::LocalDocker {
-                borrowed_from,
-                container_id: resource.unwrap(),
-            },
-            "apple-container" => TargetLocator::AppleContainer {
-                borrowed_from,
-                container_id: resource.unwrap(),
-            },
-            "aws-ec2" => TargetLocator::AwsEc2 {
-                instance_id: resource.unwrap(),
-                address,
-            },
-            "ssh-bare" => TargetLocator::SshBare {
-                host: host.unwrap(),
-                workspace: workspace.unwrap(),
-                worker_id,
-            },
-            "ssh-docker" => TargetLocator::SshDocker {
-                borrowed_from,
-                host: host.unwrap(),
-                container_id: resource.unwrap(),
-            },
-            "ssh-apple-container" => TargetLocator::SshAppleContainer {
-                borrowed_from,
-                host: host.unwrap(),
-                container_id: resource.unwrap(),
-            },
-            "ssh-podman" => TargetLocator::SshPodman {
-                borrowed_from,
-                host: host.unwrap(),
-                container_id: resource.unwrap(),
-                workspace_storage,
-            },
-            _ => unreachable!("target kind constrained by schema"),
-        };
-        Ok((session_id, target))
+        Ok((row.get(0)?, decode_target(row, 1)?))
     })?;
-    for row in rows {
-        let (session_id, target) = row?;
-        // A session skipped for an unsupported harness has no entry to attach
-        // its target, mounts, or checkpoint to.
-        if let Some(session) = state.sessions.get_mut(&session_id) {
-            session.target = Some(target);
-        }
-    }
-    Ok(())
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
+pub(super) fn decode_target(
+    row: &rusqlite::Row<'_>,
+    start: usize,
+) -> rusqlite::Result<TargetLocator> {
+    let kind: String = row.get(start)?;
+    let host: Option<String> = row.get(start + 1)?;
+    let resource: Option<String> = row.get(start + 2)?;
+    let address: Option<String> = row.get(start + 3)?;
+    let workspace = row.get_ref(start + 4)?.blob_or_null()?.map(blob_to_path);
+    let worker_id: Option<String> = row.get(start + 5)?;
+    let workspace_storage = row
+        .get::<_, Option<String>>(start + 6)?
+        .map(|serialized| {
+            serde_json::from_str(&serialized).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(start + 6, Type::Text, Box::new(error))
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let borrowed_from: Option<String> = row.get(start + 7)?;
+    let target = match kind.as_str() {
+        "local-bare" => TargetLocator::LocalBare {
+            worker_root: workspace.unwrap(),
+        },
+        "local-podman" => TargetLocator::LocalPodman {
+            borrowed_from,
+            container_id: resource.unwrap(),
+            workspace_storage,
+        },
+        "local-docker" => TargetLocator::LocalDocker {
+            borrowed_from,
+            container_id: resource.unwrap(),
+        },
+        "apple-container" => TargetLocator::AppleContainer {
+            borrowed_from,
+            container_id: resource.unwrap(),
+        },
+        "aws-ec2" => TargetLocator::AwsEc2 {
+            instance_id: resource.unwrap(),
+            address,
+        },
+        "ssh-bare" => TargetLocator::SshBare {
+            host: host.unwrap(),
+            workspace: workspace.unwrap(),
+            worker_id,
+        },
+        "ssh-docker" => TargetLocator::SshDocker {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+        },
+        "ssh-apple-container" => TargetLocator::SshAppleContainer {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+        },
+        "ssh-podman" => TargetLocator::SshPodman {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+            workspace_storage,
+        },
+        _ => unreachable!("target kind constrained by schema"),
+    };
+    Ok(target)
 }
 
 /// Rewrite a session's attached directories.

@@ -139,7 +139,7 @@ exit "$status"
 "#;
 
 /// A pre-close snapshot survives the cascade deleting the children's rows.
-pub(crate) struct SubagentReportCleanup {
+struct SubagentReportCleanup {
     backend: mj_core::targets::TargetLocator,
     session_id: String,
     root: String,
@@ -147,17 +147,6 @@ pub(crate) struct SubagentReportCleanup {
 }
 
 impl SubagentReportCleanup {
-    pub(crate) fn run(&self, executor: &impl mj_core::targets::CommandExecutor) {
-        if let Err(error) = self.execute(executor) {
-            tracing::warn!(
-                session_id = %self.session_id,
-                report_root = %self.root,
-                error = format!("{error:#}"),
-                "could not remove sub-agent report directories"
-            );
-        }
-    }
-
     fn execute(&self, executor: &impl mj_core::targets::CommandExecutor) -> Result<()> {
         validate_report_root(&self.root)?;
         for child in &self.child_ids {
@@ -185,6 +174,34 @@ impl SubagentReportCleanup {
     }
 }
 
+pub(super) fn cleanup_owned_reports(
+    _authority: &super::environment::Reclamation,
+    backend: &mj_core::targets::TargetLocator,
+    session_id: &str,
+    reports: &[(String, String)],
+    executor: &impl mj_core::targets::CommandExecutor,
+) -> Result<()> {
+    for (child_id, directory) in reports {
+        let directory = Path::new(directory);
+        ensure!(
+            directory.file_name().and_then(|name| name.to_str()) == Some(child_id),
+            "environment report path does not name its child"
+        );
+        let root = directory
+            .parent()
+            .and_then(|path| path.to_str())
+            .context("environment report root is unavailable")?;
+        SubagentReportCleanup {
+            backend: backend.clone(),
+            session_id: session_id.to_owned(),
+            root: root.to_owned(),
+            child_ids: vec![child_id.clone()],
+        }
+        .execute(executor)?;
+    }
+    Ok(())
+}
+
 fn validate_report_root(root: &str) -> Result<()> {
     let path = Path::new(root);
     ensure!(
@@ -203,131 +220,7 @@ fn validate_report_root(root: &str) -> Result<()> {
 }
 
 impl Controller {
-    /// Snapshot all relations before a daemon close/destroy cascades children.
-    pub(crate) fn subagent_report_cleanup(
-        &self,
-        parent_session_id: &str,
-    ) -> Result<Option<SubagentReportCleanup>> {
-        let parent = self
-            .state
-            .sessions
-            .get(parent_session_id)
-            .with_context(|| format!("unknown parent session {parent_session_id}"))?;
-        let child_ids: Vec<String> = self
-            .state
-            .subagents
-            .values()
-            .filter(|child| child.parent_session_id == parent_session_id)
-            .map(|child| child.child_session_id.clone())
-            .collect();
-        // Without children there is nothing to remove, so no target command.
-        if child_ids.is_empty() {
-            return Ok(None);
-        }
-        let Some(locator) = parent.target.as_ref() else {
-            return Ok(None);
-        };
-        let backend = super::backend::backend_locator(locator, parent, &self.config)?;
-        let checkout = self.state.checkout(parent_session_id)?;
-        let (root, _) = subagent_report_root(parent, &backend, &checkout);
-        Ok(Some(SubagentReportCleanup {
-            backend,
-            session_id: parent_session_id.to_owned(),
-            root,
-            child_ids,
-        }))
-    }
-
-    /// Only a child hook calls this, after its owning worker has stopped.
-    pub(super) fn remove_child_report_directory(
-        &self,
-        child_session_id: &str,
-        executor: &impl mj_core::targets::CommandExecutor,
-    ) {
-        let result = (|| -> Result<()> {
-            let Some(relation) = self.state.subagents.get(child_session_id) else {
-                return Ok(());
-            };
-            let child = self
-                .state
-                .sessions
-                .get(child_session_id)
-                .context("sub-agent session is missing")?;
-            let parent = self.state.sessions.get(&relation.parent_session_id);
-            let directory = crate::database::load_subagent_report(child_session_id)?.report_dir;
-            let root = if let Some(directory) = directory {
-                let path = Path::new(&directory);
-                ensure!(
-                    mj_core::target_path::is_absolute(path),
-                    "persisted report directory is not absolute"
-                );
-                ensure!(
-                    path.file_name().and_then(|name| name.to_str()) == Some(child_session_id),
-                    "persisted report directory does not name its child"
-                );
-                path.parent()
-                    .context("report directory has no root")?
-                    .to_str()
-                    .context("report root is not UTF-8")?
-                    .to_owned()
-            } else if let Some(parent) = parent {
-                let locator = parent
-                    .target
-                    .as_ref()
-                    .context("parent has no reachable report target")?;
-                let backend = super::backend::backend_locator(locator, parent, &self.config)?;
-                subagent_report_root(parent, &backend, &self.state.checkout(&parent.id)?).0
-            } else {
-                anyhow::bail!("child has no recorded report directory or live parent");
-            };
-            let mut last_error = None;
-            for session in std::iter::once(child).chain(parent) {
-                let Some(locator) = &session.target else {
-                    continue;
-                };
-                let attempt = (|| {
-                    let backend = super::backend::backend_locator(locator, session, &self.config)?;
-                    SubagentReportCleanup {
-                        backend,
-                        session_id: session.id.clone(),
-                        root: root.clone(),
-                        child_ids: vec![child_session_id.to_owned()],
-                    }
-                    .execute(executor)
-                })();
-                match attempt {
-                    Ok(()) => return Ok(()),
-                    Err(error) => {
-                        tracing::warn!(
-                            child_session_id,
-                            target_session_id = %session.id,
-                            error = format!("{error:#}"),
-                            "could not remove child reports through this target"
-                        );
-                        last_error = Some(error);
-                    }
-                }
-            }
-            Err(last_error.unwrap_or_else(|| {
-                anyhow::anyhow!("neither child nor parent has a reachable report target")
-            }))
-        })();
-        if let Err(error) = result {
-            tracing::warn!(
-                child_session_id,
-                error = format!("{error:#}"),
-                "could not remove the sub-agent report directory"
-            );
-        }
-    }
-
-    /// Create the directory that holds a parent's children's report
-    /// directories on the parent's target, and return its absolute path.
-    ///
-    /// It sits outside every repository: under the workspace root that a
-    /// bundle session's repositories are checked out below, or, for a bare
-    /// project whose workspace root is the user's own directory, inside the
-    /// project under a path its `info/exclude` lists.
+    /// Prepare the shared report directory before registering a child.
     pub fn prepare_subagent_report_root(
         &self,
         parent_session_id: &str,

@@ -16,11 +16,12 @@ The observable result is that deleting an unreachable child, restarting the daem
 - [x] Verified that the unpublished patches do not fix ownership across independent requests.
 - [x] Traced worker placement, process stopping, sub-agent registration, target persistence, and destructive call sites.
 - [x] Specified the replacement ownership boundary and acceptance cases.
-- [ ] Confirm the expanded storage/lifecycle refactor scope before implementation.
-- [ ] Introduce durable environments and worker ownership with an isolated migration regression.
-- [ ] Register worker leases and serialize launch admission against environment retirement.
-- [ ] Route all physical teardown through the environment owner and remove the cascade-specific patch mechanisms.
-- [ ] Run the isolated regressions, required validation, review, commit, and push.
+- [x] (2026-11-10) User approved the expanded storage/lifecycle refactor with “proceed”.
+- [x] Introduce durable environments and worker ownership, including normalized paths, unsupported harness rows, and historical Move sources.
+- [x] Register worker leases before file staging and boot; retirement/registration concurrency regression passes.
+- [x] Route physical teardown through the environment owner across Destroy, Suspend, Resume, Move, failed startup and recovery. Predictable provisioning targets are reserved before creation. Unknown legacy orphan ownership permits stopping only and reports retained files.
+- [x] Run isolated regressions, full touched-crate suites, and workspace Clippy.
+- [ ] Complete review, commit final corrections, and push.
 - [ ] Install and apply the fix to the affected live session only after installation is authorized.
 
 ## Surprises & Discoveries
@@ -34,6 +35,12 @@ Bare sub-agents have sibling worker roots. Their process groups are independent 
 `stop_subagents_for_suspend` in `mj-controller/src/daemon/close.rs` logs a failed stop and removes the child's records anyway. This is an existing instance of the same ownership defect. Several Resume, provisioning rollback, and recovery paths invoke `targets::close_plan` directly instead of sharing one environment destructor.
 
 The local commits `3c523cbdd`, `5b9868d0d`, and `ae628e069` remain unpublished and uninstalled. Their warning presentation and regression cases are useful reference material. The in-memory cascade outcome and deferred session deletion strategy are not a replacement for durable environment ownership.
+
+The original migration/deletion regression and the daemon's direct-child-destroy / state-rebuild / parent-destroy regression both passed in the isolated store on 2026-11-10. A subsequent audit found that serializing recorded targets and project paths into JSON would lose non-UTF-8 paths supported by the normalized store. The implementation now shares the existing normalized target encoder/decoder and path byte encoding; the normalized target and non-UTF-8 path migration regression now passes.
+
+Child report directories also outlive their logical session. The environment now records report obligations through SQLite triggers in the same transaction as report registration; removal is being moved out of daemon cascade snapshots and into owner-authorized teardown after all writers stop.
+
+A further admission race exists before physical teardown: a child can be registered after a daemon lists children. `begin_session_destroy` now closes the logical parent's state and its owned environments, and selects children in one writer transaction. Registration checks the existing canonical `SessionState::can_receive_child_work` predicate. The daemon preempts prior lifecycle work before this decision.
 
 ## Decision Log
 
@@ -49,7 +56,7 @@ The migration is breaking. Older readers and writers do not understand independe
 
 ## Outcomes & Retrospective
 
-Investigation and replacement design are complete. No replacement storage or runtime code has been implemented. No live state has been changed and no code has been pushed or installed. The remaining scope decision is whether to perform the shared storage/lifecycle ownership refactor now; the current Destroy patches are not safe to ship on their own.
+The user approved the broader refactor. Environment ownership, startup admission, typed checkout deletion authority, and shared teardown are implemented locally and are being integrated and validated. The two principal regressions passed before the path-storage and admission refinements. No live state has been changed and no code has been pushed or installed. Upstream was merged at c69e8327a. A focused run passed 202 lifecycle, Resume, Move, provisioning and schema cases. The full four-crate run passed core, CLI, TUI, startup/upgrade and integration suites; the controller run passed 2,498 cases with 13 fixture/expectation failures. Those failures and all subsequently changed provisioning/branch cases passed in a 47-case rerun. Workspace `cargo clippy --all-targets -- -D warnings` passes. Browser notice tests also pass. Remaining work is review and push.
 
 ## Context and Orientation
 
@@ -107,9 +114,9 @@ Validate focused cases while implementing. After the last implementation round, 
 
 Work in the current checkout on `master`. Preserve the three unpublished commits as local checkpoints. Replace their unsafe lifecycle changes with ordinary commits on the same branch; do not reset shared history or push an intermediate unsafe revision.
 
-Use `cargo test -p brokk-mj-controller -p brokk-mjolnir -p brokk-mj-tui -- <affected test filters>` during development. Run every Cargo test outside the restricted sandbox. Keep the existing isolated configuration/data directories and use a separate named instance for every real CLI, daemon, worker, or TUI regression. Keep test roots outside `target/` and do not redirect Cargo build storage.
+Use `cargo test -p brokk-mj-core -p brokk-mj-controller -p brokk-mjolnir -p brokk-mj-tui -- <affected test filters>` during development. Run every Cargo test outside the restricted sandbox. Keep the existing isolated configuration/data directories and use a separate named instance for every real CLI, daemon, worker, or TUI regression. Keep test roots outside `target/` and do not redirect Cargo build storage.
 
-At the final implementation checkpoint run `TZ=UTC cargo test -p brokk-mj-controller -p brokk-mjolnir -p brokk-mj-tui` and `cargo clippy --all-targets -- -D warnings`. Run the affected browser notice tests with `node --test tests/e2e/web/viewer.unit.test.mjs`. Re-run only failing or subsequently changed cases when correcting validation failures.
+At the final implementation checkpoint run `TZ=UTC cargo test -p brokk-mj-core -p brokk-mj-controller -p brokk-mjolnir -p brokk-mj-tui` and `cargo clippy --all-targets -- -D warnings`. Run the affected browser notice tests with `node --test tests/e2e/web/viewer.unit.test.mjs`. Re-run only failing or subsequently changed cases when correcting validation failures.
 
 ## Validation and Acceptance
 
@@ -136,3 +143,13 @@ Provide an environment-owner API with explicit registration/admission, retiremen
 Use `Path` and `PathBuf` for filesystem data, existing target/runtime parsers for placement interpretation, the serialized database writer for durable decisions, existing subprocess helpers for process control, and existing worker permits for per-worker mutation. No new host supervisor, workspace crate, polling reaper, or speculative resource cap is part of this proposal.
 
 Design reset recorded after the user's request to address the underlying fragility. This plan intentionally changes the ownership model across lifecycle operations; it does not describe another local exception in Destroy.
+
+## Validation evidence (2026-11-10)
+
+- Full four-crate suites: `/tmp/mj-environment-final-tests.log`; controller failures corrected and rerun in `/tmp/mj-environment-failed-v9.log` (47 passed).
+- Workspace Clippy: `/tmp/mj-environment-final-clippy-v3.log` (clean).
+- Migration interruption, normalized paths, unknown harness and deleted-owner evidence: `/tmp/mj-environment-focused-v7.log`; migration and admission cases passed; the Move restart fixture was corrected and passed in v9.
+- Browser notices: `/tmp/mj-environment-viewer-tests.log`.
+- The source-versus-destination restart intent regression and explicit branch deletion after Suspend both pass.
+
+No new worker protocol is needed. Revision 122 is breaking and remains uninstalled. Upstream still uses revision 121 at origin/master 9907bf540.

@@ -1250,9 +1250,24 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
             workspace_storage: Default::default(),
         },
     ] {
-        let session = crate::controller::test_support::checkpoint_test_session(
+        let mut session = crate::controller::test_support::checkpoint_test_session(
             "13131313131313131313131313131313",
         );
+        session.target = Some(match &locator {
+            targets::TargetLocator::LocalBare { worker_root } => {
+                mj_core::state::TargetLocator::LocalBare {
+                    worker_root: worker_root.into(),
+                }
+            }
+            targets::TargetLocator::LocalPodman { container_id, .. } => {
+                mj_core::state::TargetLocator::LocalPodman {
+                    container_id: container_id.clone(),
+                    borrowed_from: None,
+                    workspace_storage: Default::default(),
+                }
+            }
+            _ => unreachable!(),
+        });
         crate::database::save_session(&session).unwrap();
         let executor = RecordingExecutor {
             commands: RefCell::new(Vec::new()),
@@ -1296,7 +1311,6 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
         assert!(!script.contains("control.sock"));
         assert!(!script.contains("/worker.log"));
         drop(commands);
-        let mut session = session;
         session.no_github_credentials = true;
         crate::database::save_session(&session).unwrap();
         executor.commands.borrow_mut().clear();

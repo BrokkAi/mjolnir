@@ -466,7 +466,13 @@ impl Controller {
         };
         // A session that never started has a branch Mjolnir just created and
         // nobody has worked on, so the rollback takes the branch too.
-        cleanup_managed_worktree(executor, worktree, BranchDisposition::Delete)
+        let _ = worktree;
+        super::environment::retire_session_environment(
+            &self.state.sessions[session_id],
+            &self.config,
+            executor,
+            BranchDisposition::Delete,
+        )
     }
 }
 
@@ -2572,6 +2578,7 @@ pub(super) fn preserve_retained_managed_worktree_branch(
 /// depend on be collected. The checkout itself is dirty by design; its dirty
 /// state has already been carried into the target.
 pub(super) fn retire_managed_worktree(
+    authority: &super::environment::CheckoutRemoval<'_>,
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
 ) -> Result<()> {
@@ -2590,7 +2597,7 @@ pub(super) fn retire_managed_worktree(
             ),
         )?;
     }
-    cleanup_managed_worktree(executor, worktree, BranchDisposition::Keep)
+    cleanup_managed_worktree(authority, executor, worktree, BranchDisposition::Keep)
 }
 
 /// Remove the checkout and prune its metadata. Returns whether the repository
@@ -2703,10 +2710,12 @@ fn containing_ref_is_not_a_session(reference: &str) -> bool {
 /// asks for that. The branch can hold work the user still wants, so deleting
 /// it is always an explicit decision; see [`BranchDisposition`].
 pub(super) fn cleanup_managed_worktree(
+    authority: &super::environment::CheckoutRemoval<'_>,
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
     branch: BranchDisposition,
 ) -> Result<()> {
+    authority.covers(worktree)?;
     if !remove_managed_worktree_checkout(executor, worktree)? {
         return Ok(());
     }
@@ -2715,6 +2724,23 @@ pub(super) fn cleanup_managed_worktree(
     }
     if branch == BranchDisposition::Keep {
         return remove_empty_managed_worktree_directories(executor, worktree);
+    }
+    cleanup_managed_worktree_branch(executor, worktree, branch)?;
+    remove_empty_managed_worktree_directories(executor, worktree)
+}
+
+/// Retained branch metadata is independent of a reclaimed checkout path.
+/// Git refuses deleting a branch which a replacement checkout has in use.
+pub(super) fn cleanup_managed_worktree_branch(
+    executor: &impl CommandExecutor,
+    worktree: &ManagedWorktree,
+    branch: BranchDisposition,
+) -> Result<()> {
+    if worktree.kind == ManagedCheckoutKind::Clone
+        || branch == BranchDisposition::Keep
+        || !path_exists_on_managed_target(executor, &worktree.target, &worktree.source_repository)?
+    {
+        return Ok(());
     }
     let branch_ref = format!("refs/heads/{}", worktree.branch);
     let check = managed_git_command(
@@ -2762,7 +2788,7 @@ pub(super) fn cleanup_managed_worktree(
             ),
         )?;
     }
-    remove_empty_managed_worktree_directories(executor, worktree)
+    Ok(())
 }
 
 fn remove_empty_managed_worktree_directories(

@@ -16,11 +16,7 @@ use super::checkpoint::{
     CheckpointExportPolicy, LatchExclusivity, prune_replaced_checkpoint,
     release_projection_behind_checkpoint, verify_installed_checkpoint_gate, wait_for_relay_closed,
 };
-use super::mbx::release::BuildStateRelease;
 use super::worker_restart::WorkerRestartLeftNoWorker;
-use super::worktree::{
-    cleanup_managed_worktree, managed_worktree_checkout_is_dirty, retire_managed_worktree,
-};
 use super::{Controller, now, persist_session_record_transition_or_restore};
 
 mod subagent;
@@ -1007,22 +1003,19 @@ impl Controller {
                     .context("session has no target")?;
                 let backend = backend_locator(locator, &destroying, &self.config)?;
                 let deferred = if self.state.subagents.contains_key(session_id) {
-                    targets::borrowed_worker_cleanup_plan(&backend, session_id)?
-                        .execute(executor)?;
+                    super::environment::stop_borrower(session_id, &self.config, executor)?;
                     false
-                } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
-                    plan.execute(executor)?;
+                } else if targets::quiesce_plan(&backend, session_id)?.is_some() {
+                    super::environment::quiesce_session_environment(
+                        &destroying,
+                        &self.config,
+                        executor,
+                    )?;
                     true
                 } else {
-                    execute_target_cleanup(&backend, &destroying, &self.config, executor)?;
+                    execute_target_cleanup(&destroying, &self.config, executor)?;
                     false
                 };
-                if let mj_core::state::Checkout::ManagedWorktree { worktree, .. } =
-                    self.state.checkout(session_id)?
-                {
-                    retire_managed_worktree(executor, worktree)
-                        .context("retire managed raw-session worktree after verified close")?;
-                }
                 let record = self.state.sessions.get_mut(session_id).unwrap();
                 record.state = SessionState::Stopped;
                 if !deferred {
@@ -1086,9 +1079,7 @@ impl Controller {
                     targets::quiesce_plan(&backend, session_id)?.is_some(),
                     "session {session_id} retained a non-Podman target after stopping"
                 );
-                if let Err(error) =
-                    execute_target_cleanup(&backend, &previous, &self.config, executor)
-                {
+                if let Err(error) = execute_target_cleanup(&previous, &self.config, executor) {
                     let record = self.state.sessions.get_mut(session_id).unwrap();
                     record.updated_at = now();
                     record.last_error = Some(format!("deferred target cleanup failed: {error:#}"));
@@ -1182,26 +1173,24 @@ impl Controller {
             executor,
             || {
                 let mut deferred = false;
-                let checkout = self.state.checkout(session_id)?;
                 if let Some(locator) = &session.target {
                     let backend = backend_locator(locator, session, &self.config)?;
                     // A sub-agent borrows its parent's target: only its own worker and
                     // private state go, as they do when a live child's close finishes.
                     // A parked child reaches this, with its worker already stopped.
                     if self.state.subagents.contains_key(session_id) {
-                        targets::borrowed_worker_cleanup_plan(&backend, session_id)?
-                            .execute(executor)?;
+                        super::environment::stop_borrower(session_id, &self.config, executor)?;
                         retire_worker_restart_intent(session_id)?;
-                    } else if let Some(plan) = targets::quiesce_plan(&backend, session_id)? {
-                        plan.execute(executor)?;
+                    } else if targets::quiesce_plan(&backend, session_id)?.is_some() {
+                        super::environment::quiesce_session_environment(
+                            session,
+                            &self.config,
+                            executor,
+                        )?;
                         deferred = true;
                     } else {
-                        execute_target_cleanup(&backend, session, &self.config, executor)?;
+                        execute_target_cleanup(session, &self.config, executor)?;
                     }
-                }
-                if let mj_core::state::Checkout::ManagedWorktree { worktree, .. } = checkout {
-                    retire_managed_worktree(executor, worktree)
-                        .context("retire managed raw-session worktree after stopping the target")?;
                 }
                 let record = self.state.sessions.get_mut(session_id).unwrap();
                 record.state = SessionState::Stopped;
@@ -1237,8 +1226,8 @@ impl Controller {
     /// The same, with a say in what happens to the managed worktree's branch.
     ///
     /// A session that is already `Stopped` has had its checkout removed by
-    /// [`retire_managed_worktree`], so usually only the branch is left for
-    /// [`cleanup_managed_worktree`] to take. With [`BranchDisposition::Keep`]
+    /// [`super::worktree::retire_managed_worktree`], so usually only the branch is left for
+    /// [`super::worktree::cleanup_managed_worktree`] to take. With [`BranchDisposition::Keep`]
     /// the record, the checkpoint, and the attachments go and the branch
     /// stays, which is what a destroy does unless the user asks otherwise.
     pub fn destroy_session_controlled_with(
@@ -1268,6 +1257,21 @@ impl Controller {
         branch: BranchDisposition,
         checkout: CheckoutDisposition,
     ) -> Result<Option<PathBuf>> {
+        crate::worker_lifecycle::run_blocking(
+            session_id,
+            "destroy stopped session",
+            executor,
+            || self.destroy_stopped_session_steps(session_id, executor, branch, checkout),
+        )
+    }
+
+    fn destroy_stopped_session_steps(
+        &mut self,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+        branch: BranchDisposition,
+        checkout: CheckoutDisposition,
+    ) -> Result<Option<PathBuf>> {
         let session = self
             .state
             .sessions
@@ -1280,26 +1284,18 @@ impl Controller {
         if let Some(mut operation) = crate::database::load_move_operation(session_id)? {
             self.cleanup_prepared_move_destination(&mut operation, executor)?;
         }
-        self.remove_child_report_directory(session_id, executor);
-        let mut retained_checkout = None;
-        if let mj_core::state::Checkout::ManagedWorktree { worktree, .. } =
-            self.state.checkout(session_id)?
-        {
-            let keep = checkout == CheckoutDisposition::KeepWhenDirty
-                && (worktree.kind == mj_core::state::ManagedCheckoutKind::Clone
-                    || managed_worktree_checkout_is_dirty(executor, worktree).context(
-                        "check the managed raw-session worktree for uncommitted changes",
-                    )?);
-            if keep {
-                // Keeping the checkout keeps its branch with it: the commits
-                // the working tree is based on are the only way back to this
-                // work.
-                retained_checkout = Some(worktree.worktree_root.clone());
-            } else {
-                cleanup_managed_worktree(executor, worktree, branch)
-                    .context("remove managed raw-session worktree")?;
-            }
-        }
+        let retained_checkout = if self.state.subagents.contains_key(session_id) {
+            super::environment::stop_borrower(session_id, &self.config, executor)?;
+            None
+        } else {
+            super::environment::retire_inactive_environments(
+                &session,
+                &self.config,
+                executor,
+                branch,
+                checkout,
+            )?
+        };
         super::checkpoint::remove_session_checkpoint_archives(
             &mj_core::config::sessions_dir(),
             session_id,
@@ -1345,7 +1341,7 @@ impl Controller {
         session_id: &str,
         executor: &impl CommandExecutor,
         branch: BranchDisposition,
-        delete: impl FnOnce(&str) -> Result<()>,
+        delete: impl Fn(&str) -> Result<()>,
     ) -> Result<DestroyOutcome> {
         self.destroy_session_with_cleanup(
             session_id,
@@ -1353,36 +1349,6 @@ impl Controller {
             branch,
             delete,
             DestroyCleanup::BestEffort,
-            DestroyOutcome::default(),
-        )
-    }
-
-    /// Keep unconfirmed descendants recorded until the root can atomically
-    /// forget the tree. A failed root removal must retain their worker evidence.
-    pub(crate) fn destroy_session_in_tree(
-        &mut self,
-        session_id: &str,
-        executor: &impl CommandExecutor,
-        branch: BranchDisposition,
-        root: bool,
-        descendants: DestroyOutcome,
-    ) -> Result<DestroyOutcome> {
-        let retained = descendants.workers.retained_sessions().to_vec();
-        self.destroy_session_with_cleanup(
-            session_id,
-            executor,
-            branch,
-            move |id| {
-                let mut ids = retained;
-                ids.push(id.to_owned());
-                crate::database::delete_sessions(&ids)
-            },
-            if root {
-                DestroyCleanup::BestEffort
-            } else {
-                DestroyCleanup::Descendant
-            },
-            descendants,
         )
     }
 
@@ -1398,7 +1364,6 @@ impl Controller {
             BranchDisposition::Keep,
             crate::database::delete_session,
             DestroyCleanup::Required,
-            DestroyOutcome::default(),
         )
     }
 
@@ -1407,26 +1372,13 @@ impl Controller {
         session_id: &str,
         executor: &impl CommandExecutor,
         branch: BranchDisposition,
-        delete: impl FnOnce(&str) -> Result<()>,
+        delete: impl Fn(&str) -> Result<()>,
         cleanup: DestroyCleanup,
-        descendants: DestroyOutcome,
     ) -> Result<DestroyOutcome> {
-        let result = self.force_destroy_session_steps(
-            session_id,
-            executor,
-            branch,
-            delete,
-            cleanup,
-            descendants,
-        );
-        if result.is_err()
-            && let Err(error) = self.settle_failed_destroy(session_id)
-        {
-            tracing::warn!(
-                session_id,
-                error = format!("{error:#}"),
-                "could not record a failed destroy"
-            );
+        let result =
+            self.force_destroy_session_steps(session_id, executor, branch, delete, cleanup);
+        if result.is_err() {
+            self.settle_failed_destroy(session_id);
         }
         result
     }
@@ -1436,25 +1388,30 @@ impl Controller {
     /// a live session: `Error` is not polled, so the daemon does not keep
     /// reconnecting a relay proxy to the worker it stopped (I2-9). The target
     /// stays recorded, and the next destroy finishes the removal.
-    fn settle_failed_destroy(&mut self, session_id: &str) -> Result<()> {
+    fn settle_failed_destroy(&mut self, session_id: &str) {
         let Some(record) = self.state.sessions.get(session_id) else {
-            return Ok(());
+            return;
         };
         if !record.state.is_active() || record.state == SessionState::Error {
-            return Ok(());
+            return;
         }
         let previous = record.clone();
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.state = SessionState::Error;
         record.updated_at = now();
-        persist_session_record_transition_or_restore(
+        if let Err(error) = persist_session_record_transition_or_restore(
             &mut self.state,
             session_id,
             &previous,
             "persist the failed destroy",
             &crate::database::save_lifecycle_session,
-        )?;
-        Ok(())
+        ) {
+            tracing::warn!(
+                session_id,
+                error = format!("{error:#}"),
+                "could not record a failed destroy"
+            );
+        }
     }
 
     fn force_destroy_session_steps(
@@ -1462,9 +1419,8 @@ impl Controller {
         session_id: &str,
         executor: &impl CommandExecutor,
         branch: BranchDisposition,
-        delete: impl FnOnce(&str) -> Result<()>,
+        delete: impl Fn(&str) -> Result<()>,
         cleanup: DestroyCleanup,
-        mut outcome: DestroyOutcome,
     ) -> Result<DestroyOutcome> {
         crate::worker_lifecycle::run_blocking(
             session_id,
@@ -1478,10 +1434,8 @@ impl Controller {
                     .get(session_id)
                     .with_context(|| format!("unknown session {session_id}"))?
                     .clone();
-                let descendants_confirmed = outcome.workers.is_confirmed();
-                if descendants_confirmed
-                    && let Some(mut operation) = crate::database::load_move_operation(session_id)?
-                {
+                let mut outcome = DestroyOutcome::default();
+                if let Some(mut operation) = crate::database::load_move_operation(session_id)? {
                     outcome.cleanup(
                         self.cleanup_prepared_move_destination(&mut operation, executor),
                         &session,
@@ -1490,53 +1444,22 @@ impl Controller {
                         executor,
                     )?;
                 }
-                // Stop the worker before touching its files. A failed stop
-                // leaves those files in place, even when its record goes.
-                let target_removed = if !descendants_confirmed {
-                    outcome.warnings.push(format!("Destroy kept the environment and checkout for session {session_id} because a sub-agent worker could still be using them."));
-                    false
-                } else if let Some(locator) = &session.target {
-                    outcome.cleanup(
-                        (|| {
-                            let backend = backend_locator(locator, &session, &self.config)?;
-                            if self.state.subagents.contains_key(session_id) {
-                                targets::borrowed_worker_cleanup_plan(&backend, session_id)?
-                                    .execute(executor)?;
-                                retire_worker_restart_intent(session_id)?;
-                                self.remove_child_report_directory(session_id, executor);
-                            } else {
-                                execute_target_cleanup(&backend, &session, &self.config, executor)?;
-                            }
-                            Ok(())
-                        })(),
-                        &session,
-                        "session environment",
-                        cleanup,
-                        executor,
-                    )?
-                } else {
-                    true
-                };
-                if !target_removed {
-                    outcome.workers.mark_unconfirmed();
-                }
-                if target_removed && session.target.is_none() {
-                    self.remove_child_report_directory(session_id, executor);
-                }
-                // An unconfirmed worker can still write here. Forgetting its
-                // record must never remove its files or release its build cache.
-                if target_removed
-                    && let mj_core::state::Checkout::ManagedWorktree { worktree, .. } =
-                        self.state.checkout(session_id)?
-                {
-                    outcome.cleanup(
-                        cleanup_managed_worktree(executor, worktree, branch),
-                        &session,
-                        "managed checkout",
-                        cleanup,
-                        executor,
-                    )?;
-                }
+                outcome.cleanup(
+                    if self.state.subagents.contains_key(session_id) {
+                        super::environment::stop_borrower(session_id, &self.config, executor)
+                    } else {
+                        super::environment::destroy_session_environments(
+                            &session,
+                            &self.config,
+                            executor,
+                            branch,
+                        )
+                    },
+                    &session,
+                    "session environment",
+                    cleanup,
+                    executor,
+                )?;
                 retire_worker_restart_intent(session_id)?;
                 super::checkpoint::remove_session_checkpoint_archives(
                     &mj_core::config::sessions_dir(),
@@ -1546,14 +1469,7 @@ impl Controller {
                 mj_core::attachment::AttachmentStore::controller(session_id)?
                     .remove_session_data()
                     .context("remove session image attachments")?;
-                if matches!(cleanup, DestroyCleanup::Descendant) && !outcome.workers.is_confirmed()
-                {
-                    self.settle_failed_destroy(session_id)?;
-                    outcome.workers.retain(session_id);
-                    return Ok(outcome);
-                }
                 delete(session_id).context("force destroy session in database")?;
-                outcome.workers.clear_retained();
                 self.state.subagents.remove(session_id);
                 self.state.destroy_session_force(session_id)?;
                 Ok(outcome)
@@ -1562,72 +1478,19 @@ impl Controller {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct DestroyOutcome {
     /// Safe messages for attached surfaces; diagnostics stay in daemon logs.
     pub warnings: Vec<String>,
-    workers: DestroyWorkers,
-}
-
-#[derive(Debug, Default, Clone)]
-enum DestroyWorkers {
-    #[default]
-    Confirmed,
-    Unconfirmed {
-        retained_sessions: Vec<String>,
-    },
-}
-
-impl DestroyWorkers {
-    fn is_confirmed(&self) -> bool {
-        matches!(self, Self::Confirmed)
-    }
-    fn mark_unconfirmed(&mut self) {
-        if self.is_confirmed() {
-            *self = Self::Unconfirmed {
-                retained_sessions: Vec::new(),
-            };
-        }
-    }
-    fn retained_sessions(&self) -> &[String] {
-        match self {
-            Self::Confirmed => &[],
-            Self::Unconfirmed { retained_sessions } => retained_sessions,
-        }
-    }
-    fn retain(&mut self, session_id: &str) {
-        self.mark_unconfirmed();
-        if let Self::Unconfirmed { retained_sessions } = self {
-            retained_sessions.push(session_id.to_owned());
-        }
-    }
-    fn clear_retained(&mut self) {
-        if let Self::Unconfirmed { retained_sessions } = self {
-            retained_sessions.clear();
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
 enum DestroyCleanup {
     Required,
     BestEffort,
-    Descendant,
 }
 
 impl DestroyOutcome {
-    pub(crate) fn absorb(&mut self, other: Self) {
-        self.warnings.extend(other.warnings);
-        if let DestroyWorkers::Unconfirmed { retained_sessions } = other.workers {
-            self.workers.mark_unconfirmed();
-            if let DestroyWorkers::Unconfirmed {
-                retained_sessions: ours,
-            } = &mut self.workers
-            {
-                ours.extend(retained_sessions);
-            }
-        }
-    }
     fn cleanup(
         &mut self,
         result: Result<()>,
@@ -1687,47 +1550,16 @@ pub fn has_nothing_to_checkpoint(session: &SessionRecord, subagent: bool) -> boo
 /// the target is confirmed gone, the mbx build state of the workspaces it held
 /// is released; that release never fails the cleanup.
 fn execute_target_cleanup(
-    backend: &targets::TargetLocator,
     session: &SessionRecord,
     config: &mj_core::config::Config,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
-    let session_id = session.id.as_str();
-    let _owner = crate::worker_lifecycle::require(session_id)?;
-    if let Err(cleanup_error) = targets::close_plan(backend, session_id)?.execute(executor) {
-        match targets::cleanup_target_is_confirmed_absent(backend, session_id, executor) {
-            Ok(true) => {
-                tracing::warn!(
-                    session_id,
-                    error = format!("{cleanup_error:#}"),
-                    "target cleanup command failed, but the target was confirmed absent"
-                );
-            }
-            Ok(false) => {
-                tracing::error!(
-                    session_id,
-                    error = format!("{cleanup_error:#}"),
-                    "target cleanup failed and the target is still present"
-                );
-                return Err(cleanup_error);
-            }
-            Err(probe_error) => {
-                tracing::error!(
-                    session_id,
-                    cleanup_error = format!("{cleanup_error:#}"),
-                    probe_error = format!("{probe_error:#}"),
-                    "target cleanup failed and exact absence could not be confirmed"
-                );
-                return Err(cleanup_error.context(format!(
-                    "target cleanup failed and exact absence could not be confirmed: {probe_error:#}"
-                )));
-            }
-        }
-    }
-    if let Some(release) = BuildStateRelease::for_target(session, backend, config) {
-        release.run(executor);
-    }
-    retire_worker_restart_intent(session_id)
+    super::environment::retire_session_environment(
+        session,
+        config,
+        executor,
+        BranchDisposition::Keep,
+    )
 }
 
 /// Exact teardown proved there is no process left whose boot must be

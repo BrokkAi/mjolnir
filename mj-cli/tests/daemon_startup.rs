@@ -253,7 +253,17 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Hard-won: #1187: revision-121 cleanup triggers referenced tables removed by this legacy fixture.
     connection
         .execute_batch(
-            "DROP TRIGGER IF EXISTS session_rows_deleted;
+            "ALTER TABLE session_moves DROP COLUMN source_environment_id;
+         ALTER TABLE retained_move_sources DROP COLUMN environment_id;
+         DROP TRIGGER IF EXISTS environment_report_registered;
+         DROP TRIGGER IF EXISTS environment_report_updated;
+         DROP TRIGGER IF EXISTS reclaimed_environment_owner_deleted;
+         DROP TRIGGER IF EXISTS reclaimed_environment_binding_deleted;
+         DROP TABLE IF EXISTS environment_reports;
+         DROP TABLE IF EXISTS environment_bindings;
+         DROP TABLE IF EXISTS environment_workers;
+         DROP TABLE IF EXISTS environments;
+         DROP TRIGGER IF EXISTS session_rows_deleted;
          DROP TRIGGER IF EXISTS session_rows_destroyed;
          DROP TRIGGER IF EXISTS mailbox_outbox_live_target;
          DROP TRIGGER IF EXISTS github_watch_items_live_creator;

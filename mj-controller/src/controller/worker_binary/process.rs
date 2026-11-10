@@ -196,6 +196,21 @@ pub(in crate::controller) fn start_worker(
         targets::worker_root(locator, owner.session_id())? == worker_root,
         "worker owner does not cover the selected root"
     );
+    let session = crate::database::read_durable_session_record(owner.session_id())?
+        .context("session disappeared before worker launch admission")?;
+    let target = session
+        .target
+        .as_ref()
+        .context("worker has no durable placement")?;
+    ensure!(
+        super::super::backend::backend_locator(
+            target,
+            &session,
+            &mj_core::config::Config::load()?
+        )? == *locator,
+        "worker launch does not match its admitted placement"
+    );
+    crate::database::admit_environment_worker(owner.session_id(), target)?;
     if github.session_token_path.is_some() {
         let session = crate::database::read_durable_session_record(owner.session_id())?
             .context("session disappeared before installing its GitHub token")?;

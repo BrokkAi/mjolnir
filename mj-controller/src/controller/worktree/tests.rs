@@ -218,7 +218,12 @@ fn independent_clones_share_a_starting_branch_and_push_normally() {
         test_git(&first.worktree_root, &["rev-parse", "HEAD"])
     );
     for owned in [&first, &second] {
-        cleanup_managed_worktree(&ProcessExecutor, owned, BranchDisposition::Keep).unwrap();
+        super::super::environment::cleanup_unstarted_checkout(
+            &ProcessExecutor,
+            owned,
+            BranchDisposition::Keep,
+        )
+        .unwrap();
     }
 }
 
@@ -1650,7 +1655,12 @@ fn managed_raw_worktree_inherits_upstream_and_cleans_up_owned_artifacts() {
     assert_eq!(test_git(repository.path(), &["status", "--porcelain"]), "");
     std::fs::write(worktree.worktree_root.join("dirty.txt"), "session\n").unwrap();
 
-    cleanup_managed_worktree(&ProcessExecutor, &worktree, BranchDisposition::Delete).unwrap();
+    super::super::environment::cleanup_unstarted_checkout(
+        &ProcessExecutor,
+        &worktree,
+        BranchDisposition::Delete,
+    )
+    .unwrap();
     assert!(!worktree.worktree_root.exists());
     assert!(!repository.path().join(".mj").exists());
     let output = Command::new("git")
@@ -1678,7 +1688,12 @@ fn retired_worktree_can_be_recreated_from_its_retained_branch() {
     // The checkout is dirty by design: its dirty state moved into the target.
     std::fs::write(worktree.worktree_root.join("dirty.txt"), "session\n").unwrap();
 
-    retire_managed_worktree(&ProcessExecutor, &worktree).unwrap();
+    super::super::environment::cleanup_unstarted_checkout(
+        &ProcessExecutor,
+        &worktree,
+        BranchDisposition::Keep,
+    )
+    .unwrap();
 
     assert!(!worktree.worktree_root.exists());
     assert!(!repository.path().join(".mj").exists());
@@ -1744,7 +1759,12 @@ fn retiring_a_remote_worktree_prunes_registration_after_target_removed_checkout(
         commands: RefCell::new(Vec::new()),
     };
 
-    retire_managed_worktree(&executor, &worktree).unwrap();
+    super::super::environment::cleanup_unstarted_checkout(
+        &executor,
+        &worktree,
+        BranchDisposition::Keep,
+    )
+    .unwrap();
 
     let purposes = executor
         .commands
@@ -2200,6 +2220,18 @@ fn a_failed_conversion_returns_the_session_to_its_checkout() {
     ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
 )]
 fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
+    const TEST: &str = "cancelled_new_session_cleanup_removes_managed_worktree_and_branch";
+    const CHILD: &str = "MJ_TEST_CANCELLED_CHECKOUT";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), TEST))
+            .isolated_store(directory.path())
+            .env(CHILD, "1")
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
     let worktree = ManagedWorktree {
@@ -2229,6 +2261,7 @@ fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
             ..State::default()
         },
     };
+    crate::database::save_session(&controller.state.sessions[session_id]).unwrap();
     let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let executor = CancellableProcessExecutor::new(cancelled);
     assert!(executor.cancellation_requested());
@@ -2392,7 +2425,7 @@ fn archiving_deletes_a_branch_another_branch_contains() {
         &["merge", "--no-ff", "-m", "merge session", &worktree.branch],
     );
 
-    cleanup_managed_worktree(
+    super::super::environment::cleanup_unstarted_checkout(
         &ProcessExecutor,
         &worktree,
         BranchDisposition::DeleteIfMerged,
@@ -2417,7 +2450,7 @@ fn archiving_keeps_a_branch_holding_unmerged_commits() {
     let worktree = session.managed_worktree.unwrap();
     commit_on_session_branch(&worktree);
 
-    cleanup_managed_worktree(
+    super::super::environment::cleanup_unstarted_checkout(
         &ProcessExecutor,
         &worktree,
         BranchDisposition::DeleteIfMerged,
@@ -2452,7 +2485,7 @@ fn archiving_keeps_a_branch_only_another_session_branch_contains() {
         ],
     );
 
-    cleanup_managed_worktree(
+    super::super::environment::cleanup_unstarted_checkout(
         &ProcessExecutor,
         &worktree,
         BranchDisposition::DeleteIfMerged,

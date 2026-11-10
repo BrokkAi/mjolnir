@@ -2093,34 +2093,13 @@ impl SessionRecord {
         &'a self,
         config: &Config,
     ) -> Result<std::borrow::Cow<'a, TargetRuntimeSettings>> {
-        if let Some(runtime) = &self.target_runtime {
-            // How to reach the target follows the machine's current ssh
-            // options; where it is stays as recorded (launch finding R3-7).
-            if let Some(refreshed) =
-                config
-                    .targets
-                    .get(&self.target_template_id)
-                    .and_then(|template| {
-                        runtime.with_current_ssh_options(&TargetRuntimeSettings::from(template))
-                    })
-            {
-                return Ok(std::borrow::Cow::Owned(refreshed));
-            }
-            return Ok(std::borrow::Cow::Borrowed(runtime));
-        }
-        let template = config.targets.get(&self.target_template_id).ok_or_else(|| {
-            crate::refusal::Refusal::precondition(format!(
-                "Session {:?} has no recorded target access settings. Restore target {:?} in config.toml once, then retry.",
-                self.id, self.target_template_id))
-        })?;
-        let runtime = TargetRuntimeSettings::from(template);
-        if let Some(locator) = &self.target {
-            crate::targets::TargetLocator::try_from(crate::targets::RecordedTarget {
-                locator, runtime: Some(&runtime), session_id: &self.id,
-            }).map_err(|error| crate::refusal::Refusal::precondition(format!(
-                "Session {:?} cannot recover target {:?}: {error}. Restore its original target settings, then retry.", self.id, self.target_template_id)))?;
-        }
-        Ok(std::borrow::Cow::Owned(runtime))
+        target_runtime_settings_for(
+            &self.id,
+            &self.target_template_id,
+            self.target.as_ref(),
+            self.target_runtime.as_ref(),
+            config,
+        )
     }
 
     /// The recorded failure that is safe to publish whatever state this
@@ -3356,6 +3335,136 @@ pub struct ResumeRepositorySourceReceipt {
     pub bundle_id: String,
     pub checkpoint_sha256: String,
     pub repositories: Vec<crate::config::ProjectRepository>,
+}
+
+/// Access settings for a recorded physical placement, independent of its session.
+pub fn target_runtime_settings_for<'a>(
+    session_id: &str,
+    target_template_id: &str,
+    target: Option<&TargetLocator>,
+    runtime: Option<&'a TargetRuntimeSettings>,
+    config: &Config,
+) -> Result<std::borrow::Cow<'a, TargetRuntimeSettings>> {
+    if let Some(runtime) = runtime {
+        // How to reach the target follows the machine's current ssh
+        // options; where it is stays as recorded (launch finding R3-7).
+        if let Some(refreshed) = config.targets.get(target_template_id).and_then(|template| {
+            runtime.with_current_ssh_options(&TargetRuntimeSettings::from(template))
+        }) {
+            return Ok(std::borrow::Cow::Owned(refreshed));
+        }
+        return Ok(std::borrow::Cow::Borrowed(runtime));
+    }
+    let template = config.targets.get(target_template_id).ok_or_else(|| {
+            crate::refusal::Refusal::precondition(format!(
+                "Session {:?} has no recorded target access settings. Restore target {:?} in config.toml once, then retry.",
+                session_id, target_template_id))
+        })?;
+    let runtime = TargetRuntimeSettings::from(template);
+    if let Some(locator) = target {
+        crate::targets::TargetLocator::try_from(crate::targets::RecordedTarget {
+                locator, runtime: Some(&runtime), session_id,
+            }).map_err(|error| crate::refusal::Refusal::precondition(format!(
+                "Session {:?} cannot recover target {:?}: {error}. Restore its original target settings, then retry.", session_id, target_template_id)))?;
+    }
+    Ok(std::borrow::Cow::Owned(runtime))
+}
+
+impl TargetLocator {
+    /// Physical identity ignores borrowing, SSH discovery and storage metadata.
+    pub fn same_resource(&self, other: &Self) -> bool {
+        let (left, right) = (self, other);
+        match (left, right) {
+            (
+                TargetLocator::LocalBare { worker_root: left },
+                TargetLocator::LocalBare { worker_root: right },
+            ) => left == right,
+            (
+                TargetLocator::LocalPodman {
+                    container_id: left, ..
+                },
+                TargetLocator::LocalPodman {
+                    container_id: right,
+                    ..
+                },
+            )
+            | (
+                TargetLocator::LocalDocker {
+                    container_id: left, ..
+                },
+                TargetLocator::LocalDocker {
+                    container_id: right,
+                    ..
+                },
+            )
+            | (
+                TargetLocator::AppleContainer {
+                    container_id: left, ..
+                },
+                TargetLocator::AppleContainer {
+                    container_id: right,
+                    ..
+                },
+            ) => left == right,
+            (
+                TargetLocator::SshAppleContainer {
+                    host: left_host,
+                    container_id: left_container,
+                    ..
+                },
+                TargetLocator::SshAppleContainer {
+                    host: right_host,
+                    container_id: right_container,
+                    ..
+                },
+            ) => left_host == right_host && left_container == right_container,
+            (
+                TargetLocator::AwsEc2 {
+                    instance_id: left, ..
+                },
+                TargetLocator::AwsEc2 {
+                    instance_id: right, ..
+                },
+            ) => left == right,
+            (
+                TargetLocator::SshBare {
+                    host: left_host,
+                    workspace: left_workspace,
+                    ..
+                },
+                TargetLocator::SshBare {
+                    host: right_host,
+                    workspace: right_workspace,
+                    ..
+                },
+            ) => left_host == right_host && left_workspace == right_workspace,
+            (
+                TargetLocator::SshPodman {
+                    host: left_host,
+                    container_id: left_container,
+                    ..
+                },
+                TargetLocator::SshPodman {
+                    host: right_host,
+                    container_id: right_container,
+                    ..
+                },
+            )
+            | (
+                TargetLocator::SshDocker {
+                    host: left_host,
+                    container_id: left_container,
+                    ..
+                },
+                TargetLocator::SshDocker {
+                    host: right_host,
+                    container_id: right_container,
+                    ..
+                },
+            ) => left_host == right_host && left_container == right_container,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]

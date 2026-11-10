@@ -128,6 +128,15 @@ pub(crate) fn register_subagent_with_startup(
             &tx,
             &subagent.parent_session_id,
         )?;
+        let parent_state = tx.query_row(
+            "SELECT state FROM sessions WHERE session_id=?1",
+            [&subagent.parent_session_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        ensure!(
+            super::values::stored_session_state(&parent_state).can_receive_child_work(),
+            "parent is no longer accepting child work"
+        );
         if subagent.kind == mj_core::subagent::SubagentKind::Oracle {
             let mut statement = tx.prepare(
                 "SELECT s.state FROM subagent_sessions c
@@ -145,7 +154,11 @@ pub(crate) fn register_subagent_with_startup(
                 return Err(OracleAlreadyLive.into());
             }
         }
-        insert_session(&tx, &session)?;
+        super::state_io::insert_session_with_parent(
+            &tx,
+            &session,
+            Some(&subagent.parent_session_id),
+        )?;
         super::usage::record_child_accounting(&tx, &subagent)?;
         tx.execute(
             "INSERT INTO subagent_sessions(
@@ -647,6 +660,28 @@ pub(super) fn save_resumed_session_to(
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
 ) -> Result<()> {
+    save_resumed_session_in_environment_to(path, session, container_size, None)
+}
+
+pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &str) -> Result<()> {
+    let session = session.clone();
+    let environment_id = environment_id.to_owned();
+    submit_database_write("restore resumed environment", move |_| {
+        save_resumed_session_in_environment_to(
+            &database_path(),
+            &session,
+            None,
+            Some(&environment_id),
+        )
+    })
+}
+
+fn save_resumed_session_in_environment_to(
+    path: &Path,
+    session: &SessionRecord,
+    container_size: Option<(&str, HostContainerSize)>,
+    environment_id: Option<&str>,
+) -> Result<()> {
     validate_session_record(session)?;
     let mut connection = open(path)?;
     let tx = connection.transaction()?;
@@ -660,6 +695,21 @@ pub(super) fn save_resumed_session_to(
         "session {} context changed before resume publication",
         session.id
     );
+    if let Some(environment_id) = environment_id {
+        let owner: String = tx.query_row(
+            "SELECT owner_session_id FROM environments WHERE environment_id=?1",
+            [environment_id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            owner == session.id,
+            "resume rollback does not own the selected environment"
+        );
+        tx.execute(
+            "UPDATE environment_bindings SET environment_id=?2 WHERE session_id=?1",
+            params![session.id, environment_id],
+        )?;
+    }
     update_lifecycle_fields(&tx, session)?;
     tx.execute(
         "UPDATE sessions SET native_session_id = ?2, container_cpus = ?3,
@@ -1392,22 +1442,6 @@ pub fn delete_session(session_id: &str) -> Result<()> {
     let session_id = session_id.to_owned();
     submit_database_write("delete_session", move |_| {
         delete_session_from(&database_path(), &session_id)
-    })
-}
-
-/// Retained descendants and their root disappear together. A failed root
-/// delete must leave evidence of every worker whose teardown was unconfirmed.
-pub fn delete_sessions(session_ids: &[String]) -> Result<()> {
-    let session_ids = session_ids.to_vec();
-    submit_database_write("delete_sessions", move |_| {
-        let mut connection = open(&database_path())?;
-        let transaction =
-            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        for id in session_ids {
-            transaction.execute("DELETE FROM sessions WHERE session_id = ?1", [id])?;
-        }
-        transaction.commit()?;
-        Ok(())
     })
 }
 

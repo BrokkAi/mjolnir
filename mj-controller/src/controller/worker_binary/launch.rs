@@ -189,9 +189,12 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
-        if let Some(target) = session.target.as_ref() {
-            owner.verify_target(target)?;
-        }
+        let target = session
+            .target
+            .as_ref()
+            .context("worker preparation has no committed placement")?;
+        owner.verify_target(target)?;
+        crate::database::admit_environment_worker(session_id, target)?;
         // A busy worker can outlive a daemon upgrade. Reusing its history
         // does not imply that its executable can read this launch format.
         let upgrade_retained_worker = if preparation == WorkerFilePreparation::RefreshProfile {

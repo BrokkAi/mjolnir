@@ -1506,7 +1506,12 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     let mut session = managed_worktree_session(repository.path(), session_id);
     session.checkpoint = Some(checkpoint);
     let worktree = session.managed_worktree.clone().unwrap();
-    retire_managed_worktree(&ProcessExecutor, &worktree).unwrap();
+    super::super::environment::cleanup_unstarted_checkout(
+        &ProcessExecutor,
+        &worktree,
+        crate::controller::BranchDisposition::Keep,
+    )
+    .unwrap();
     assert!(!worktree.worktree_root.exists());
 
     let profile_home = data_directory.join("profile");

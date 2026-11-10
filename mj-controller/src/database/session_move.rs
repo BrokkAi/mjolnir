@@ -11,8 +11,8 @@ pub fn retain_move_source(operation: &MoveOperation) -> Result<()> {
             .as_ref()
             .context("Move transfer missing")?;
         connection.execute(
-            "INSERT INTO retained_move_sources(operation_id, session_id, source_json, exclusions_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(operation_id) DO NOTHING",
+            "INSERT INTO retained_move_sources(operation_id, session_id, source_json, exclusions_json, created_at,environment_id)
+             VALUES (?1, ?2, ?3, ?4, ?5,(SELECT source_environment_id FROM session_moves WHERE operation_id=?1)) ON CONFLICT(operation_id) DO NOTHING",
             params![operation.operation_id, operation.selection.session_id,
                 serde_json::to_string(&transfer.source)?, serde_json::to_string(&operation.selection.workspace.exclusions)?, operation.created_at],
         )?;
@@ -117,9 +117,12 @@ pub(super) fn save_move_operation_with(
         tx.commit()?;
         return Ok(());
     }
+    super::environments::record_prepared_move_environment(connection, operation)?;
     connection.execute(
-        "INSERT INTO session_moves(session_id, operation_id, operation_json) VALUES (?1, ?2, ?3)
-         ON CONFLICT(session_id) DO UPDATE SET operation_id=excluded.operation_id,
+        "INSERT INTO session_moves(session_id, operation_id, operation_json,source_environment_id)
+         VALUES (?1, ?2, ?3,(SELECT environment_id FROM environment_bindings WHERE session_id=?1))
+         ON CONFLICT(session_id) DO UPDATE SET source_environment_id=CASE WHEN session_moves.operation_id=excluded.operation_id THEN session_moves.source_environment_id ELSE excluded.source_environment_id END,
+             operation_id=excluded.operation_id,
              operation_json=CASE WHEN session_moves.operation_id=excluded.operation_id
                  AND json_extract(session_moves.operation_json, '$.cancellation_requested')=1
                  THEN json_set(excluded.operation_json, '$.cancellation_requested', json('true'))
@@ -329,6 +332,37 @@ pub fn move_pending_work(session_id: &str) -> Result<(bool, Vec<MaterializedQueu
         running.as_deref() == Some("running"),
         read_materialized_queued_prompts(&connection, session_id)?,
     ))
+}
+
+/// Cleanup uses the accepted source owner, independent of the current binding.
+pub(crate) fn move_source_environment(operation_id: &str) -> Result<Option<EnvironmentRecord>> {
+    let connection = open_reader(&database_path())?;
+    let id: Option<String> = connection
+        .query_row(
+            "SELECT source_environment_id FROM session_moves WHERE operation_id=?1",
+            [operation_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    id.map(|id| super::environments::read_environment(&connection, &id))
+        .transpose()
+        .map(Option::flatten)
+}
+
+pub(crate) fn retained_move_environment(operation_id: &str) -> Result<Option<EnvironmentRecord>> {
+    let connection = open_reader(&database_path())?;
+    let id: Option<String> = connection
+        .query_row(
+            "SELECT environment_id FROM retained_move_sources WHERE operation_id=?1",
+            [operation_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    id.map(|id| super::environments::read_environment(&connection, &id))
+        .transpose()
+        .map(Option::flatten)
 }
 
 #[cfg(test)]

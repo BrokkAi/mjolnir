@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use mj_core::config::{TargetTemplate, atomic_write, data_dir};
+use mj_core::config::{Config, TargetTemplate, atomic_write, data_dir};
 use mj_core::state::{SessionState, State, TargetLocator};
 
 use crate::targets::{
@@ -370,7 +370,12 @@ impl Controller {
                                 &root,
                             )?;
                         } else {
-                            targets::close_plan(&backend, session_id)?.execute(executor)?;
+                            super::environment::retire_session_environment(
+                                &previous,
+                                &self.config,
+                                executor,
+                                super::BranchDisposition::Delete,
+                            )?;
                         }
                     }
                     if !child {
@@ -513,9 +518,13 @@ impl Controller {
         let target_cleanup = match session.target.as_ref() {
             Some(locator) => (|| -> Result<()> {
                 let backend = backend_locator(locator, &session, &self.config)?;
-                targets::close_plan(&backend, session_id)?
-                    .execute(target_cleanup_executor)
-                    .map(|_| ())
+                let _ = backend;
+                super::environment::retire_session_environment(
+                    &session,
+                    &self.config,
+                    target_cleanup_executor,
+                    super::BranchDisposition::Delete,
+                )
             })(),
             None => Ok(()),
         };
@@ -707,6 +716,15 @@ impl Controller {
                 .map(|op| targets::move_resource_name(session_id, &op.operation_id))
                 .unwrap_or_else(|| targets::resource_name(session_id))?;
             let moving_workspace = resource_name != targets::resource_name(session_id)?;
+            // Reserve physical ownership before creation, including a target
+            // whose creation or locator discovery later fails. Rollback uses
+            // the same owner and writer inventory as ordinary teardown.
+            let reserved_target = super::backend::locator_after_provision_named(
+                template,&target,session_id,None,executor,&resource_name)?;
+            self.state.sessions.get_mut(session_id).context("session disappeared before target reservation")?.target = Some(reserved_target);
+            self.persist_session_state(session_id)?;
+            let reserved_environment = crate::database::session_environment(session_id)?.context("target reservation has no environment")?;
+
             let tool_cache = super::tool_cache::prepare(
                 &self.config,
                 &session.target_template_id,
@@ -784,12 +802,11 @@ impl Controller {
             }
 
             let started = Instant::now();
-            let result = provision_target_creation_named(
+            let result = provision_target_creation_plan(
                 &provision,
                 &target,
-                session_id,
                 executor,
-                &resource_name,
+                |_| None,
                 |outputs| {
                     super::backend::locator_after_provision_named(
                         template,
@@ -802,18 +819,9 @@ impl Controller {
                 },
             )
             .map(|(locator, remainder)| (locator, remainder, bundle, build_cache));
-            if result.is_err()
-                && let Some(cache) = &prepared_cache
-            {
-                if let Some(locator) =
-                    provisioned_locator_named(&target, session_id, None, &resource_name)
-                {
-                    let _ = targets::close_plan(&locator, session_id)
-                        .and_then(|plan| plan.execute(executor).map(|_| ()));
-                } else {
-                    let _ = cache.cleanup(executor);
-                }
-            }
+            let result = result.map_err(|error| {
+                error.context(failed_environment_creation_cleanup(&reserved_environment, &self.config, executor))
+            });
             tracing::debug!(
                 session_id,
                 elapsed_ms = started.elapsed().as_millis(),
@@ -1307,6 +1315,25 @@ fn execute_repository_setup(
     plan.execute_concurrent(executor).map(|_| ())
 }
 
+fn failed_environment_creation_cleanup(
+    environment: &crate::database::EnvironmentRecord,
+    config: &Config,
+    executor: &impl CommandExecutor,
+) -> String {
+    match super::environment::retire_owned_environment(
+        environment.clone(),
+        config,
+        executor,
+        super::BranchDisposition::Delete,
+        super::CheckoutDisposition::Remove,
+    ) {
+        Ok(_) => "cleanup succeeded: reserved session environment".into(),
+        Err(error) => {
+            format!("cleanup FAILED: {error:#}; reserved resources remain recorded for Destroy")
+        }
+    }
+}
+
 /// Run a provisioning plan and discover the locator it produced, tearing the
 /// target down again if anything after its creation fails.
 ///
@@ -1352,22 +1379,20 @@ fn provision_target_creation(
     executor: &(impl CommandExecutor + Sync),
     discover: impl FnOnce(&[CommandOutput]) -> Result<TargetLocator>,
 ) -> Result<(TargetLocator, targets::CommandPlan)> {
-    provision_target_creation_named(
+    provision_target_creation_plan(
         plan,
         target,
-        session_id,
         executor,
-        &targets::resource_name(session_id)?,
+        |outputs| cleanup_failed_provision(target, session_id, outputs.first(), executor),
         discover,
     )
 }
 
-fn provision_target_creation_named(
+fn provision_target_creation_plan(
     plan: &targets::CommandPlan,
     target: &targets::TargetTemplate,
-    session_id: &str,
     executor: &(impl CommandExecutor + Sync),
-    name: &str,
+    cleanup: impl FnOnce(&[CommandOutput]) -> Option<String>,
     discover: impl FnOnce(&[CommandOutput]) -> Result<TargetLocator>,
 ) -> Result<(TargetLocator, targets::CommandPlan)> {
     let Some((creation, remainder)) = plan.split_at_target_creation() else {
@@ -1394,17 +1419,9 @@ fn provision_target_creation_named(
     })?;
     discover(&outputs)
         .map(|locator| (locator, remainder))
-        .map_err(|error| {
-            match cleanup_failed_provision_named(
-                target,
-                session_id,
-                outputs.first(),
-                executor,
-                name,
-            ) {
-                Some(note) => error.context(note),
-                None => error,
-            }
+        .map_err(|error| match cleanup(&outputs) {
+            Some(note) => error.context(note),
+            None => error,
         })
 }
 
@@ -1430,6 +1447,7 @@ fn cleanup_failed_provision(
     )
 }
 
+#[cfg(test)]
 fn cleanup_failed_provision_named(
     target: &targets::TargetTemplate,
     session_id: &str,
@@ -1494,6 +1512,7 @@ fn cleanup_failed_provision_named(
 ///
 /// Every target but AWS is named before its plan runs; an EC2 instance
 /// reports its own ID in the launch response.
+#[cfg(test)]
 fn provisioned_locator_named(
     target: &targets::TargetTemplate,
     session_id: &str,

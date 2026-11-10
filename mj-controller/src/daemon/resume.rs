@@ -133,9 +133,7 @@ impl RuntimeState {
         self.remove_completed_lifecycle(&channel);
         match result? {
             DaemonLifecycleResult::Done => {}
-            DaemonLifecycleResult::Move(_)
-            | DaemonLifecycleResult::Park(_)
-            | DaemonLifecycleResult::Destroy(_) => {
+            DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
                 unreachable!("resume cannot return a move outcome")
             }
             DaemonLifecycleResult::DeferredCleanup => {
@@ -517,7 +515,6 @@ impl RuntimeState {
                 child_id.clone(),
                 BranchDisposition::Keep,
                 LifecycleKind::StopSubagent,
-                false,
             ))
             .await
             .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
@@ -688,19 +685,8 @@ impl RuntimeState {
         // a graceful stop or handoff waits for it, sub-agents first (#1191).
         let _upgrade_work = crate::upgrade::destroy_activity(&session_id)?;
         self.index_before_destroy(&session_id).await;
-        let outcome = self
-            .force_destroy_indexed_session(
-                session_id.clone(),
-                branch,
-                LifecycleKind::ForceDestroy,
-                true,
-            )
-            .await?;
-        for warning in outcome.warnings {
-            tracing::warn!(session_id = %session_id, %warning, "Destroy completed with incomplete cleanup");
-            self.push_public_notice(&session_id, warning);
-        }
-        Ok(())
+        self.force_destroy_indexed_session(session_id, branch, LifecycleKind::ForceDestroy)
+            .await
     }
 
     /// [`Self::force_destroy_session`] once the session and its sub-agents
@@ -712,95 +698,69 @@ impl RuntimeState {
         session_id: String,
         branch: BranchDisposition,
         kind: LifecycleKind,
-        root: bool,
-    ) -> Result<crate::controller::DestroyOutcome> {
-        // Explicit destruction may forget a child whose worker survived.
-        // Each successfully stopped child removes its own reports; do not
-        // later delete a forgotten child's files through its parent.
-        let report_cleanup = if kind == LifecycleKind::StopSubagent {
-            self.snapshot_subagent_report_cleanup(&session_id).await
-        } else {
-            None
-        };
+    ) -> Result<()> {
+        self.preempt_active_lifecycle(&session_id).await?;
         let children = blocking({
             let session_id = session_id.clone();
-            move || {
-                Ok(crate::database::list_subagents(&session_id)?
-                    .into_iter()
-                    .map(|child| child.child_session_id)
-                    .collect::<Vec<_>>())
-            }
+            move || crate::database::begin_session_destroy(&session_id)
         })
         .await?;
-        let mut descendants = crate::controller::DestroyOutcome::default();
         for child_id in children {
             // Sub-agents borrow their parent's worker and own no branch.
-            let child = Box::pin(self.force_destroy_indexed_session(
+            Box::pin(self.force_destroy_indexed_session(
                 child_id.clone(),
                 BranchDisposition::Keep,
                 kind,
-                false,
             ))
             .await
             .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
-            descendants.absorb(child);
         }
-        self.finish_subagent_report_cleanup(&session_id, report_cleanup)
-            .await;
-        self.preempt_active_lifecycle(&session_id).await?;
         let exists = blocking({
             let session_id = session_id.clone();
             move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
         })
         .await?;
         if !exists {
-            return Ok(descendants);
+            return Ok(());
         }
-        let result = self
-            .run_lifecycle(
-                session_id,
-                kind,
-                move |state, session_id, cancelled| async move {
-                    let _recovery_reservation = tokio::task::spawn_blocking({
-                        let observer = state.recovery_observer.clone();
-                        let session_id = session_id.clone();
-                        let cancelled = cancelled.clone();
-                        move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
-                    })
-                    .await
-                    .context("reserve recovery for daemon force-destroy task")??;
-                    blocking({
-                        let session_id = session_id.clone();
-                        move || {
-                            let mut controller = Controller::load()?;
-                            let executor = DaemonStageReportingExecutor::new(
-                                CancellableProcessExecutor::new(cancelled),
-                                state.clone(),
-                                session_id.clone(),
-                            );
-                            let outcome = if kind == LifecycleKind::StopSubagent {
-                                controller.stop_subagent(&session_id, &executor)?
-                            } else {
-                                controller.destroy_session_in_tree(
-                                    &session_id,
-                                    &executor,
-                                    branch,
-                                    root,
-                                    descendants,
-                                )?
-                            };
-                            crate::controller::move_session::release_move_queue_hold(&session_id);
-                            Ok(DaemonLifecycleResult::Destroy(outcome))
+        self.run_lifecycle(
+            session_id,
+            kind,
+            move |state, session_id, cancelled| async move {
+                let _recovery_reservation = tokio::task::spawn_blocking({
+                    let observer = state.recovery_observer.clone();
+                    let session_id = session_id.clone();
+                    let cancelled = cancelled.clone();
+                    move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
+                })
+                .await
+                .context("reserve recovery for daemon force-destroy task")??;
+                blocking({
+                    let session_id = session_id.clone();
+                    move || {
+                        let mut controller = Controller::load()?;
+                        let executor = DaemonStageReportingExecutor::new(
+                            CancellableProcessExecutor::new(cancelled),
+                            state.clone(),
+                            session_id.clone(),
+                        );
+                        let outcome = if kind == LifecycleKind::StopSubagent {
+                            controller.stop_subagent(&session_id, &executor)?
+                        } else {
+                            controller.force_destroy_session(&session_id, &executor, branch)?
+                        };
+                        for warning in outcome.warnings {
+                            state.push_public_notice(&session_id, warning);
                         }
-                    })
-                    .await
-                },
-            )
-            .await?;
-        match result {
-            DaemonLifecycleResult::Destroy(outcome) => Ok(outcome),
-            _ => unreachable!("destroy returns its cleanup outcome"),
-        }
+                        crate::controller::move_session::release_move_queue_hold(&session_id);
+                        Ok(DaemonLifecycleResult::Done)
+                    }
+                })
+                .await
+            },
+        )
+        .await?;
+        Ok(())
     }
 }
 

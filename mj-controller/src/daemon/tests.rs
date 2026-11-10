@@ -5801,6 +5801,28 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
     session.id = child_id.into();
     crate::database::save_subagent_session(&session, &runtime_test_subagent(child_id, parent_id))
         .unwrap();
+    let environment = crate::database::session_environment(parent_id)
+        .unwrap()
+        .unwrap();
+    // Hard-won: ae628e069: a direct child Destroy lost its writer before a later parent Destroy.
+    state
+        .force_destroy_session(child_id.into(), BranchDisposition::Keep)
+        .await
+        .unwrap();
+    assert!(
+        !crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(child_id)
+    );
+    assert!(
+        crate::database::environment_workers(&environment.id)
+            .unwrap()
+            .iter()
+            .any(|worker| worker.session_id == child_id)
+    );
+    // Rebuild daemon-owned state from durable records, with no cascade memory.
+    let state = test_runtime_state_loading_the_store();
     let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
     connection.execute_batch("CREATE TRIGGER reject_test_destroy BEFORE DELETE ON sessions WHEN OLD.session_id = '22222222222222222222222222222222' BEGIN SELECT RAISE(ABORT, 'test root deletion unavailable'); END;").unwrap();
     // Hard-won: 5b9868d0d: forgetting an unconfirmed child lost the evidence needed to protect its parent's shared checkout.
@@ -5812,13 +5834,13 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
     );
     let retained = crate::database::load_state().unwrap();
     assert!(retained.sessions.contains_key(parent_id));
+    assert!(!retained.sessions.contains_key(child_id));
     assert!(
-        retained.sessions.contains_key(child_id),
-        "root rollback retains the unconfirmed child's record"
+        crate::database::environment_workers(&environment.id)
+            .unwrap()
+            .iter()
+            .any(|worker| worker.session_id == child_id)
     );
-    assert!(!crate::pollers::session_target_is_pollable(
-        &retained.sessions[child_id]
-    ));
     assert!(checkout.exists());
     assert!(worker_root.join("keep").exists());
     connection
@@ -5847,8 +5869,8 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
     assert!(
         root_notices
             .iter()
-            .any(|notice| notice.text.contains(child_id)),
-        "the advertised parent notice path includes descendant failures"
+            .any(|notice| notice.text.contains("Resources may remain")),
+        "the advertised parent notice path reports retained physical resources"
     );
 }
 
@@ -5893,13 +5915,15 @@ async fn report_candidates_follow_committed_child_lifecycle_without_losing_faile
     }
     let _writer = crate::database::install_isolated_test_writer();
     let mut parent = crate::controller::test_support::checkpoint_test_session("report-parent");
-    parent.state = SessionState::Stopped;
+    parent.state = SessionState::Running;
     crate::database::save_session(&parent).unwrap();
     let mut child = crate::controller::test_support::checkpoint_test_session("report-child");
     child.state = SessionState::Stopped;
     child.last_error = None;
     let relation = runtime_test_subagent(&child.id, &parent.id);
     crate::database::save_subagent_session(&child, &relation).unwrap();
+    parent.state = SessionState::Stopped;
+    crate::database::save_session(&parent).unwrap();
     let mut state = test_runtime_state_loading_the_store();
     Arc::get_mut(&mut state).unwrap().committed =
         Some(crate::database::subscribe_committed_state().unwrap());
@@ -7052,6 +7076,11 @@ async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
     crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
         .unwrap();
 
+    crate::database::record_subagent_report_dir(
+        child_id,
+        &reports.join(child_id).to_string_lossy(),
+    )
+    .unwrap();
     let state = test_runtime_state_loading_the_store();
     let metadata = test_metadata("127.0.0.1:1".parse().unwrap());
     let shutdown = CancellationToken::new();
@@ -7078,17 +7107,27 @@ async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
         }
     });
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while crate::database::load_state()
-        .unwrap()
-        .sessions
-        .contains_key(child_id)
-    {
+    loop {
+        if crate::upgrade::gate()
+            .active_labels()
+            .iter()
+            .any(|label| label.starts_with("session destroy"))
+        {
+            break;
+        }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the sub-agent is destroyed first"
+            "Destroy must hold handoff admission while preempting earlier work"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
     }
+    assert!(
+        crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(child_id),
+        "preemption completes before the atomic child snapshot"
+    );
 
     let blockers = match handle_action(DaemonAction::UpgradeBlockers, &metadata, &state, &shutdown)
         .await
@@ -7141,7 +7180,7 @@ async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
 /// checkpoints only the parent. Each child is removed the way a destroy
 /// removes one, after SessionWiki has taken its conversation, and the parent's
 /// record lists what was stopped for its model. A child that cannot be
-/// stopped the ordinary way is removed anyway and never fails the parent.
+/// stopped retains its ownership and prevents shared-file retirement.
 #[cfg(unix)]
 #[tokio::test]
 async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent() {
@@ -7280,22 +7319,32 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     sessionwiki::index::open().unwrap();
 
     let state = test_runtime_state_loading_the_store();
-    tokio::time::timeout(
+    let error = tokio::time::timeout(
         Duration::from_secs(60),
         state.suspend_session(parent_id.to_owned()),
     )
     .await
     .unwrap()
-    .unwrap();
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("stop sub-agent"));
 
     let stored = crate::database::load_state().unwrap();
-    assert_eq!(stored.sessions[parent_id].state, SessionState::Stopped);
-    for child in [finished_id, stuck_id, oracle_id] {
+    assert_ne!(stored.sessions[parent_id].state, SessionState::Stopped);
+    for child in [stuck_id, oracle_id] {
         assert!(
-            !stored.sessions.contains_key(child) && !stored.subagents.contains_key(child),
-            "sub-agent {child} is removed, not suspended"
+            stored.sessions.contains_key(child) && stored.subagents.contains_key(child),
+            "failed stops preserve retryable ownership"
         );
     }
+    let owner = crate::database::session_environment(parent_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::database::environment_workers(&owner.id)
+            .unwrap()
+            .iter()
+            .any(|worker| worker.session_id == stuck_id)
+    );
     assert_eq!(
         crate::database::load_stopped_subagents(parent_id).unwrap(),
         [
@@ -7911,6 +7960,11 @@ async fn a_suspend_stops_the_sub_agents_once_the_parents_checkpoint_is_verified(
         &runtime_test_subagent(stopped_id, LATCH_RELAY_SESSION),
     )
     .unwrap();
+    crate::database::record_subagent_report_dir(
+        stopped_id,
+        &report_root.join(stopped_id).to_string_lossy(),
+    )
+    .unwrap();
     for id in [stopped_id, unrelated_id] {
         std::fs::create_dir_all(report_root.join(id)).unwrap();
         std::fs::write(
@@ -8318,8 +8372,8 @@ async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
         "the relation stays"
     );
     assert!(
-        !worker_root.exists(),
-        "only the child's own worker root is removed"
+        worker_root.exists(),
+        "the shared environment retains the child's private root"
     );
     assert!(
         !root.path().join("started").exists(),
@@ -8584,7 +8638,10 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
             stored.sessions[LATCH_RELAY_SESSION].state,
             SessionState::Stopped
         );
-        assert!(!worker_root.exists());
+        assert!(
+            worker_root.exists(),
+            "private roots remain owned until the environment retires"
+        );
         let history = crate::database::load_materialized_session(LATCH_RELAY_SESSION)
             .unwrap()
             .unwrap();
@@ -8790,7 +8847,10 @@ async fn exercise_child_close_with_a_nested_workspace(
     let closed = &stored.sessions[LATCH_RELAY_SESSION];
     assert_eq!(closed.state, SessionState::Stopped);
     assert!(closed.target.is_none() && closed.checkpoint.is_none());
-    assert!(!worker_root.exists());
+    assert!(
+        worker_root.exists(),
+        "private roots remain owned until the environment retires"
+    );
     assert_eq!(stored.sessions[parent_id], parent);
     assert_eq!(
         std::fs::read_to_string(parent_root.join("private")).unwrap(),
@@ -10315,7 +10375,7 @@ async fn archiving_old_children_needs_no_index_copy_and_preserves_the_parent() {
     let repository = crate::controller::test_support::committed_repository();
     let parent_id = "0123456789abcdef0123456789abcdef";
     let child_id = "33333333333333333333333333333333";
-    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Stopped);
+    let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
     parent.project_directory = Some(repository.path().to_owned());
     parent.updated_at = "2000-01-01T00:00:00Z".into();
     let archives = mj_core::config::sessions_dir();
@@ -10348,10 +10408,13 @@ async fn archiving_old_children_needs_no_index_copy_and_preserves_the_parent() {
     );
     crate::database::save_session(&parent).unwrap();
     let mut child = parent.clone();
+    child.state = SessionState::Stopped;
     child.id = child_id.into();
     child.checkpoint = None;
     crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
         .unwrap();
+    parent.state = SessionState::Stopped;
+    crate::database::save_session(&parent).unwrap();
     let state = test_runtime_state_loading_the_store();
     let archived = tokio::time::timeout(Duration::from_secs(60), state.archive_aged_sessions(1))
         .await

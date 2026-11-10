@@ -40,12 +40,12 @@ use super::readiness::{
 use super::worker_binary::{bridge_readiness_stage, start_worker_durably, worker_probe_diagnosis};
 use super::worktree::{
     PrimaryCheckoutRequirement, ResumeConversion, ResumePlan, apply_raw_to_workspace,
-    apply_workspace_to_raw, cleanup_managed_worktree, create_managed_worktree,
-    managed_worktree_checkout_exists, managed_worktree_target, plan_raw_to_workspace_for_session,
+    apply_workspace_to_raw, create_managed_worktree, managed_worktree_checkout_exists,
+    managed_worktree_target, plan_raw_to_workspace_for_session,
     preserve_retained_managed_worktree_branch, raw_checkout_divergence_notice,
     raw_checkout_position_with_checkout, raw_checkout_snapshot,
     raw_conversion_preview_with_checkout, restore_managed_worktree,
-    resume_compatibility_with_checkout, retire_managed_worktree,
+    resume_compatibility_with_checkout,
 };
 use super::{
     Controller, SessionResumeOptions, execute_checked, now, selected_host_container_size,
@@ -606,7 +606,7 @@ pub(super) struct RestoreIntoTarget<'a> {
     pub install_attached_resources: bool,
     pub worker_root_reset: WorkerRootReset,
     /// A managed checkout to retire once, and only once, the restore succeeded.
-    pub retire_after_ready: Option<&'a mj_core::state::ManagedWorktree>,
+    pub retire_after_ready: Option<&'a crate::database::EnvironmentRecord>,
 }
 
 impl Controller {
@@ -1045,8 +1045,15 @@ impl Controller {
             // Last, and only once the resume has otherwise succeeded: a failure
             // before this point rolls the record back to a session whose
             // worktree still has to be there.
-            if let Some(worktree) = retire_after_ready
-                && let Err(error) = retire_managed_worktree(executor, worktree)
+            if let Some(environment) = retire_after_ready
+                && let Some(worktree) = &environment.placement.managed_worktree
+                && let Err(error) = super::environment::retire_owned_environment(
+                    environment.clone(),
+                    &self.config,
+                    executor,
+                    super::BranchDisposition::Keep,
+                    super::CheckoutDisposition::Remove,
+                )
             {
                 tracing::warn!(
                     session_id,
@@ -1710,11 +1717,9 @@ impl Controller {
         let history_mounts = additional_mounts.clone();
         if !transferring_workspace
             && previous.state == SessionState::Error
-            && let Some(locator) = &previous.target
+            && previous.target.is_some()
         {
-            let backend = backend_locator(locator, &previous, &self.config)?;
-            targets::close_plan(&backend, session_id)?
-                .execute(executor)
+            super::environment::remove_runtime_preserving_workspace(&previous,&self.config,executor)
                 .context("clean up target from failed resume")?;
         }
         let mut resume_notices = Vec::new();
@@ -1735,6 +1740,12 @@ impl Controller {
                     .unwrap_or("a detached head"),
                 conversion.worktree.branch,
             ));
+        }
+        let mut source_environment = crate::database::session_environment(session_id)?;
+        if previous_managed_worktree.is_some() {
+            let mut physical_source = previous.clone();
+            physical_source.managed_worktree = previous_managed_worktree.clone();
+            source_environment = Some(crate::database::reserve_owned_checkout(&physical_source)?);
         }
         let managed_checkout_present = previous_managed_worktree
             .as_ref()
@@ -2076,7 +2087,8 @@ impl Controller {
                         .as_ref()
                         .filter(|_| !transferring_workspace)
                         .and_then(ResumeConversion::raw_to_workspace)
-                        .and_then(|plan| plan.retire.as_ref()),
+                        .and_then(|plan| plan.retire.as_ref())
+                        .and(source_environment.as_ref()),
                 },
                 executor,
             )
@@ -2121,6 +2133,7 @@ impl Controller {
                 Err(self.rollback_failed_resume(
                     session_id,
                     &previous,
+                    source_environment.as_ref(),
                     recreated_managed_worktree,
                     error,
                     executor,
@@ -2135,6 +2148,7 @@ impl Controller {
         &mut self,
         session_id: &str,
         previous: &SessionRecord,
+        source_environment: Option<&crate::database::EnvironmentRecord>,
         recreated_managed_worktree: bool,
         error: anyhow::Error,
         _executor: &impl CommandExecutor,
@@ -2146,16 +2160,11 @@ impl Controller {
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
         let cleanup = match current.target.as_ref() {
-            Some(locator) => (|| -> Result<()> {
-                let backend = backend_locator(locator, &current, &self.config)?;
-                targets::close_plan(&backend, session_id)?
-                    // Use a fresh executor: cancellation applies to the
-                    // requested operation, not to its compensating cleanup.
-                    .execute(&CancellableProcessExecutor::with_timeout(
-                        Duration::from_secs(15),
-                    ))
-                    .map(|_| ())
-            })(),
+            Some(_) => super::environment::remove_runtime_preserving_workspace(
+                &current,
+                &self.config,
+                &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
+            ),
             None => Ok(()),
         };
         // A failed target teardown may leave its harness writing. Keep its
@@ -2166,20 +2175,36 @@ impl Controller {
             let current_worktree = self.state.checkout(session_id)?.managed_worktree().cloned();
             let previous_checkout = self.state.checkout_for_record(session_id, previous)?;
             let previous_worktree = previous_checkout.managed_worktree().cloned();
-            match (current_worktree.as_ref(), previous_worktree.as_ref()) {
-                (_, Some(previous)) if recreated_managed_worktree => retire_managed_worktree(
+            let cleanup_checkout = match (current_worktree.as_ref(), previous_worktree.as_ref()) {
+                (_, Some(previous)) if recreated_managed_worktree => {
+                    Some((previous, super::BranchDisposition::Keep))
+                }
+                (Some(current), Some(previous)) if current == previous => None,
+                (Some(current), _) => Some((current, super::BranchDisposition::Delete)),
+                (None, _) => None,
+            };
+            if let Some((worktree, branch)) = cleanup_checkout {
+                let owners = crate::database::checkout_environments(worktree)?
+                    .into_iter()
+                    .filter(|environment| {
+                        environment.owner_session_id == session_id
+                            && environment.phase != crate::database::EnvironmentPhase::Reclaimed
+                    })
+                    .collect::<Vec<_>>();
+                ensure!(
+                    owners.len() == 1,
+                    "resume rollback lost its exact checkout owner"
+                );
+                super::environment::retire_owned_environment(
+                    owners.into_iter().next().unwrap(),
+                    &self.config,
                     &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
-                    previous,
-                ),
-                (Some(current), Some(previous)) if current == previous => Ok(()),
-                // The failed resume created this worktree and its branch, and
-                // no harness ever ran in it, so the rollback removes both.
-                (Some(worktree), _) => cleanup_managed_worktree(
-                    &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
-                    worktree,
-                    crate::controller::BranchDisposition::Delete,
-                ),
-                (None, _) => Ok(()),
+                    branch,
+                    super::CheckoutDisposition::Remove,
+                )
+                .map(|_| ())
+            } else {
+                Ok(())
             }
         };
         let cleanup_error = [cleanup, worktree_cleanup]
@@ -2207,6 +2232,7 @@ impl Controller {
             .checkout(session_id)?
             .managed_worktree()
             .is_some();
+        let rollback_clean = cleanup_error.is_empty();
         let record = self.state.sessions.get_mut(session_id).unwrap();
         let failure = apply_failed_resume_rollback_with_ownership(
             record,
@@ -2217,7 +2243,14 @@ impl Controller {
         );
         // Rollback restores only resources owned by this attempt, preserving
         // client edits committed while provisioning was in flight.
-        crate::database::save_resumed_session(&self.state.sessions[session_id], None)?;
+        if rollback_clean && let Some(source_environment) = source_environment {
+            crate::database::restore_resumed_session(
+                &self.state.sessions[session_id],
+                &source_environment.id,
+            )?;
+        } else {
+            crate::database::save_resumed_session(&self.state.sessions[session_id], None)?;
+        }
         Ok(failure)
     }
 }

@@ -1,6 +1,7 @@
 //! One recoverable stop/restore operation, independent of its initiating viewer.
 
 mod destination;
+pub(in crate::controller) use destination::destroy_prepared_environment;
 #[cfg(test)]
 mod tests;
 mod transfer;
@@ -1876,7 +1877,7 @@ impl Controller {
                     } else if operation.workspace_transfer.is_some() {
                         self.rollback_move_destination(&operation, cause, executor)?
                     } else {
-                        self.rollback_failed_resume(&id, previous, false, cause, executor)?
+                        self.rollback_failed_resume(&id, previous, crate::database::move_source_environment(&operation.operation_id)?.as_ref(), false, cause, executor)?
                     };
                     Err(error)
                 }
@@ -2039,7 +2040,7 @@ impl Controller {
                     crate::database::save_resumed_session(record, None)?;
                 } else {
                     let failure =
-                        self.rollback_failed_resume(&id, previous, false, cause, executor)?;
+                        self.rollback_failed_resume(&id, previous, crate::database::move_source_environment(&operation.operation_id)?.as_ref(), false, cause, executor)?;
                     ensure!(
                         self.state.sessions[&id].state == SessionState::Stopped,
                         "{failure:#}"
