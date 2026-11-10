@@ -171,27 +171,14 @@ impl VerdictClient {
     /// Compare complete forms; the proxy's documented body ceiling is 64 KiB.
     pub(crate) async fn same_afk_question(
         &self,
-        current_question: &str,
-        previous_questions: &[String],
+        current_question: &serde_json::Value,
+        previous_questions: &[serde_json::Value],
     ) -> Result<bool> {
         // The ordinary egress redactor collapses all long identifiers. Keep
         // their equality within this comparison without sending their contents.
-        fn redact_form(
-            form: &str,
-            labels: &mut std::collections::BTreeMap<String, usize>,
-        ) -> Result<String> {
-            let mut form: serde_json::Value =
-                serde_json::from_str(form).context("decode AFK form for redaction")?;
-            mj_core::redact::redact_json_strings_distinct(&mut form, labels);
-            Ok(form.to_string())
-        }
         let mut labels = std::collections::BTreeMap::new();
-        let current_question = redact_form(current_question, &mut labels)?;
-        let previous_questions: Vec<_> = previous_questions
-            .iter()
-            .map(|question| redact_form(question, &mut labels))
-            .collect::<Result<_>>()?;
-        let state = serde_json::json!({"current_question": current_question, "previous_questions": previous_questions});
+        let mut state = serde_json::json!({"current_question": current_question, "previous_questions": previous_questions});
+        mj_core::redact::redact_json_strings_distinct(&mut state, &mut labels);
         let questions = match &self.source {
             VerdictSource::Direct { .. } => {
                 Some(serde_json::from_str(include_str!("afk_question.json"))?)

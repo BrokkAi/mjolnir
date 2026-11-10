@@ -3,8 +3,18 @@ import questions from "../../../mj-worker/src/acp/afk_question.json" with { type
 export const afkQuestionQuestions = questions;
 
 export interface AfkQuestionRequest {
-  current_question: string;
-  previous_questions: string[];
+  current_question: AfkForm;
+  previous_questions: AfkForm[];
+}
+
+interface AfkForm extends Record<string, unknown> {
+  message: string;
+  fields: Record<string, unknown>[];
+}
+
+function form(value: unknown): value is AfkForm {
+  return object(value) && typeof value.message === "string" && value.message.trim().length > 0
+    && Array.isArray(value.fields) && value.fields.every(object);
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -13,9 +23,9 @@ function object(value: unknown): value is Record<string, unknown> {
 
 export function afkQuestionRequest(value: unknown): value is AfkQuestionRequest {
   return object(value) && Object.keys(value).length === 2
-    && typeof value.current_question === "string" && value.current_question.trim().length > 0
+    && form(value.current_question)
     && Array.isArray(value.previous_questions) && value.previous_questions.length > 0
-    && value.previous_questions.every(text => typeof text === "string" && text.trim().length > 0);
+    && value.previous_questions.every(form);
 }
 
 export function afkQuestionAnswers(value: unknown) {

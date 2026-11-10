@@ -8,7 +8,7 @@ pub struct OperatorAway(Arc<Mutex<OperatorAwayState>>);
 struct OperatorAwayState {
     presence: mj_core::state::OperatorPresence,
     // The accepted answers are both the fallback identity and Jev's evidence.
-    refused: BTreeMap<(String, AwayRequest), Vec<String>>,
+    refused: BTreeMap<(String, AwayRequest), Vec<serde_json::Value>>,
     next_bridge: u64,
     bridges: BTreeSet<u64>,
     pending: Vec<PendingElicitation>,
@@ -43,24 +43,27 @@ impl OperatorAwayState {
 }
 
 /// Retain answer constraints, excluding transient identity and secret defaults.
-fn question_evidence(question: &ElicitationRequest) -> String {
+fn question_evidence(question: &ElicitationRequest) -> serde_json::Value {
     let mut evidence = serde_json::to_value(question).expect("elicitation serializes");
     evidence
         .as_object_mut()
         .expect("elicitation is an object")
         .remove("id");
-    for field in evidence["fields"]
+    for (field, original) in evidence["fields"]
         .as_array_mut()
         .expect("elicitation fields are an array")
+        .iter_mut()
+        .zip(&question.fields)
     {
-        if field["secret"] == true {
+        if question.field_is_secret(original) {
             field
                 .as_object_mut()
                 .expect("elicitation field is an object")
                 .remove("default");
+            field["secret"] = true.into();
         }
     }
-    evidence.to_string()
+    evidence
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -547,15 +550,6 @@ mod tests {
         })
     }
 
-    fn decoded_evidence(evidence: Value) -> Value {
-        json!({
-            "current_question": serde_json::from_str::<Value>(evidence["current_question"].as_str().unwrap()).unwrap(),
-            "previous_questions": evidence["previous_questions"].as_array().unwrap().iter().map(|question| {
-                serde_json::from_str::<Value>(question.as_str().unwrap()).unwrap()
-            }).collect::<Vec<_>>()
-        })
-    }
-
     // Hard-won: #1489: new questions shared the generic Question refusal identity.
     #[tokio::test]
     async fn afk_question_protocol_distinguishes_mixed_forms_and_preserves_unavailable_fallback() {
@@ -573,7 +567,6 @@ mod tests {
             ));
             let new = ask(&pending, "mixed", "Who owns #11482, and who owns #10941?");
             let (stream, evidence) = classifier.request().await;
-            let evidence = decoded_evidence(evidence);
             assert_eq!(
                 evidence,
                 json!({"current_question":{"message":"Who owns #11482, and who owns #10941?", "fields":[]}, "previous_questions":[{"message":"Who owns #10941?", "fields":[]}]})
@@ -587,7 +580,7 @@ mod tests {
             let repeated = ask(&pending, "repeat", "Please assign #10941.");
             let (stream, evidence) = classifier.request().await;
             assert_eq!(
-                decoded_evidence(evidence)["previous_questions"],
+                evidence["previous_questions"],
                 json!([{"message":"Who owns #10941?", "fields":[]}, {"message":"Who owns #11482, and who owns #10941?", "fields":[]}])
             );
             classifier.respond(stream, "same").await;
@@ -621,7 +614,7 @@ mod tests {
         }
     }
 
-    // Hard-won: #1489 review: evidence lost constraints and included secret defaults.
+    // Hard-won: #1489 review: evidence lost constraints and leaked inherited secret defaults.
     #[tokio::test]
     async fn afk_question_evidence_preserves_changed_selection_and_required_constraints() {
         let classifier = Classifier::new(false).await;
@@ -637,7 +630,8 @@ mod tests {
                 "mode":"form", "sessionId":"test", "message":"Choose a destination",
             "requestedSchema":{"type":"object", "properties":{
                 "destination":{"type":"string", "title":"Destination", "enum":["one","two"]},
-                "password":{"type":"string", "title":"Password", "default":"P!n12", "_meta":{"codex":{"isSecret":true}}}
+                "password":{"type":"string", "title":"Password", "default":"P!n12", "_meta":{"codex":{"isSecret":true}}},
+                "password__other":{"type":"string", "title":"Other password", "default":"77!Z", "_meta":{"codex":{"questionId":"password", "role":"user_note"}}}
             }}
             }),
         )
@@ -646,7 +640,8 @@ mod tests {
             "mode":"form", "sessionId":"test", "message":"Choose a destination",
             "requestedSchema":{"type":"object", "required":["destination"], "properties":{
                 "destination":{"type":"array", "title":"Destination", "items":{"type":"string", "enum":["one","two"]}, "minItems":1},
-                "password":{"type":"string", "title":"Password", "default":"n3w?Pin", "_meta":{"codex":{"isSecret":true}}}
+                "password":{"type":"string", "title":"Password", "default":"n3w?Pin", "_meta":{"codex":{"isSecret":true}}},
+                "password__other":{"type":"string", "title":"Other password", "default":"55?X", "_meta":{"codex":{"questionId":"password", "role":"user_note"}}}
             }}
         })).unwrap();
         assert_eq!(
@@ -662,7 +657,19 @@ mod tests {
         let (stream, evidence) = classifier.request().await;
         assert!(!evidence.to_string().contains("P!n12"));
         assert!(!evidence.to_string().contains("n3w?Pin"));
-        let evidence = decoded_evidence(evidence);
+        assert!(!evidence.to_string().contains("77!Z"));
+        assert!(!evidence.to_string().contains("55?X"));
+        assert!(
+            evidence["current_question"]["fields"][2]
+                .get("default")
+                .is_none()
+        );
+        assert!(
+            evidence["previous_questions"][0]["fields"][2]
+                .get("default")
+                .is_none()
+        );
+        assert_eq!(evidence["current_question"]["fields"][2]["secret"], true);
         assert!(
             evidence["current_question"]["fields"][1]
                 .get("default")
@@ -695,7 +702,7 @@ mod tests {
         ));
     }
 
-    // Hard-won: #1489 review: redaction collapsed long IDs and misread JSON escapes.
+    // Hard-won: #1489 review: nested JSON redaction collapsed IDs and misread escape boundaries.
     #[tokio::test]
     async fn afk_question_protocol_preserves_redacted_identifier_equality() {
         let classifier = Classifier::new(false).await;
@@ -717,7 +724,6 @@ mod tests {
         let (stream, evidence) = classifier.request().await;
         let serialized = evidence.to_string();
         assert!(!serialized.contains(&first_id) && !serialized.contains(&second_id));
-        let evidence = decoded_evidence(evidence);
         assert_eq!(
             evidence["current_question"]["message"],
             "Merge commit\n[redacted token 0]?"
@@ -733,7 +739,6 @@ mod tests {
         ));
         let repeated = ask(&pending, "repeated", &format!("Merge commit\t{first_id}?"));
         let (stream, evidence) = classifier.request().await;
-        let evidence = decoded_evidence(evidence);
         assert_eq!(
             evidence["current_question"]["message"],
             "Merge commit\t[redacted token 0]?"
@@ -753,6 +758,17 @@ mod tests {
         assert!(matches!(
             repeated.await.unwrap(),
             Some(PendingAnswer::Human(_))
+        ));
+        // A serialized newline plus a 23-character run used to cross the
+        // 24-character redaction boundary and produce an invalid JSON escape.
+        let short_message = format!("Merge commit\n{}?", "c".repeat(23));
+        let short = ask(&pending, "short", &short_message);
+        let (stream, evidence) = classifier.request().await;
+        assert_eq!(evidence["current_question"]["message"], short_message);
+        classifier.respond(stream, "different").await;
+        assert!(matches!(
+            short.await.unwrap(),
+            Some(PendingAnswer::OperatorAway)
         ));
     }
 
@@ -845,7 +861,7 @@ mod tests {
         stream_two.read_to_end(&mut eof).await.unwrap();
         let (stream_two, evidence) = classifier.request().await;
         assert_eq!(
-            decoded_evidence(evidence)["previous_questions"],
+            evidence["previous_questions"],
             json!([{"message":"First decision?", "fields":[]}, {"message":"Who owns #11482?", "fields":[]}])
         );
         classifier.respond(stream_two, "same").await;

@@ -24,6 +24,8 @@ An absent operator should receive a notice for each new decision an agent asks a
 - [x] (2026-11-10) Escaped-identifier fix committed as 7f7159fcc; complete core/worker suites passed. Fourth review found secret defaults in the full-form evidence.
 - [x] (2026-11-10) Secret defaults excluded before capture; expanded HTTP form regression passes. Final core suite: 644 passed, 3 ignored; final worker suite: 818 passed, 11 ignored. Workspace Clippy and formatting pass. Final implementation is ready for delivery review.
 
+- [x] (2026-11-10) Fifth-review cleanup validated: structured evidence, shared inherited secrecy, five focused regressions, complete core/worker suites, Clippy, formatting, 39 service tests, and six final live smoke cases pass. Deployed structured contract as 05397108-1a05-4112-b210-1d2bcc0426b1. Ready for delivery review.
+
 ## Surprises & Discoveries
 
 The refusal owner lives in `mj-worker/src/acp/operator_away.rs` and survives bridge restarts. Its question identity is only `(agent, Question)`. Permission identities already include tool content and need no change. Requests opened before AFK use the same owner as newly opened requests.
@@ -50,7 +52,7 @@ The refusal owner lives in `mj-worker/src/acp/operator_away.rs` and survives bri
 
 ## Outcomes & Retrospective
 
-Implementation and the hosted deployment are complete. The worker uses one accepted-answer map for both the old fallback identity and classifier evidence. The existing responder task owns HTTP inference; presence/history changes cancel stale inference and all acceptance stays under the same mutex. No migration, relay version, dependency, or install is needed for the service deployment. Worker integration takes effect with a Mjolnir build containing this change; this task does not authorize installing Mjolnir.
+Implementation and the hosted deployment are complete. The final route accepts structured normalized form objects, so egress redaction never scans serialized JSON. Both reply rendering and classifier evidence use ElicitationRequest::field_is_secret, including companion inheritance; secret defaults are removed before capture. The worker uses one accepted-answer map for both the old fallback identity and classifier evidence. The existing responder task owns HTTP inference; presence/history changes cancel stale inference and all acceptance stays under the same mutex. No migration, relay version, dependency, or install is needed for the service deployment. Worker integration takes effect with a Mjolnir build containing this change; this task does not authorize installing Mjolnir.
 
 ## Context and Orientation
 
@@ -58,7 +60,7 @@ The worker runs one agent harness and owns pending structured requests. `mj-work
 
 ## Plan of Work
 
-Add a shared frozen question specification and a hosted `/v1/afk-question-verdict` route. Its evidence contains the current question and previous AFK-answered questions. Return the validated same/different choice. Extend the existing worker Jev client rather than creating another transport. Keep prior question text beside refusal memory and publish state changes to waiting responder tasks. Classify only when the old generic identity would leave a question pending; no call is needed for the first question. Apply a different verdict only while the compared presence and history remain current. Disabled Jev, network errors, invalid responses, and tied probabilities preserve the current behavior.
+Add a shared frozen question specification and a hosted `/v1/afk-question-verdict` route. Its evidence contains the current question and previous AFK-answered questions. Return the validated same/different choice. Extend the existing worker Jev client rather than creating another transport. Keep prior normalized structured forms in the accepted-answer map and publish state changes to waiting responder tasks. Classify only when the old generic identity would leave a question pending; no call is needed for the first question. Apply a different verdict only while the compared presence and history remain current. Disabled Jev, network errors, invalid responses, and tied probabilities preserve the current behavior.
 
 ## Concrete Steps
 
@@ -74,7 +76,7 @@ No schema or relay changes are needed. Presence and refusal history stay process
 
 ## Artifacts and Notes
 
-Issue: https://github.com/BrokkAi/mjolnir/issues/1489. Hosted version: 9774197c-a7da-4f0f-9d8f-e45a08dbe744 at https://mj-jev-proxy.eng-admin-a63.workers.dev. Final actual-form live results: mixed form different=0.99; identical form same=0.97. Earlier subset same=0.76 on the first deployment. Final constraint live results: single/multi change different=1.0; requiredness-only change different=0.99; field ID and option order change same=0.99. The five synthetic cases also classify as expected. Python urllib received Cloudflare 1010; normal curl requests succeeded.
+Issue: https://github.com/BrokkAi/mjolnir/issues/1489. Current hosted version: 05397108-1a05-4112-b210-1d2bcc0426b1 at https://mj-jev-proxy.eng-admin-a63.workers.dev. Final actual-form live results: mixed form different=0.99; identical form same=0.97. Earlier subset same=0.76 on the first deployment. Final constraint live results: single/multi change different=1.0; requiredness-only change different=0.99; field ID and option order change same=0.99. The five synthetic cases also classify as expected. Python urllib received Cloudflare 1010; normal curl requests succeeded.
 
 ## Interfaces and Dependencies
 
@@ -103,3 +105,9 @@ Checkpoint: the escaped-identifier fix is independently validated by the expande
 Fourth-review update: full-form serialization included defaults marked secret, including short PINs/passwords that generic token redaction does not cover. question_evidence now removes each secret field default before either current or previous evidence is stored or sent. Extended the existing form-constraint HTTP regression with two short punctuated secret defaults and assertions that neither leaves the process. The client integration remains uninstalled; live smoke forms contained no secret defaults.
 
 Final privacy validation: cargo test -p brokk-mj-core -p brokk-mj-worker -- --quiet completed successfully after secret-default exclusion. Core library: 641 passed, 3 ignored; core integration: 3 passed; core doctest: 1 ignored. Worker library: 792 passed, 11 ignored; binary/integration: 26 passed. Workspace Clippy passed. The secret-default regression uses short punctuated synthetic values and proves both current and previous evidence omit them.
+
+Fifth-review decision: remove nested JSON strings from AFK evidence. Current and prior forms now stay structured JSON objects through anonymous labeling, the shared egress redactor, the hosted route, and TypeSafe. This removes the escape-sensitive second scan instead of adding another serialization-specific patch. The route is new and its client has not been installed, so update its contract directly without parallel compatibility paths. Extracted ElicitationRequest::field_is_secret from reply_text and use it for default exclusion, including companion fields. Extended existing HTTP regressions with a 23-character token after a newline and short inherited secret defaults.
+
+Final structured-contract validation: five focused AFK regressions pass, including the 23-character escape boundary and inherited companion defaults. Complete core suite: 644 passed, 3 ignored plus one ignored doctest. Complete worker suite: 818 passed, 11 ignored. Workspace Clippy, formatting, all 39 service tests, TypeScript, and deploy dry run pass. Deployment 05397108-1a05-4112-b210-1d2bcc0426b1 passes actual mixed/same/subset forms and synthetic constraints, escaped short tokens, and distinct anonymous IDs.
+
+Final interface: same_afk_question takes a current serde_json::Value form and a slice of prior form Values; the service receives current_question as an object with message and fields and previous_questions as an array of those objects. No serialized form strings or compatibility alias remain. ElicitationRequest::field_is_secret owns direct and companion secrecy interpretation.

@@ -4,8 +4,8 @@ import proxy from "../src/index.ts";
 import questions from "../../../mj-worker/src/acp/afk_question.json" with { type: "json" };
 
 const state = {
-  current_question: "Who owns #11482 and who owns #10941?",
-  previous_questions: ["Who should own #10941?"],
+  current_question: { message: "Who owns #11482 and who owns #10941?", fields: [] },
+  previous_questions: [{ message: "Who should own #10941?", fields: [] }],
 };
 const environment = { TYPESAFE_API_KEY: "private-test-key",
   TURN_RATE_LIMITER: { async limit() { return { success: true }; } } };
