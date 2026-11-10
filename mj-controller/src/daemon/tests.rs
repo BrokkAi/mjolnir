@@ -1645,8 +1645,8 @@ async fn missing_target_retry_completes_a_committed_transition() {
     assert_eq!(stored.last_error.as_deref(), Some(detail));
     let notices = state.notices.lock().unwrap();
     assert_eq!(notices.len(), 2);
-    assert!(notices.front().unwrap().text.contains("retrying"));
-    assert_eq!(notices.back().unwrap().text, detail);
+    assert!(notices.front().unwrap().notice.text.contains("retrying"));
+    assert_eq!(notices.back().unwrap().notice.text, detail);
 }
 
 #[test]
@@ -4934,7 +4934,7 @@ fn notice_texts(state: &RuntimeState) -> Vec<String> {
         .lock()
         .unwrap()
         .iter()
-        .map(|notice| notice.text.clone())
+        .map(|entry| entry.notice.text.clone())
         .collect()
 }
 
@@ -5742,6 +5742,42 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
         !found.nothing_to_restore,
         "the indexed conversation keeps the prompt a restore starts from"
     );
+
+    // Hard-won: 27c51a34c: unavailable target configuration blocked Destroy too.
+    // A second session has no surviving machine configuration. Destruction
+    // must still remove its record and publish a safe warning independently.
+    session.id = "abcdef0123456789abcdef0123456789".into();
+    session.target_template_id = "removed-machine".into();
+    session.target = Some(mj_core::state::TargetLocator::SshPodman {
+        host: "removed.invalid".into(),
+        container_id: "gone-container".into(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    });
+    crate::database::save_session(&session).unwrap();
+    state.push_notice(&session.id, "private diagnostic /secret/path");
+    state
+        .destroy_stopped_session(session.id.clone(), BranchDisposition::Keep)
+        .await
+        .unwrap();
+    assert!(
+        !crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(&session.id)
+    );
+    let notices = state.public_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].session_id, session.id);
+    assert!(notices[0].text.contains("Resources may remain"));
+    let wire = serde_json::to_string(&crate::server::ViewerSnapshot {
+        notices,
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(wire.contains("Resources may remain"));
+    assert!(!wire.contains("private diagnostic"));
+    assert!(!wire.contains("removed.invalid"));
 }
 
 /// A runtime whose controller comes from the real store, for the tests that

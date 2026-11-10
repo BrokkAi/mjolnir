@@ -347,7 +347,9 @@ fn changed_metadata(
         } else if before.is_some() {
             let empty = match *key {
                 "server_version" => Value::String(String::new()),
-                "workspaces" | "capacity" | "launch_failures" => Value::Array(Vec::new()),
+                "workspaces" | "capacity" | "launch_failures" | "notices" => {
+                    Value::Array(Vec::new())
+                }
                 _ => Value::Null,
             };
             changed.insert((*key).to_owned(), empty);
@@ -475,13 +477,24 @@ mod tests {
         assert!(base_keys.contains_key(key) || frame["interned"].get(key).is_some());
         assert!(frame["metadata"].get("profiles").is_none());
 
-        let mut metadata_change = snapshot(33, vec![changed]);
+        let mut metadata_change = snapshot(33, Vec::new());
         metadata_change.operator_away = true;
         metadata_change.review_config.trigger = mj_core::config::ReviewTrigger::Push;
+        metadata_change
+            .notices
+            .push(mj_client::daemon::RuntimeNotice {
+                id: 1,
+                session_id: "a".into(),
+                text: "Cleanup failed; resources may remain.".into(),
+            });
         let frame = decode(&feed.update(metadata_change).unwrap()[0]);
         assert_eq!(frame["metadata"]["operator_away"], true);
         assert_eq!(frame["metadata"]["review_config"]["trigger"], "push");
         assert!(frame["metadata"].get("profiles").is_none());
+        assert_eq!(frame["sessions"], serde_json::json!([["a", null]]));
+        assert_eq!(frame["metadata"]["notices"][0]["session_id"], "a");
+        let cleared = decode(&feed.update(snapshot(34, Vec::new())).unwrap()[0]);
+        assert_eq!(cleared["metadata"]["notices"], serde_json::json!([]));
     }
 
     #[test]

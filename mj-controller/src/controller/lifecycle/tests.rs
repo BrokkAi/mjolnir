@@ -1624,42 +1624,39 @@ fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
     assert!(!controller.state.sessions.contains_key(session_id));
 }
 
+// Hard-won: 27c51a34c: an unreachable host made explicit Destroy impossible.
 #[test]
 #[cfg_attr(
     windows,
     ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
 )]
-fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
-    if !in_isolated_store("force_destroy_aborts_and_keeps_the_record_when_the_target_survives") {
+fn destroy_warns_when_cleanup_fails_but_automatic_stopping_keeps_the_record() {
+    if !in_isolated_store(
+        "destroy_warns_when_cleanup_fails_but_automatic_stopping_keeps_the_record",
+    ) {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
-    let mut session = checkpoint_test_session(session_id);
-    session.target_template_id = "local".into();
-    session.state = SessionState::Running;
-    session.target = Some(TargetLocator::LocalBare {
-        worker_root: directory.path().join(session_id),
-    });
-    session.checkpoint = Some(checkpoint.clone());
-    let mut config = Config::default();
-    config
-        .targets
-        .insert("local".into(), TargetTemplate::LocalBare);
-    let mut controller = Controller {
-        config,
-        state: State {
-            sessions: [(session_id.into(), session)].into_iter().collect(),
-            ..State::default()
-        },
-    };
+    let repository = committed_repository();
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut controller =
+        running_managed_clone_controller(repository.path(), &worker_root, session_id);
+    controller
+        .state
+        .sessions
+        .get_mut(session_id)
+        .unwrap()
+        .checkpoint = Some(checkpoint.clone());
+    let checkout = repository.path().join(".mj/clones").join(session_id);
     crate::database::save_session(&controller.state.sessions[session_id]).unwrap();
     let deleted = RefCell::new(Vec::new());
 
     let error = controller
-        .force_destroy_session_with(
+        .destroy_session_with_cleanup(
             session_id,
             &FailingExecutor,
             BranchDisposition::Delete,
@@ -1667,6 +1664,7 @@ fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
                 deleted.borrow_mut().push(id.to_owned());
                 Ok(())
             },
+            DestroyCleanup::Required,
         )
         .unwrap_err();
 
@@ -1682,7 +1680,7 @@ fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
         checkpoint.archive_path.exists(),
         "a surviving target must keep the recovery archive"
     );
-    assert!(deleted.into_inner().is_empty());
+    assert!(deleted.borrow().is_empty());
     // The record is being destroyed: it must stop being polled, so the daemon
     // does not keep reconnecting to a worker the destroy stopped (I2-9). It
     // keeps its target, so the next destroy finishes the removal.
@@ -1690,6 +1688,33 @@ fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
     assert_eq!(record.state, SessionState::Error);
     assert!(record.target.is_some());
     assert!(!crate::pollers::session_target_is_pollable(record));
+
+    let outcome = controller
+        .force_destroy_session_with(
+            session_id,
+            &FailingExecutor,
+            BranchDisposition::Delete,
+            crate::database::delete_session,
+        )
+        .unwrap();
+    assert!(
+        worker_root.exists(),
+        "an unconfirmed worker keeps its files"
+    );
+    assert!(
+        checkout.exists(),
+        "an unconfirmed writer keeps its checkout"
+    );
+    assert_eq!(outcome.warnings.len(), 1);
+    assert!(outcome.warnings[0].contains("Resources may remain"));
+    assert!(!checkpoint.archive_path.exists());
+    assert!(!controller.state.sessions.contains_key(session_id));
+    assert!(
+        !crate::database::load_state()
+            .unwrap()
+            .sessions
+            .contains_key(session_id)
+    );
 }
 
 #[test]

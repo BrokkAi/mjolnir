@@ -2314,13 +2314,13 @@ fn a_recovered_ssh_relay_uses_the_machines_current_ssh_options() {
 }
 
 #[test]
-fn saved_target_survives_config_removal_restart_and_failed_destroy() {
+fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
     const MARKER: &str = "MJ_TEST_DURABLE_TARGET_CHILD";
     if std::env::var_os(MARKER).is_none() {
         let directory = tempfile::tempdir().unwrap();
         run_registration_child(
             MARKER,
-            "saved_target_survives_config_removal_restart_and_failed_destroy",
+            "saved_target_survives_config_removal_restart_and_failed_cleanup",
             directory.path(),
         );
         return;
@@ -2443,11 +2443,7 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
     executor
         .fail
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        controller
-            .force_destroy_session(&id, &executor, BranchDisposition::Keep)
-            .is_err()
-    );
+    assert!(controller.stop_subagent(&id, &executor).is_err());
     let saved = crate::database::load_state().unwrap();
     assert_eq!(saved.sessions[&id].target_runtime.as_ref(), Some(&runtime));
     assert!(saved.sessions[&id].target.is_some());
@@ -2560,7 +2556,7 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
     assert!(refusal.message().contains("podman"));
     assert!(
         controller
-            .force_destroy_session(&session.id, &UnusedExecutor, BranchDisposition::Keep)
+            .stop_subagent(&session.id, &UnusedExecutor)
             .is_err()
     );
     assert!(

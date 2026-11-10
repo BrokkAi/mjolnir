@@ -68,6 +68,9 @@ pub struct ViewerSnapshot {
     /// Recent failed launches, independent of provisional session rollback.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launch_failures: Vec<ViewerLaunchFailure>,
+    /// Safe background notices, retained even after a session is destroyed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<mj_client::daemon::RuntimeNotice>,
 }
 
 /// The public wire shape remains an array; in-process publications share rows.
@@ -473,6 +476,7 @@ impl ViewerSnapshot {
             },
             capacity: Vec::new(),
             launch_failures: Vec::new(),
+            notices: Vec::new(),
         }
     }
 }

@@ -230,14 +230,7 @@ impl RuntimeState {
         session_id: String,
         branch: BranchDisposition,
     ) -> Result<()> {
-        self.tear_down_stopped_session(
-            session_id,
-            LifecycleKind::DestroyStopped,
-            branch,
-            CheckoutDisposition::Remove,
-        )
-        .await
-        .map(|_| ())
+        self.force_destroy_session(session_id, branch).await
     }
 
     /// Discard the record of a session that ended as `Lost`: its managed
@@ -521,7 +514,7 @@ impl RuntimeState {
             Box::pin(self.force_destroy_indexed_session(
                 child_id.clone(),
                 BranchDisposition::Keep,
-                LifecycleKind::ForceDestroy,
+                LifecycleKind::StopSubagent,
             ))
             .await
             .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
@@ -706,7 +699,14 @@ impl RuntimeState {
         branch: BranchDisposition,
         kind: LifecycleKind,
     ) -> Result<()> {
-        let report_cleanup = self.snapshot_subagent_report_cleanup(&session_id).await;
+        // Explicit destruction may forget a child whose worker survived.
+        // Each successfully stopped child removes its own reports; do not
+        // later delete a forgotten child's files through its parent.
+        let report_cleanup = if kind == LifecycleKind::StopSubagent {
+            self.snapshot_subagent_report_cleanup(&session_id).await
+        } else {
+            None
+        };
         let children = blocking({
             let session_id = session_id.clone();
             move || {
@@ -756,10 +756,17 @@ impl RuntimeState {
                         let mut controller = Controller::load()?;
                         let executor = DaemonStageReportingExecutor::new(
                             CancellableProcessExecutor::new(cancelled),
-                            state,
+                            state.clone(),
                             session_id.clone(),
                         );
-                        controller.force_destroy_session(&session_id, &executor, branch)?;
+                        let outcome = if kind == LifecycleKind::StopSubagent {
+                            controller.stop_subagent(&session_id, &executor)?
+                        } else {
+                            controller.force_destroy_session(&session_id, &executor, branch)?
+                        };
+                        for warning in outcome.warnings {
+                            state.push_public_notice(&session_id, warning);
+                        }
                         crate::controller::move_session::release_move_queue_hold(&session_id);
                         Ok(DaemonLifecycleResult::Done)
                     }

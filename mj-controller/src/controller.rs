@@ -111,7 +111,7 @@ pub use checkpoint::{
     sweep_local_checkpoint_leftovers,
 };
 pub use lifecycle::{
-    BeforeClose, BranchDisposition, CheckoutDisposition, has_nothing_to_checkpoint,
+    BeforeClose, BranchDisposition, CheckoutDisposition, DestroyOutcome, has_nothing_to_checkpoint,
 };
 pub use recovery_scan::{RecoveryCandidate, RecoveryScan};
 pub(crate) use resume::InPlaceRestartError;

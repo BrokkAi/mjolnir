@@ -290,8 +290,13 @@ impl RuntimeState {
                                         && intent.operation_id == intent_id
                                 })
                                 .and_then(|intent| intent.container_upgrade)
+                                && let Err(error) = plan.retire_backup_for_destroy(&operation_id, &ProcessExecutor)
                             {
-                                plan.retire_backup_for_destroy(&operation_id, &ProcessExecutor)?;
+                                if kind != LifecycleKind::ForceDestroy {
+                                    return Err(error);
+                                }
+                                tracing::warn!(session_id = %operation_id, error = format!("{error:#}"), "Destroy could not remove retained container upgrade resources");
+                                cleanup_state.push_public_notice(&operation_id, format!("Cleanup of retained container upgrade resources failed during Destroy for session {operation_id}. Resources may remain; details are in the daemon logs."));
                             }
                             cleanup_state
                                 .release_restart_intent(&operation_id, &intent_id)

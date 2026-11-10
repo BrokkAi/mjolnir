@@ -658,16 +658,35 @@ impl RuntimeState {
     /// Record something the daemon did on its own, for every attached surface
     /// to report once.
     pub(crate) fn push_notice(&self, session_id: &str, text: impl Into<String>) {
+        self.push_surface_notice(session_id, text.into(), false);
+    }
+
+    /// Only safe, deliberately public text may cross the browser boundary.
+    pub(crate) fn push_public_notice(&self, session_id: &str, text: impl Into<String>) {
+        self.push_surface_notice(session_id, text.into(), true);
+    }
+
+    pub(crate) fn public_notices(&self) -> Vec<RuntimeNotice> {
+        self.notices
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|entry| entry.public)
+            .map(|entry| entry.notice.clone())
+            .collect()
+    }
+
+    fn push_surface_notice(&self, session_id: &str, text: String, public: bool) {
         const RETAINED_NOTICES: usize = 32;
 
         let notice = RuntimeNotice {
             id: self.next_notice_id.fetch_add(1, Ordering::AcqRel),
             session_id: session_id.to_owned(),
-            text: text.into(),
+            text,
         };
         {
             let mut notices = self.notices.lock().unwrap_or_else(PoisonError::into_inner);
-            notices.push_back(notice);
+            notices.push_back(SurfaceNotice { notice, public });
             while notices.len() > RETAINED_NOTICES {
                 notices.pop_front();
             }

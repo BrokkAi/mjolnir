@@ -439,6 +439,29 @@ test('rolled-back launch errors remain visible only in their workspace and can b
   assert.equal(notices.children.length, 0);
 });
 
+// Hard-won: 27c51a34c: session deletion hid incomplete target cleanup from the browser.
+test('cleanup warnings remain visible after their session is removed and can be dismissed', () => {
+  const notices = makeNode();
+  const context = vm.createContext({
+    snapshot: { sessions: [], notices: [
+      { id: 7, session_id: 'removed', text: 'Environment cleanup failed; resources may remain.' },
+    ] },
+    route: { name: 'dashboard' },
+    selectedWorkspaceId: () => 'primary',
+    document: { querySelector: () => notices },
+    el: (tag, className, textContent) => Object.assign(makeNode(tag), { className, textContent }),
+  });
+  vm.runInContext(sourceBetween('const dismissedLaunchFailures =', '\nfunction renderWorkspaces()'), context);
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children[0].children[0].textContent, context.snapshot.notices[0].text);
+  context.route.name = 'conversation';
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children.length, 1, 'warning survives the route after session removal');
+  notices.children[0].children[1].onclick();
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children.length, 0, 'snapshot refresh does not undo dismissal');
+});
+
 function descendants(root, tag) {
   const wanted = tag.toUpperCase();
   const found = [];

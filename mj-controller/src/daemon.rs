@@ -204,6 +204,11 @@ struct QuotaBoard {
     refresh: Option<tokio::sync::mpsc::Sender<()>>,
 }
 
+struct SurfaceNotice {
+    notice: RuntimeNotice,
+    public: bool,
+}
+
 pub struct RuntimeState {
     attachments: Mutex<BTreeMap<String, Attachment>>,
     phone_status: Mutex<WebViewerStatus>,
@@ -250,7 +255,7 @@ pub struct RuntimeState {
     worker_upgrade_observer: WorkerUpgradeObserver,
     /// Recent background notices, newest last, with the id of the next one.
     /// Bounded: a surface that never attaches must not make this grow.
-    notices: Mutex<VecDeque<RuntimeNotice>>,
+    notices: Mutex<VecDeque<SurfaceNotice>>,
     next_notice_id: AtomicU64,
     /// Dashboard requests made on the person's behalf (`mj ui`).
     ui_requests: Mutex<ui_requests::UiRequestBoard>,

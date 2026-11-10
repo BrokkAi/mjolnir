@@ -922,6 +922,7 @@ pub(crate) struct SuspendArgs {
     json: bool,
 }
 
+/// Remove the session even if environment cleanup fails; report remaining resources in a warning.
 #[derive(Debug, Args)]
 pub(crate) struct DestroyArgs {
     /// Session id, as `mj sessions` lists it.

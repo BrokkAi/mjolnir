@@ -3434,7 +3434,13 @@ async fn snapshot_clock_anchor_is_fresh_even_when_the_projection_has_not_changed
 
 #[tokio::test]
 async fn snapshot_wire_cursor_and_detail_route_share_revision_and_resolve_interned_fields() {
-    let (app, _, _, _, _) = app();
+    let (app, _, _, _, _) = app_with_snapshot(|snapshot| {
+        snapshot.notices.push(mj_client::daemon::RuntimeNotice {
+            id: 1,
+            session_id: "removed-session".into(),
+            text: "Cleanup failed; resources may remain.".into(),
+        });
+    });
     let cookie = login_cookie(&app).await;
     let snapshot_response = app
         .clone()
@@ -3458,6 +3464,11 @@ async fn snapshot_wire_cursor_and_detail_route_share_revision_and_resolve_intern
     )
     .unwrap();
     assert_eq!(snapshot["operator_away"], false);
+    assert_eq!(snapshot["notices"][0]["session_id"], "removed-session");
+    assert_eq!(
+        snapshot["notices"][0]["text"],
+        "Cleanup failed; resources may remain."
+    );
     assert_eq!(snapshot["cursor"]["sequence"], 1);
     assert!(snapshot["cursor"]["incarnation"].as_str().is_some());
     let snapshot_row = &snapshot["sessions"][0];

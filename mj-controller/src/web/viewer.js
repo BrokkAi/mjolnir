@@ -952,6 +952,7 @@ function renderSettings() {
 // ---------------------------------------------------------------------------
 
 const dismissedLaunchFailures = new Set();
+const dismissedRuntimeNotices = new Set();
 
 function renderLaunchFailures() {
   const notices = (snapshot.launch_failures || []).filter(
@@ -968,7 +969,21 @@ function renderLaunchFailures() {
     card.append(dismiss);
     return card;
   });
-  document.querySelector('#launch-failures').replaceChildren(...failureCards);
+  const runtimeCards = (snapshot.notices || []).filter(
+    notice => !dismissedRuntimeNotices.has(notice.id),
+  ).map(notice => {
+    const card = el('div', 'card');
+    card.setAttribute('role', 'status');
+    card.append(el('p', '', notice.text));
+    const dismiss = el('button', 'secondary', 'Dismiss notice');
+    dismiss.onclick = () => {
+      dismissedRuntimeNotices.add(notice.id);
+      renderLaunchFailures();
+    };
+    card.append(dismiss);
+    return card;
+  });
+  document.querySelector('#launch-failures').replaceChildren(...failureCards, ...runtimeCards);
 }
 
 function renderWorkspaces() {
@@ -5715,6 +5730,7 @@ function confirmSessionDestruction(session) {
     dialog.append(el('h2', '', 'Destroy session?'));
     dialog.append(el('p', '', session.title || session.id));
     dialog.append(el('p', '', 'Permanently remove this session, its environment, and its recovery archive. Work held only in the environment will be lost. This also destroys its sub-agents.'));
+    dialog.append(el('p', '', 'If environment cleanup fails, the session is still removed and a warning reports resources that may remain.'));
     const label = el('label');
     const branch = el('input');
     branch.type = 'checkbox';

@@ -280,7 +280,7 @@ impl RuntimeState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .cloned()
+            .map(|entry| entry.notice.clone())
             .collect();
         full.metadata.ui_requests = self
             .ui_requests
