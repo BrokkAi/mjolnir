@@ -560,6 +560,24 @@ pub(super) struct DestroyRequest {
     pub(super) delete_branch: bool,
 }
 
+/// The safe recent notices outlive their session record. Absence here says
+/// nothing about completion: an accepted Destroy can still be running.
+pub(super) async fn session_notices(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Json<Vec<mj_client::daemon::RuntimeNotice>> {
+    Json(
+        state
+            .snapshot_rx
+            .borrow()
+            .notices
+            .iter()
+            .filter(|notice| notice.session_id == session_id)
+            .cloned()
+            .collect(),
+    )
+}
+
 /// Submit an exact worker-published control without selecting a newer target.
 pub(super) async fn turn_control(
     State(state): State<ServerState>,

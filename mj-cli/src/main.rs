@@ -186,6 +186,8 @@ enum Command {
     Suspend(api_commands::SuspendArgs),
     /// Permanently destroy a session, its environment, and recovery archive.
     Destroy(api_commands::DestroyArgs),
+    /// Read recent cleanup notices, including after a session was destroyed.
+    Notices(api_commands::NoticesArgs),
     /// Resume a stopped session from its checkpoint.
     Resume(api_commands::ResumeArgs),
     /// Cancel the turn a session is running.
@@ -870,6 +872,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Sessions(_)) => "sessions",
         Some(Command::Suspend(_)) => "suspend",
         Some(Command::Destroy(_)) => "destroy",
+        Some(Command::Notices(_)) => "notices",
         Some(Command::Resume(_)) => "resume",
         Some(Command::InterruptTurn(_)) => "interrupt-turn",
         Some(Command::Review(_)) => "review",
@@ -1198,6 +1201,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Destroy(args)) => api_commands::destroy(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Notices(args)) => api_commands::notices(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Resume(mut args)) => {

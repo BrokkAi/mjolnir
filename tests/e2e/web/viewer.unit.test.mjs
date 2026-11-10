@@ -447,6 +447,7 @@ test('cleanup warnings remain visible after their session is removed and can be 
       { id: 7, session_id: 'removed', text: 'Environment cleanup failed; resources may remain.' },
     ] },
     route: { name: 'dashboard' },
+    viewerState: { cursor: { incarnation: 'first-daemon' } },
     selectedWorkspaceId: () => 'primary',
     document: { querySelector: () => notices },
     el: (tag, className, textContent) => Object.assign(makeNode(tag), { className, textContent }),
@@ -460,6 +461,11 @@ test('cleanup warnings remain visible after their session is removed and can be 
   notices.children[0].children[1].onclick();
   vm.runInContext('renderLaunchFailures()', context);
   assert.equal(notices.children.length, 0, 'snapshot refresh does not undo dismissal');
+  context.viewerState.cursor.incarnation = 'second-daemon';
+  context.snapshot.notices[0] = { id: 7, session_id: 'another', text: 'A new cleanup failed.' };
+  vm.runInContext('renderLaunchFailures()', context);
+  assert.equal(notices.children.length, 1, 'an ID reused by a new daemon is not dismissed');
+  assert.equal(notices.children[0].children[0].textContent, 'A new cleanup failed.');
 });
 
 function descendants(root, tag) {

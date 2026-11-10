@@ -20,6 +20,44 @@ use super::super::{
 
 const MAILBOX_EVENT_RETRY_CHILD: &str = "MJ_API_MAILBOX_EVENT_RETRY_CHILD";
 
+// Hard-won: 3c523cbdd: CLI callers could not retrieve cleanup warnings after Destroy removed the record.
+#[tokio::test]
+async fn cleanup_notices_are_authenticated_and_readable_after_session_removal() {
+    let (app, _actions, _snapshots, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            snapshot.sessions = Default::default();
+            snapshot.notices = vec![
+                mj_client::daemon::RuntimeNotice {
+                    id: 1,
+                    session_id: "removed".into(),
+                    text: "Cleanup failed; resources may remain.".into(),
+                },
+                mj_client::daemon::RuntimeNotice {
+                    id: 2,
+                    session_id: "other".into(),
+                    text: "Another session's notice".into(),
+                },
+            ];
+        });
+    let path = "/api/v1/sessions/removed/notices";
+    let denied = app
+        .clone()
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let response = app
+        .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let notices: Vec<mj_client::daemon::RuntimeNotice> =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].session_id, "removed");
+    assert_eq!(notices[0].text, "Cleanup failed; resources may remain.");
+}
+
 // HTTP contract integration: optional All and encoded profile names must reach
 // the same store query, with authentication and no caching on the report.
 #[tokio::test]

@@ -5743,7 +5743,6 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
         "the indexed conversation keeps the prompt a restore starts from"
     );
 
-    // Hard-won: 27c51a34c: unavailable target configuration blocked Destroy too.
     // A second session has no surviving machine configuration. Destruction
     // must still remove its record and publish a safe warning independently.
     session.id = "abcdef0123456789abcdef0123456789".into();
@@ -5756,6 +5755,7 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
     });
     crate::database::save_session(&session).unwrap();
     state.push_notice(&session.id, "private diagnostic /secret/path");
+    // Hard-won: 27c51a34c: unavailable target configuration blocked Destroy too.
     state
         .destroy_stopped_session(session.id.clone(), BranchDisposition::Keep)
         .await

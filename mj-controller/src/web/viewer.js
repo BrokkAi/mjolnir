@@ -955,6 +955,7 @@ const dismissedLaunchFailures = new Set();
 const dismissedRuntimeNotices = new Set();
 
 function renderLaunchFailures() {
+  const noticeKey = notice => `${viewerState.cursor?.incarnation}:${notice.id}`;
   const notices = (snapshot.launch_failures || []).filter(
     failure => route.name === 'dashboard' && failure.workspace_id === selectedWorkspaceId() && !dismissedLaunchFailures.has(failure.id),
   );
@@ -970,14 +971,15 @@ function renderLaunchFailures() {
     return card;
   });
   const runtimeCards = (snapshot.notices || []).filter(
-    notice => !dismissedRuntimeNotices.has(notice.id),
+    notice => !dismissedRuntimeNotices.has(noticeKey(notice)),
   ).map(notice => {
+    const key = noticeKey(notice);
     const card = el('div', 'card');
     card.setAttribute('role', 'status');
     card.append(el('p', '', notice.text));
     const dismiss = el('button', 'secondary', 'Dismiss notice');
     dismiss.onclick = () => {
-      dismissedRuntimeNotices.add(notice.id);
+      dismissedRuntimeNotices.add(key);
       renderLaunchFailures();
     };
     card.append(dismiss);

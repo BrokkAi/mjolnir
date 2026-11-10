@@ -13,7 +13,8 @@ Destroy must remove a session even when its remote host cannot be contacted. The
 - [x] Implemented explicit cleanup outcome, strict automatic stopping, and safe daemon/browser warnings.
 - [x] Focused isolated cleanup/removal regressions and browser warning/dismissal tests pass.
 - [x] Completed touched crate suites, corrected the one obsolete expectation and reran the affected cases; final workspace clippy passes.
-- [ ] Commit, review, and push. Apply to the live session only after installation is authorized.
+- [x] Committed the implementation as `3c523cbdd` and completed the first review.
+- [ ] Validate and commit the review fixes, finish review, and push. Apply to the live session only after installation is authorized.
 
 ## Surprises & Discoveries
 
@@ -25,7 +26,7 @@ The user chose on 2026-11-10 to let Destroy proceed with a cleanup warning. Keep
 
 ## Outcomes & Retrospective
 
-Implementation and validation are complete. The full controller suite passed 2529 cases with one obsolete explicit-Destroy assertion; that assertion was corrected to cover strict automatic stopping and passed on its focused rerun. The terminal suite passed 582 cases; CLI unit tests passed 242 cases plus its enabled integration suites. The final three affected Rust cases, browser warning rendering/dismissal test, formatting, and workspace clippy all pass. No live data has been changed. Filing an issue was rejected by automatic approval review because the proposed issue included live identifiers; do not publish those details.
+The original implementation passed validation; review identified two warning-delivery gaps, now addressed with validation running. The full controller suite passed 2529 cases with one obsolete explicit-Destroy assertion; that assertion was corrected to cover strict automatic stopping and passed on its focused rerun. The terminal suite passed 582 cases; CLI unit tests passed 242 cases plus its enabled integration suites. The final three affected Rust cases, browser warning rendering/dismissal test, formatting, and workspace clippy all pass. No live data has been changed. Filing an issue was rejected by automatic approval review because the proposed issue included live identifiers; do not publish those details.
 
 ## Context and Orientation
 
@@ -35,7 +36,7 @@ Implementation and validation are complete. The full controller suite passed 252
 
 Return a destruction outcome containing safe cleanup warnings from explicit controller destruction. Catch external target and prepared destination cleanup failures, retaining process-owned files after unconfirmed target death. Continue independent cleanup where safe. Treat managed checkout cleanup failures as warnings in explicit destruction as well. Retire obsolete worker restart intent when forgetting the session. Preserve strict cleanup in automatic child stops by passing intent explicitly through the existing daemon helper.
 
-Publish warnings from the daemon through the existing notice queue, with an internal marker permitting the safe warning text in browser snapshots. Keep private diagnostics out of browser projection. Render public notices independently of session cards so deletion cannot hide the warning. Explain the cleanup policy in destroy confirmations and CLI help.
+Publish warnings from the daemon through the existing notice queue, with an internal marker permitting the safe warning text in browser snapshots. Keep private diagnostics out of browser projection. Render public notices independently of session cards so deletion cannot hide the warning. Explain the cleanup policy in destroy confirmations and CLI help. Provide `mj notices --session <id>` and an authenticated `/api/v1/sessions/{id}/notices` endpoint that reads safe recent notices without requiring the deleted record. Destroy points to this command and JSON callers receive its URL. Absence of retained notices does not imply completion or successful cleanup. Scope browser notice dismissals by feed incarnation and notice ID so a daemon restart cannot hide a new warning.
 
 ## Concrete Steps
 
@@ -55,7 +56,7 @@ The failure was an SSH connection timeout in both target cleanup and its exact a
 
 ## Interfaces and Dependencies
 
-Keep the existing HTTP and daemon request shapes. Add a controller destruction outcome and an internal cleanup policy distinguishing explicit destruction from automatic stopping. Keep notice visibility internal to the daemon so old clients retain the same runtime notice wire shape. Add an optional, omitted-when-empty notice array to HTTP viewer snapshots.
+Keep the existing HTTP and daemon request shapes. Add a controller destruction outcome and an internal cleanup policy distinguishing explicit destruction from automatic stopping. Keep notice visibility internal to the daemon so old clients retain the same runtime notice wire shape. Add an optional, omitted-when-empty notice array to HTTP viewer snapshots, plus an additive notice-reading endpoint. Preserve asynchronous Destroy and use the existing safe notice owner for CLI retrieval.
 
 Initial plan recorded after live diagnosis and the user's cleanup-policy decision.
 
@@ -64,3 +65,5 @@ Implementation update: explicit stopped-session destruction now uses the same pa
 Validation update: the first full run exposed an existing test expecting the old strict explicit-Destroy behavior. It now checks strict automatic stopping instead. Extend the existing browser delta integration test to carry a warning with the deleted row and clear evicted warnings with an empty array. Rerun only that corrected assertion and the affected browser integration cases, plus final clippy.
 
 Final validation: the corrected durable-target assertion, browser snapshot HTTP integration and browser delta integration all passed. Final workspace clippy passed. No full suites were repeated to confirm the one assertion correction.
+
+Review update: both reviewers found missing CLI access to warnings and dismissal ID reuse after daemon replacement. Added CLI/API notice retrieval, linked it from Destroy output, and keyed browser dismissals by daemon incarnation. Test the authenticated route with no session record and extend browser dismissal coverage across incarnation changes.

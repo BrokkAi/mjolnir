@@ -937,6 +937,34 @@ pub(crate) struct DestroyArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct NoticesArgs {
+    /// Session id; notices remain readable after the session is removed.
+    #[arg(long)]
+    session: String,
+    /// Print the response as JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+pub(crate) async fn notices(args: NoticesArgs) -> Result<()> {
+    let notices = ApiClient::connect().await?.notices(&args.session).await?;
+    if args.json {
+        print_json(&notices)
+    } else {
+        if notices.is_empty() {
+            println!(
+                "No cleanup notices are currently retained for {}. Notices can arrive while destruction runs; they are kept in the current daemon's recent notice history.",
+                args.session
+            );
+        }
+        for notice in notices {
+            println!("{}", sanitize_terminal_text(&notice.text));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Args)]
 #[command(group(
     clap::ArgGroup::new("resume-subject")
         .required(true)
@@ -2023,12 +2051,16 @@ pub(crate) async fn destroy(args: DestroyArgs) -> Result<()> {
         .await?;
     if args.json {
         print_json(
-            &serde_json::json!({"session_id": args.session, "accepted": true, "operation": "destroy"}),
+            &serde_json::json!({"session_id": args.session, "accepted": true, "operation": "destroy", "notices_url": format!("/api/v1/sessions/{}/notices", args.session)}),
         )
     } else {
         println!("destruction accepted for {}", args.session);
         println!(
             "it finishes in the background; check removal with `mj sessions --session {}`",
+            args.session
+        );
+        println!(
+            "read cleanup warnings with `mj notices --session {}`",
             args.session
         );
         Ok(())
