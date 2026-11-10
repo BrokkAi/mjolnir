@@ -1963,3 +1963,137 @@ async fn claim_reads_the_session_owner_once() {
     drop(guard);
     assert_eq!(claim(&state, session), Claim::Allowed);
 }
+
+// Hard-won: #1487: quota recovery queried providers again and could lose model-scoped poller data.
+#[tokio::test]
+async fn quota_recovery_reads_full_owner_reports_without_requesting_another_probe() {
+    use crate::controller::test_support::{IsolatedTest, test_name};
+    use crate::quota::{ProfileQuota, QuotaRefreshRequest, QuotaWindow};
+    use mj_core::config::{Config, HarnessKind, HarnessProfile};
+
+    const CHILD: &str = "MJ_TEST_QUOTA_RECOVERY_OWNER";
+    const NAME: &str = "quota_recovery_reads_full_owner_reports_without_requesting_another_probe";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), NAME))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "quota-recovery-1487")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let home = tempfile::tempdir().unwrap();
+    let profile = HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf());
+    let mut config = Config::default();
+    config.profiles.insert("claude".into(), profile.clone());
+    let mut session = super::super::tests::runtime_test_session(
+        "one",
+        "workspace",
+        mj_core::state::SessionState::Running,
+    );
+    session.last_profile = "claude".into();
+    session.harness_kind = HarnessKind::Claude;
+    let mut controller = Controller {
+        config: config.clone(),
+        state: Default::default(),
+    };
+    controller.state.sessions.insert("one".into(), session);
+    let state = super::super::tests::test_runtime_state_with(controller);
+    let now = mj_core::clock::epoch_seconds() as i64;
+    let reset = now + 2 * 3600;
+    let window = |label: &str, scope: Option<&str>, remaining, reset| QuotaWindow {
+        label: label.into(),
+        model_scope: scope.map(str::to_owned),
+        remaining_percent: Some(remaining),
+        resets_at_epoch_seconds: Some(reset),
+        resets: None,
+        duration_seconds: Some(5 * 3600),
+        used: None,
+        limit: None,
+    };
+    let stored = ProfileQuota {
+        profile_id: "claude".into(),
+        harness: HarnessKind::Claude,
+        windows: vec![window("5H", None, 70, now + 3 * 3600)],
+        paid_credits: None,
+        banked_resets: None,
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: now as u64,
+        rate_limited_until_epoch_seconds: None,
+    };
+    let request = QuotaRefreshRequest::for_profile(
+        "claude",
+        &profile,
+        home.path().to_path_buf(),
+        crate::quota::QuotaRuntimeConfig::of(&config),
+    );
+    crate::database::save_quota_report(&request.cache_identity(), &stored).unwrap();
+    let reports = Arc::new(Mutex::new(BTreeMap::new()));
+    let backend = Arc::new(
+        crate::server_runtime::api::ApiBackend::new(
+            state.session_manager.client(),
+            Arc::new(|_| None),
+            state.clone(),
+        )
+        .with_quota_reports(reports.clone()),
+    );
+    state.install_report_backend(&backend);
+    let (refresh, mut refreshes) = mpsc::channel(1);
+    state.attach_quota_refresh(refresh);
+    let mut blocked = view("one", true);
+    let snapshot = blocked.snapshot.as_mut().unwrap();
+    snapshot
+        .operational
+        .config
+        .insert("model".into(), "claude-opus".into());
+    snapshot
+        .materialized
+        .last_turn_outcome
+        .as_mut()
+        .unwrap()
+        .completed_at_ms = now * 1000;
+    // The event can arrive after the poll: a retained positive percentage
+    // still supplies its model's reset time without a synchronous recheck.
+    for remaining in [0, 17] {
+        let mut observed = stored.clone();
+        observed.windows = vec![
+            window("5H (Opus)", Some("opus"), remaining, reset),
+            window("5H (Sonnet)", Some("sonnet"), 0, now + 1800),
+        ];
+        assert!(
+            crate::quota::surface_quota_report(&observed)
+                .windows
+                .is_empty()
+        );
+        reports.lock().unwrap().insert("claude".into(), observed);
+        let quota::Plan::Wait(recovery) = quota::prepare(&state, "one", &blocked).await.unwrap()
+        else {
+            panic!("a short scoped reset must wait on its original profile");
+        };
+        assert_eq!(recovery.reset_at_ms, Some(reset * 1000));
+        assert_eq!(recovery.retry_at_ms, Some((reset + 60) * 1000));
+        assert!(
+            recovery
+                .notice
+                .contains("using last-known quota reset times")
+        );
+        assert!(
+            refreshes.try_recv().is_err(),
+            "recovery must not request a probe"
+        );
+    }
+    // A missing owner report keeps the existing reset-cache recovery path.
+    reports.lock().unwrap().clear();
+    let quota::Plan::Wait(recovery) = quota::prepare(&state, "one", &blocked).await.unwrap() else {
+        panic!("stored short reset must remain recoverable");
+    };
+    assert_eq!(recovery.reset_at_ms, Some((now + 3 * 3600) * 1000));
+    assert!(
+        recovery
+            .notice
+            .contains("using last-known quota reset times")
+    );
+    assert!(refreshes.try_recv().is_err());
+}

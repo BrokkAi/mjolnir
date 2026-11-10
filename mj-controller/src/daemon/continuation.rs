@@ -548,11 +548,9 @@ pub(super) fn spawn(
         },
         quota: {
             let state = state.clone();
-            let service = Arc::new(quota::Service::default());
             Arc::new(move |id, view| {
                 let state = state.clone();
-                let service = service.clone();
-                Box::pin(async move { quota::prepare(&state, &service, &id, &view).await })
+                Box::pin(async move { quota::prepare(&state, &id, &view).await })
             })
         },
         start_quota_move: {

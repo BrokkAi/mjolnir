@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use crate::compaction::{
     CompactionBackend, CompactionFailure, DEFAULT_CONTEXT_BYTES, MIN_CONTEXT_BYTES,
 };
-use crate::quota::{ProfileQuota, QuotaManager, QuotaRefreshRequest};
+use crate::quota::{ProfileQuota, QuotaRefreshRequest};
 use mj_core::codex_provider::{BuiltInCodexProvider, CodexProviderDefinition, CodexProviderKind};
 use mj_core::config::{Config, HarnessKind, HarnessProfile};
 
@@ -78,7 +78,6 @@ type CachedBackend = (HarnessProfile, Arc<dyn LlmBackend>);
 
 #[derive(Default)]
 pub struct UtilityLlmRuntime {
-    quota_cache: tokio::sync::Mutex<BTreeMap<String, ProfileQuota>>,
     /// Backends are reused across resolves so a client that mints a key holds
     /// it in memory instead of minting one per compaction.
     backend_cache: tokio::sync::Mutex<BTreeMap<String, CachedBackend>>,
@@ -105,7 +104,7 @@ impl UtilityLlmRuntime {
                 "no enabled utility model is configured; enable or add a Codex, Muse, Grok, or Kimi profile"
             )
         }
-        let quotas = self.quotas(config, &supported).await;
+        let quotas = self.quotas(&supported).await;
         if cancel.is_cancelled() {
             bail!("utility-model discovery cancelled")
         }
@@ -197,57 +196,45 @@ impl UtilityLlmRuntime {
 
     pub(crate) async fn quotas(
         &self,
-        config: &Config,
         profiles: &[(&str, &HarnessProfile)],
     ) -> BTreeMap<String, ProfileQuota> {
         let now = now_seconds();
-        let stale = {
-            let cache = self.quota_cache.lock().await;
-            profiles
-                .iter()
-                .filter(|(id, _)| {
-                    cache.get(*id).is_none_or(|report| {
-                        now.saturating_sub(report.refreshed_at_epoch_seconds) > QUOTA_FRESH_SECONDS
-                    })
-                })
-                .map(|(id, profile)| {
-                    quota_request(id, profile, crate::quota::QuotaRuntimeConfig::of(config))
-                })
-                .collect::<Vec<_>>()
-        };
-        // The daemon's poller keeps the stored report of each profile current;
-        // read that before asking a provider a second time.
-        let mut still_stale = Vec::new();
-        for request in stale {
-            let identity = request.cache_identity();
-            let stored =
-                tokio::task::spawn_blocking(move || crate::database::load_quota_cache(&identity))
-                    .await
-                    .ok()
-                    .and_then(|stored| stored.ok().flatten())
-                    .filter(|report| {
-                        now.saturating_sub(report.refreshed_at_epoch_seconds) <= QUOTA_FRESH_SECONDS
-                    });
-            match stored {
-                Some(report) => {
-                    self.quota_cache
-                        .lock()
-                        .await
-                        .insert(request.profile_id.clone(), report);
+        let mut reads = tokio::task::JoinSet::new();
+        for (id, profile) in profiles {
+            let profile_id = (*id).to_owned();
+            let profile = (*profile).clone();
+            reads.spawn_blocking(move || {
+                let request = quota_request(&profile_id, &profile);
+                let identity = request.cache_identity();
+                (profile_id, crate::database::load_quota_cache(&identity))
+            });
+        }
+
+        let mut reports = BTreeMap::new();
+        while let Some(result) = reads.join_next().await {
+            let (profile_id, stored) = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::warn!(%error, "quota cache read task failed");
+                    continue;
                 }
-                None => still_stale.push(request),
+            };
+            match stored {
+                Ok(Some(report))
+                    if now.saturating_sub(report.refreshed_at_epoch_seconds)
+                        <= QUOTA_FRESH_SECONDS =>
+                {
+                    reports.insert(profile_id, report);
+                }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    profile_id,
+                    %error,
+                    "could not read the stored utility quota report"
+                ),
             }
         }
-        let stale = still_stale;
-        if !stale.is_empty() {
-            let mut manager = QuotaManager::default();
-            manager.refresh_profiles(stale, |_| async {}).await;
-            let refreshed = manager.reports().clone();
-            manager.shutdown().await;
-            self.quota_cache.lock().await.extend(refreshed);
-        }
-        self.retain_enabled(config).await;
-        self.quota_cache.lock().await.clone()
+        reports
     }
 
     async fn retain_enabled(&self, config: &Config) {
@@ -256,10 +243,6 @@ impl UtilityLlmRuntime {
             .map(|(id, _)| id.to_owned())
             .collect::<BTreeSet<_>>();
         self.backend_cache
-            .lock()
-            .await
-            .retain(|id, _| enabled.contains(id));
-        self.quota_cache
             .lock()
             .await
             .retain(|id, _| enabled.contains(id));
@@ -502,16 +485,12 @@ impl CompactionBackend for UtilityCompactionBackend {
     }
 }
 
-fn quota_request(
-    profile_id: &str,
-    profile: &HarnessProfile,
-    runtime: crate::quota::QuotaRuntimeConfig,
-) -> QuotaRefreshRequest {
+fn quota_request(profile_id: &str, profile: &HarnessProfile) -> QuotaRefreshRequest {
     QuotaRefreshRequest::for_profile(
         profile_id,
         profile,
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        runtime,
+        crate::quota::QuotaRuntimeConfig::host(),
     )
 }
 
@@ -840,6 +819,108 @@ mod tests {
             .to_string();
 
         assert!(error.contains("no enabled utility model"), "{error}");
+    }
+
+    #[cfg(unix)]
+    // Hard-won: #1487: utility discovery could start a second provider quota checker on a cache miss.
+    #[tokio::test]
+    async fn utility_quota_uses_only_fresh_stored_reports() {
+        const CHILD: &str = "MJ_UTILITY_QUOTA_STORED_REPORT_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(
+                    module_path!(),
+                    "utility_quota_uses_only_fresh_stored_reports",
+                ),
+            )
+            .env(CHILD, "1")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+
+        let data_dir = PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap());
+        let fake_bin = data_dir.join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let marker = data_dir.join("quota-checker-started");
+        let executable = fake_bin.join("grok");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf called >> \"$UTILITY_QUOTA_MARKER\"\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut profile = HarnessProfile::new(HarnessKind::Grok, data_dir.join("grok-profile"));
+        profile.environment = BTreeMap::from([
+            ("PATH".into(), fake_bin.to_string_lossy().into_owned()),
+            (
+                "UTILITY_QUOTA_MARKER".into(),
+                marker.to_string_lossy().into_owned(),
+            ),
+        ])
+        .into();
+        let _writer = crate::database::install_isolated_test_writer();
+        let runtime = UtilityLlmRuntime::default();
+
+        assert!(
+            runtime.quotas(&[("grok", &profile)]).await.is_empty(),
+            "a missing owner report is unknown"
+        );
+        assert!(
+            !marker.exists(),
+            "a cache miss must not start the configured provider checker"
+        );
+
+        let stale = ProfileQuota {
+            paid_credits: None,
+            banked_resets: None,
+            profile_id: "grok".into(),
+            harness: HarnessKind::Grok,
+            windows: vec![crate::quota::QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(50),
+                duration_seconds: None,
+                model_scope: None,
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: Some(1_900_000_000),
+            }],
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: now_seconds().saturating_sub(QUOTA_FRESH_SECONDS + 1),
+            rate_limited_until_epoch_seconds: None,
+        };
+        let identity = quota_request("grok", &profile).cache_identity();
+        let fresh = ProfileQuota {
+            refreshed_at_epoch_seconds: now_seconds(),
+            ..stale.clone()
+        };
+        crate::database::save_quota_report(&identity, &fresh).unwrap();
+        assert_eq!(
+            runtime.quotas(&[("grok", &profile)]).await.get("grok"),
+            Some(&fresh),
+            "a fresh owner report remains available to utility selection"
+        );
+        assert!(
+            !marker.exists(),
+            "reading a fresh report must not start the configured provider checker"
+        );
+
+        crate::database::save_quota_report(&identity, &stale).unwrap();
+
+        assert!(
+            runtime.quotas(&[("grok", &profile)]).await.is_empty(),
+            "a stale owner report is unknown"
+        );
+        assert!(
+            !marker.exists(),
+            "a stale report must not start the configured provider checker"
+        );
     }
 
     #[test]

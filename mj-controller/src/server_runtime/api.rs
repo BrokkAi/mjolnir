@@ -654,6 +654,17 @@ impl ApiBackend {
         self
     }
 
+    /// Full poller-owned report, including model-scoped allowances omitted
+    /// from user-facing quota projections.
+    pub(crate) fn quota_report(&self, profile_id: &str) -> Result<Option<ProfileQuota>> {
+        Ok(self
+            .quota_reports
+            .lock()
+            .map_err(|_| anyhow!("profile quota reports lock poisoned"))?
+            .get(profile_id)
+            .cloned())
+    }
+
     pub fn with_rejected_logins(
         mut self,
         rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
