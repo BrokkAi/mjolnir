@@ -614,7 +614,7 @@ mod tests {
         }
     }
 
-    // Hard-won: #1489 review: evidence lost constraints and leaked inherited secret defaults.
+    // Hard-won: #1489 review: evidence lost constraints and leaked secret defaults/choices.
     #[tokio::test]
     async fn afk_question_evidence_preserves_changed_selection_and_required_constraints() {
         let classifier = Classifier::new(false).await;
@@ -630,7 +630,7 @@ mod tests {
                 "mode":"form", "sessionId":"test", "message":"Choose a destination",
             "requestedSchema":{"type":"object", "properties":{
                 "destination":{"type":"string", "title":"Destination", "enum":["one","two"]},
-                "password":{"type":"string", "title":"Password", "default":"P!n12", "_meta":{"codex":{"isSecret":true}}},
+                "password":{"type":"string", "title":"Password", "enum":["P!n12","n3w?Pin"], "default":"P!n12", "_meta":{"codex":{"isSecret":true}}},
                 "password__other":{"type":"string", "title":"Other password", "default":"77!Z", "_meta":{"codex":{"questionId":"password", "role":"user_note"}}}
             }}
             }),
@@ -640,7 +640,7 @@ mod tests {
             "mode":"form", "sessionId":"test", "message":"Choose a destination",
             "requestedSchema":{"type":"object", "required":["destination"], "properties":{
                 "destination":{"type":"array", "title":"Destination", "items":{"type":"string", "enum":["one","two"]}, "minItems":1},
-                "password":{"type":"string", "title":"Password", "default":"n3w?Pin", "_meta":{"codex":{"isSecret":true}}},
+                "password":{"type":"string", "title":"Password", "enum":["P!n12","n3w?Pin"], "default":"n3w?Pin", "_meta":{"codex":{"isSecret":true}}},
                 "password__other":{"type":"string", "title":"Other password", "default":"55?X", "_meta":{"codex":{"questionId":"password", "role":"user_note"}}}
             }}
         })).unwrap();
@@ -670,6 +670,14 @@ mod tests {
                 .is_none()
         );
         assert_eq!(evidence["current_question"]["fields"][2]["secret"], true);
+        assert_eq!(
+            evidence["current_question"]["fields"][1]["options"],
+            evidence["previous_questions"][0]["fields"][1]["options"]
+        );
+        assert_ne!(
+            evidence["current_question"]["fields"][1]["options"][0]["value"],
+            evidence["current_question"]["fields"][1]["options"][1]["value"]
+        );
         assert!(
             evidence["current_question"]["fields"][1]
                 .get("default")
@@ -702,7 +710,7 @@ mod tests {
         ));
     }
 
-    // Hard-won: #1489 review: nested JSON redaction collapsed IDs and misread escape boundaries.
+    // Hard-won: #1489 review: redaction changed ID identity across escapes and punctuation.
     #[tokio::test]
     async fn afk_question_protocol_preserves_redacted_identifier_equality() {
         let classifier = Classifier::new(false).await;
@@ -737,11 +745,11 @@ mod tests {
             second.await.unwrap(),
             Some(PendingAnswer::OperatorAway)
         ));
-        let repeated = ask(&pending, "repeated", &format!("Merge commit\t{first_id}?"));
+        let repeated = ask(&pending, "repeated", &format!("Merge commit\t{first_id}."));
         let (stream, evidence) = classifier.request().await;
         assert_eq!(
             evidence["current_question"]["message"],
-            "Merge commit\t[redacted token 0]?"
+            "Merge commit\t[redacted token 0]."
         );
         assert_eq!(
             evidence["previous_questions"][0]["message"],

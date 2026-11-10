@@ -26,6 +26,8 @@ An absent operator should receive a notice for each new decision an agent asks a
 
 - [x] (2026-11-10) Fifth-review cleanup validated: structured evidence, shared inherited secrecy, five focused regressions, complete core/worker suites, Clippy, formatting, 39 service tests, and six final live smoke cases pass. Deployed structured contract as 05397108-1a05-4112-b210-1d2bcc0426b1. Ready for delivery review.
 
+- [x] (2026-11-10) Seventh-review privacy/identity fixes validated: secret option strings are anonymous, punctuation stays outside identifier labels, five focused regressions and complete core/worker suites pass, as do Clippy, formatting and three new live cases. Ready for delivery review.
+
 ## Surprises & Discoveries
 
 The refusal owner lives in `mj-worker/src/acp/operator_away.rs` and survives bridge restarts. Its question identity is only `(agent, Question)`. Permission identities already include tool content and need no change. Requests opened before AFK use the same owner as newly opened requests.
@@ -113,3 +115,7 @@ Final structured-contract validation: five focused AFK regressions pass, includi
 Final interface: same_afk_question takes a current serde_json::Value form and a slice of prior form Values; the service receives current_question as an object with message and fields and previous_questions as an array of those objects. No serialized form strings or compatibility alias remain. ElicitationRequest::field_is_secret owns direct and companion secrecy interpretation.
 
 Sixth-review compatibility fix: ACP allows an empty/whitespace-only message with the decision in the title and fields. Removed the service-only nonempty-message restriction and extended the existing route integration fixture to preserve those forms. All 39 service tests, TypeScript check, deploy dry run, and diff checks pass. Deployed 6eeb5234-6137-4a93-a1f9-a0d121406f04; live title-only same/new comparisons pass at 0.99. Rust sources are unchanged from the completed full core/worker and Clippy validation.
+
+Seventh-review update: secret single/multi-select options can repeat the removed secret default, so the Jev client now anonymizes every string in secret option records regardless of length, using the same request-local label map. Option equality, distinction and order remain visible without answer contents. Long token components receive separate anonymous labels while punctuation stays outside them, preserving sentence-format equivalence. Ordinary diagnostic redaction stays unchanged. Extended the existing HTTP secrecy/ID cases; the service contract and deployment are unchanged.
+
+Final seventh-review validation: the existing HTTP secrecy case now includes secret select values/titles and proves that no raw secret leaves the process, while equal private choices keep equal labels. The ID case proves sentence punctuation preserves the underlying label. Complete core suite: 644 passed; worker suite: 818 passed; existing ignores unchanged. Workspace Clippy and formatting pass. Live checks: sentence punctuation same=1.0, reordered anonymous private choices same=0.97, an added anonymous choice different=0.99. Hosted version remains 6eeb5234-6137-4a93-a1f9-a0d121406f04.

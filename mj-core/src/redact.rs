@@ -14,15 +14,36 @@ pub fn redact_secrets(text: &str) -> String {
     redact_token_runs(text, |_| "[redacted]".into())
 }
 
-/// Request-local labels preserve identifier equality without exposing contents.
+fn anonymous_label(text: &str, labels: &mut std::collections::BTreeMap<String, usize>) -> String {
+    let next = labels.len();
+    let label = labels.entry(text.to_owned()).or_insert(next);
+    format!("[redacted token {label}]")
+}
+
+/// Keep punctuation outside labels so formatting cannot change identifier equality.
 fn redact_secrets_distinct(
     text: &str,
     labels: &mut std::collections::BTreeMap<String, usize>,
 ) -> String {
     redact_token_runs(text, |token| {
-        let next = labels.len();
-        let label = labels.entry(token.to_owned()).or_insert(next);
-        format!("[redacted token {label}]")
+        if !token.chars().any(|ch| ch.is_ascii_alphanumeric()) {
+            return anonymous_label(token, labels);
+        }
+        let mut result = String::new();
+        let mut start = 0;
+        for (index, ch) in token.char_indices() {
+            if !ch.is_ascii_alphanumeric() {
+                if start < index {
+                    result.push_str(&anonymous_label(&token[start..index], labels));
+                }
+                result.push(ch);
+                start = index + ch.len_utf8();
+            }
+        }
+        if start < token.len() {
+            result.push_str(&anonymous_label(&token[start..], labels));
+        }
+        result
     })
 }
 
@@ -72,6 +93,14 @@ pub fn redact_json_strings_distinct(
     redact_json_strings_with(value, false, &mut |text| {
         redact_secrets_distinct(text, labels)
     });
+}
+
+/// Secret answer choices need anonymous labels even when they are short.
+pub fn anonymize_json_strings(
+    value: &mut Value,
+    labels: &mut std::collections::BTreeMap<String, usize>,
+) {
+    redact_json_strings_with(value, false, &mut |text| anonymous_label(text, labels));
 }
 
 fn redact_json_strings_with(

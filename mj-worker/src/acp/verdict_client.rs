@@ -176,8 +176,31 @@ impl VerdictClient {
     ) -> Result<bool> {
         // The ordinary egress redactor collapses all long identifiers. Keep
         // their equality within this comparison without sending their contents.
+        fn anonymize_secret_choices(
+            form: &mut serde_json::Value,
+            labels: &mut std::collections::BTreeMap<String, usize>,
+        ) {
+            for field in form["fields"]
+                .as_array_mut()
+                .expect("normalized form fields")
+            {
+                // question_evidence has already resolved inherited secrecy.
+                if field["secret"] == true
+                    && let Some(options) = field.get_mut("options")
+                {
+                    mj_core::redact::anonymize_json_strings(options, labels);
+                }
+            }
+        }
         let mut labels = std::collections::BTreeMap::new();
         let mut state = serde_json::json!({"current_question": current_question, "previous_questions": previous_questions});
+        anonymize_secret_choices(&mut state["current_question"], &mut labels);
+        for form in state["previous_questions"]
+            .as_array_mut()
+            .expect("prior normalized forms")
+        {
+            anonymize_secret_choices(form, &mut labels);
+        }
         mj_core::redact::redact_json_strings_distinct(&mut state, &mut labels);
         let questions = match &self.source {
             VerdictSource::Direct { .. } => {
