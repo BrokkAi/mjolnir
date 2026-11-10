@@ -12,7 +12,7 @@ The user wants a persistent c7i.16xlarge EC2 VM with Podman, configured as an mj
 - [x] (2026-11-09) Provisioned the requested C7i; user then requested shutdown and selected C8id.16xlarge with local NVMe, ZFS/lz4, and mold. Replacement is running and original is stopped.
 - [x] (2026-11-09) Registered ec2-c8id16, disabled discovered bare access, removed old configuration, and verified real session cfd87ded54b8f20fed978447b3089998 replied EC2_ZFS_PODMAN_OK with ZFS/mbx evidence.
 - [x] (2026-11-09) Implemented create/list/destroy, ZFS cache bootstrap, pinned mbx setup, mold in the agent image, documentation, and AWS boundary/partial-failure integration tests.
-- [ ] Complete touched-crate tests, workspace clippy, review, commit, and push.
+- [x] (2026-11-09) Initial EC2 checkpoint passed the full CLI/controller suites and clippy, was reviewed clean, and was pushed as 348ba323a. Image publication and cross-platform CI were started.
 
 ## Surprises & Discoveries
 
@@ -63,3 +63,15 @@ Revision 2026-11-09: final CLI validation passed (all tests); workspace clippy p
 Revision 2026-11-09: review found address lifetime, SSH-readiness, and terminated-name-reuse defects. Future creates reserve a tagged Elastic IP and publish configuration only after SSH, cloud-init, and requested mbx installation are ready. The controller's existing EC2 SSH wait is shared rather than duplicated. The active manually provisioned host keeps its address to preserve live connections. Revalidate the CLI and controller crates and workspace clippy after these fixes.
 
 Revision 2026-11-09: the review regressions and help-surface check passed, and workspace clippy passed after the fixes. The expanded final CLI/controller suites are still running; request the second review in parallel, and do not push before both required validation and review are complete.
+
+## Expanded scope: profile transport and legacy EC2 removal
+
+The user explicitly expanded scope to address the measured 162-second profile upload and remove the old VM-per-session path. Replace both remote-container and SSH-bare recursive profile scp operations with one gzip tar archive streamed through the existing CommandExecutor stdin facility. Build the archive in an owner-private temporary file, preserve the staged allowlist and recursive-copy contents, unpack with restrictive permissions, and report producer/transport/extraction errors without falling back to file-by-file copy. Validate the Rust archive writer against system tar with incompressible content exceeding 64 KiB, Unicode paths, nested files, and symlinks, then measure the same actual session-profile transfer on EC2 without disturbing running sessions.
+
+Remove session-owned EC2 creation, resource selection, launch-template setup, and user-facing documentation from new-session paths. Keep only passive persisted-format readers and existing-instance cleanup/checkpoint handling needed to preserve historical work and compatible upgrades. New/restarted/resumed work selects an ordinary persistent SSH/Podman target; it must never launch a per-session VM. Remove the user's obsolete aws-runson launch-template machine/target after verifying no active session uses it. Trace all creation entry points, including Move, Resume, resource probes, target discovery and API validation, and make one authoritative target-availability rule exclude retired AWS targets. Expand the applicable isolated configuration/store/API compatibility regressions instead of adding happy-path unit examples. Run focused checks during implementation and the full suites of every touched crate plus workspace clippy once after the final round.
+
+Progress for expanded scope:
+
+- [x] (2026-11-09) Implemented archive streaming for SSH-bare and remote containers. Rust writer/system tar and real node transport passed with an archive over 8 MiB; the same 587 plugin files packed in 1.083 seconds and uploaded/extracted in 12.185 seconds versus 162.345 seconds for recursive scp.
+- [ ] Remove legacy VM-per-session admission and provisioning surfaces while preserving historical readers/cleanup.
+- [ ] Complete expanded validation, review, commit, and push.

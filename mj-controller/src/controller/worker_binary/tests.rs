@@ -1560,6 +1560,19 @@ impl CommandExecutor for SshHostExecutor {
             stderr: Vec::new(),
         })
     }
+    fn execute_with_stdin(
+        &self,
+        command: &CommandSpec,
+        input: &mut (dyn Read + Send),
+    ) -> Result<CommandOutput> {
+        // The transport boundary receives a complete archive, rather than a
+        // test-only fallback to file-by-file copy.
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(input));
+        for entry in archive.entries()? {
+            std::io::copy(&mut entry?, &mut std::io::sink())?;
+        }
+        self.execute(command)
+    }
 }
 fn install_on_ssh_host(
     executor: &SshHostExecutor,
