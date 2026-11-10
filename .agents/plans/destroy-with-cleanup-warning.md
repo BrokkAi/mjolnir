@@ -1,5 +1,7 @@
 # Finish Destroy when target cleanup fails
 
+Superseded by [environment-owned-teardown.md](environment-owned-teardown.md). The unpublished implementation does not preserve ownership across direct child deletion and must not be pushed or installed as-is.
+
 This living ExecPlan follows `.agents/PLANS.md`. Keep its progress, discoveries, decisions, and outcomes current.
 
 ## Purpose / Big Picture
