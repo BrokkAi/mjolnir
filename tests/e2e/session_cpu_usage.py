@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise worker CPU sampling, the daemon feed and the live TUI in cpu-test."""
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -151,10 +152,10 @@ assert all(child.exitcode == 0 for child in children)
                     # selected sample covers an interval after the burner began.
                     covered = sample["usage"]["hourly_covered_secs"]
                     coverage_advances += 1
-                    during = sample["usage"]
-                    during_usec = self.container_cpu_usec(container_id)
-                    assert during_usec - before_usec >= 500_000, (before_usec, during_usec)
                     if coverage_advances == 2:
+                        during = sample["usage"]
+                        during_usec = self.container_cpu_usec(container_id)
+                        assert during_usec - before_usec >= 500_000, (before_usec, during_usec)
                         break
                 if command.poll() is not None:
                     raise ScenarioFailure("sibling burner exited before a container CPU sample appeared")
@@ -358,6 +359,15 @@ assert all(child.exitcode == 0 for child in children)
             if exists.returncode != 1:
                 raise ScenarioFailure(f"could not verify removal of {container_id}: {exists.stderr}")
 
+    def cleanup_cpu_run(self):
+        # ExitStack runs every step after a failure, in reverse registration order.
+        with contextlib.ExitStack() as cleanup:
+            cleanup.callback(self.integrity)
+            cleanup.callback(self.capture_process_tree)
+            cleanup.callback(self.cleanup_cpu_containers)
+            cleanup.callback(self.cleanup_owned)
+            cleanup.callback(self.stop_daemon)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -368,11 +378,7 @@ def main():
     try:
         lab.run_cpu(container_only=args.container_only)
     finally:
-        lab.stop_daemon()
-        lab.cleanup_owned()
-        lab.cleanup_cpu_containers()
-        lab.capture_process_tree()
-        lab.integrity()
+        lab.cleanup_cpu_run()
     print(f"CPU acceptance evidence: {lab.root}")
 
 

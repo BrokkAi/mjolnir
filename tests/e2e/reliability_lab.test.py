@@ -31,6 +31,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from reliability_lab import Lab, daemon_request  # noqa: E402
+from session_cpu_usage import CpuLab  # noqa: E402
 
 HEL = pathlib.Path("/bin/true")
 SLEEPER = "import time; time.sleep(300)"
@@ -207,6 +208,34 @@ class LabCleanupTest(unittest.TestCase):
         self.assertTrue(eventually(lambda: not running(sleeper.pid)))
         self.assertFalse(lab.runtime_root.exists())
         self.assertEqual((lab.root / "leaks.txt").read_text(), "")
+
+
+class CpuAcceptanceCleanupTests(unittest.TestCase):
+    # Hard-won: e584948ba: shutdown failures skipped process and container cleanup.
+    def test_shutdown_failures_do_not_skip_later_cleanup(self):
+        calls = []
+
+        class FailedRun:
+            def stop_daemon(self):
+                calls.append("daemon")
+                raise RuntimeError("daemon stop failed")
+
+            def cleanup_owned(self):
+                calls.append("processes")
+                raise RuntimeError("process cleanup failed")
+
+            def cleanup_cpu_containers(self):
+                calls.append("containers")
+
+            def capture_process_tree(self):
+                calls.append("evidence")
+
+            def integrity(self):
+                calls.append("integrity")
+
+        with self.assertRaisesRegex(RuntimeError, "process cleanup failed"):
+            CpuLab.cleanup_cpu_run(FailedRun())
+        self.assertEqual(calls, ["daemon", "processes", "containers", "evidence", "integrity"])
 
 
 class DaemonReplyTests(unittest.TestCase):
