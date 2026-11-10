@@ -42,13 +42,24 @@ impl OperatorAwayState {
     }
 }
 
-/// Retain all answer constraints, excluding the request's transient identity.
+/// Retain answer constraints, excluding transient identity and secret defaults.
 fn question_evidence(question: &ElicitationRequest) -> String {
     let mut evidence = serde_json::to_value(question).expect("elicitation serializes");
     evidence
         .as_object_mut()
         .expect("elicitation is an object")
         .remove("id");
+    for field in evidence["fields"]
+        .as_array_mut()
+        .expect("elicitation fields are an array")
+    {
+        if field["secret"] == true {
+            field
+                .as_object_mut()
+                .expect("elicitation field is an object")
+                .remove("default");
+        }
+    }
     evidence.to_string()
 }
 
@@ -610,7 +621,7 @@ mod tests {
         }
     }
 
-    // Hard-won: #1489 review: question_text hid changed form kinds and constraints.
+    // Hard-won: #1489 review: evidence lost constraints and included secret defaults.
     #[tokio::test]
     async fn afk_question_evidence_preserves_changed_selection_and_required_constraints() {
         let classifier = Classifier::new(false).await;
@@ -624,17 +635,19 @@ mod tests {
             "first",
             json!({
                 "mode":"form", "sessionId":"test", "message":"Choose a destination",
-                "requestedSchema":{"type":"object", "properties":{"destination":{
-                    "type":"string", "title":"Destination", "enum":["one","two"]
-                }}}
+            "requestedSchema":{"type":"object", "properties":{
+                "destination":{"type":"string", "title":"Destination", "enum":["one","two"]},
+                "password":{"type":"string", "title":"Password", "default":"P!n12", "_meta":{"codex":{"isSecret":true}}}
+            }}
             }),
         )
         .unwrap();
         let second = ElicitationRequest::from_acp_params("second", json!({
             "mode":"form", "sessionId":"test", "message":"Choose a destination",
-            "requestedSchema":{"type":"object", "required":["destination"], "properties":{"destination":{
-                "type":"array", "title":"Destination", "items":{"type":"string", "enum":["one","two"]}, "minItems":1
-            }}}
+            "requestedSchema":{"type":"object", "required":["destination"], "properties":{
+                "destination":{"type":"array", "title":"Destination", "items":{"type":"string", "enum":["one","two"]}, "minItems":1},
+                "password":{"type":"string", "title":"Password", "default":"n3w?Pin", "_meta":{"codex":{"isSecret":true}}}
+            }}
         })).unwrap();
         assert_eq!(
             first.question_text(),
@@ -647,7 +660,20 @@ mod tests {
         ));
         let second = ask_form(&pending, second);
         let (stream, evidence) = classifier.request().await;
+        assert!(!evidence.to_string().contains("P!n12"));
+        assert!(!evidence.to_string().contains("n3w?Pin"));
         let evidence = decoded_evidence(evidence);
+        assert!(
+            evidence["current_question"]["fields"][1]
+                .get("default")
+                .is_none()
+        );
+        assert!(
+            evidence["previous_questions"][0]["fields"][1]
+                .get("default")
+                .is_none()
+        );
+        assert_eq!(evidence["current_question"]["fields"][1]["secret"], true);
         assert_eq!(
             evidence["current_question"]["fields"][0]["kind"],
             "multi_select"

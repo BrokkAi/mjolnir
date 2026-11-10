@@ -21,7 +21,8 @@ An absent operator should receive a notice for each new decision an agent asks a
 - [x] (2026-11-10) Second-review fix validated: five focused AFK regressions, full core/worker suites, workspace Clippy, and formatting pass. The worker suite now has 818 passing tests with 11 ignored. Ready for final commit and push review.
 
 - [x] (2026-11-10) Third-review fix: redact normalized form values before serialization; the five focused AFK regressions, escaped-format live checks, Clippy, and formatting pass.
-- [ ] Final combined core/worker suite is rebuilding; commit the focused validated fix and run review in parallel, then push only after both finish.
+- [x] (2026-11-10) Escaped-identifier fix committed as 7f7159fcc; complete core/worker suites passed. Fourth review found secret defaults in the full-form evidence.
+- [x] (2026-11-10) Secret defaults excluded before capture; expanded HTTP form regression passes. Final core suite: 644 passed, 3 ignored; final worker suite: 818 passed, 11 ignored. Workspace Clippy and formatting pass. Final implementation is ready for delivery review.
 
 ## Surprises & Discoveries
 
@@ -98,3 +99,7 @@ Final validation after the identifier fix: cargo test -p brokk-mj-core -p brokk-
 Third-review update: scanning serialized JSON made escape letters part of token identity and could produce invalid escaped text. The AFK client now parses normalized forms, redacts their string values using the shared JSON walker and token scanner, then serializes them. Ordinary diagnostic redaction still preserves its previous identifier-key behavior; AFK evidence anonymizes all values. The existing HTTP regression now covers newline/tab formatting and checks valid decoded evidence.
 
 Checkpoint: the escaped-identifier fix is independently validated by the expanded real HTTP regression, live anonymous-label formatting comparisons, workspace Clippy and rustfmt. The full suite is still running and must complete before delivery. No source edits remain in flight.
+
+Fourth-review update: full-form serialization included defaults marked secret, including short PINs/passwords that generic token redaction does not cover. question_evidence now removes each secret field default before either current or previous evidence is stored or sent. Extended the existing form-constraint HTTP regression with two short punctuated secret defaults and assertions that neither leaves the process. The client integration remains uninstalled; live smoke forms contained no secret defaults.
+
+Final privacy validation: cargo test -p brokk-mj-core -p brokk-mj-worker -- --quiet completed successfully after secret-default exclusion. Core library: 641 passed, 3 ignored; core integration: 3 passed; core doctest: 1 ignored. Worker library: 792 passed, 11 ignored; binary/integration: 26 passed. Workspace Clippy passed. The secret-default regression uses short punctuated synthetic values and proves both current and previous evidence omit them.
