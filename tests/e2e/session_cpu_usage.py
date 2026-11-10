@@ -14,16 +14,20 @@ from reliability_lab import Lab, PtyClient, ScenarioFailure
 
 
 class CpuLab(Lab):
+    @property
+    def instance(self):
+        return f"cpu-test-{self.root.name}"
+
     def environment(self):
         env = super().environment()
-        env["MJ_INSTANCE"] = "cpu-test"
+        env["MJ_INSTANCE"] = self.instance
         return env
 
     def command(self, *args, **kwargs):
-        return super().command("--instance", "cpu-test", *args, **kwargs)
+        return super().command("--instance", self.instance, *args, **kwargs)
 
     def start_tui(self, name):
-        client = PtyClient(name, [str(self.hel), "--instance", "cpu-test"], self.environment(), self.root / f"{name}.capture")
+        client = PtyClient(name, [str(self.hel), "--instance", self.instance], self.environment(), self.root / f"{name}.capture")
         self.clients.append(client)
         return client
 
@@ -55,13 +59,6 @@ class CpuLab(Lab):
     def container_id(self, session_id):
         reply = self.daemon_request({"action": "session_record", "arguments": {"session_id": session_id}})
         return reply["value"]["target"]["container_id"]
-
-    def record_cpu_container(self, container_id):
-        ids_path = self.data / "cpu-container-ids.json"
-        ids = json.loads(ids_path.read_text()) if ids_path.exists() else []
-        if container_id not in ids:
-            ids.append(container_id)
-            ids_path.write_text(json.dumps(ids, indent=2) + "\n")
 
     @staticmethod
     def container_cpu_usec(container_id):
@@ -111,7 +108,6 @@ class CpuLab(Lab):
         session_id = next(row["id"] for row in snapshot["sessions"]
                           if row.get("title") == "container-cpu-sibling" and row["state"] == "running")
         container_id = self.container_id(session_id)
-        self.record_cpu_container(container_id)
         baseline = self.wait_cpu(session_id, lambda _: True, timeout=60)
         assert baseline["scope"] == "container", baseline
         before_usec = self.container_cpu_usec(container_id)
@@ -338,18 +334,19 @@ assert all(child.exitcode == 0 for child in children)
         self.stop_daemon()
 
     def cleanup_cpu_containers(self):
-        ids_path = self.data / "cpu-container-ids.json"
-        if not ids_path.exists():
-            return
-        for container_id in json.loads(ids_path.read_text()):
-            if not re.fullmatch(r"mj-[a-fA-F0-9]{12}-[a-fA-F0-9]{6}", container_id):
-                raise ScenarioFailure(f"invalid recorded Podman container ID: {container_id!r}")
-            removed = subprocess.run(
-                ["podman", "container", "rm", "--force", container_id],
-                capture_output=True, text=True, timeout=30,
+        # The engine owns resource existence, including failed provisioning.
+        # Each run has its own instance label; no session must reach `running`.
+        owned = subprocess.run(
+            ["podman", "container", "ls", "--all", "--quiet",
+             "--filter", "label=dev.mj.managed=true",
+             "--filter", f"label=dev.mj.instance={self.instance}"],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        for container_id in owned.stdout.split():
+            subprocess.run(
+                ["podman", "container", "rm", "--force", "--", container_id],
+                capture_output=True, text=True, timeout=30, check=True,
             )
-            if removed.returncode and "no such container" not in removed.stderr.lower():
-                raise ScenarioFailure(f"could not remove owned container {container_id}: {removed.stderr}")
             exists = subprocess.run(
                 ["podman", "container", "exists", container_id],
                 capture_output=True, text=True, timeout=10,
