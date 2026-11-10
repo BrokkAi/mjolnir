@@ -2398,8 +2398,13 @@ pub(super) async fn reconcile_credentials(
     let session = client.credential_state().await?;
     if target.harness.keeps_logins_in_database() {
         if let Some(bytes) = stored_logins_push(canonical, canonical_bytes, &session) {
-            client.install_credentials(bytes).await?;
-            actions.push(CredentialSyncAction::Pushed);
+            let installed = client.install_credentials(bytes).await?;
+            // OpenCode's empty export (`[]`) is the authoritative deletion
+            // payload and remains a present staged export on the worker.
+            let expected = CredentialSnapshot::of(target.harness, bytes);
+            if installed == expected {
+                actions.push(CredentialSyncAction::Pushed);
+            }
         }
         return Ok(());
     }
@@ -2419,8 +2424,10 @@ pub(super) async fn reconcile_credentials(
             }
         }
         SyncAction::Push => {
-            client.install_credentials(canonical_bytes).await?;
-            actions.push(CredentialSyncAction::Pushed);
+            let installed = client.install_credentials(canonical_bytes).await?;
+            if installed == *canonical {
+                actions.push(CredentialSyncAction::Pushed);
+            }
         }
         SyncAction::Pull => {
             let bytes = client.read_credentials().await?;
@@ -2430,13 +2437,21 @@ pub(super) async fn reconcile_credentials(
                     target.session_id
                 )
             })?;
-            write_credential_file(target.harness, canonical_path, &bytes).with_context(|| {
+            let installed = mj_core::credentials::install_credentials_if_newer(
+                target.harness,
+                canonical_path,
+                &bytes,
+            )
+            .await
+            .with_context(|| {
                 format!(
                     "install fresher credentials from session {} for profile {}",
                     target.session_id, target.profile_id
                 )
             })?;
-            actions.push(CredentialSyncAction::Pulled);
+            if installed.installed {
+                actions.push(CredentialSyncAction::Pulled);
+            }
         }
     }
     Ok(())

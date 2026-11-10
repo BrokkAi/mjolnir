@@ -15,6 +15,11 @@
 //! never enter the durable event stream or a checkpoint archive. Fingerprints
 //! and freshness timestamps are not secret and may appear in logs.
 
+mod locking;
+pub use locking::{
+    CLAUDE_REFRESH_LOCK_WAIT, CredentialInstall, CredentialWriteGuard, install_credentials_if_newer,
+};
+
 use crate::hex::lower_hex;
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -439,12 +444,7 @@ pub fn read_credential_file(
 /// cannot redirect the write.
 pub fn write_credential_file(kind: HarnessKind, path: &Path, bytes: &[u8]) -> Result<()> {
     validate_credential_payload(kind, bytes)?;
-    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        bail!(
-            "credential destination {} is a symbolic link",
-            path.display()
-        );
-    }
+    refuse_symlinked_token("credential", path)?;
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

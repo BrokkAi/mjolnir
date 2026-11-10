@@ -250,12 +250,28 @@ pub(crate) async fn credential_response(
         Ok(endpoint) => {
             let endpoint = endpoint.clone();
             let github_token_path = relay_root.join("github-token");
-            let request = envelope.request.clone();
-            match tokio::task::spawn_blocking(move || {
-                apply_credential_request_at(&endpoint, &github_token_path, &request)
-            })
-            .await
-            {
+            let result = match &envelope.request {
+                RelayRequest::InstallCredentials { .. }
+                    if endpoint.harness.keeps_logins_in_database() =>
+                {
+                    let request = envelope.request.clone();
+                    tokio::task::spawn_blocking(move || {
+                        apply_credential_request_at(&endpoint, &github_token_path, &request)
+                    })
+                    .await
+                }
+                RelayRequest::InstallCredentials { data } => {
+                    Ok(apply_install_credentials(&endpoint, data).await)
+                }
+                request => {
+                    let request = request.clone();
+                    tokio::task::spawn_blocking(move || {
+                        apply_credential_request_at(&endpoint, &github_token_path, &request)
+                    })
+                    .await
+                }
+            };
+            match result {
                 Ok(Ok(payload)) => RelayResponseBody::Ok { payload },
                 Ok(Err(error)) => RelayResponseBody::Error {
                     error: RelayProtocolError {
@@ -281,6 +297,34 @@ pub(crate) async fn credential_response(
         protocol_version: envelope.protocol_version,
         body,
     }
+}
+
+async fn apply_install_credentials(
+    endpoint: &CredentialEndpoint,
+    data: &str,
+) -> Result<RelayResponsePayload> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use mj_core::credentials::{MAX_CREDENTIAL_BYTES, validate_credential_payload};
+
+    if endpoint.harness.keeps_logins_in_database() {
+        bail!("database-backed credentials require the authoritative install path");
+    }
+    if data.len() > MAX_CREDENTIAL_BYTES * 2 {
+        bail!("credential payload is above the {MAX_CREDENTIAL_BYTES} byte limit");
+    }
+    let bytes = BASE64
+        .decode(data.as_bytes())
+        .context("decode credential payload")?;
+    validate_credential_payload(endpoint.harness, &bytes)?;
+    let installed = mj_core::credentials::install_credentials_if_newer(
+        endpoint.harness,
+        &endpoint.marker,
+        &bytes,
+    )
+    .await
+    .with_context(|| format!("install credentials at {}", endpoint.marker.display()))?;
+    Ok(credential_state_payload(&installed.snapshot))
 }
 
 /// Snapshot and install project memory off the socket task. These payloads
@@ -487,6 +531,9 @@ pub(crate) fn apply_credential_request_at(
             })
         }
         RelayRequest::InstallCredentials { data } => {
+            if !endpoint.harness.keeps_logins_in_database() {
+                bail!("file credential installs must use the async destination-owned install path");
+            }
             if data.len() > MAX_CREDENTIAL_BYTES * 2 {
                 bail!("credential payload is above the {MAX_CREDENTIAL_BYTES} byte limit");
             }
@@ -613,4 +660,83 @@ pub(crate) async fn write_logged_response(
         );
     }
     write_response(writer, response).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn codex_login(refreshed: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {"access_token": format!("access-{refreshed}")},
+            "last_refresh": refreshed,
+        }))
+        .unwrap()
+    }
+
+    // Hard-won: #1485: an install used bytes captured before waiting for the harness refresh lock.
+    #[tokio::test]
+    async fn credential_install_reports_the_newer_file_found_after_waiting_for_native_lock() {
+        use base64::Engine as _;
+
+        let home = tempfile::tempdir().unwrap();
+        let marker = home.path().join("auth.json");
+        let initial = codex_login("2026-09-25T20:00:00Z");
+        let incoming = codex_login("2026-09-25T21:00:00Z");
+        let latest = codex_login("2026-09-25T22:00:00Z");
+        std::fs::write(&marker, &initial).unwrap();
+        let held = mj_core::credentials::CredentialWriteGuard::acquire(
+            mj_core::config::HarnessKind::Codex,
+            &marker,
+        )
+        .await
+        .unwrap();
+        let endpoint = CredentialEndpoint {
+            no_github_credentials: false,
+            harness: mj_core::config::HarnessKind::Codex,
+            home: home.path().to_owned(),
+            marker: marker.clone(),
+        };
+        let data = base64::engine::general_purpose::STANDARD.encode(incoming);
+        let mut install = tokio::spawn(async move {
+            credential_response(
+                RelayRequestEnvelope {
+                    request_id: "credential-lock-race".into(),
+                    protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                    request: RelayRequest::InstallCredentials { data },
+                },
+                &Ok(endpoint.clone()),
+                &endpoint.home,
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut install)
+                .await
+                .is_err(),
+            "install must wait for the held destination lock"
+        );
+        std::fs::write(&marker, &latest).unwrap();
+        drop(held);
+
+        let response = install.await.unwrap();
+        let RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::CredentialState {
+                    fingerprint,
+                    present,
+                    ..
+                },
+        } = response.body
+        else {
+            panic!("unexpected credential install response: {response:?}");
+        };
+        assert!(present);
+        assert_eq!(
+            fingerprint,
+            mj_core::credentials::credential_fingerprint(&latest)
+        );
+        assert_eq!(std::fs::read(marker).unwrap(), latest);
+    }
 }

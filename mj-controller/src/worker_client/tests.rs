@@ -1452,6 +1452,8 @@ import base64, hashlib, json, os, sys
 protocol, session, fingerprint, freshness, skills, received = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5], sys.argv[6]
 # Optional: the first connection ever made fails, to play a flaky worker.
 fail_first = sys.argv[7] if len(sys.argv) > 7 else ""
+canonical_path = sys.argv[8] if len(sys.argv) > 8 else ""
+new_canonical_path = sys.argv[9] if len(sys.argv) > 9 else ""
 for line in sys.stdin:
     req = json.loads(line)
     method = req["request"]["method"]
@@ -1478,6 +1480,9 @@ for line in sys.stdin:
         payload = {"type": "aws_credentials_scope", "data": {"scope": scope, "profile": profile}}
     elif method == "read_credentials":
         payload = {"type": "credentials", "data": {"data": base64.b64encode(open(received, "rb").read()).decode()}}
+        if canonical_path and new_canonical_path:
+            import shutil
+            shutil.copyfile(new_canonical_path, canonical_path)
     elif method == "remove_aws_credentials":
         import pathlib
         pathlib.Path(received).unlink(missing_ok=True)
@@ -2776,6 +2781,38 @@ async fn a_clean_later_pass_replaces_the_failure_an_earlier_one_reported() {
     assert!(flaky.step_failures.is_empty());
     let puller = outcomes.iter().find(|o| o.session_id == "puller").unwrap();
     assert_eq!(puller.outcome, Ok(vec![CredentialSyncAction::Pulled]));
+}
+
+#[cfg(unix)]
+// Hard-won: #1485: a credential read could overwrite a host login refreshed while the relay request was in flight.
+#[tokio::test]
+async fn credential_pull_rechecks_host_after_worker_read_completes() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let old = "2026-09-25T20:00:00.000Z";
+    let worker = "2026-09-25T21:00:00.000Z";
+    let latest = "2026-09-25T22:00:00.000Z";
+    let canonical = home.path().join("auth.json");
+    let read_from = scratch.path().join("worker");
+    let latest_file = scratch.path().join("latest");
+    std::fs::write(&canonical, codex_login(old)).unwrap();
+    std::fs::write(&read_from, codex_login(worker)).unwrap();
+    std::fs::write(&latest_file, codex_login(latest)).unwrap();
+    let mut target = codex_sync_target(home.path(), "pull-race", worker, &read_from);
+    target.spec.args.extend([
+        String::new(),
+        canonical.to_string_lossy().into_owned(),
+        latest_file.to_string_lossy().into_owned(),
+    ]);
+
+    let outcomes = reconcile_profile(&[target], None).await;
+
+    assert_eq!(std::fs::read(&canonical).unwrap(), codex_login(latest));
+    let outcome = outcomes
+        .iter()
+        .find(|outcome| outcome.session_id == "pull-race")
+        .unwrap();
+    assert_eq!(outcome.outcome, Ok(Vec::new()), "{outcomes:?}");
 }
 
 #[cfg(unix)]
