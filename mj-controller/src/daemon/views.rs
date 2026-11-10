@@ -697,23 +697,26 @@ impl RuntimeState {
     /// Connect the quota poller's wake-up channel. The poller is the daemon's
     /// only prober; a surface that wants a fresh reading asks the daemon, and
     /// this is how the ask reaches the poller.
-    pub(crate) fn attach_quota_refresh(&self, refresh: tokio::sync::mpsc::Sender<()>) {
+    pub(crate) fn attach_quota_refresh(
+        &self,
+        refresh: tokio::sync::mpsc::UnboundedSender<super::QuotaRefreshIntent>,
+    ) {
         self.quota
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .refresh = Some(refresh);
     }
 
-    /// Ask the quota poller to probe now. Requests that arrive while one is
-    /// already waiting are one request.
+    /// Ask the quota poller to probe now. The owner coalesces queued intents.
     pub(crate) fn request_quota_refresh(&self) -> Result<()> {
         let quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
         let refresh = quota
             .refresh
             .as_ref()
             .context("the daemon's quota service is not running")?;
-        // A full channel means a refresh is already queued.
-        let _ = refresh.try_send(());
+        refresh
+            .send(super::QuotaRefreshIntent::Force)
+            .context("the daemon's quota service is not running")?;
         Ok(())
     }
 

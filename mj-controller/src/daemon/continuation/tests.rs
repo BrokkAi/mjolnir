@@ -224,8 +224,9 @@ async fn continuation_checks_run_concurrently_and_defer_review_until_each_settle
     remote.shutdown.shutdown().await.unwrap();
 }
 
+// Hard-won: #1487: disconnected first attachment consumed the same-turn recovery trigger.
 #[tokio::test]
-async fn continuation_does_not_revive_old_idle_sessions_and_new_input_cancels_a_check() {
+async fn continuation_rechecks_disconnected_attachment_once_and_new_input_cancels_it() {
     let remote = spawn_remote_session_manager().unwrap();
     remote.targets.send_replace(
         ["one", "two"]
@@ -266,19 +267,15 @@ async fn continuation_does_not_revive_old_idle_sessions_and_new_input_cancels_a_
         cancellation.clone(),
         classifier,
     );
+    let mut disconnected = view("one", true);
+    disconnected.connected = false;
     remote
         .publisher
-        .publish("one".into(), view("one", true))
+        .publish("one".into(), disconnected)
         .await
         .unwrap();
     receive(&mut updates).await;
     assert!(requests.try_recv().is_err());
-    remote
-        .publisher
-        .publish("one".into(), view("one", false))
-        .await
-        .unwrap();
-    receive(&mut updates).await;
     remote
         .publisher
         .publish("one".into(), view("one", true))
@@ -289,6 +286,23 @@ async fn continuation_does_not_revive_old_idle_sessions_and_new_input_cancels_a_
         .await
         .unwrap()
         .unwrap();
+    let mut same_turn = view("one", true);
+    same_turn
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .latest_ordinal += 1;
+    remote
+        .publisher
+        .publish("one".into(), same_turn)
+        .await
+        .unwrap();
+    receive(&mut updates).await;
+    assert!(
+        requests.try_recv().is_err(),
+        "the reconnected turn is classified once"
+    );
     let mut next = view("one", true);
     next.snapshot.as_mut().unwrap().operational.continuation = ContinuationState {
         user_command_id: Some("new-request".into()),
@@ -912,13 +926,20 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
             classifier,
         );
         let mut before = view("one", true);
+        // Keep the preceding prompted completion cancelled in both views;
+        // only protocols that understand the new harness turn may classify it.
         let mut after = self_started("one", "You've hit your session limit · resets 1:40pm");
         for v in [&mut before, &mut after] {
-            v.snapshot
+            let snapshot = v.snapshot.as_mut().unwrap();
+            snapshot
+                .materialized
+                .last_turn_outcome
                 .as_mut()
                 .unwrap()
-                .operational
-                .relay_protocol_version = Some(protocol);
+                .outcome = TurnOutcomeKind::Completed {
+                stop_reason: "cancelled".into(),
+            };
+            snapshot.operational.relay_protocol_version = Some(protocol);
         }
         remote
             .publisher
@@ -1146,7 +1167,7 @@ async fn background_work_defers_continuation_and_its_end_brings_a_fresh_check() 
             .decisions[0]
             .technical
             .as_ref()
-            .is_some_and(|t| t["trigger"] == "driver-stopped")
+            .is_some_and(|t| t["trigger"] == "eligibility-restored")
     }));
     cancellation.cancel();
     task.await.unwrap().unwrap();
@@ -1962,4 +1983,658 @@ async fn claim_reads_the_session_owner_once() {
     assert_eq!(claim(&state, session), Claim::Move);
     drop(guard);
     assert_eq!(claim(&state, session), Claim::Allowed);
+}
+
+// Hard-won: #1487: quota recovery queried providers again and could lose model-scoped poller data.
+#[tokio::test]
+async fn quota_recovery_reads_full_owner_reports_without_requesting_another_probe() {
+    use crate::controller::test_support::{IsolatedTest, test_name};
+    use crate::quota::{ProfileQuota, QuotaRefreshRequest, QuotaWindow};
+    use mj_core::config::{Config, HarnessKind, HarnessProfile};
+
+    const CHILD: &str = "MJ_TEST_QUOTA_RECOVERY_OWNER";
+    const NAME: &str = "quota_recovery_reads_full_owner_reports_without_requesting_another_probe";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), NAME))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "quota-recovery-1487")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let home = tempfile::tempdir().unwrap();
+    let profile = HarnessProfile::new(HarnessKind::Claude, home.path().to_path_buf());
+    let mut config = Config::default();
+    config.profiles.insert("claude".into(), profile.clone());
+    let mut session = super::super::tests::runtime_test_session(
+        "one",
+        "workspace",
+        mj_core::state::SessionState::Running,
+    );
+    session.last_profile = "claude".into();
+    session.harness_kind = HarnessKind::Claude;
+    let mut controller = Controller {
+        config: config.clone(),
+        state: Default::default(),
+    };
+    controller.state.sessions.insert("one".into(), session);
+    let state = super::super::tests::test_runtime_state_with(controller);
+    let now = mj_core::clock::epoch_seconds() as i64;
+    let reset = now + 2 * 3600;
+    let window = |label: &str, scope: Option<&str>, remaining, reset| QuotaWindow {
+        label: label.into(),
+        model_scope: scope.map(str::to_owned),
+        remaining_percent: Some(remaining),
+        resets_at_epoch_seconds: Some(reset),
+        resets: None,
+        duration_seconds: Some(5 * 3600),
+        used: None,
+        limit: None,
+    };
+    let stored = ProfileQuota {
+        profile_id: "claude".into(),
+        harness: HarnessKind::Claude,
+        windows: vec![window("5H", None, 70, now + 3 * 3600)],
+        paid_credits: None,
+        banked_resets: None,
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: now as u64,
+        rate_limited_until_epoch_seconds: None,
+    };
+    let request = QuotaRefreshRequest::for_profile(
+        "claude",
+        &profile,
+        home.path().to_path_buf(),
+        crate::quota::QuotaRuntimeConfig::of(&config),
+    );
+    crate::database::save_quota_report(&request.cache_identity(), &stored).unwrap();
+    let reports = Arc::new(Mutex::new(crate::quota::QuotaReportMap::new()));
+    let (publications, quota_feed) =
+        tokio::sync::watch::channel(crate::quota::QuotaReportMap::new());
+    let catalog = crate::server_runtime::profile_catalog::ProfileCatalog::with_probe(
+        crate::server_runtime::profile_catalog::counting_probe(Arc::new(
+            std::sync::atomic::AtomicUsize::new(0),
+        )),
+    );
+    catalog.sync(&config);
+    let (refresh, mut refreshes) = mpsc::unbounded_channel();
+    let backend = Arc::new(
+        crate::server_runtime::api::ApiBackend::new(
+            state.session_manager.client(),
+            Arc::new(|_| None),
+            state.clone(),
+        )
+        .with_quota_reports(reports.clone())
+        .with_quota_publications(quota_feed)
+        .with_quota_refresh(refresh.clone())
+        .with_profile_catalog(catalog),
+    );
+    state.install_report_backend(&backend);
+    state.attach_quota_refresh(refresh);
+    let mut blocked = view("one", true);
+    let snapshot = blocked.snapshot.as_mut().unwrap();
+    snapshot
+        .operational
+        .config
+        .insert("model".into(), "claude-opus".into());
+    snapshot
+        .materialized
+        .last_turn_outcome
+        .as_mut()
+        .unwrap()
+        .completed_at_ms = now * 1000;
+    // The event can arrive after the poll: a retained positive percentage
+    // still supplies its model's reset time without a synchronous recheck.
+    for remaining in [0, 17] {
+        let mut observed = stored.clone();
+        observed.windows = vec![
+            window("5H (Opus)", Some("opus"), remaining, reset),
+            window("5H (Sonnet)", Some("sonnet"), 0, now + 1800),
+        ];
+        assert!(
+            crate::quota::surface_quota_report(&observed)
+                .windows
+                .is_empty()
+        );
+        reports.lock().unwrap().insert(
+            "claude".into(),
+            crate::quota::QuotaReportPublication {
+                cache_identity: request.cache_identity(),
+                report: Some(observed),
+            },
+        );
+        publications.send_replace(reports.lock().unwrap().clone());
+        let quota::Plan::Wait(recovery) = quota::prepare(&state, "one", &blocked).await.unwrap()
+        else {
+            panic!("a short scoped reset must wait on its original profile");
+        };
+        assert_eq!(recovery.reset_at_ms, Some(reset * 1000));
+        assert_eq!(recovery.retry_at_ms, Some((reset + 60) * 1000));
+        assert!(
+            recovery
+                .notice
+                .contains("using last-known quota reset times")
+        );
+        assert!(
+            refreshes.try_recv().is_err(),
+            "recovery must not request a probe"
+        );
+    }
+    // A missing owner report keeps the existing reset-cache recovery path.
+    reports.lock().unwrap().clear();
+    publications.send_replace(reports.lock().unwrap().clone());
+    let quota::Plan::Wait(recovery) = quota::prepare(&state, "one", &blocked).await.unwrap() else {
+        panic!("stored short reset must remain recoverable");
+    };
+    assert_eq!(recovery.reset_at_ms, Some((now + 3 * 3600) * 1000));
+    assert!(
+        recovery
+            .notice
+            .contains("using last-known quota reset times")
+    );
+    while let Ok(intent) = refreshes.try_recv() {
+        assert_eq!(intent, super::super::QuotaRefreshIntent::ReconcileSources);
+    }
+}
+
+// Hard-won: #1487: a first quota check could strand recovery, and waiting for it must not hold daemon handoff.
+#[tokio::test]
+async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
+    use crate::controller::test_support::{IsolatedTest, test_name};
+    use crate::quota::{
+        ProfileQuota, QuotaRefreshRequest, QuotaReportMap, QuotaReportPublication, QuotaWindow,
+    };
+    use crate::server_runtime::profile_catalog::{ProfileCatalog, counting_probe};
+    use futures::FutureExt;
+    use mj_core::config::{HarnessKind, HarnessProfile};
+
+    async fn observed<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(3), future)
+            .await
+            .expect("isolated continuation transition")
+    }
+
+    const CHILD: &str = "MJ_TEST_QUOTA_OWNER_WAIT";
+    const NAME: &str = "quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(module_path!(), NAME))
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "quota-owner-wait-1487")
+            .isolated_store(root.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    for case in [
+        "ready",
+        "assessment-reconnect",
+        "waiting-reconnect",
+        "failure",
+        "identity",
+        "input",
+        "handoff",
+        "owner-stopped",
+        "complete",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let profile = HarnessProfile::new(HarnessKind::Claude, home.path());
+        let mut config = Config::default();
+        config.profiles.clear();
+        config.profiles.insert("claude".into(), profile.clone());
+        let mut session = super::super::tests::runtime_test_session(
+            "one",
+            "workspace",
+            mj_core::state::SessionState::Running,
+        );
+        session.last_profile = "claude".into();
+        session.harness_kind = HarnessKind::Claude;
+        let mut controller = Controller {
+            config: config.clone(),
+            state: Default::default(),
+        };
+        controller.state.sessions.insert("one".into(), session);
+        let state = super::super::tests::test_runtime_state_with(controller);
+        let identity_for = |config: &Config| {
+            QuotaRefreshRequest::for_profile(
+                "claude",
+                &config.profiles["claude"],
+                home.path().to_path_buf(),
+                crate::quota::QuotaRuntimeConfig::of(config),
+            )
+            .cache_identity()
+        };
+        let mut identity = identity_for(&config);
+        let reports = Arc::new(Mutex::new(QuotaReportMap::from([(
+            "claude".into(),
+            QuotaReportPublication {
+                cache_identity: identity.clone(),
+                report: None,
+            },
+        )])));
+        let (publications, quota_feed) =
+            tokio::sync::watch::channel(reports.lock().unwrap().clone());
+        let catalog = ProfileCatalog::with_probe(counting_probe(Arc::new(
+            std::sync::atomic::AtomicUsize::new(0),
+        )));
+        catalog.sync(&config);
+        let (refresh, mut refreshes) = mpsc::unbounded_channel();
+        let backend = Arc::new(
+            crate::server_runtime::api::ApiBackend::new(
+                state.session_manager.client(),
+                Arc::new(|_| None),
+                state.clone(),
+            )
+            .with_quota_reports(reports.clone())
+            .with_quota_publications(quota_feed)
+            .with_quota_refresh(refresh)
+            .with_profile_catalog(catalog.clone()),
+        );
+        state.install_report_backend(&backend);
+        let mut remote = spawn_remote_session_manager().unwrap();
+        remote.targets.send_replace(vec![RelaySessionTarget {
+            session_id: "one".into(),
+            spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+        let (prepared, mut preparations) = mpsc::unbounded_channel();
+        let mut environment = Environment {
+            start_quota_move: Arc::new(|_, _, _| {
+                Box::pin(async { anyhow::bail!("unexpected Move") })
+            }),
+            quota: {
+                let state = state.clone();
+                Arc::new(move |id, view| {
+                    let state = state.clone();
+                    let prepared = prepared.clone();
+                    Box::pin(async move {
+                        let result = quota::prepare(&state, &id, &view).await;
+                        prepared
+                            .send(
+                                result
+                                    .as_ref()
+                                    .is_ok_and(|plan| matches!(plan, quota::Plan::Pending(_))),
+                            )
+                            .unwrap();
+                        result
+                    })
+                })
+            },
+            profile: Arc::new(|_| Some("claude".into())),
+            log: None,
+            control: remote.control.clone(),
+            allowed: Arc::new(|_| true),
+            claim: Arc::new(|_| Claim::Allowed),
+            live: Arc::new(|| live_sessions(&["one"])),
+            review: Arc::new(|_, _| {}),
+        };
+        let (classified, mut classifications) = mpsc::unbounded_channel();
+        let classifier: Classifier = Arc::new(move |_, _| {
+            let (answer, result) = oneshot::channel();
+            classified.send(answer).unwrap();
+            Box::pin(async move { result.await.context("classification cancelled")? })
+        });
+        let gate = Arc::new(crate::upgrade::Gate::default());
+        let mut cancellation = CancellationToken::new();
+        let (mut updates, mut task) = spawn_with_gate(
+            environment.clone(),
+            remote.updates,
+            cancellation.clone(),
+            classifier.clone(),
+            gate.clone(),
+        );
+        let mut blocked = view("one", true);
+        if case == "assessment-reconnect" {
+            use mj_core::assessment::{
+                Action, Failure, Input, Judgment, Status, TurnAssessment, Verdict, Work,
+            };
+            let snapshot = blocked.snapshot.as_mut().unwrap();
+            let operational = &mut snapshot.operational;
+            operational.relay_protocol_version = Some(mj_core::assessment::PROTOCOL);
+            operational.assessment_context = Some(Default::default());
+            let mut assessment = TurnAssessment::pending(
+                "request".into(),
+                3,
+                3,
+                mj_core::activity::verdict::CompletionEvidence::bounded("turn_completed", None),
+            );
+            assessment.verdict = Some(Verdict {
+                failure: Judgment {
+                    choice: Failure::Quota,
+                    confidence: 0.99,
+                    probabilities: Default::default(),
+                },
+                input: Judgment {
+                    choice: Input::Unclear,
+                    confidence: 0.5,
+                    probabilities: Default::default(),
+                },
+                work: Judgment {
+                    choice: Work::Unclear,
+                    confidence: 0.5,
+                    probabilities: Default::default(),
+                },
+                background: None,
+                reply: None,
+            });
+            assessment.action = Some(Action::RecoverQuota);
+            assessment.status = Status::Deferred;
+            operational.assessment = Some(Box::new(assessment));
+            let mut disconnected = blocked.clone();
+            disconnected.connected = false;
+            remote
+                .publisher
+                .publish("one".into(), disconnected)
+                .await
+                .unwrap();
+            receive(&mut updates).await;
+            assert!(preparations.try_recv().is_err());
+            assert!(classifications.try_recv().is_err());
+        }
+        // Initial attachment alone must rediscover a legacy turn after handoff.
+        remote
+            .publisher
+            .publish("one".into(), blocked.clone())
+            .await
+            .unwrap();
+        receive(&mut updates).await;
+        if case != "assessment-reconnect" {
+            observed(classifications.recv())
+                .await
+                .unwrap()
+                .send(Ok(ContinuationVerdict {
+                    quota_limit: if case == "complete" { 0.0 } else { 0.99 },
+                    unfinished: 0.0,
+                    no_input_needed: 0.0,
+                }))
+                .unwrap();
+        } else {
+            assert!(
+                classifications.try_recv().is_err(),
+                "worker assessment is already durable"
+            );
+        }
+        receive(&mut updates).await;
+        if case == "complete" {
+            assert!(
+                preparations.try_recv().is_err(),
+                "a completed non-quota reply must remain untouched"
+            );
+            assert!(remote.requests.recv().now_or_never().is_none());
+            // The manager suppresses byte-identical views; advance only the
+            // relay frontier so this is a new publication of the same turn.
+            let mut same_turn = blocked;
+            same_turn
+                .snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .latest_ordinal += 1;
+            remote
+                .publisher
+                .publish("one".into(), same_turn)
+                .await
+                .unwrap();
+            receive(&mut updates).await;
+            assert!(
+                classifications.try_recv().is_err(),
+                "one service must not recheck the same attached turn"
+            );
+            cancellation.cancel();
+            task.await.unwrap().unwrap();
+            remote.shutdown.shutdown().await.unwrap();
+            continue;
+        }
+        assert!(observed(preparations.recv()).await.unwrap());
+        assert!(
+            gate.active_labels().is_empty(),
+            "a quota publication wait must hold no admission: {case}"
+        );
+        assert!(
+            remote.requests.recv().now_or_never().is_none(),
+            "no terminal no-retry record before the owner reports"
+        );
+        if case == "owner-stopped" {
+            // Keeping ApiBackend alive must not keep its publication owner
+            // alive: consumers hold receivers, never the owner's sender.
+            drop(publications);
+            receive(&mut updates).await;
+            assert!(remote.requests.recv().now_or_never().is_none());
+            assert!(preparations.try_recv().is_err());
+            cancellation.cancel();
+            task.await.unwrap().unwrap();
+            remote.shutdown.shutdown().await.unwrap();
+            continue;
+        }
+        let reset = mj_core::clock::epoch_seconds() as i64 + 3600;
+        let report = ProfileQuota {
+            profile_id: "claude".into(),
+            harness: HarnessKind::Claude,
+            windows: vec![QuotaWindow {
+                label: "5H".into(),
+                remaining_percent: Some(0),
+                duration_seconds: Some(5 * 3600),
+                resets: None,
+                resets_at_epoch_seconds: Some(reset),
+                model_scope: None,
+                used: None,
+                limit: None,
+            }],
+            paid_credits: None,
+            banked_resets: None,
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: mj_core::clock::epoch_seconds(),
+            rate_limited_until_epoch_seconds: None,
+        };
+        let publish_report = |identity: &str, report: ProfileQuota| {
+            let mut reports = reports.lock().unwrap();
+            reports.insert(
+                "claude".into(),
+                QuotaReportPublication {
+                    cache_identity: identity.into(),
+                    report: Some(report),
+                },
+            );
+            publications.send_replace(reports.clone());
+        };
+        if case == "input" {
+            let mut input = view("one", false);
+            input
+                .snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .continuation
+                .user_command_id = Some("new-user-request".into());
+            remote.publisher.publish("one".into(), input).await.unwrap();
+            receive(&mut updates).await;
+            publish_report(&identity, report);
+            cancellation.cancel();
+            task.await.unwrap().unwrap();
+            assert!(
+                remote.requests.recv().now_or_never().is_none(),
+                "user input must cancel the old quota wait"
+            );
+            remote.shutdown.shutdown().await.unwrap();
+            continue;
+        }
+        if case == "waiting-reconnect" {
+            let mut disconnected = blocked.clone();
+            disconnected.connected = false;
+            remote
+                .publisher
+                .publish("one".into(), disconnected)
+                .await
+                .unwrap();
+            receive(&mut updates).await;
+            // The owner can finish while no worker is connected; no active
+            // waiter or additional provider check is needed to preserve it.
+            publish_report(&identity, report.clone());
+            assert!(preparations.try_recv().is_err());
+            assert!(remote.requests.recv().now_or_never().is_none());
+            let mut reconnected = blocked.clone();
+            reconnected
+                .snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .background_commands
+                .push(mj_core::relay::BackgroundCommand {
+                    id: "still-running".into(),
+                    started_at_ms: 1,
+                    command: "sleep infinity".into(),
+                    can_stop: true,
+                });
+            remote
+                .publisher
+                .publish("one".into(), reconnected.clone())
+                .await
+                .unwrap();
+            receive(&mut updates).await;
+            observed(classifications.recv())
+                .await
+                .unwrap()
+                .send(Ok(ContinuationVerdict {
+                    quota_limit: 0.99,
+                    unfinished: 0.0,
+                    no_input_needed: 0.0,
+                }))
+                .unwrap();
+            // A new publication with the same turn/evidence must join the
+            // resumed decision, rather than start another classification.
+            reconnected
+                .snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .latest_ordinal += 1;
+            remote
+                .publisher
+                .publish("one".into(), reconnected)
+                .await
+                .unwrap();
+            receive(&mut updates).await;
+            assert!(classifications.try_recv().is_err());
+        }
+        if case == "identity" {
+            config.profiles.get_mut("claude").unwrap().home = home.path().join("other-account");
+            let sessions = state.owner().controller().state.clone();
+            state.owner().install_controller(Controller {
+                config: config.clone(),
+                state: sessions,
+            });
+            catalog.sync(&config);
+            publish_report(&identity, report.clone());
+            assert!(
+                observed(preparations.recv()).await.unwrap(),
+                "old-account report must leave current account pending"
+            );
+            receive(&mut updates).await;
+            assert!(remote.requests.recv().now_or_never().is_none());
+            identity = identity_for(&config);
+        }
+        if case == "handoff" {
+            let blocker = gate.enter("bounded daemon control").unwrap();
+            assert!(!gate.try_close(), "the control operation holds admission");
+            // Draining cancels the restartable watch, not the durable turn.
+            receive(&mut updates).await;
+            drop(blocker);
+            assert!(gate.try_close(), "the quota wait must not hold handoff");
+            cancellation.cancel();
+            task.await.unwrap().unwrap();
+            remote.shutdown.shutdown().await.unwrap();
+            remote = spawn_remote_session_manager().unwrap();
+            remote.targets.send_replace(vec![RelaySessionTarget {
+                session_id: "one".into(),
+                spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
+                worker_recovery: None,
+                project_memory: None,
+            }]);
+            environment.control = remote.control.clone();
+            cancellation = CancellationToken::new();
+            (updates, task) = spawn_with_gate(
+                environment,
+                remote.updates,
+                cancellation.clone(),
+                classifier,
+                Arc::new(crate::upgrade::Gate::default()),
+            );
+            remote
+                .publisher
+                .publish("one".into(), blocked)
+                .await
+                .unwrap();
+            receive(&mut updates).await;
+            observed(classifications.recv())
+                .await
+                .unwrap()
+                .send(Ok(ContinuationVerdict {
+                    quota_limit: 0.99,
+                    unfinished: 0.0,
+                    no_input_needed: 0.0,
+                }))
+                .unwrap();
+            receive(&mut updates).await;
+            assert!(
+                observed(preparations.recv()).await.unwrap(),
+                "new daemon must recover the pending check from its durable turn"
+            );
+        }
+        let mut report = report;
+        if case == "failure" {
+            report.windows.clear();
+            report.error = Some("provider unavailable".into());
+        }
+        publish_report(&identity, report);
+        while let Ok(intent) = refreshes.try_recv() {
+            assert_eq!(intent, super::super::QuotaRefreshIntent::ReconcileSources);
+        }
+        assert!(
+            !observed(preparations.recv()).await.unwrap(),
+            "a matching completed check must end the wait"
+        );
+        let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let RemoteSessionRequest::Submit { command, reply, .. } = request else {
+            panic!("expected quota scheduling")
+        };
+        let RelayCommand::SetQuotaRecovery {
+            recovery: Some(recovery),
+            ..
+        } = command
+        else {
+            panic!("expected recovery record")
+        };
+        if case == "failure" {
+            assert_eq!(recovery.retry_at_ms, None);
+            assert!(recovery.notice.contains("No reliable reset time"));
+        } else {
+            assert_eq!(recovery.reset_at_ms, Some(reset * 1000));
+            assert_eq!(recovery.retry_at_ms, Some((reset + 60) * 1000));
+        }
+        if case == "waiting-reconnect" {
+            assert!(
+                preparations.try_recv().is_err(),
+                "reconnect prepares the quota decision once"
+            );
+            assert!(
+                classifications.try_recv().is_err(),
+                "reconnect classifies the same turn once"
+            );
+        }
+        reply
+            .send(Err("end isolated scheduling probe".into()))
+            .unwrap();
+        receive(&mut updates).await;
+        cancellation.cancel();
+        task.await.unwrap().unwrap();
+        remote.shutdown.shutdown().await.unwrap();
+    }
 }

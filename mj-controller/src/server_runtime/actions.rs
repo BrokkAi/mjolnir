@@ -1,32 +1,6 @@
 use super::*;
 use crate::controller::BranchDisposition;
 
-/// Point the quota refresher at what the configuration currently asks of it,
-/// alongside the worker-poll and credential-sync targets that are rebuilt from
-/// the same reload. A profile added to `config.toml` while the server runs
-/// otherwise reaches the snapshot but never the refresher, and reads "quota
-/// unavailable" until the next restart. The same holds for anything else a
-/// request carries, such as `[quota] runtime`, which decides where each check
-/// runs.
-///
-/// Sending a batch restarts every profile's refresh, which spawns a harness
-/// process per profile, so the batch travels only when the requests differ
-/// from the ones already sent. Reports whether it did.
-pub(crate) fn republish_quota_profiles(
-    controller: &Controller,
-    batch: &mut QuotaRefreshBatch,
-    profiles_tx: &tokio::sync::watch::Sender<QuotaRefreshBatch>,
-) -> bool {
-    let requests = quota_refresh_profiles(controller);
-    if requests == batch.profiles {
-        return false;
-    }
-    batch.generation = batch.generation.saturating_add(1);
-    batch.profiles = requests;
-    profiles_tx.send_replace(batch.clone());
-    true
-}
-
 pub(super) fn request_phone_action_cancellation(
     session_id: &str,
     action_sessions: &std::collections::BTreeMap<u64, String>,

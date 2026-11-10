@@ -496,7 +496,9 @@ pub struct ApiBackend {
     /// Latest background-refreshed quota reports, used to rank configured
     /// session and sub-agent profile choices without exposing credential
     /// aliases to their callers.
-    quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
+    quota_reports: Arc<Mutex<crate::quota::QuotaReportMap>>,
+    quota_publications: Option<tokio::sync::watch::Receiver<crate::quota::QuotaReportMap>>,
+    quota_refresh: Option<tokio::sync::mpsc::UnboundedSender<crate::daemon::QuotaRefreshIntent>>,
     /// Profiles whose login the credential sync found refused; session and
     /// sub-agent selection refuse them until their login file changes.
     rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
@@ -514,6 +516,26 @@ struct NotificationChildSnapshot {
     output: Option<String>,
     finished: bool,
     identity: Option<mj_core::subagent::SubagentFinishIdentity>,
+}
+
+#[derive(Debug)]
+pub(crate) enum QuotaRead {
+    Ready(ProfileQuota),
+    Pending(QuotaWait),
+}
+
+#[derive(Debug)]
+pub(crate) struct QuotaWait {
+    receiver: tokio::sync::watch::Receiver<crate::quota::QuotaReportMap>,
+}
+
+impl QuotaWait {
+    pub(crate) async fn wait(mut self) -> Result<()> {
+        self.receiver
+            .changed()
+            .await
+            .context("quota publication owner stopped before the profile was checked")
+    }
 }
 
 impl ApiBackend {
@@ -558,7 +580,9 @@ impl ApiBackend {
             match discovery.map(|mut choices| choices.pop()) {
                 Ok(Some(choices)) => {
                     let quota = crate::server::api::CandidateQuota::from_report(
-                        quota_reports.get(&profile_id),
+                        quota_reports
+                            .get(&profile_id)
+                            .and_then(|publication| publication.report.as_ref()),
                     );
                     let unhealthy = choices
                         .models
@@ -635,6 +659,8 @@ impl ApiBackend {
             sessions,
             exports,
             quota_reports: Arc::new(Mutex::new(BTreeMap::new())),
+            quota_publications: None,
+            quota_refresh: None,
             rejected_logins: Arc::default(),
             // Nothing is adopted until the daemon hands its configuration
             // over, so a backend built without one — every test that does not
@@ -646,12 +672,65 @@ impl ApiBackend {
         }
     }
 
-    pub fn with_quota_reports(
+    pub(crate) fn with_quota_reports(
         mut self,
-        quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
+        quota_reports: Arc<Mutex<crate::quota::QuotaReportMap>>,
     ) -> Self {
         self.quota_reports = quota_reports;
         self
+    }
+
+    pub(crate) fn with_quota_publications(
+        mut self,
+        publications: tokio::sync::watch::Receiver<crate::quota::QuotaReportMap>,
+    ) -> Self {
+        self.quota_publications = Some(publications);
+        self
+    }
+
+    pub(crate) fn with_quota_refresh(
+        mut self,
+        refresh: tokio::sync::mpsc::UnboundedSender<crate::daemon::QuotaRefreshIntent>,
+    ) -> Self {
+        self.quota_refresh = Some(refresh);
+        self
+    }
+
+    /// Full poller-owned report, including model-scoped allowances omitted
+    /// from user-facing quota projections.
+    pub(crate) fn quota_report(
+        &self,
+        profile_id: &str,
+        wanted_identity: &str,
+    ) -> Result<QuotaRead> {
+        let publications = self
+            .quota_publications
+            .as_ref()
+            .ok_or_else(|| anyhow!("quota publication source is unavailable"))?;
+        let mut receiver = publications.clone();
+        // Inspect one versioned owner snapshot. A later publication wakes the
+        // returned waiter even if it arrived before the wait started.
+        let current = receiver.borrow_and_update().clone();
+        let config = self.profile_catalog.live()?;
+        if config.enabled_profile(profile_id).is_none() {
+            bail!("quota profile {profile_id:?} is missing or disabled");
+        }
+        match current.get(profile_id) {
+            Some(publication) if publication.cache_identity == wanted_identity => {
+                match publication.report.clone() {
+                    Some(report) => Ok(QuotaRead::Ready(report)),
+                    None => Ok(QuotaRead::Pending(QuotaWait { receiver })),
+                }
+            }
+            _ => {
+                self.quota_refresh
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("quota source reconciliation is unavailable"))?
+                    .send(crate::daemon::QuotaRefreshIntent::ReconcileSources)
+                    .map_err(|_| anyhow!("quota owner stopped before source reconciliation"))?;
+                Ok(QuotaRead::Pending(QuotaWait { receiver }))
+            }
+        }
     }
 
     pub fn with_rejected_logins(
@@ -3398,7 +3477,9 @@ impl SubagentBackend for ApiBackend {
                         harness,
                         choices: choices.clone(),
                         quota: crate::server::api::CandidateQuota::from_report(
-                            quota_reports.get(&profile_id),
+                            quota_reports
+                                .get(&profile_id)
+                                .and_then(|publication| publication.report.as_ref()),
                         ),
                         unhealthy,
                     });

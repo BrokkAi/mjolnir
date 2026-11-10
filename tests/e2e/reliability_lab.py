@@ -346,7 +346,10 @@ class PtyClient:
 
 
 class Lab:
+    """One isolated mj instance driven through a reliability scenario."""
+
     def __init__(self, hel: pathlib.Path, scenario: str, seed: int, *, watchdog: bool = True):
+        """Prepare a lab for one scenario, seed and `hel` binary."""
         self.hel = hel.resolve()
         self.scenario = scenario
         self.seed = seed
@@ -1163,6 +1166,7 @@ pull_policy = "never"
                     os.kill(pid, signal.SIGKILL)
 
     def run(self) -> None:
+        """Run the scenario against a freshly prepared isolated instance."""
         port = self.prepare()
         first = self.start_tui("tui-1")
         first.wait_for("Sessions")
@@ -1252,6 +1256,12 @@ pull_policy = "never"
         # review needs no reviewer and closes again on its own. The answer can
         # wait up to two minutes behind the recovery copy the finished turn
         # started, as `mj review start` allows for.
+        # The reply can render before the turn's teardown marks the session
+        # idle; a review start in that window is refused with 409.
+        self.wait_snapshot(
+            lambda value: (self.session(value, session_id) or {}).get("chat_phase") == "idle",
+            "session idle for a review",
+        )
         #
         # The fixture clone sits at the default branch with no reviewed commit
         # and no recorded start, so nothing tells the session's work from

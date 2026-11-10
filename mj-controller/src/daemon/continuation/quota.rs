@@ -1,11 +1,13 @@
 use super::*;
-use crate::quota::{ProfileQuota, QuotaManager, QuotaRefreshRequest};
+use crate::quota::{ProfileQuota, QuotaRefreshRequest};
 use crate::server::api::{SubagentBackend, SubagentCandidate};
+use crate::server_runtime::api::{QuotaRead, QuotaWait};
 use mj_core::continuation::QuotaRecovery;
 use mj_core::state::{MoveSessionRequest, QuotaMoveContinuation};
 
 #[derive(Debug)]
 pub(super) enum Plan {
+    Pending(QuotaWait),
     Wait(QuotaRecovery),
     Move {
         request: Box<MoveSessionRequest>,
@@ -61,40 +63,6 @@ pub(super) type Resolver = Arc<
         + Send
         + Sync,
 >;
-type Lane = Arc<tokio::sync::Mutex<Option<(std::time::Instant, ProfileQuota)>>>;
-
-#[derive(Default)]
-pub(super) struct Service {
-    lanes: Mutex<BTreeMap<String, Lane>>,
-}
-
-impl Service {
-    async fn refresh(&self, request: QuotaRefreshRequest) -> Result<ProfileQuota> {
-        let identity = request.cache_identity();
-        let lane = self
-            .lanes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(identity)
-            .or_default()
-            .clone();
-        let mut cached = lane.lock().await;
-        if let Some((at, report)) = &*cached
-            && at.elapsed() < Duration::from_secs(30)
-        {
-            return Ok(report.clone());
-        }
-        let id = request.profile_id.clone();
-        let mut manager = QuotaManager::default();
-        manager.refresh_profiles(vec![request], |_| async {}).await;
-        let report = manager.reports().get(&id).cloned();
-        manager.shutdown().await;
-        let report = report.context("quota refresh produced no report")?;
-        *cached = Some((std::time::Instant::now(), report.clone()));
-        Ok(report)
-    }
-}
-
 /// How far ahead a quota reset may be and still earn an automatic resume.
 pub(super) const AUTORESUME_HORIZON_MS: i64 = 16 * 60 * 60 * 1000;
 
@@ -113,7 +81,7 @@ pub(super) fn deadline(
         (Some(time), _) => format!(
             "Subscription quota reached. Automatically continuing at {time} (one minute after reset){}.",
             if used_cache {
-                "; using last-known quota reset times because fresh reset data is unavailable"
+                "; using last-known quota reset times"
             } else {
                 ""
             }
@@ -160,7 +128,6 @@ pub(super) fn message(snapshot: &mj_core::state::ManagedSessionSnapshot) -> Opti
 
 pub(super) async fn prepare(
     state: &Arc<RuntimeState>,
-    service: &Service,
     id: &str,
     view: &ManagedSessionView,
 ) -> Result<Plan> {
@@ -198,19 +165,21 @@ pub(super) async fn prepare(
     .await
     .context("prepare quota request")?;
     let identity = request.cache_identity();
-    let refreshed = service.refresh(request).await;
+    let observed = state
+        .quota_report_backend()
+        .context("quota report service is unavailable")
+        .and_then(|backend| backend.quota_report(&profile_id, &identity));
     let cached = tokio::task::spawn_blocking(move || crate::database::load_quota_cache(&identity))
         .await
         .context("read cached quota resets")?;
-    let fresh = match refreshed {
-        Ok(report) if report.error.is_none() => Some(report),
-        Ok(report) => {
-            tracing::warn!(session=id, error=?report.error, "quota refresh unavailable; consulting last known resets");
-            None
+    let (observed, wait) = match observed {
+        Ok(QuotaRead::Ready(report)) => {
+            (Some(report).filter(|report| report.error.is_none()), None)
         }
+        Ok(QuotaRead::Pending(wait)) => (None, Some(wait)),
         Err(error) => {
-            tracing::warn!(session=id, %error, "quota refresh failed; consulting last known resets");
-            None
+            tracing::warn!(session=id, %error, "quota report unavailable; consulting last known resets");
+            (None, None)
         }
     };
     let cached = match cached {
@@ -220,15 +189,14 @@ pub(super) async fn prepare(
             None
         }
     };
-    let mut windows = fresh
+    let mut windows = observed
         .as_ref()
         .map(|r| r.windows.clone())
         .unwrap_or_default();
-    let mut used_cache = false;
-    if !fresh.as_ref().is_some_and(ProfileQuota::is_usage_priced)
+    if !observed.as_ref().is_some_and(ProfileQuota::is_usage_priced)
         && let Some(cached) = cached
     {
-        used_cache = crate::quota::merge_reset_windows(&mut windows, &cached.windows);
+        crate::quota::merge_reset_windows(&mut windows, &cached.windows);
     }
     let now = chrono::DateTime::from_timestamp_millis(turn.completed_at_ms)
         .context("invalid completion timestamp")?
@@ -266,6 +234,18 @@ pub(super) async fn prepare(
         .collect();
     let now_ms = mj_core::clock::epoch_millis();
     let reset = crate::quota::recovery_reset(&windows, explicit, now_ms / 1000, consumed);
+    if reset.is_none()
+        && let Some(wait) = wait
+    {
+        return Ok(Plan::Pending(wait));
+    }
+    // These are retained poller observations, not a provider query made for
+    // this recovery. Attribute the selected reset after model filtering.
+    let used_cache = reset.is_some_and(|reset| {
+        windows
+            .iter()
+            .any(|window| window.resets_at_epoch_seconds == Some(reset))
+    });
     let (reset_at_ms, retry_at_ms, notice) =
         deadline(reset.and_then(|t| t.checked_mul(1000)), now_ms, used_cache);
     let mut fallback = QuotaRecovery {
@@ -429,6 +409,7 @@ pub(super) async fn schedule(
             .await?;
         let current = handle.view();
         let recovery = match &plan {
+            Plan::Pending(_) => bail!("quota report has not been published yet"),
             Plan::Wait(r) => r,
             Plan::Move { abstention, .. } => abstention,
         };

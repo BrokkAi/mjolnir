@@ -29,6 +29,20 @@ impl StartupSteps {
     }
 }
 
+fn quota_reports_for_viewer(
+    publications: &crate::quota::QuotaReportMap,
+) -> std::collections::BTreeMap<String, crate::quota::ProfileQuota> {
+    publications
+        .iter()
+        .filter_map(|(id, publication)| {
+            publication
+                .report
+                .clone()
+                .map(|report| (id.clone(), report))
+        })
+        .collect()
+}
+
 pub(crate) async fn run_server(
     args: ServerArgs,
     termination: tokio_util::sync::CancellationToken,
@@ -49,7 +63,7 @@ pub(crate) async fn run_server(
     daemon_revisions.borrow_and_update();
     workspace_updates.borrow_and_update();
     let mut quota_updates = services.quotas.clone();
-    let mut quotas = quota_updates.borrow_and_update().clone();
+    let mut quotas = quota_reports_for_viewer(&quota_updates.borrow_and_update());
     let api_backend = services.backend.clone();
     let mut revision = daemon_runtime.allocate_revision();
     let mut conversations = mj_core::snapshot_map::SnapshotMap::new();
@@ -520,7 +534,7 @@ pub(crate) async fn run_server(
                 }
                 changed = quota_updates.changed() => {
                     if changed.is_err() { anyhow::bail!("daemon quota feed stopped"); }
-                    quotas = quota_updates.borrow_and_update().clone();
+                    quotas = quota_reports_for_viewer(&quota_updates.borrow_and_update());
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
                 }

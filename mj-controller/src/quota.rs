@@ -280,9 +280,21 @@ pub(crate) fn hold_report(previous: Option<&ProfileQuota>, limited: ProfileQuota
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuotaRefreshOutcome {
+    /// Identity captured from the request that produced this outcome.
+    pub cache_identity: String,
     pub report: ProfileQuota,
     pub credentials_changed: bool,
 }
+
+/// One profile's authoritative quota publication. `None` means that its
+/// current identity has not completed a check yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuotaReportPublication {
+    pub cache_identity: String,
+    pub report: Option<ProfileQuota>,
+}
+
+pub(crate) type QuotaReportMap = BTreeMap<String, QuotaReportPublication>;
 
 #[derive(Default)]
 pub struct QuotaManager {
@@ -386,8 +398,9 @@ impl QuotaManager {
             let previous = self.reports.get(&outcome.report.profile_id);
             let outcome = if outcome.report.rate_limited_until_epoch_seconds.is_some() {
                 QuotaRefreshOutcome {
+                    cache_identity: outcome.cache_identity,
                     report: hold_report(previous, outcome.report),
-                    ..outcome
+                    credentials_changed: outcome.credentials_changed,
                 }
             } else {
                 outcome
@@ -883,8 +896,9 @@ async fn refresh_profile_with_cache_root(
     // Only the daemon owns the writer; other callers leave persistence to it.
     if crate::database::database_writer_installed() {
         let observed = report.clone();
+        let identity = cache_identity.clone();
         match tokio::task::spawn_blocking(move || {
-            crate::database::save_quota_report(&cache_identity, &observed)
+            crate::database::save_quota_report(&identity, &observed)
         })
         .await
         {
@@ -916,6 +930,7 @@ async fn refresh_profile_with_cache_root(
     };
     (
         QuotaRefreshOutcome {
+            cache_identity,
             report,
             credentials_changed,
         },

@@ -201,7 +201,13 @@ const ATTACHMENT_LEASE: Duration = Duration::from_secs(15);
 #[derive(Default)]
 struct QuotaBoard {
     snapshot: mj_core::snapshot_map::SharedSnapshot<mj_client::quota::QuotaSnapshot>,
-    refresh: Option<tokio::sync::mpsc::Sender<()>>,
+    refresh: Option<tokio::sync::mpsc::UnboundedSender<QuotaRefreshIntent>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuotaRefreshIntent {
+    Force,
+    ReconcileSources,
 }
 
 struct SurfaceNotice {
