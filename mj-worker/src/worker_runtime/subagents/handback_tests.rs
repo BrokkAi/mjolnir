@@ -115,14 +115,9 @@ async fn pending_handback_check_withholds_publication_and_repeat_is_forwarded_wi
     let first = tokio::spawn(call(endpoint.clone(), report("first")));
     let evidence = seen_rx.await.unwrap();
     let retry = tokio::spawn(call(endpoint.clone(), report("first")));
+    let retry_gate_refs = Arc::strong_count(&endpoint.handback_gate);
     loop {
-        let joined = endpoint
-            .handback_requests
-            .lock()
-            .unwrap()
-            .get("first")
-            .is_some_and(|lock| lock.strong_count() >= 2);
-        if joined {
+        if Arc::strong_count(&endpoint.handback_gate) > retry_gate_refs {
             break;
         }
         tokio::task::yield_now().await;
@@ -134,15 +129,50 @@ async fn pending_handback_check_withholds_publication_and_repeat_is_forwarded_wi
     );
     // Both state owners remain available while classification is awaiting HTTP.
     let _state = relay.lock().unwrap().operational_state();
-    let mut independent = report("independent");
-    independent.action = SubagentToolAction::ListAgents;
-    endpoint.enqueue(independent).unwrap();
+    // Hard-won: 2afc06c9a: a concurrent handback with another request ID was delivered while the first check was pending
+    let different = tokio::spawn(call(endpoint.clone(), report("different")));
+    let different_gate_refs = Arc::strong_count(&endpoint.handback_gate);
+    loop {
+        if Arc::strong_count(&endpoint.handback_gate) > different_gate_refs {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        endpoint.state.lock().unwrap().requests.is_empty(),
+        "neither handback may publish while the first HTTP check waits"
+    );
     release_tx.send(()).unwrap();
     let bounced = first.await.unwrap();
     assert_eq!(
         retry.await.unwrap(),
         bounced,
         "same-ID retry must await and reuse the first decision"
+    );
+    loop {
+        if endpoint
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .contains_key("different")
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(http.await.unwrap(), ()); // Listener is gone: no second HTTP check.
+    endpoint
+        .complete(SubagentToolResult {
+            request_id: "different".into(),
+            completed_at_ms: 1,
+            is_error: false,
+            message: "Report delivered".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        different.await.unwrap()["result"]["message"],
+        "Report delivered"
     );
     assert_eq!(bounced["result"]["is_error"], false);
     assert!(
@@ -159,7 +189,6 @@ async fn pending_handback_check_withholds_publication_and_repeat_is_forwarded_wi
             .requests
             .contains_key("first")
     );
-    http.await.unwrap(); // Listener is gone: another HTTP check would fail.
     let second = tokio::spawn(call(endpoint.clone(), report("second")));
     let mut changes = endpoint.generations();
     loop {

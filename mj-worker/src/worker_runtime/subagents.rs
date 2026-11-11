@@ -888,15 +888,13 @@ struct Collections {
     last: Option<Instant>,
 }
 
-type HandbackRequestLocks = BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>;
-
 #[derive(Clone)]
 pub struct SubagentEndpoint {
     path: PathBuf,
     admission: Arc<SocketAdmission>,
     relay: Option<Arc<crate::relay::RelayCell>>,
     subagent_kind: Option<mj_core::subagent::SubagentKind>,
-    handback_requests: Arc<Mutex<HandbackRequestLocks>>,
+    handback_gate: Arc<tokio::sync::Mutex<()>>,
     state: Arc<Mutex<QueueState>>,
     /// Woken whenever a result lands, so a socket call awaiting its own request
     /// returns the moment the daemon completes it.
@@ -923,7 +921,7 @@ impl SubagentEndpoint {
             admission: Arc::default(),
             relay: None,
             subagent_kind: None,
-            handback_requests: Arc::default(),
+            handback_gate: Arc::default(),
             state: Arc::new(Mutex::new(state)),
             completed: Arc::new(Notify::new()),
             generations: Arc::new(tokio::sync::watch::Sender::new(0)),
@@ -997,7 +995,7 @@ impl SubagentEndpoint {
         );
         Ok(bounce.then(|| SubagentToolResult {
             request_id: request.request_id.clone(), completed_at_ms: mj_core::clock::epoch_millis(), is_error: false,
-            message: "Not delivered: an automatic check judged that your assigned task still has work you can do without further input. Continue it. If the check is wrong — the task is done, your instructions let you stop at this point, what remains is outside your assignment, or you need instructions or a decision from the parent — call handback again (put your question in the report); it will be delivered without another check.".into(),
+            message: "Not delivered: an automatic check judged that your assigned task still has unfinished work. Continue it. If the check is wrong — the task is done, your instructions let you stop at this point, what remains is outside your assignment, or you need instructions or a decision from the parent — call handback again (put your question in the report); it will be delivered without another check.".into(),
         }))
     }
 
@@ -3148,27 +3146,15 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
     let mut waiter = queued_input
         .is_none()
         .then(|| endpoint.register_waiter(&request_id));
-    // Retries with the same request ID join the first socket's decision rather
-    // than publishing its report while that socket is still checking it.
-    let handback_lock = matches!(
+    // The gate makes an in-flight check the only decision for the child's
+    // assignment, so concurrent handbacks wait until that check completes.
+    let handback_gate = matches!(
         request.action,
         mj_core::subagent::SubagentToolAction::Handback { .. }
     )
-    .then(|| {
-        let mut locks = endpoint
-            .handback_requests
-            .lock()
-            .expect("handback request lock poisoned");
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        let entry = locks.entry(request_id.clone()).or_default();
-        let lock = entry
-            .upgrade()
-            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
-        *entry = Arc::downgrade(&lock);
-        lock
-    });
-    let handback_guard = match &handback_lock {
-        Some(lock) => Some(lock.lock().await),
+    .then(|| endpoint.handback_gate.clone());
+    let handback_guard = match &handback_gate {
+        Some(gate) => Some(gate.lock().await),
         None => None,
     };
     // The classifier's 10-second HTTP deadline is inside this call's existing
