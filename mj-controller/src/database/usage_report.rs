@@ -1,8 +1,8 @@
 //! One consistent store snapshot of parent usage and retained descendants.
 use super::*;
 use mj_core::usage::{
-    ModelUsageEstimate, SessionUsageEstimate, SessionUsageQuery, SessionUsageReport, UnknownCost,
-    UsageScope, add_cost, descending_cost,
+    AgentUsageEstimate, ModelUsageEstimate, SessionUsageEstimate, SessionUsageQuery,
+    SessionUsageReport, UnknownCost, UsageAgentRole, UsageScope, add_cost, descending_cost,
 };
 
 use mj_core::usage::model_catalog;
@@ -76,6 +76,11 @@ fn load_with(
     }
     report.profiles = profiles.into_iter().collect();
     let wanted = query.profile.as_deref();
+    let mut role_groups = BTreeMap::from([
+        (UsageAgentRole::Primary, BTreeMap::new()),
+        (UsageAgentRole::Subagent, BTreeMap::new()),
+        (UsageAgentRole::Reviewer, BTreeMap::new()),
+    ]);
     for (session_id, title, profile, state) in roots {
         let suspended = !SessionState::from_stored(&state)
             .context("unknown usage session state")?
@@ -85,9 +90,13 @@ fn load_with(
         }
         let mut tree = tx.prepare("WITH RECURSIVE tree(id) AS (
             SELECT ?1 UNION SELECT a.child_session_id FROM subagent_accounting a JOIN tree t ON a.parent_session_id=t.id)
-            SELECT id FROM tree ORDER BY id")?;
+            SELECT t.id, CASE WHEN c.child_session_id IS NOT NULL
+                THEN COALESCE(json_extract(c.record_json, '$.kind'), 'worker') END
+            FROM tree t LEFT JOIN subagent_sessions c ON c.child_session_id=t.id ORDER BY t.id")?;
         let members = tree
-            .query_map([&session_id], |row| row.get::<_, String>(0))?
+            .query_map([&session_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut estimate = SessionUsageEstimate {
             session_id,
@@ -98,7 +107,17 @@ fn load_with(
             ..Default::default()
         };
         let mut groups: BTreeMap<Option<String>, ModelUsageEstimate> = BTreeMap::new();
-        for member in members {
+        for (member, kind) in members {
+            let role = if member == estimate.session_id {
+                UsageAgentRole::Primary
+            } else {
+                match kind.as_deref() {
+                    Some("worker" | "oracle") => UsageAgentRole::Subagent,
+                    Some("reviewer") => UsageAgentRole::Reviewer,
+                    None => UsageAgentRole::UnclassifiedSubagent,
+                    Some(kind) => bail!("unknown usage agent kind {kind:?} for {member}"),
+                }
+            };
             let mut turns = tx.prepare(
                 "SELECT u.body, s.model, s.effort, s.profile FROM session_turn_usage u
                 LEFT JOIN session_turn_selections s USING(session_id, command_id)
@@ -134,17 +153,19 @@ fn load_with(
                                 selection.model.as_deref(),
                                 &totals,
                             )?;
-                            let group =
-                                groups.entry(selection.model.clone()).or_insert_with(|| {
-                                    ModelUsageEstimate {
-                                        model: selection.model,
-                                        ..Default::default()
-                                    }
-                                });
-                            group.cost_usd_ticks =
-                                add_cost(group.cost_usd_ticks, cost.ok_or(UnknownCost))
-                                    .context("model cost overflow")?;
-                            super::usage::merge_totals(&mut group.totals, &totals)?;
+                            for groups in [&mut groups, role_groups.entry(role).or_default()] {
+                                let group =
+                                    groups.entry(selection.model.clone()).or_insert_with(|| {
+                                        ModelUsageEstimate {
+                                            model: selection.model.clone(),
+                                            ..Default::default()
+                                        }
+                                    });
+                                group.cost_usd_ticks =
+                                    add_cost(group.cost_usd_ticks, cost.ok_or(UnknownCost))
+                                        .context("model cost overflow")?;
+                                super::usage::merge_totals(&mut group.totals, &totals)?;
+                            }
                         }
                     }
                     Some(usage) if usage.scope == UsageScope::LastRequest => {
@@ -193,6 +214,22 @@ fn load_with(
         descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
+    for (role, groups) in role_groups {
+        let mut models: Vec<_> = groups.into_values().collect();
+        models.sort_by(|a, b| {
+            descending_cost(&a.cost_usd_ticks, &b.cost_usd_ticks)
+                .then_with(|| a.model.cmp(&b.model))
+        });
+        let cost_usd_ticks = models
+            .iter()
+            .try_fold(Ok(0), |total, model| add_cost(total, model.cost_usd_ticks))
+            .context("agent role cost overflow")?;
+        report.agent_usage.push(AgentUsageEstimate {
+            role,
+            models,
+            cost_usd_ticks,
+        });
+    }
     Ok(report)
 }
 
@@ -227,6 +264,37 @@ mod tests {
         save_state_to(&path, &state)?;
         let connection = open(&path)?;
         connection.execute_batch("INSERT INTO subagent_accounting VALUES ('child','root','child'),('grandchild','child','grandchild')")?;
+        for (child, parent, kind) in [
+            ("child", "root", mj_core::subagent::SubagentKind::Worker),
+            (
+                "grandchild",
+                "child",
+                mj_core::subagent::SubagentKind::Reviewer,
+            ),
+        ] {
+            let record = mj_core::subagent::SubagentRecord {
+                kind,
+                reviewer_launch: None,
+                child_session_id: child.into(),
+                parent_session_id: parent.into(),
+                task_name: child.into(),
+                profile_id: state.sessions[child].last_profile.clone(),
+                model: None,
+                effort: None,
+                working_directory: PathBuf::new(),
+                initial_prompt: "Inspect usage".into(),
+                request_key: child.into(),
+                created_at: state.sessions[child].created_at.clone(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            };
+            connection.execute(
+                "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json)
+                 VALUES (?1,?2,?3,?4)",
+                params![child, parent, kind.request_key(child), serde_json::to_string(&record)?],
+            )?;
+        }
         let insert = |session: &str,
                       seq: u64,
                       timestamp: i64,
@@ -323,6 +391,56 @@ mod tests {
             1
         );
         drop(connection);
+        let role_cost = |report: &SessionUsageReport, role| {
+            report
+                .agent_usage
+                .iter()
+                .find(|a| a.role == role)
+                .unwrap()
+                .cost_usd_ticks
+        };
+        let before_destroy = load_from(&path, &SessionUsageQuery::default(), now)?;
+        assert_eq!(
+            role_cost(&before_destroy, UsageAgentRole::Primary),
+            Ok(1_050_000_000)
+        );
+        assert_eq!(
+            role_cost(&before_destroy, UsageAgentRole::Subagent),
+            Ok(71_000_000_000)
+        );
+        assert_eq!(
+            role_cost(&before_destroy, UsageAgentRole::Reviewer),
+            Err(UnknownCost)
+        );
+        // Park/Close keep child records and their kind, even though the child
+        // itself is no longer active. Only the root controls this report filter.
+        let connection = open(&path)?;
+        connection.execute(
+            "UPDATE sessions SET state='stopped' WHERE session_id IN ('child','grandchild')",
+            [],
+        )?;
+        drop(connection);
+        assert_eq!(
+            load_from(&path, &SessionUsageQuery::default(), now)?.agent_usage,
+            before_destroy.agent_usage
+        );
+        let filtered = load_from(
+            &path,
+            &SessionUsageQuery {
+                profile: Some("codex2".into()),
+                ..Default::default()
+            },
+            now,
+        )?;
+        assert_eq!(role_cost(&filtered, UsageAgentRole::Primary), Ok(0));
+        assert_eq!(
+            role_cost(&filtered, UsageAgentRole::Subagent),
+            Ok(71_000_000_000)
+        );
+        assert_eq!(
+            role_cost(&filtered, UsageAgentRole::Reviewer),
+            Err(UnknownCost)
+        );
         delete_session_from(&path, "grandchild")?;
         delete_session_from(&path, "child")?;
 
@@ -358,6 +476,16 @@ mod tests {
         assert_eq!(root.coverage.unfinished_turns, 1);
         assert_eq!(hourly.profiles, ["claude", "codex", "codex2"]);
         assert_eq!(hourly.cost_usd_ticks, Err(UnknownCost));
+        assert_eq!(
+            role_cost(&hourly, UsageAgentRole::Primary),
+            Ok(1_050_000_000)
+        );
+        assert_eq!(role_cost(&hourly, UsageAgentRole::Subagent), Ok(0));
+        assert_eq!(role_cost(&hourly, UsageAgentRole::Reviewer), Ok(0));
+        assert_eq!(
+            role_cost(&hourly, UsageAgentRole::UnclassifiedSubagent),
+            Err(UnknownCost)
+        );
 
         // A profile counts the turns recorded on it anywhere in the tree, by
         // the profile at turn start, after the children are destroyed.

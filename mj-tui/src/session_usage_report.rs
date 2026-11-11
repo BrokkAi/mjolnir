@@ -11,7 +11,7 @@ use mj_chat::{
     theme,
 };
 use mj_core::usage::{
-    CostUsdTicks, SessionUsageQuery, SessionUsageReport, UsagePeriod, add_cost, descending_cost,
+    CostUsdTicks, SessionUsageQuery, SessionUsageReport, UsageAgentRole, UsagePeriod,
 };
 use ratatui::{
     Frame,
@@ -20,7 +20,6 @@ use ratatui::{
     widgets::Paragraph,
 };
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UsageControl {
@@ -34,6 +33,8 @@ pub(crate) enum UsageControl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UsageRow {
+    Role(UsageAgentRole),
+    ModelTotal(UsageAgentRole, Option<String>),
     Session(String),
     Model(String, Option<String>),
     Coverage(String),
@@ -177,29 +178,6 @@ fn dollars(cost: CostUsdTicks, partial: bool) -> String {
     format!("${:.3}{plus}", ticks as f64 / 10_000_000_000.0)
 }
 
-fn model_costs(report: &SessionUsageReport) -> anyhow::Result<String> {
-    let mut costs = BTreeMap::new();
-    for model in report.sessions.iter().flat_map(|session| &session.models) {
-        let total = costs.entry(model.model.as_deref()).or_insert(Ok(0));
-        *total = add_cost(*total, model.cost_usd_ticks)?;
-    }
-    let mut costs: Vec<_> = costs.into_iter().collect();
-    costs.sort_by(|(a_model, a_cost), (b_model, b_cost)| {
-        descending_cost(a_cost, b_cost).then_with(|| a_model.cmp(b_model))
-    });
-    Ok(costs
-        .into_iter()
-        .map(|(model, cost)| {
-            format!(
-                "{} {}",
-                model.unwrap_or("Unknown model"),
-                dollars(cost, false)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" · "))
-}
-
 pub(crate) fn render(
     frame: &mut Frame,
     area: Rect,
@@ -292,35 +270,44 @@ pub(crate) fn render(
         ),
         Some(Ok(report)) => {
             let partial = report.sessions.iter().any(|s| s.is_partial());
-            let mut summary = vec![Line::raw(format!(
-                "Total {} · {window} · estimated API USD",
-                dollars(report.cost_usd_ticks, partial),
-            ))];
-            match model_costs(report) {
-                Ok(models) if !models.is_empty() => {
-                    summary.push(Line::raw(format!("By model: {models}")));
-                }
-                Ok(_) => {}
-                Err(error) => summary.push(Line::raw(format!("Model totals failed: {error}"))),
-            }
-            let summary = Paragraph::new(summary).wrap(ratatui::widgets::Wrap { trim: false });
-            let summary_height = u16::try_from(summary.line_count(inner.width))
-                .unwrap_or(u16::MAX)
-                .min(inner.height.saturating_sub(9));
             frame.render_widget(
-                summary,
-                Rect::new(inner.x, inner.y + 4, inner.width, summary_height),
-            );
-            let rows_area = Rect::new(
-                inner.x,
-                inner.y + 5 + summary_height,
-                inner.width,
-                inner.height.saturating_sub(8 + summary_height),
+                Paragraph::new(format!(
+                    "Total {} · {window} · estimated API USD",
+                    dollars(report.cost_usd_ticks, partial),
+                )),
+                Rect::new(inner.x, inner.y + 4, inner.width, 1),
             );
             let mut lines = Vec::new();
             let mut row_map = Vec::new();
             let mut row_keys = dialog.row_keys.borrow_mut();
             row_keys.clear();
+            if !report.sessions.is_empty() {
+                for agents in &report.agent_usage {
+                    lines.push(Line::styled(
+                        format!(
+                            "{}  {}",
+                            agents.role.label(),
+                            dollars(agents.cost_usd_ticks, partial)
+                        ),
+                        theme::title(false),
+                    ));
+                    row_map.push(Some(row_keys.len()));
+                    row_keys.push(UsageRow::Role(agents.role));
+                    for model in &agents.models {
+                        let cost = dollars(model.cost_usd_ticks, partial);
+                        let name = truncate_to_cells(
+                            model.model.as_deref().unwrap_or("Unknown model"),
+                            usize::from(inner.width).saturating_sub(cost.len() + 4),
+                            Truncate::PLAIN,
+                        );
+                        lines.push(Line::raw(format!("  {name}  {cost}")));
+                        row_map.push(Some(row_keys.len()));
+                        row_keys.push(UsageRow::ModelTotal(agents.role, model.model.clone()));
+                    }
+                    lines.push(Line::default());
+                    row_map.push(None);
+                }
+            }
             for session in &report.sessions {
                 let cost = format!(
                     "{}{}",

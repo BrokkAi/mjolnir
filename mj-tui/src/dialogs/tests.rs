@@ -1117,7 +1117,8 @@ fn golden_dashboard_dialogs() {
 
     // Extend the full dialog golden through the Profiles menu and real controls.
     use mj_core::usage::{
-        ModelUsageEstimate, SessionUsageEstimate, SessionUsageReport, UnknownCost, UsagePeriod,
+        AgentUsageEstimate, ModelUsageEstimate, SessionUsageEstimate, SessionUsageReport,
+        UnknownCost, UsageAgentRole, UsagePeriod,
     };
     let mut usage = dashboard_with_session(running_session());
     usage.begin_support_pane_menu(crate::SupportPane::Quota);
@@ -1138,7 +1139,7 @@ fn golden_dashboard_dialogs() {
     );
     let (first, query) = usage.session_usage_request().unwrap();
     assert_eq!(query, mj_core::usage::SessionUsageQuery::default());
-    let report = SessionUsageReport {
+    let mut report = SessionUsageReport {
         profiles: vec!["claude".into(), "codex".into()],
         cost_usd_ticks: Err(UnknownCost),
         sessions: vec![
@@ -1210,6 +1211,36 @@ fn golden_dashboard_dialogs() {
         ],
         ..Default::default()
     };
+    report.agent_usage = vec![
+        AgentUsageEstimate {
+            role: UsageAgentRole::Primary,
+            models: vec![
+                report.sessions[0].models[0].clone(),
+                report.sessions[1].models[1].clone(),
+            ],
+            cost_usd_ticks: Ok(72_000_000_000),
+        },
+        AgentUsageEstimate {
+            role: UsageAgentRole::Subagent,
+            models: vec![
+                ModelUsageEstimate {
+                    model: Some("gpt-6.1-sol".into()),
+                    cost_usd_ticks: Ok(50_000_000_000),
+                    ..Default::default()
+                },
+                report.sessions[1].models[3].clone(),
+            ],
+            cost_usd_ticks: Ok(51_050_000_000),
+        },
+        AgentUsageEstimate {
+            role: UsageAgentRole::Reviewer,
+            models: vec![
+                report.sessions[1].models[2].clone(),
+                report.sessions[1].models[4].clone(),
+            ],
+            cost_usd_ticks: Err(UnknownCost),
+        },
+    ];
     usage.apply_session_usage_result(first, Ok(report.clone()));
     append_dialog_render(
         &mut output,
@@ -1218,6 +1249,34 @@ fn golden_dashboard_dialogs() {
         36,
         &drawn(&mut usage, 120, 36),
     );
+    // Hard-won: #1501: a wrapped fixed header clipped models and crowded out sessions.
+    for _ in 0..3 {
+        usage.handle_key(key(KeyCode::Tab));
+    }
+    usage.handle_key(key(KeyCode::Home));
+    for _ in 0..8 {
+        usage.handle_key(key(KeyCode::Down));
+    }
+    append_dialog_render(
+        &mut output,
+        "Usage narrow last model total",
+        70,
+        22,
+        &drawn(&mut usage, 70, 22),
+    );
+    usage.handle_key(key(KeyCode::End));
+    append_dialog_render(
+        &mut output,
+        "Usage narrow last session",
+        70,
+        22,
+        &drawn(&mut usage, 70, 22),
+    );
+    usage.handle_key(key(KeyCode::Home));
+    for _ in 0..3 {
+        usage.handle_key(key(KeyCode::BackTab));
+    }
+    drawn(&mut usage, 120, 36);
     usage.handle_key(key(KeyCode::Enter));
     append_dialog_render(
         &mut output,
@@ -1244,6 +1303,26 @@ fn golden_dashboard_dialogs() {
     codex_report.sessions[0]
         .models
         .retain(|model| model.model.as_deref() != Some("claude-opus-5-5"));
+    codex_report.agent_usage = vec![
+        AgentUsageEstimate {
+            role: UsageAgentRole::Primary,
+            models: vec![codex_report.sessions[0].models[1].clone()],
+            cost_usd_ticks: Ok(10_000_000_000),
+        },
+        AgentUsageEstimate {
+            role: UsageAgentRole::Subagent,
+            models: vec![
+                codex_report.sessions[0].models[0].clone(),
+                codex_report.sessions[0].models[2].clone(),
+            ],
+            cost_usd_ticks: Ok(31_050_000_000),
+        },
+        AgentUsageEstimate {
+            role: UsageAgentRole::Reviewer,
+            models: vec![codex_report.sessions[0].models[3].clone()],
+            cost_usd_ticks: Err(UnknownCost),
+        },
+    ];
     usage.apply_session_usage_result(profile_request, Ok(codex_report.clone()));
     // Hard-won: #1501: unknown totals hid the known per-model sums in both views.
     append_dialog_render(
