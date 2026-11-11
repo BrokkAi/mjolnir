@@ -128,6 +128,17 @@ pub(crate) enum ClaudeLauncher {
     Program(PathBuf),
 }
 
+/// The person's own `claude` on the profile's `PATH`, where Mjolnir has no
+/// installation of Claude Code to offer.
+#[cfg(not(unix))]
+fn host_claude_on_path(environment: &HashMap<String, String>) -> Option<PathBuf> {
+    let path = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
+    mj_core::program_path::find_executable_on_path(claude_program(), path.as_deref())
+}
+
 /// The `claude` a host renewal runs, and what keeps it installed meanwhile.
 struct ClaudeProgram {
     command: PathBuf,
@@ -136,6 +147,24 @@ struct ClaudeProgram {
 }
 
 impl ClaudeLauncher {
+    /// Whether this host can run Claude Code through this launcher: always where
+    /// Mjolnir installs it (Unix), and where it does not (Windows) when the
+    /// person's own `claude.cmd` is on the profile's `PATH`. Quota runtime
+    /// `auto` falls back to a container exactly when this is false.
+    pub(crate) fn host_can_run(&self, environment: &HashMap<String, String>) -> bool {
+        match self {
+            #[cfg(test)]
+            Self::Program(_) => true,
+            #[cfg(unix)]
+            Self::Managed => {
+                let _ = environment;
+                true
+            }
+            #[cfg(not(unix))]
+            Self::Managed => host_claude_on_path(environment).is_some(),
+        }
+    }
+
     /// Resolve the program, installing the pinned Claude Code when this host
     /// has none yet. A failure says why no `claude` can run, so it is
     /// reported on every renewal that needs it.
@@ -187,24 +216,18 @@ impl ClaudeLauncher {
                 })
             }
             #[cfg(not(unix))]
-            Self::Managed => {
-                let path = environment
-                    .get("PATH")
-                    .map(std::ffi::OsString::from)
-                    .or_else(|| std::env::var_os("PATH"));
-                mj_core::program_path::find_executable_on_path(claude_program(), path.as_deref())
-                    .map(|command| ClaudeProgram {
-                        command,
-                        environment: HashMap::new(),
-                        _installation: None,
-                    })
-                    .ok_or_else(|| {
-                        ClaudeUsageError::Refresh(format!(
-                            "no Claude Code to run: Mjolnir installs none on this platform and {} is not on PATH",
-                            claude_program()
-                        ))
-                    })
-            }
+            Self::Managed => host_claude_on_path(environment)
+                .map(|command| ClaudeProgram {
+                    command,
+                    environment: HashMap::new(),
+                    _installation: None,
+                })
+                .ok_or_else(|| {
+                    ClaudeUsageError::Refresh(format!(
+                        "no Claude Code to run: Mjolnir installs none on this platform and {} is not on PATH",
+                        claude_program()
+                    ))
+                }),
         }
     }
 }

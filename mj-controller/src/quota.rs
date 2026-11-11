@@ -534,10 +534,13 @@ pub(crate) async fn refresh_claude_grant(
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<HashMap<_, _>>();
-    // Mjolnir's pinned Claude Code runs on this host, so a container is used
-    // only where `[quota] runtime` names an engine (or the daemon itself runs
-    // in one): never because `claude` is missing from PATH.
-    let container = match quota_container(&request.runtime, &request.source_home, true) {
+    // The launcher says whether this host can run Claude Code, so `auto`
+    // picks a container exactly when it cannot.
+    let container = match quota_container(
+        &request.runtime,
+        &request.source_home,
+        launcher.host_can_run(&environment),
+    ) {
         Ok(container) => container,
         Err(error) => {
             tracing::warn!(
@@ -818,7 +821,7 @@ async fn refresh_profile_with_cache_root(
         HarnessKind::Claude => match if cfg!(target_os = "macos") {
             Ok(None)
         } else {
-            container(true)
+            container(claude_usage::ClaudeLauncher::Managed.host_can_run(&environment))
         } {
             Err(error) => Err(error),
             Ok(container) => claude_usage::query(source_home, environment, container)
