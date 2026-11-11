@@ -371,7 +371,7 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
         "the microvm engine must run as root (use sudo -n)"
     );
     layout.ensure()?;
-    let _vm_lock = layout.lock_vm(&spec.name)?;
+    let vm_lock = layout.lock_vm(&spec.name)?;
     ensure!(
         !layout.vm(&spec.name).exists(),
         "the container name {:?} is already in use",
@@ -440,8 +440,14 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
         Ok(state) => Ok(state.id),
         Err(error) => {
             let mut problems = Vec::new();
-            if let Err(cleanup) = teardown(layout, &spec.name) {
-                problems.push(format!("{cleanup:#}"));
+            match teardown(layout, &spec.name) {
+                // The VM is gone, and its lock file goes with it.
+                Ok(()) => {
+                    if let Err(cleanup) = layout.forget_vm_lock(&spec.name, &vm_lock) {
+                        problems.push(format!("{cleanup:#}"));
+                    }
+                }
+                Err(cleanup) => problems.push(format!("{cleanup:#}")),
             }
             for name in &created_volumes {
                 if let Err(cleanup) = volume::remove(layout, name, true) {
@@ -488,9 +494,11 @@ pub fn start(layout: &Layout, name: &str) -> Result<()> {
         sys::is_root(),
         "the microvm engine must run as root (use sudo -n)"
     );
-    let _vm_lock = layout.lock_vm(name)?;
-    let state = VmState::read(layout, name)?
-        .ok_or_else(|| anyhow!("no container with name or ID {name:?} found: no such container"))?;
+    let vm_lock = layout.lock_vm(name)?;
+    let Some(state) = VmState::read(layout, name)? else {
+        layout.forget_vm_lock(name, &vm_lock)?;
+        bail!("no container with name or ID {name:?} found: no such container");
+    };
     match activity(name)? {
         Activity::Running => return Ok(()),
         Activity::Stopping => bail!("container {name} is stopping; try again when it has stopped"),
@@ -750,11 +758,17 @@ pub fn agent_for(layout: &Layout, name: &str) -> Result<(VmState, Client<UnixStr
 pub fn stop(layout: &Layout, name: &str, grace: Duration, ignore_missing: bool) -> Result<()> {
     let name = &resolve(layout, name)?;
     validate_name("container", name)?;
-    let _vm_lock = layout.lock_vm(name)?;
+    let vm_lock = layout.lock_vm(name)?;
     match VmState::read(layout, name)? {
         Some(_) => stop_locked(name, grace),
-        None if ignore_missing => Ok(()),
-        None => bail!("no container with name or ID {name:?} found: no such container"),
+        None => {
+            layout.forget_vm_lock(name, &vm_lock)?;
+            if ignore_missing {
+                Ok(())
+            } else {
+                bail!("no container with name or ID {name:?} found: no such container")
+            }
+        }
     }
 }
 
@@ -824,9 +838,10 @@ pub fn remove(
         sys::is_root(),
         "the microvm engine must run as root (use sudo -n)"
     );
-    let _vm_lock = layout.lock_vm(name)?;
+    let vm_lock = layout.lock_vm(name)?;
     let state = VmState::read(layout, name)?;
     if state.is_none() && !layout.vm(name).exists() {
+        layout.forget_vm_lock(name, &vm_lock)?;
         if ignore_missing {
             return Ok(());
         }
@@ -845,6 +860,8 @@ pub fn remove(
             volume::remove(layout, &mounted.name, true)?;
         }
     }
+    // The VM is gone, and its lock file goes with it.
+    layout.forget_vm_lock(name, &vm_lock)?;
     Ok(())
 }
 

@@ -35,8 +35,12 @@ pub fn create(
         validate_label(key, value)?;
     }
     layout.ensure()?;
-    let _lock = layout.lock_volume(name)?;
-    create_locked(layout, name, labels)
+    let lock = layout.lock_volume(name)?;
+    let created = create_locked(layout, name, labels);
+    if created.is_err() {
+        forget_if_absent(layout, name, &lock);
+    }
+    created
 }
 
 /// [`create`] for a caller that already holds the volume's lock.
@@ -114,7 +118,10 @@ pub fn prepare_for_run(
             for (key, value) in labels {
                 validate_label(key, value)?;
             }
-            create_locked(layout, name, labels.clone())?;
+            if let Err(error) = create_locked(layout, name, labels.clone()) {
+                forget_if_absent(layout, name, &lock);
+                return Err(error);
+            }
             Ok((lock, true))
         }
     }
@@ -142,8 +149,9 @@ fn check_ownership(existing: &VolumeMetadata, wanted: &BTreeMap<String, String>)
 /// Remove a volume no VM uses.
 pub fn remove(layout: &Layout, name: &str, ignore_missing: bool) -> Result<()> {
     validate_name("volume", name)?;
-    let _lock = layout.lock_volume(name)?;
+    let lock = layout.lock_volume(name)?;
     if VolumeMetadata::read(layout, name)?.is_none() {
+        layout.forget_volume_lock(name, &lock)?;
         if ignore_missing {
             return Ok(());
         }
@@ -161,5 +169,19 @@ pub fn remove(layout: &Layout, name: &str, ignore_missing: bool) -> Result<()> {
         .join(format!(".removing-{name}-{}", sys::scratch_suffix()));
     fs::rename(layout.volume(name), &doomed).with_context(|| format!("unpublish volume {name}"))?;
     fs::remove_dir_all(&doomed).with_context(|| format!("remove {}", doomed.display()))?;
+    layout.forget_volume_lock(name, &lock)?;
     Ok(())
+}
+
+/// After a failed create: drop the lock file unless the volume exists.
+/// It runs on an error path, so its own failure is logged, not returned over the original.
+fn forget_if_absent(layout: &Layout, name: &str, lock: &FileLock) {
+    let forgotten = match VolumeMetadata::read(layout, name) {
+        Ok(None) => layout.forget_volume_lock(name, lock),
+        Ok(Some(_)) => Ok(()),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = forgotten {
+        tracing::warn!(%error, volume = name, "could not remove a volume lock file");
+    }
 }

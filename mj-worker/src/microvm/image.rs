@@ -68,6 +68,7 @@ pub fn ensure_image(
             return Ok((id, lock));
         }
         // Pruned while we waited for the lock.
+        layout.forget_image_lock(&id, &lock)?;
         drop(lock);
     }
     if policy == PullPolicy::Never {
@@ -157,9 +158,14 @@ fn pull_reserved(
     // (which decides under the same lock) never sees the image between the two.
     // Lock order everywhere is image, then global.
     let image_lock = layout.lock_image(&id)?;
-    if !layout.image(&id).join("config.json").is_file() {
-        flatten(layout, &crane, &pinned, &platform, &id, &config)
-            .with_context(|| format!("flatten {reference}"))?;
+    if !layout.image(&id).join("config.json").is_file()
+        && let Err(error) = flatten(layout, &crane, &pinned, &platform, &id, &config)
+    {
+        // Nothing was published, so no image keeps this lock file.
+        if let Err(forget) = layout.forget_image_lock(&id, &image_lock) {
+            tracing::warn!(error = %forget, "could not remove an image lock file");
+        }
+        return Err(error).with_context(|| format!("flatten {reference}"));
     }
     let _global = layout.lock_global()?;
     let mut refs = ImageRefs::read(layout)?;
@@ -418,7 +424,7 @@ pub fn prune(layout: &Layout) -> Result<Vec<String>> {
             // Decide under the image's lock, which pulls and runs hold from
             // before they name the image until they have recorded their use
             // of it. Lock order: image, then global.
-            let _image_lock = layout.lock_image(&name)?;
+            let image_lock = layout.lock_image(&name)?;
             let _global = layout.lock_global()?;
             let refs = ImageRefs::read(layout)?;
             let in_use = refs.refs.values().any(|id| *id == name)
@@ -426,6 +432,7 @@ pub fn prune(layout: &Layout) -> Result<Vec<String>> {
             if !in_use && layout.image(&name).exists() {
                 fs::remove_dir_all(layout.image(&name))
                     .with_context(|| format!("remove image {name}"))?;
+                layout.forget_image_lock(&name, &image_lock)?;
                 removed.push(name);
             }
         }

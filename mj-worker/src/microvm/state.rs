@@ -159,19 +159,62 @@ impl Layout {
             .with_context(|| format!("open lock {}", path.display()))
     }
 
+    /// Lock the named file. A resource's lock file is deleted with the
+    /// resource (see the `forget_*` methods), by a holder of the lock; a
+    /// locker that was waiting then holds a lock on an unlinked file, which
+    /// excludes nobody. So after acquiring, check that the file held is still
+    /// the one at the path, and start over if not. Each retry follows a delete
+    /// by another process, so the loop cannot spin.
     fn lock_file(&self, file_name: &str) -> Result<FileLock> {
-        fs::create_dir_all(self.locks())
-            .with_context(|| format!("create {}", self.locks().display()))?;
         let path = self.locks().join(file_name);
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .with_context(|| format!("open lock {}", path.display()))?;
-        file.lock()
-            .with_context(|| format!("lock {}", path.display()))?;
-        Ok(FileLock::new(file))
+        loop {
+            let file = self.open_lock_file(file_name)?;
+            file.lock()
+                .with_context(|| format!("lock {}", path.display()))?;
+            if lock_file_is_linked(&file, &path)? {
+                return Ok(FileLock::new(file));
+            }
+        }
+    }
+
+    /// Delete a VM's lock file with the VM. The caller holds the VM's lock and
+    /// must do nothing more to the VM afterwards: a locker arriving after the
+    /// delete creates a new file and does not wait for the holder.
+    pub fn forget_vm_lock(&self, name: &str, held: &FileLock) -> Result<()> {
+        self.forget_lock(&format!("vm-{name}.lock"), held)
+    }
+
+    /// Delete a volume's lock file with the volume. The caller holds its lock.
+    pub fn forget_volume_lock(&self, name: &str, held: &FileLock) -> Result<()> {
+        self.forget_lock(&format!("volume-{name}.lock"), held)
+    }
+
+    /// Delete an image's lock file with the image. The caller holds its lock.
+    pub fn forget_image_lock(&self, id: &str, held: &FileLock) -> Result<()> {
+        self.forget_lock(&format!("image-{id}.lock"), held)
+    }
+
+    /// Unlink a lock file while its lock is held; `held` is the proof.
+    fn forget_lock(&self, file_name: &str, _held: &FileLock) -> Result<()> {
+        let path = self.locks().join(file_name);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+        }
+    }
+}
+
+/// Whether `file` is still the file at `path` (same device and inode).
+fn lock_file_is_linked(file: &File, path: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let held = file
+        .metadata()
+        .with_context(|| format!("stat lock {}", path.display()))?;
+    match fs::metadata(path) {
+        Ok(linked) => Ok(linked.dev() == held.dev() && linked.ino() == held.ino()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("stat lock {}", path.display())),
     }
 }
 
@@ -527,5 +570,41 @@ mod tests {
                 && error.contains(&format!("format {}", STATE_FORMAT + 1)),
             "{error}"
         );
+    }
+
+    #[test]
+    fn deleting_a_lock_file_while_held_never_lets_two_holders_in() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory = tempfile::tempdir().unwrap();
+        let layout = Arc::new(Layout::new(directory.path()));
+        layout.ensure().unwrap();
+        let inside = Arc::new(AtomicUsize::new(0));
+        let workers: Vec<_> = (0..8)
+            .map(|worker| {
+                let (layout, inside) = (Arc::clone(&layout), Arc::clone(&inside));
+                std::thread::spawn(move || {
+                    for round in 0..150 {
+                        let lock = layout.lock_vm("racing").unwrap();
+                        // A holder on an unlinked file would see another inside.
+                        assert_eq!(inside.fetch_add(1, Ordering::SeqCst), 0, "two holders");
+                        std::thread::yield_now();
+                        // Deleting the file is the holder's last act: a locker that
+                        // arrives after it creates a new file and may enter at once.
+                        inside.fetch_sub(1, Ordering::SeqCst);
+                        if (worker + round) % 3 == 0 {
+                            layout.forget_vm_lock("racing", &lock).unwrap();
+                        }
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let lock = layout.lock_vm("racing").unwrap();
+        layout.forget_vm_lock("racing", &lock).unwrap();
+        drop(lock);
+        assert!(!layout.locks().join("vm-racing.lock").exists());
     }
 }
