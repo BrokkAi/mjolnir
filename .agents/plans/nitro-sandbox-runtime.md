@@ -552,6 +552,40 @@ Session A (`mj new ... --target nitro-live`, first turn 80 s after `mj new` on a
 - With A (8 GiB) and B (48 GiB) running, an 8 GiB session C is refused: "this host has 2.7 GiB left" (engine: 2772 MiB free).
 - Destroy A and B: no VM, unit, TAP, volume, Firecracker process or used slot; pool 60120 MiB free. Per-volume lock files remained (follow-up).
 
+### Milestone 6 engine transcript, 2026-11-11
+
+On the spike host with a stripped musl build of `f18ddd188` merged with the jailer commit `556b7f144` (another agent's VMs on the same host had written state format 2, which a build without the jailer refuses to list). Images `alpine:3.19` and `alpine:3.20` stand in for two agent-dev versions. Run as `ec2-user` with `sudo -n ./mj-worker-m6 microvm ...`; `[exit N]` lines omitted when 0.
+
+    $ run --detach --name m6t --label dev.mj.managed=true --label dev.mj.session=m6 --memory 512m --cpus 1 --user 0:0 --volume m6t-ws:/workspace:rw,U --volume m6t-tmp:/tmp:rw alpine:3.19 tail -f /dev/null
+    739b8b98...
+    $ exec m6t sh -c 'cat /etc/alpine-release; echo kept-in-workspace > /workspace/keep; echo kept-in-tmp > /tmp/keep; echo lost-with-root > /root/rootfile; sync'
+    3.19.9
+    $ container replace-root stage --operation op1 --label dev.mj.container-upgrade=op1 --label dev.mj.container-image=alpine:3.20 m6t alpine:3.20
+    bf8527eb...
+    $ container replace-root apply --operation op1 m6t           (VM still running)
+    Error: container m6t is running; stop it before replacing its root disk   [exit 125]
+    $ stop --time 0 m6t
+    $ container replace-root stage --operation op2 m6t alpine:3.19
+    Error: container m6t already has a root replacement in progress (operation op1); release it first   [exit 125]
+    $ container replace-root apply --operation op1 m6t
+    40600531...                                                  (new id)
+    $ container replace-root apply --operation op1 m6t           (repeat)
+    40600531...
+    $ ls -la vms/m6t
+    replace-root.json  root.ext4  root.previous (owned by the jail user)  state.json
+    $ start m6t
+    $ exec m6t sh -c 'cat /etc/alpine-release; cat /workspace/keep; cat /tmp/keep; ls /root/rootfile'
+    release: 3.20.10
+    workspace: kept-in-workspace
+    tmp: kept-in-tmp
+    ls: /root/rootfile: No such file or directory
+    $ container inspect --format '{{.Id}} {{.Config.Image}} {{json .Config.Labels}} {{.State.Status}}' m6t
+    40600531... alpine:3.20 {"dev.mj.container-image":"alpine:3.20","dev.mj.container-upgrade":"op1","dev.mj.managed":"true","dev.mj.session":"m6"} running
+    $ container replace-root release --operation op1 m6t   (twice, both exit 0)
+    $ ls vms/m6t
+    root.ext4  state.json
+    $ rm --force m6t; volume rm m6t-ws m6t-tmp               (nothing left in vms/ or volumes/)
+
 ## Interfaces and Dependencies
 
 `mj-worker/src/microvm/mod.rs` exposes the CLI entry `pub fn main(args: Vec<OsString>) -> anyhow::Result<i32>` dispatched from the worker binary's argument parser for the `microvm` subcommand. The vsock protocol types live in `mj-worker/src/microvm/protocol.rs` with `pub const PROTOCOL_VERSION: u32`. External tools on the host: Firecracker and jailer 1.18.0, crane (pinned), dracut, e2fsprogs, nftables, systemd. No new Rust crates beyond what the workspace already uses unless a milestone records why in the Decision Log.
