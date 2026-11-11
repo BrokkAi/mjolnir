@@ -37,8 +37,8 @@ for i in $(seq 1 100); do [ -b /dev/vda ] && break; sleep 0.1; done
 [ -b /dev/vda ] || fatal "no /dev/vda"
 mount -t ext4 -o rw,noatime /dev/vda /newroot || fatal "mount root failed"
 
-# Volumes. A volume that is new (empty apart from lost+found) takes the owner and mode of the
-# directory it covers, the way a named volume copies up from the image.
+# Volumes. A volume that is new (empty apart from lost+found) is filled from the image directory it
+# covers, with that directory's owner and mode, the way a named volume copies up from the image.
 IFS=',' read -ra vols <<< "$sbx_vols"
 for entry in "${vols[@]}"; do
   [ -n "$entry" ] || continue
@@ -48,10 +48,16 @@ for entry in "${vols[@]}"; do
   mkdir -p "/newroot$dest"
   covered=$(stat -c '%u:%g %a' "/newroot$dest")
   # A read-only drive cannot be mounted read-write, and a read-only volume cannot be copied up to.
-  mount -t ext4 -o "$mode,noatime" "/dev/$dev" "/newroot$dest" || fatal "mount $dev on $dest failed"
-  if [ "$mode" = rw ] && [ -z "$(ls -A "/newroot$dest" | grep -v '^lost+found$')" ]; then
-    chown "${covered% *}" "/newroot$dest"; chmod "${covered#* }" "/newroot$dest"
+  if [ "$mode" = rw ]; then
+    mkdir -p /volume-staging
+    mount -t ext4 -o "rw,noatime" "/dev/$dev" /volume-staging || fatal "mount $dev failed"
+    if [ -z "$(ls -A /volume-staging | grep -v '^lost+found$')" ]; then
+      cp -a "/newroot$dest/." /volume-staging/ || fatal "copy $dest into its volume failed"
+      chown "${covered% *}" /volume-staging; chmod "${covered#* }" /volume-staging
+    fi
+    umount /volume-staging || fatal "unmount staging for $dev failed"
   fi
+  mount -t ext4 -o "$mode,noatime" "/dev/$dev" "/newroot$dest" || fatal "mount $dev on $dest failed"
 done
 
 # Kernel modules for later modprobe in the guest. A bind mount would be deleted by switch_root

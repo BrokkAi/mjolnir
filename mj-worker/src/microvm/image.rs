@@ -14,6 +14,8 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
+use mj_core::file_lock::FileLock;
+
 use super::state::{ImageConfig, ImageRefs, Layout, METADATA_FORMAT, VmState};
 use super::sys;
 
@@ -54,13 +56,24 @@ pub fn ensure_image(
     reference: &str,
     platform: Option<&str>,
     policy: PullPolicy,
-) -> Result<String> {
-    let known = lookup(layout, reference)?;
-    match (policy, known) {
-        (PullPolicy::Never, Some(id)) | (PullPolicy::Missing, Some(id)) => Ok(id),
-        (PullPolicy::Never, None) => bail!("{reference}: image not known"),
-        _ => pull(layout, reference, platform),
+) -> Result<(String, FileLock)> {
+    layout.ensure()?;
+    if policy != PullPolicy::Always
+        && let Some(id) = lookup(layout, reference)?
+    {
+        // Name the image and reserve it in one step: a prune decides under
+        // this lock, so it cannot remove the image between the two.
+        let lock = layout.lock_image(&id)?;
+        if layout.image(&id).join("config.json").is_file() {
+            return Ok((id, lock));
+        }
+        // Pruned while we waited for the lock.
+        drop(lock);
     }
+    if policy == PullPolicy::Never {
+        bail!("{reference}: image not known");
+    }
+    pull_reserved(layout, reference, platform)
 }
 
 /// The id a reference or id names on this host, if any.
@@ -107,6 +120,16 @@ fn platform_for(requested: Option<&str>) -> Result<String> {
 
 /// Fetch `reference` and flatten it unless this host already holds that exact image.
 pub fn pull(layout: &Layout, reference: &str, platform: Option<&str>) -> Result<String> {
+    pull_reserved(layout, reference, platform).map(|(id, _lock)| id)
+}
+
+/// [`pull`], returning the image's lock so the caller can keep the image from
+/// being pruned until it has recorded its own use of it.
+fn pull_reserved(
+    layout: &Layout,
+    reference: &str,
+    platform: Option<&str>,
+) -> Result<(String, FileLock)> {
     layout.ensure()?;
     let platform = platform_for(platform)?;
     let crane = sys::find_tool("crane")?;
@@ -133,7 +156,7 @@ pub fn pull(layout: &Layout, reference: &str, platform: Option<&str>) -> Result<
     // The image lock covers flattening and recording the reference, so a prune
     // (which decides under the same lock) never sees the image between the two.
     // Lock order everywhere is image, then global.
-    let _image_lock = layout.lock_image(&id)?;
+    let image_lock = layout.lock_image(&id)?;
     if !layout.image(&id).join("config.json").is_file() {
         flatten(layout, &crane, &pinned, &platform, &id, &config)
             .with_context(|| format!("flatten {reference}"))?;
@@ -143,7 +166,7 @@ pub fn pull(layout: &Layout, reference: &str, platform: Option<&str>) -> Result<
     refs.format = METADATA_FORMAT;
     refs.refs.insert(normalize_reference(reference), id.clone());
     refs.write(layout)?;
-    Ok(id)
+    Ok((id, image_lock))
 }
 
 fn first_number(output: &[u8]) -> Option<u64> {

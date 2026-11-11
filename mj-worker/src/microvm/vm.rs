@@ -371,16 +371,16 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
         spec.name
     );
     // Pulling can take minutes and is not rolled back: a later run reuses the image.
-    let image_id = image::ensure_image(layout, &spec.image, spec.platform.as_deref(), spec.pull)?;
+    let (image_id, image_lock) =
+        image::ensure_image(layout, &spec.image, spec.platform.as_deref(), spec.pull)?;
     sys::install_interrupt_handlers();
     let mut created_volumes = Vec::new();
     let result = (|| -> Result<VmState> {
-        // Hold the image's lock from before the VM names it until its root disk
-        // is cloned, so a prune cannot remove it in between, and every volume's
+        // The image's lock, taken when `run` resolved the image, is held until
+        // its root disk is cloned, so a prune cannot remove it in between, and every volume's
         // lock until the state that lists them is written, so a `volume rm`
         // cannot remove one in between. Lock order: VM, image, volumes in name
         // order, global.
-        let _image_lock = layout.lock_image(&image_id)?;
         let mut names: Vec<&VolumeArg> = spec.volumes.iter().collect();
         names.sort_by(|a, b| a.name.cmp(&b.name));
         let mut volume_locks = Vec::new();
@@ -424,6 +424,8 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
             &image::root_image(layout, &image_id),
             &layout.vm(&state.name).join("root.ext4"),
         )?;
+        // The clone owns its blocks now; the base image can be pruned.
+        drop(image_lock);
         launch(layout, &state)?;
         Ok(state)
     })();

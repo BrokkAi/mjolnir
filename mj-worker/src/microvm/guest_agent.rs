@@ -395,7 +395,7 @@ impl Agent {
     fn start_main(self: &Arc<Self>, start: &StartRequest) -> Result<u32> {
         let user = resolve_user_in_guest(&start.user)?;
         for volume in start.volumes.iter().filter(|volume| volume.chown) {
-            lchown(Path::new(&volume.destination), user.uid, user.gid)
+            chown_tree(Path::new(&volume.destination), user.uid, user.gid)
                 .with_context(|| format!("give {} to the container user", volume.destination))?;
         }
         *self
@@ -759,6 +759,29 @@ fn ensure_runtime_directory(directory: &Path, user: &ResolvedUser) -> Result<()>
         fs::create_dir_all(directory)?;
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
         lchown(directory, user.uid, user.gid)?;
+    }
+    Ok(())
+}
+
+/// Podman's `U` volume option: change the owner of everything below `root`,
+/// without following symlinks and without crossing into other filesystems.
+fn chown_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let device = fs::symlink_metadata(root)?.dev();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.dev() != device {
+            continue;
+        }
+        if metadata.uid() != uid || metadata.gid() != gid {
+            lchown(&path, uid, gid)?;
+        }
+        if metadata.is_dir() {
+            for entry in fs::read_dir(&path)? {
+                pending.push(entry?.path());
+            }
+        }
     }
     Ok(())
 }
