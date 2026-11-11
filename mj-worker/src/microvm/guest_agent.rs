@@ -688,6 +688,9 @@ impl Agent {
             .context("start exec monitor")?;
         // Feed stdin until the client says it is done, or goes away.
         let mut stdin = spawned.stdin.take();
+        if let Some(pipe) = &stdin {
+            set_nonblocking(pipe.as_raw_fd()).context("make exec stdin non-blocking")?;
+        }
         loop {
             let frame = match frames.next_frame() {
                 Ok(Some(frame)) => frame,
@@ -698,7 +701,7 @@ impl Agent {
             match frame.kind {
                 FrameKind::Stdin => {
                     if let Some(pipe) = stdin.as_mut()
-                        && let Err(error) = pipe.write_all(&frame.payload)
+                        && let Err(error) = write_stdin(pipe, &frame.payload, &wake)
                     {
                         // The process closed its stdin or exited; later input
                         // has nowhere to go and is dropped.
@@ -855,6 +858,55 @@ impl Read for Source {
             Source::Stderr(pipe) => pipe.read(buffer),
         }
     }
+}
+
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    // SAFETY: fcntl on a descriptor the caller holds open.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// Write all of `data` to a non-blocking pipe, waiting for room while the
+/// process is alive. When the process exits (`wake` fires) with room never
+/// coming, because a descendant holds the pipe open and does not read it, the
+/// remaining input is abandoned as if the pipe had closed.
+fn write_stdin(pipe: &mut ChildStdin, mut data: &[u8], wake: &OwnedFd) -> io::Result<()> {
+    while !data.is_empty() {
+        match pipe.write(data) {
+            Ok(count) => data = &data[count..],
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let mut fds = [
+                    libc::pollfd {
+                        fd: pipe.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: wake.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                // SAFETY: `fds` is a valid array of two pollfd.
+                if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                } else if fds[0].revents == 0 && fds[1].revents != 0 {
+                    return Err(io::ErrorKind::BrokenPipe.into());
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn eventfd() -> Result<OwnedFd> {

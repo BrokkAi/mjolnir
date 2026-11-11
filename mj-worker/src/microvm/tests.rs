@@ -100,6 +100,26 @@ fn exec_survives_a_process_that_stops_reading_stdin_early() {
     assert_eq!(stdout, pattern(10));
 }
 
+// Hard-won: review: a background descendant that holds the exec's stdin open
+// without reading it left the connection thread blocked in a pipe write after
+// the exec had finished.
+#[test]
+fn exec_ends_when_a_descendant_holds_unread_stdin_open() {
+    let harness = Harness::new();
+    let (stream, thread) = harness.connect();
+    let exit = client::handshake(stream)
+        .unwrap()
+        .exec(
+            exec_request(&["sh", "-c", "sleep 5 & exit 0"]),
+            Some(Box::new(std::io::Cursor::new(pattern(2 << 20)))),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    assert_eq!(exit.code, Some(0));
+    thread.join().unwrap().unwrap();
+}
+
 /// Hands out one line, then waits to be released before reporting end of input.
 struct HeldInput {
     sent_first: bool,
