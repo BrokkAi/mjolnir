@@ -130,9 +130,7 @@ RUN apt-get update \
         openssh-client \
         patch \
         pkg-config \
-        podman \
         podman-remote \
-        crun \
         procps \
         python3 \
         python3-dev \
@@ -144,26 +142,16 @@ RUN apt-get update \
         time \
         tmux \
         unzip \
-        uidmap \
-        fuse-overlayfs \
-        passt \
         zip \
     && rm -rf /var/lib/apt/lists/* \
-    && rm -f /usr/local/bin/podman \
-    && printf '%s\n' '#!/bin/sh' \
-        'if [ -n "${CONTAINER_HOST:-}" ] || [ -n "${CONTAINER_CONNECTION:-}" ] || [ -S "/run/user/$(id -u)/podman/podman.sock" ] || [ -S /run/podman/podman.sock ]; then' \
-        '  exec /usr/bin/podman-remote "$@"' \
-        'fi' \
-        'exec /usr/bin/podman "$@"' \
-        > /usr/local/bin/podman \
-    && chmod 0755 /usr/local/bin/podman \
-    && mkdir -p /etc/containers/containers.conf.d \
-    && printf '%s\n' '[engine]' 'cgroup_manager="cgroupfs"' > /etc/containers/containers.conf.d/50-sandbox.conf \
+    && ln -s /usr/bin/podman-remote /usr/local/bin/podman \
     && aws --version \
     && /usr/bin/time --version
 
-# Container sessions use podman-remote through their mounted host socket;
-# Nitro guests have no host socket and use the local Podman engine instead.
+# `docker-cli` and `podman-remote` (as `podman`) are clients only. A daemon run
+# in this image with `[daemon] runtime = "docker"` or `"podman"` reaches the
+# host's engine through its mounted socket (`CONTAINER_HOST` for Podman), so
+# container sessions launch on the host exactly as from a host daemon.
 
 # Astral's distroless image provides native binaries for both supported
 # architectures. Keep uv on the shared PATH, including unprivileged sessions.

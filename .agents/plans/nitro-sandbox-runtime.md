@@ -15,8 +15,7 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - [x] (2026-11-10) Spike on a real m7i.4xlarge AL2023 host: agent-dev boots as a Nitro Sandbox in direct mode, vsock, two drives, NAT with IMDS refused, nested rootless Podman, stop/relaunch from retained disks. Notes and scripts: `.agents/docs/nitro-sandbox-spike.md` and `.agents/docs/nitro-sandbox-spike/`.
 - [ ] Milestone 1: host engine `mj-worker microvm` and guest agent, proven by hand on the spike host.
 - [ ] Milestone 2: `ssh_nitro` target kind in mj-core, mj-controller, mj-tui, with the breaking schema migration.
-- [ ] Milestone 3: `mj ec2 create --runtime nitro` host bootstrap; agent-dev image runs nested Podman without a host socket.
-- [ ] (2026-11-10) Milestone 3 host bootstrap and agent-dev nested Podman changes implemented; registration and image preload remain for integration with the parallel `ssh_nitro` target work. AWS-boundary fixtures cover the Nitro launch requests and bootstrap. Local image build is deferred because this sandbox's Podman runtime directory is read-only.
+- [x] (2026-11-10) Milestone 3: `mj ec2 create --runtime nitro` host bootstrap; AWS-boundary fixtures cover the Nitro launch requests and bootstrap. Registration and image preload remain for Milestone 4.
 - [ ] Milestone 4: integration and live acceptance on EC2.
 - [ ] Milestone 5: Firecracker jailer.
 - [ ] Milestone 6: storage-preserving image upgrade for Nitro sessions.
@@ -73,6 +72,10 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
   Rationale: upgrades complete without user intervention (AGENTS.md).
   Date/Author: 2026-11-10, lead.
 
+- Decision: Containers inside Nitro sessions (nested Podman or Docker) are out of scope; the agent-dev image stays unchanged.
+  Rationale: ordinary Podman sessions cannot run containers either (the image's `podman` is `podman-remote` with no socket in sessions), so this would be a new capability, not parity, and it would grow every session's image. The user chose to drop it on 2026-11-10; it is tracked in #1496. The guest init keeps the modules and device setup the spike used, which cost nothing at boot.
+  Date/Author: 2026-11-10, lead (user decision).
+
 ## Outcomes & Retrospective
 
 None yet.
@@ -126,11 +129,11 @@ Add `TargetTemplate::SshNitro { ssh: SshConnection, container: ContainerTemplate
 
 Tests: extend the existing schema migration tests for the new revision; extend an existing golden for the target list or doctor output to include an `ssh_nitro` target rather than adding a new family.
 
-### Milestone 3: EC2 host bootstrap and image
+### Milestone 3: EC2 host bootstrap
 
 Add `--runtime podman|nitro` (default `podman`) to `mj ec2 create`. For `nitro`: reject instance types that do not support Nitro Enclaves (`aws ec2 describe-instance-types` field `NitroEnclavesSupport`), use AMI `resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-<arch>`, pass `--enclave-options Enabled=true`, SSH user `ec2-user`, and bootstrap: `dnf install -y nftables e2fsprogs dracut git tar`, pinned Firecracker and jailer 1.18.0 and pinned `crane` downloaded with SHA-256 verification into `/usr/local/bin`, `grubby --update-kernel=ALL --args="nitro_enclaves.mempool=95%-1G"`, reboot, then verify kernel ≥ 6.18.51 and the `nitro_enclaves: CMA pool` line. Register an `ssh_nitro` target with the host's architecture as platform and preload the image through the existing refresher. Keep the Podman path unchanged.
 
-In `containers/Containerfile.agent-dev`, install the real Podman engine pieces the spike needed (`podman crun uidmap fuse-overlayfs passt`, `containers.conf.d` with `cgroup_manager="cgroupfs"` only when no systemd) and replace the `/usr/local/bin/podman` symlink with a small wrapper that uses `podman-remote` when the host socket that container sessions mount is present and the real engine otherwise, so nested containers work in both runtimes.
+The agent-dev image is unchanged; containers inside Nitro sessions are out of scope (see the Decision Log).
 
 ### Milestone 4: integration and live acceptance
 
@@ -150,7 +153,7 @@ Work happens in detached worktrees, one per milestone owner: `git worktree add -
 
 ## Validation and Acceptance
 
-On a host created by `mj ec2 create --runtime nitro`, using an isolated instance: (1) `mj doctor` reports the Nitro target ready with pool size and Firecracker version; (2) a new session on it reaches a first turn and the agent reports a guest kernel and PID 1 `mj-worker`; (3) the agent runs `git clone` and `curl https://github.com`, and `curl -s -m 3 http://169.254.169.254/` fails; (4) the agent runs `podman run --rm alpine echo ok` (nested); (5) `mj daemon restart --instance nitro-live` leaves the turn running and the session reattaches; (6) close and resume the session, with workspace contents intact; (7) destroy it, after which `sudo mj-worker microvm container exists`, `volume ls`, `ip link`, and `/sys/class/misc/nitro_enclaves/pcie_slots_in_use` show nothing left of it; (8) two sessions run concurrently and cannot reach each other; (9) a session asking for more memory than the pool has free is refused at admission with a message naming the pool.
+On a host created by `mj ec2 create --runtime nitro`, using an isolated instance: (1) `mj doctor` reports the Nitro target ready with pool size and Firecracker version; (2) a new session on it reaches a first turn and the agent reports a guest kernel and PID 1 `mj-worker`; (3) the agent runs `git clone` and `curl https://github.com`, and `curl -s -m 3 http://169.254.169.254/` fails; (5) `mj daemon restart --instance nitro-live` leaves the turn running and the session reattaches; (6) close and resume the session, with workspace contents intact; (7) destroy it, after which `sudo mj-worker microvm container exists`, `volume ls`, `ip link`, and `/sys/class/misc/nitro_enclaves/pcie_slots_in_use` show nothing left of it; (8) two sessions run concurrently and cannot reach each other; (9) a session asking for more memory than the pool has free is refused at admission with a message naming the pool.
 
 ## Idempotence and Recovery
 
