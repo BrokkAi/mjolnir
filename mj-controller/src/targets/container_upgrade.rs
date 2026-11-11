@@ -957,7 +957,9 @@ impl RetainedContainer {
     }
 
     /// Pin the prepared image in the VM's record. Unlike the Podman tag, the
-    /// pin cannot outlive the VM.
+    /// pin cannot outlive the VM. The engine also checks the image's root
+    /// filesystem for what the control-state transfer needs (the Podman
+    /// preflight's `run --rm` probe) and refuses before anything is stopped.
     fn nitro_stage(&self, host: &ImageHost, executor: &impl CommandExecutor) -> Result<()> {
         let image = self
             .prepared_image

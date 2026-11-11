@@ -122,6 +122,26 @@ pub fn stage(
     reference: &str,
     labels: &BTreeMap<String, String>,
 ) -> Result<String> {
+    stage_checked(
+        layout,
+        name,
+        operation,
+        reference,
+        labels,
+        &super::root_check::check_image,
+    )
+}
+
+/// `stage` with the image check given; tests, which have no mountable disk,
+/// give it a no-op.
+fn stage_checked(
+    layout: &Layout,
+    name: &str,
+    operation: &str,
+    reference: &str,
+    labels: &BTreeMap<String, String>,
+    check: &dyn Fn(&Layout, &str, &str, &str) -> Result<()>,
+) -> Result<String> {
     validate_name("container", name)?;
     validate_operation(operation)?;
     for (key, value) in labels {
@@ -129,6 +149,7 @@ pub fn stage(
     }
     let vm_lock = layout.lock_vm(name)?;
     refuse_absent(layout, name, &vm_lock)?;
+    let state = read_state(layout, name)?;
     let id =
         image::lookup(layout, reference)?.ok_or_else(|| anyhow!("{reference}: image not known"))?;
     // Held while the record is written: a prune decides under this lock.
@@ -137,6 +158,16 @@ pub fn stage(
         layout.image(&id).join("config.json").is_file(),
         "{reference}: image not known"
     );
+    // Every stage, first or repeated, checks the image before anything is
+    // stopped or swapped: the swap cannot be undone by the controller, and a
+    // worker state that cannot be restored would strand the session.
+    let path = state
+        .env
+        .iter()
+        .find_map(|entry| entry.strip_prefix("PATH="))
+        .unwrap_or(super::guest_agent::DEFAULT_PATH);
+    check(layout, &id, &state.user, path)
+        .with_context(|| format!("{reference} cannot replace the root disk of container {name}"))?;
     if let Some(existing) = read_record(layout, name)? {
         ensure!(
             existing.operation == operation,
@@ -409,6 +440,10 @@ mod tests {
         (directory, layout)
     }
 
+    fn accept(_: &Layout, _: &str, _: &str, _: &str) -> Result<()> {
+        Ok(())
+    }
+
     fn labels() -> BTreeMap<String, String> {
         BTreeMap::from([("dev.mj.container-upgrade".to_owned(), "op1".to_owned())])
     }
@@ -443,7 +478,7 @@ mod tests {
     fn apply_finishes_after_a_crash_between_any_two_steps() {
         for steps in 0..=3 {
             let (_directory, layout) = host();
-            stage(&layout, "t1", "op1", "agent:new", &labels()).unwrap();
+            stage_checked(&layout, "t1", "op1", "agent:new", &labels(), &accept).unwrap();
             crash_after(&layout, steps);
             let seen = observed(
                 &layout,
@@ -486,7 +521,7 @@ mod tests {
     #[test]
     fn release_keeps_the_only_root_disk_of_an_interrupted_swap() {
         let (_directory, layout) = host();
-        stage(&layout, "t1", "op1", "agent:new", &labels()).unwrap();
+        stage_checked(&layout, "t1", "op1", "agent:new", &labels(), &accept).unwrap();
         assert!(pinned_images(&layout).unwrap().contains(NEW_IMAGE));
         crash_after(&layout, 2);
         let error = release(&layout, "t1", "op1").unwrap_err();
@@ -494,7 +529,7 @@ mod tests {
         assert!(layout.vm("t1").join(PREVIOUS).exists());
 
         let (_directory, layout) = host();
-        stage(&layout, "t1", "op1", "agent:new", &labels()).unwrap();
+        stage_checked(&layout, "t1", "op1", "agent:new", &labels(), &accept).unwrap();
         release(&layout, "t1", "op1").unwrap();
         assert!(pinned_images(&layout).unwrap().is_empty());
         assert_eq!(root(&layout), "old root with session edits");
@@ -505,17 +540,18 @@ mod tests {
     #[test]
     fn stage_is_idempotent_and_refuses_a_second_operation() {
         let (_directory, layout) = host();
-        let first = stage(&layout, "t1", "op1", "agent:new", &labels()).unwrap();
+        let first = stage_checked(&layout, "t1", "op1", "agent:new", &labels(), &accept).unwrap();
         let record = read_record(&layout, "t1").unwrap().unwrap();
         assert_eq!(
-            stage(&layout, "t1", "op1", "agent:new", &labels()).unwrap(),
+            stage_checked(&layout, "t1", "op1", "agent:new", &labels(), &accept).unwrap(),
             first
         );
         assert_eq!(read_record(&layout, "t1").unwrap().unwrap(), record);
-        assert!(stage(&layout, "t1", "op1", "agent:old", &labels()).is_err());
-        let error = stage(&layout, "t1", "op2", "agent:new", &labels()).unwrap_err();
+        assert!(stage_checked(&layout, "t1", "op1", "agent:old", &labels(), &accept).is_err());
+        let error =
+            stage_checked(&layout, "t1", "op2", "agent:new", &labels(), &accept).unwrap_err();
         assert!(format!("{error:#}").contains("in progress"), "{error:#}");
         assert!(apply_stopped(&layout, "t1", "op2", &copy).is_err());
-        assert!(stage(&layout, "absent", "op1", "agent:new", &labels()).is_err());
+        assert!(stage_checked(&layout, "absent", "op1", "agent:new", &labels(), &accept).is_err());
     }
 }

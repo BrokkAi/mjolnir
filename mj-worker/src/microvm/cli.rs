@@ -66,6 +66,10 @@ enum Command {
     /// The guest agent. Runs as PID 1 inside a VM.
     #[command(hide = true)]
     GuestAgent,
+    /// Inside a private mount namespace: check an image mounted at ROOT; run by
+    /// `container replace-root stage`.
+    #[command(hide = true)]
+    RootCheckInner { root: PathBuf, path: String },
     /// Remove a TAP device; run by the VM's systemd unit when it stops.
     #[command(hide = true)]
     HostTapDown { tap: String },
@@ -320,6 +324,10 @@ fn dispatch(layout: &Layout, command: Command) -> Result<i32> {
         }
         Command::HostJailDown { slot } => {
             vm::release_host_resources(layout, slot)?;
+            Ok(0)
+        }
+        Command::RootCheckInner { root, path } => {
+            super::root_check::check_mounted(&root, &path)?;
             Ok(0)
         }
         Command::HostTapDown { tap } => {
