@@ -10,11 +10,11 @@
 //! directories and symlinks, never leaves the destination, and never writes
 //! through a symlink.
 
-use std::ffi::OsString;
+use std::ffi::CString;
 use std::fs;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -49,6 +49,11 @@ pub fn pack<W: Write>(source: &Path, out: W) -> Result<W> {
 ///
 /// `owner` is the owner every created entry receives; `None` leaves entries
 /// owned by the unpacking process.
+///
+/// Every operation is relative to a directory descriptor this function holds,
+/// and no step follows a symlink, so another process that swaps a checked
+/// directory for a symlink while the engine runs as root cannot redirect the
+/// unpacking: the swap is seen as an error, not followed.
 pub fn unpack<R: Read>(reader: R, destination: &Path, owner: Option<(u32, u32)>) -> Result<()> {
     // `metadata` follows a symlinked destination directory on purpose: that is
     // the destination the caller named. Entries below it never follow links.
@@ -71,45 +76,72 @@ pub fn unpack<R: Read>(reader: R, destination: &Path, owner: Option<(u32, u32)>)
             (parent, Some(name))
         }
     };
+    let root_fd = open_path(
+        libc::AT_FDCWD,
+        &root,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+    )
+    .with_context(|| format!("open {}", root.display()))?;
     let mut archive = tar::Archive::new(reader);
     for entry in archive.entries().context("read tar stream")? {
         let mut entry = entry.context("read tar entry")?;
         let relative = entry.path().context("read tar entry path")?.into_owned();
         let relative = rename_top(&relative, rename.as_deref())?;
-        let target = checked_target(&root, &relative)?;
-        // Never carry setuid or setgid across the VM boundary: a guest-made
-        // setuid file would become a privileged file on the host.
+        let (parent_path, name) = (
+            relative.parent().map(Path::to_path_buf).unwrap_or_default(),
+            relative
+                .file_name()
+                .ok_or_else(|| anyhow!("tar entry {} has no name", relative.display()))?
+                .to_owned(),
+        );
+        let parent = open_parents(&root_fd, &parent_path)?;
         let mode = entry.header().mode().unwrap_or(0o644) & 0o1777;
-        match entry.header().entry_type() {
+        let mtime = entry.header().mtime().ok();
+        let created: Option<OwnedFd> = match entry.header().entry_type() {
             tar::EntryType::Directory => {
-                match fs::symlink_metadata(&target) {
-                    Ok(existing) if existing.is_dir() => {}
-                    Ok(_) => {
-                        fs::remove_file(&target)
-                            .with_context(|| format!("replace {}", target.display()))?;
-                        fs::create_dir(&target)
-                            .with_context(|| format!("create {}", target.display()))?;
+                match stat_at(&parent, &name)? {
+                    Some(kind) if kind == libc::S_IFDIR => {}
+                    Some(_) => {
+                        unlink_at(&parent, &name, 0)?;
+                        make_dir_at(&parent, &name)?;
                     }
-                    Err(_) => fs::create_dir(&target)
-                        .with_context(|| format!("create {}", target.display()))?,
+                    None => make_dir_at(&parent, &name)?,
                 }
-                fs::set_permissions(&target, fs::Permissions::from_mode(mode))
-                    .with_context(|| format!("set mode of {}", target.display()))?;
+                Some(
+                    open_path(
+                        parent.as_raw_fd(),
+                        Path::new(&name),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                        0,
+                    )
+                    .with_context(|| format!("open {}", relative.display()))?,
+                )
             }
             tar::EntryType::Regular | tar::EntryType::Continuous => {
-                remove_non_directory(&target)?;
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .mode(mode)
-                    .open(&target)
-                    .with_context(|| format!("create {}", target.display()))?;
+                match stat_at(&parent, &name)? {
+                    Some(kind) if kind == libc::S_IFDIR => bail!(
+                        "refusing to replace directory {} with a file",
+                        relative.display()
+                    ),
+                    Some(_) => unlink_at(&parent, &name, 0)?,
+                    None => {}
+                }
+                let fd = open_path(
+                    parent.as_raw_fd(),
+                    Path::new(&name),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    0o600,
+                )
+                .with_context(|| format!("create {}", relative.display()))?;
+                let mut file = fs::File::from(fd);
                 std::io::copy(&mut entry, &mut file)
-                    .with_context(|| format!("write {}", target.display()))?;
-                // The creation mode is filtered by the umask.
-                file.set_permissions(fs::Permissions::from_mode(mode))
-                    .with_context(|| format!("set mode of {}", target.display()))?;
+                    .with_context(|| format!("write {}", relative.display()))?;
+                Some(OwnedFd::from(file))
             }
             tar::EntryType::Symlink => {
                 let link = entry
@@ -117,22 +149,80 @@ pub fn unpack<R: Read>(reader: R, destination: &Path, owner: Option<(u32, u32)>)
                     .context("read symlink target")?
                     .ok_or_else(|| anyhow!("symlink entry {} has no target", relative.display()))?
                     .into_owned();
-                remove_non_directory(&target)?;
-                symlink(&link, &target)
-                    .with_context(|| format!("create symlink {}", target.display()))?;
+                match stat_at(&parent, &name)? {
+                    Some(kind) if kind == libc::S_IFDIR => bail!(
+                        "refusing to replace directory {} with a symlink",
+                        relative.display()
+                    ),
+                    Some(_) => unlink_at(&parent, &name, 0)?,
+                    None => {}
+                }
+                let target = c_string(link.as_os_str().as_bytes())?;
+                let link_name = c_string(name.as_bytes())?;
+                // SAFETY: both strings are NUL-terminated and `parent` is an open directory.
+                if unsafe {
+                    libc::symlinkat(target.as_ptr(), parent.as_raw_fd(), link_name.as_ptr())
+                } != 0
+                {
+                    return Err(std::io::Error::last_os_error())
+                        .with_context(|| format!("create symlink {}", relative.display()));
+                }
+                if let Some((uid, gid)) = owner {
+                    // SAFETY: as above; AT_SYMLINK_NOFOLLOW keeps the change on the link.
+                    if unsafe {
+                        libc::fchownat(
+                            parent.as_raw_fd(),
+                            link_name.as_ptr(),
+                            uid,
+                            gid,
+                            libc::AT_SYMLINK_NOFOLLOW,
+                        )
+                    } != 0
+                    {
+                        return Err(std::io::Error::last_os_error())
+                            .with_context(|| format!("change owner of {}", relative.display()));
+                    }
+                }
+                None
             }
             other => bail!(
                 "unsupported tar entry type {other:?} for {}",
                 relative.display()
             ),
-        }
-        if let Some((uid, gid)) = owner {
-            lchown(&target, uid, gid)?;
-        }
-        if !matches!(entry.header().entry_type(), tar::EntryType::Symlink)
-            && let Ok(mtime) = entry.header().mtime()
-        {
-            set_mtime(&target, mtime)?;
+        };
+        if let Some(fd) = created {
+            let raw = fd.as_raw_fd();
+            // The creation mode is filtered by the umask; set it exactly.
+            // SAFETY: `raw` is an open descriptor owned by `fd`.
+            if unsafe { libc::fchmod(raw, mode as libc::mode_t) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("set mode of {}", relative.display()));
+            }
+            if let Some((uid, gid)) = owner {
+                // SAFETY: as above.
+                if unsafe { libc::fchown(raw, uid, gid) } != 0 {
+                    return Err(std::io::Error::last_os_error())
+                        .with_context(|| format!("change owner of {}", relative.display()));
+                }
+            }
+            if let Some(seconds) = mtime {
+                let times = [
+                    libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: libc::UTIME_OMIT,
+                    },
+                    libc::timespec {
+                        tv_sec: seconds as _,
+                        tv_nsec: 0,
+                    },
+                ];
+                // SAFETY: `times` holds two timespecs and `raw` is open.
+                if unsafe { libc::futimens(raw, times.as_ptr()) } != 0 {
+                    return Err(std::io::Error::last_os_error()).with_context(|| {
+                        format!("set modification time of {}", relative.display())
+                    });
+                }
+            }
         }
     }
     Ok(())
@@ -155,81 +245,104 @@ fn rename_top(path: &Path, rename: Option<&std::ffi::OsStr>) -> Result<PathBuf> 
     Ok(result)
 }
 
-/// `root` joined with `relative`, creating missing parents and refusing a
-/// symlink anywhere between them.
-fn checked_target(root: &Path, relative: &Path) -> Result<PathBuf> {
-    let mut current = root.to_path_buf();
-    let parts: Vec<OsString> = relative
-        .components()
-        .map(|component| component.as_os_str().to_owned())
-        .collect();
-    for (index, part) in parts.iter().enumerate() {
-        current.push(part);
-        if index + 1 == parts.len() {
-            break;
-        }
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => bail!(
-                "refusing to unpack through {}: it is not a directory",
-                current.display()
-            ),
-            Err(_) => {
-                fs::create_dir(&current).with_context(|| format!("create {}", current.display()))?
+fn c_string(bytes: &[u8]) -> Result<CString> {
+    CString::new(bytes).context("a path contains a NUL byte")
+}
+
+/// `openat` that reports `errno`.
+fn open_path(
+    dir: libc::c_int,
+    path: &Path,
+    flags: libc::c_int,
+    mode: libc::mode_t,
+) -> Result<OwnedFd> {
+    let path = c_string(path.as_os_str().as_bytes())?;
+    // SAFETY: `path` is NUL-terminated; `dir` is AT_FDCWD or an open directory.
+    let fd = unsafe { libc::openat(dir, path.as_ptr(), flags, libc::c_uint::from(mode)) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: `fd` is a fresh descriptor this function owns.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// The file type bits of `name` in `dir`, or `None` if it does not exist; a symlink is not followed.
+fn stat_at(dir: &OwnedFd, name: &std::ffi::OsStr) -> Result<Option<libc::mode_t>> {
+    let name = c_string(name.as_bytes())?;
+    // SAFETY: `stat` is plain old data filled by the call; `name` is NUL-terminated.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: as above, `dir` is an open directory.
+    if unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0
+    {
+        return Ok(Some(stat.st_mode & libc::S_IFMT));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return Ok(None);
+    }
+    Err(error).context("stat a tar destination")
+}
+
+fn unlink_at(dir: &OwnedFd, name: &std::ffi::OsStr, flags: libc::c_int) -> Result<()> {
+    let name = c_string(name.as_bytes())?;
+    // SAFETY: `name` is NUL-terminated and `dir` is an open directory.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), flags) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("replace a tar destination");
+    }
+    Ok(())
+}
+
+fn make_dir_at(dir: &OwnedFd, name: &std::ffi::OsStr) -> Result<()> {
+    let name = c_string(name.as_bytes())?;
+    // SAFETY: `name` is NUL-terminated and `dir` is an open directory.
+    if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("create a tar directory");
+    }
+    Ok(())
+}
+
+/// Open (creating missing ones) the directories of `relative` below `root`,
+/// one component at a time, each relative to the previous descriptor and
+/// refusing symlinks.
+fn open_parents(root: &OwnedFd, relative: &Path) -> Result<OwnedFd> {
+    let mut current = root
+        .try_clone()
+        .context("duplicate the destination descriptor")?;
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            continue;
+        };
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let opened = open_path(current.as_raw_fd(), Path::new(part), flags, 0);
+        let next = match opened {
+            Ok(fd) => fd,
+            Err(error) if is_errno(&error, libc::ENOENT) => {
+                make_dir_at(&current, part)?;
+                open_path(current.as_raw_fd(), Path::new(part), flags, 0)?
             }
-        }
+            Err(error) if is_errno(&error, libc::ELOOP) || is_errno(&error, libc::ENOTDIR) => {
+                bail!(
+                    "refusing to unpack through {}: it is not a directory",
+                    relative.display()
+                )
+            }
+            Err(error) => return Err(error),
+        };
+        current = next;
     }
     Ok(current)
 }
 
-fn remove_non_directory(target: &Path) -> Result<()> {
-    match fs::symlink_metadata(target) {
-        Ok(metadata) if metadata.is_dir() => bail!(
-            "refusing to replace directory {} with a file",
-            target.display()
-        ),
-        Ok(_) => fs::remove_file(target).with_context(|| format!("replace {}", target.display())),
-        Err(_) => Ok(()),
-    }
-}
-
-fn lchown(path: &Path, uid: u32, gid: u32) -> Result<()> {
-    let path_bytes = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("path {} contains a NUL byte", path.display()))?;
-    // SAFETY: `path_bytes` is a valid NUL-terminated string for the call.
-    if unsafe { libc::lchown(path_bytes.as_ptr(), uid, gid) } != 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("change owner of {}", path.display()));
-    }
-    Ok(())
-}
-
-fn set_mtime(path: &Path, seconds: u64) -> Result<()> {
-    let path_bytes = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("path {} contains a NUL byte", path.display()))?;
-    let times = [
-        libc::timespec {
-            tv_sec: 0,
-            tv_nsec: libc::UTIME_OMIT,
-        },
-        libc::timespec {
-            tv_sec: seconds as _,
-            tv_nsec: 0,
-        },
-    ];
-    // SAFETY: both pointers are valid for the call; AT_SYMLINK_NOFOLLOW keeps
-    // the update on the entry itself.
-    let result = unsafe {
-        libc::utimensat(
-            libc::AT_FDCWD,
-            path_bytes.as_ptr(),
-            times.as_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("set modification time of {}", path.display()));
-    }
-    Ok(())
+fn is_errno(error: &anyhow::Error, errno: libc::c_int) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .and_then(std::io::Error::raw_os_error)
+        == Some(errno)
 }
