@@ -23,6 +23,15 @@ use super::{image, sys};
 
 /// The programs the control-state transfer runs in the guest.
 const REQUIRED_PROGRAMS: [&str; 3] = ["sh", "tar", "flock"];
+/// The options of `restore_control_state` and `capture_control_state`, as
+/// the controller's tar probe names them.
+const TAR_OPTIONS: [&str; 5] = [
+    "one-file-system",
+    "unlink-first",
+    "strip-components",
+    "no-recursion",
+    "occurrence",
+];
 /// Where the worker keeps the state the transfer carries.
 const CONTROL_ROOT: &str = "/var/lib/hel";
 /// The kernel's limit on symlinks followed in one lookup.
@@ -92,20 +101,46 @@ pub fn check_mounted(root: &Path, path: &str) -> Result<()> {
 fn problems(root: &Path, path: &str) -> Vec<String> {
     let mut problems = Vec::new();
     for program in REQUIRED_PROGRAMS {
-        if !path.split(':').any(|directory| {
+        let found = path.split(':').find_map(|directory| {
             let directory = if directory.is_empty() { "." } else { directory };
-            matches!(
-                resolve(root, &format!("{directory}/{program}")),
-                Ok(Some(file)) if is_executable_file(&file)
-            )
-        }) {
-            problems.push(format!("`{program}` is not an executable on PATH ({path})"));
+            match resolve(root, &format!("{directory}/{program}")) {
+                Ok(Some(file)) if is_executable_file(&file) => Some(file),
+                _ => None,
+            }
+        });
+        match found {
+            None => problems.push(format!("`{program}` is not an executable on PATH ({path})")),
+            Some(file) if program == "tar" => {
+                let missing = missing_tar_options(&file);
+                if !missing.is_empty() {
+                    problems.push(format!(
+                        "its `tar` lacks the options the restore uses ({}); it needs GNU tar",
+                        missing.join(", ")
+                    ));
+                }
+            }
+            Some(_) => {}
         }
     }
     if let Err(reason) = creatable_directory(root, CONTROL_ROOT) {
         problems.push(format!("{CONTROL_ROOT} cannot be created: {reason:#}"));
     }
     problems
+}
+
+/// The restore runs `tar` with these long options, and the source-side
+/// preflight looks for them in `tar --help`. GNU tar carries its option names
+/// in its own binary, BusyBox's tar lacks `unlink-first` and `occurrence`, so
+/// the static counterpart of that check is a search of the binary, which
+/// nothing executes.
+fn missing_tar_options(tar: &Path) -> Vec<&'static str> {
+    let Ok(binary) = fs::read(tar) else {
+        return TAR_OPTIONS.to_vec();
+    };
+    TAR_OPTIONS
+        .into_iter()
+        .filter(|option| !binary.windows(option.len()).any(|w| w == option.as_bytes()))
+        .collect()
 }
 
 fn is_executable_file(file: &Path) -> bool {
@@ -208,7 +243,11 @@ mod tests {
         }
         symlink("usr/bin", root.path().join("bin")).unwrap();
         let busybox = root.path().join("usr/bin/busybox");
-        fs::write(&busybox, b"\x7fELF").unwrap();
+        fs::write(
+            &busybox,
+            b"\x7fELF one-file-system unlink-first strip-components no-recursion occurrence",
+        )
+        .unwrap();
         fs::set_permissions(&busybox, fs::Permissions::from_mode(0o755)).unwrap();
         for program in ["sh", "tar", "flock"] {
             // Absolute links resolve against the image, not the host.
@@ -243,6 +282,23 @@ mod tests {
         symlink("loop-b", root.path().join("usr/bin/loop-a")).unwrap();
         symlink("loop-a", root.path().join("usr/bin/loop-b")).unwrap();
         assert!(resolve(root.path(), "/usr/bin/loop-a").is_err());
+    }
+
+    // Hard-won: review of the first version found a BusyBox-style tar passing a
+    // check the restore's GNU-only options would then fail after the swap.
+    #[test]
+    fn a_tar_without_the_restore_options_is_named() {
+        let root = tree();
+        let tar = root.path().join("usr/bin/tar");
+        fs::remove_file(&tar).unwrap();
+        fs::write(&tar, b"\x7fELF no-recursion strip-components").unwrap();
+        fs::set_permissions(&tar, fs::Permissions::from_mode(0o755)).unwrap();
+        let named = problems(root.path(), PATH);
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert!(
+            named[0].contains("unlink-first, occurrence") && !named[0].contains("strip-components"),
+            "{named:?}"
+        );
     }
 
     #[test]
