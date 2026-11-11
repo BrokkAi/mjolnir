@@ -18,7 +18,7 @@ A session whose turn stopped at a provider quota limit should be able to switch 
 - [x] (2026-11-11) Removed blocking recovery/upgrade result settlement from the serving loop; four focused publication/admission/lifecycle tests passed.
 - [ ] Diagnose the reported `d1af5b48` project-memory snapshot relay disconnect and resolve the proven cause if it lies in this path.
 - [x] (2026-11-11) With explicit user authorization, fast-forwarded the checkout by 80 upstream commits to 2fc7ec17b, preserving all in-progress edits.
-- [ ] Review the integrated changes and complete validation.
+- [x] (2026-11-11) Reviewed the integrated changes; completed full core/controller suites with the sole older-fixture failure repaired and rerun, workspace clippy, formatting and diff checks.
 - [ ] Commit, complete push review, push to origin/master, and close the issue.
 
 ## Surprises & Discoveries
@@ -54,6 +54,10 @@ Implementation and validation are in progress. No installation is authorized by 
 The result-publication change now keeps configuration-lock waits out of the serving loop. Upgrade failure settlement retains the existing per-session attempt and a named daemon admission through the durable write. Four focused tests passed, including actual Ping/Stop traffic while the configuration lock remains held and a real SQLite write-lock wait while another session proceeds. Log: `.mj/agents/4a58f6d94bc675fcf4acd5f24798cfc1/publication-tests-retry.log`.
 
 The full admission regression now requires a completed Move, the destination profile, unchanged native history/cache, and an active goal in the canonical checkpoint. It also proves that a running turn and a newer completed turn prevent the old automatic decision, and that an autonomous turn at checkpoint acquisition remains alive without a CancelTurn command. Intermediate fixture failures exposed missing native history and insufficient outcome assertions; both were corrected. Passing log: `.mj/agents/1cbd92b1e462d4831611d7744363a0df/retest8.log`. Full touched-crate tests and workspace clippy are running after the source edits stabilized.
+
+Final validation: controller 2544 passed and 19 ignored, with one older native-source fixture initially failing because it supplied no pending quota recovery. That fixture now models a real quota-stopped live source and its focused rerun passed. Core 643 passed and 3 ignored; the three Jev scenario tests passed; documentation tests completed without failures. Workspace clippy passed after collapsing one nested conditional. Relevant logs are `consolidated-tests.log`, `consolidated-core-tests.log`, `consolidated-core-scenarios.log`, `consolidated-doctests.log`, and `consolidated-clippy-retry.log` in the publication agent's report directory, and `native-drain-fix2.log` in the Move agent's report directory. No full suite was repeated to confirm the fixture repair.
+
+The separate relay disconnect is now proven to be an oversized project-memory snapshot frame on morannon, tracked in #1500. Its transfer design is under investigation; raising the global frame cap would only postpone the failure.
 
 ## Context and Orientation
 

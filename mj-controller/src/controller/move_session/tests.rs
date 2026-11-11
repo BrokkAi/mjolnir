@@ -3929,7 +3929,10 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
                 crate::controller::checkpoint::tests::LATCH_RECORD_SUBAGENT_ADMISSION,
                 "1",
             )
-            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env(
+                crate::controller::checkpoint::tests::LATCH_RELAY_JOURNALS_BEFORE_CLOSE,
+                crate::controller::checkpoint::tests::LATE_HARNESS_NOTIFICATION,
+            )
             .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
             .isolated_store(directory.path())
             .run();
@@ -3953,6 +3956,15 @@ fn in_place_move_drains_the_queue_of_a_native_source() {
     operation.quota_stop_reason = Some("weekly quota exhausted".into());
     operation.quota_continuation = Some(mj_core::state::QuotaMoveContinuation::Prompt);
     operation.queue = ResumeQueueDisposition::Start;
+    // A live quota-stopped source has native history and pending recovery.
+    let native = worker_root.join("profile/projects/fixture/native-session.jsonl");
+    fs::create_dir_all(native.parent().unwrap()).unwrap();
+    fs::write(&native, b"{\"type\":\"assistant\"}\n").unwrap();
+    // The automatic Move must belong to a pending, quota-stopped turn.
+    let source_relay = seed_source_relay(&worker_root);
+    let mut relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    seed_quota_recovery(&mut relay, "native-source-quota-turn");
+    drop(relay);
     let executor = RecordingProcessExecutor::default();
     run_in_place_move(&mut controller, &mut operation, &worker_root, &executor).unwrap();
     assert_eq!(

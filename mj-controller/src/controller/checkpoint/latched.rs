@@ -465,11 +465,11 @@ impl Controller {
                 return Err(CheckpointDeferred::harness_busy().into());
             }
         }
-        if let Some(expected) = &quota_recovery {
-            if super::super::move_session::quota_move_recovery(&barrier.operational).ok() != Some(expected) {
-                relay.cancel_abandoned_barrier().await?;
-                anyhow::bail!("quota Move recovery changed before source close");
-            }
+        if let Some(expected) = &quota_recovery
+            && super::super::move_session::quota_move_recovery(&barrier.operational).ok() != Some(expected)
+        {
+            relay.cancel_abandoned_barrier().await?;
+            anyhow::bail!("quota Move recovery changed before source close");
         }
         let barrier_ready_at = Instant::now();
         // Project memory is checkpoint state, not relay connection state.
