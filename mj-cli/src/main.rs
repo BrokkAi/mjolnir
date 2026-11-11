@@ -516,6 +516,8 @@ enum SetupPlatform {
 }
 
 fn main() -> Result<()> {
+    // First, before any thread or child: every child inherits the limit.
+    mj_core::subprocess::raise_open_file_limit();
     mj_controller::server::install_rustls_crypto_provider();
     let cli = Cli::parse();
     if let Some(notice) = replacement_notice(cli.command.as_ref()) {
