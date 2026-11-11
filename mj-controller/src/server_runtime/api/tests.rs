@@ -874,6 +874,7 @@ fn ready_view(model: &str) -> ManagedSessionView {
         agent_info: None,
         runtime: None,
         steering_supported: None,
+        mailbox_delivery: None,
         turn_controls: None,
         config_options: vec![option],
         modes: None,
@@ -2587,6 +2588,8 @@ fn message_backend_for_session(
         .unwrap()
         .operational
         .relay_protocol_version = Some(protocol);
+    view.snapshot.as_mut().unwrap().operational.mailbox_delivery =
+        Some(mj_core::mailbox::MailboxDeliveryMode::TurnBoundary);
     let session = ScriptedSession {
         inner: FakeSession {
             session_id: session_id.into(),
@@ -2681,6 +2684,11 @@ async fn send_message_to_parked_child_unparks_once_and_legacy_request_uses_the_s
         assert_eq!(result["child_session_id"], "child-1");
         assert!(result.get("session_id").is_none());
         assert!(result.get("turn_id").is_none());
+        assert_eq!(result["mailbox_delivery"], "turn_boundary");
+        assert_eq!(
+            result["note"],
+            "If the recipient is working, delivery is deferred until its current turn ends."
+        );
     }
     let pending = crate::database::pending_mailbox_events(10).unwrap();
     assert_eq!(pending.len(), 1, "a request retry inserts one outbox event");
@@ -2856,9 +2864,12 @@ async fn send_message_to_parked_child_unparks_once_and_legacy_request_uses_the_s
         .execute_subagent_tool("parent-1".into(), cached_alias)
         .await;
     assert!(!alias_answer.is_error, "{}", alias_answer.message);
+    let alias_result: serde_json::Value = serde_json::from_str(&alias_answer.message).unwrap();
+    assert_eq!(alias_result["via"], "mailbox");
+    assert_eq!(alias_result["mailbox_delivery"], "turn_boundary");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&alias_answer.message).unwrap()["via"],
-        "mailbox"
+        alias_result["note"],
+        "If the recipient is working, delivery is deferred until its current turn ends."
     );
     let pending = crate::database::pending_mailbox_events(10).unwrap();
     assert!(
@@ -2905,6 +2916,11 @@ async fn send_message_to_peer_queues_typed_event_with_the_calling_session_as_sen
     assert!(!answer.is_error, "{}", answer.message);
     let result: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
     assert_eq!(result["via"], "mailbox");
+    assert_eq!(result["mailbox_delivery"], "turn_boundary");
+    assert_eq!(
+        result["note"],
+        "If the recipient is working, delivery is deferred until its current turn ends."
+    );
     let pending = crate::database::pending_mailbox_events(10).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].target_session_id, "peer-1");

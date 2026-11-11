@@ -8,7 +8,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
+use mj_core::mailbox::{MailboxDeliveryMode, MailboxEvent, MailboxEventBody};
 use mj_core::relay::{
     RELAY_EVENT_GENESIS_DIGEST, RELAY_PROTOCOL_VERSION, RelayCommand, RelayObservation,
     RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponsePayload,
@@ -554,6 +554,7 @@ fn mailbox_post_tool_use_hook_stays_empty_and_turn_boundaries_deliver() {
     let socket = root.path().join("control.sock");
     let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
     let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    relay.set_mailbox_delivery_mode(MailboxDeliveryMode::TurnBoundary);
     let event = MailboxEvent {
         key: "api:post-tool-use-guard".into(),
         source: "api".into(),
@@ -626,4 +627,92 @@ fn mailbox_post_tool_use_hook_stays_empty_and_turn_boundaries_deliver() {
             ..
         } if event_keys.as_slice() == ["api:post-tool-use-guard"] && hook_event == "PostToolBatch"
     )));
+}
+
+// Hard-won: #1492: OpenAI-backed Codex sessions were left waiting until turn end after #1277 suppressed every PostToolUse drain.
+#[test]
+fn openai_codex_mailbox_hook_delivers_at_the_tool_boundary() {
+    let root = tempfile::tempdir().expect("isolated mailbox hook root");
+    let relay_root = root.path().join("relay");
+    let data_dir = root.path().join("data");
+    let config_dir = root.path().join("config");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let socket = root.path().join("control.sock");
+    let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
+    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    relay.set_mailbox_delivery_mode(MailboxDeliveryMode::ToolBoundary);
+    let event = MailboxEvent {
+        key: "api:openai-post-tool-use".into(),
+        source: "api".into(),
+        wake: false,
+        created_at_ms: 1,
+        body: MailboxEventBody::PlainText {
+            text: "OpenAI-backed Codex receives this at its next tool boundary.".into(),
+        },
+    };
+    let accepted = relay.handle(RelayRequestEnvelope {
+        request_id: "seed-openai-post-tool-use-event".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Submit {
+            command_id: "seed-openai-post-tool-use-event-command".into(),
+            command: RelayCommand::DeliverMailboxEvent {
+                event: event.clone(),
+            },
+        },
+    });
+    assert!(matches!(accepted.body, RelayResponseBody::Ok { .. }));
+
+    let server = std::thread::spawn(move || {
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().expect("accept mailbox hook connection");
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            serve_relay_json_lines(&mut reader, &mut writer, &mut relay)
+                .expect("serve the actual durable relay protocol");
+        }
+        relay
+    });
+
+    let tool_boundary = run_hook_with_stdin(
+        &socket,
+        &data_dir,
+        &config_dir,
+        "PostToolUse",
+        serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "openai-backed-codex-session",
+        }))
+        .unwrap(),
+    );
+    let batch_control = run_hook(&socket, &data_dir, &config_dir);
+    let mut relay = server.join().expect("relay socket server thread");
+
+    assert_eq!(
+        tool_boundary["hookSpecificOutput"]["additionalContext"],
+        mj_core::mailbox::render_mailbox_events(std::slice::from_ref(&event))
+    );
+    assert_eq!(batch_control, serde_json::json!({}));
+    let journal = relay_events(&mut relay, "inspect-openai-post-tool-use-delivery");
+    assert!(journal.iter().any(|record| matches!(
+        &record.observation,
+        RelayObservation::MailboxEventsDelivered {
+            event_keys,
+            path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+            hook_event: Some(hook_event),
+            ..
+        } if event_keys.as_slice() == ["api:openai-post-tool-use"]
+            && hook_event == "PostToolUse"
+    )));
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|record| matches!(
+                &record.observation,
+                RelayObservation::MailboxHookLeaseCreated { lease }
+                    if lease.hook_event == "PostToolUse"
+            ))
+            .count(),
+        1
+    );
 }

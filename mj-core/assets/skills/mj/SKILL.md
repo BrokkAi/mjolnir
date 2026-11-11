@@ -98,11 +98,15 @@ child sessions in the same target and filesystem:
   what Mjolnir observed when the child finished (processes its agent left running,
   its working tree). Read them against the child's own report.
 - `send_message` — send follow-up work to one child. With a worker that supports
-  structured events, a running child receives it at its next tool boundary without its turn being cancelled; an idle child wakes and
-  a parked child starts again. Several messages sent while the child is busy
-  arrive together. Otherwise Mjolnir queues a new turn. A mailbox queue
-  receipt is not child delivery confirmation; do not resend it. `list_agents` shows
-  pending messages and delivery failures, marked `via: mailbox` or `via: turn`.
+  structured events, a running child receives it at its next tool boundary
+  without its turn being cancelled. This includes OpenAI-backed Codex and
+  other supported mid-turn harnesses. Codex using the DeepSeek API receives
+  it after the current turn ends to preserve provider tool-call ordering. An idle child wakes and a parked child starts again. Several
+  messages sent while the child is busy arrive together. When mailbox delivery
+  is unavailable, Mjolnir queues a new turn. The response includes delivery
+  timing when the worker reports it. A mailbox queue receipt is not child
+  delivery confirmation; do not resend it. `list_agents` shows pending messages
+  and delivery failures, marked `via: mailbox` or `via: turn`.
 - `close` — stop a child and keep its conversation.
 - `ask_oracle` — listed when the user configured an oracle model. Consult a
   strong read-only advisor before a hard-to-reverse decision; send the decision,

@@ -1648,6 +1648,7 @@ async fn prepare_and_start_harness(
     }
 
     let mut claude_mailbox_hook_available = false;
+    let mut codex_mailbox_delivery = None;
     let profile_registration = match config.harness {
         HarnessKind::Codex => {
             let budget = preparation_step(
@@ -1670,7 +1671,7 @@ async fn prepare_and_start_harness(
             let policy = config.execution_policy;
             let mailboxes_enabled = config.agent_mailboxes_enabled;
             let subtle_subagents = config.subtle_subagents;
-            let (registered, environment) =
+            let (registered, environment, mode) =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                     if step_cancel.is_cancelled() {
                         bail!("preparation cancelled before configuring the Codex profile");
@@ -1689,10 +1690,19 @@ async fn prepare_and_start_harness(
                         },
                         review_tools,
                     )?;
-                    Ok((registered, environment))
+                    // The staged home holds the configuration Codex runs
+                    // with, overlay included. An unreadable one fails startup
+                    // here rather than guessing a delivery mode.
+                    let provider = mj_core::codex_provider::codex_provider(&home, None)
+                        .context("resolve the Codex provider for mailbox delivery")?;
+                    let mode = mj_core::mailbox::MailboxDeliveryMode::for_codex_provider(
+                        provider.as_ref(),
+                    );
+                    Ok((registered, environment, mode))
                 })
                 .await?;
             config.environment = environment;
+            codex_mailbox_delivery = Some(mode);
             registered
         }
         HarnessKind::Claude => {
@@ -1801,10 +1811,14 @@ async fn prepare_and_start_harness(
         }
         _ => false,
     };
-    relay
-        .lock()
-        .expect("relay state lock poisoned")
-        .set_steering_delivery_mode(config.harness, claude_mailbox_hook_available);
+    {
+        let mut relay = relay.lock().expect("relay state lock poisoned");
+        relay.set_steering_delivery_mode(config.harness, claude_mailbox_hook_available);
+        // Resolved before the harness starts, so no hook can drain earlier.
+        if let Some(mode) = codex_mailbox_delivery {
+            relay.set_mailbox_delivery_mode(mode);
+        }
+    }
     if config.project_memory.is_some()
         && resume_session.is_none()
         && config.harness != HarnessKind::Claude
