@@ -168,7 +168,10 @@ pub struct RelayClient {
     subagent_publication: Option<SubagentQueueSnapshot>,
     /// The operational state the worker last sent on this connection and its
     /// digest. A protocol-57 worker skips resending a state that matches it.
-    known_state: Option<(String, mj_core::relay::RelayOperationalState)>,
+    known_state: Option<(
+        String,
+        mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
+    )>,
     /// The shared-connection session the proxy runs on, held for as long as
     /// the proxy runs.
     ssh_session: Option<SshSessionLease>,

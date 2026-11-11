@@ -67,7 +67,7 @@ pub(super) async fn get_session(
                     session.config_options = options;
                 }
                 if view.connected {
-                    session.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
+                    session.background_work = Some(ApiBackgroundWork::from(&*snapshot.operational));
                     session.assessment = snapshot.operational.assessment.as_deref().map(Into::into);
                 }
             }

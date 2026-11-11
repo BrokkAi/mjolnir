@@ -556,7 +556,7 @@ pub struct ManagedSessionSnapshot {
     /// What `materialized.transcript` leaves out, and the facts that live
     /// there. See [`ProjectionWindow`].
     pub window: ProjectionWindow,
-    pub operational: RelayOperationalState,
+    pub operational: crate::snapshot_map::SharedSnapshot<RelayOperationalState>,
     /// Newest relay event observed by this live actor that asks for immediate
     /// credential reconciliation. This is intentionally ephemeral: it avoids
     /// retaining raw replay pages or rescanning projected history.
@@ -566,9 +566,11 @@ pub struct ManagedSessionSnapshot {
     /// field; either way the worker is not known to match this controller.
     pub worker_build: Option<String>,
     /// Pending parent-tool work fetched from the target worker.
-    pub subagent_requests: Vec<crate::subagent::SubagentToolRequest>,
+    pub subagent_requests:
+        crate::snapshot_map::SharedSnapshot<Vec<crate::subagent::SubagentToolRequest>>,
     /// Compact completion receipts; full tool replies remain worker-private.
-    pub subagent_completions: Vec<crate::subagent::SubagentCompletion>,
+    pub subagent_completions:
+        crate::snapshot_map::SharedSnapshot<Vec<crate::subagent::SubagentCompletion>>,
     /// Delegation transport failures do not make the worker's controls unreachable.
     pub subagent_queue_error: Option<String>,
 }

@@ -65,7 +65,8 @@ pub struct RuntimeStateUpdate {
 pub(super) struct PublishedView {
     pub(super) projection_ordinal: u64,
     pub(super) projection_digest: String,
-    pub(super) operational: Option<mj_core::relay::RelayOperationalState>,
+    pub(super) operational:
+        Option<mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>>,
     pub(super) connected: bool,
     pub(super) error: Option<String>,
 }
@@ -367,8 +368,8 @@ pub(super) fn runtime_projection_view(
                     operational,
                     latest_credential_sync_signal: runtime.latest_credential_sync_signal,
                     worker_build: None,
-                    subagent_requests: Vec::new(),
-                    subagent_completions: Vec::new(),
+                    subagent_requests: Default::default(),
+                    subagent_completions: Default::default(),
                     subagent_queue_error: None,
                 }),
                 connected: runtime.connected,

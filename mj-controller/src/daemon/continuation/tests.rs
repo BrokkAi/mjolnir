@@ -75,11 +75,11 @@ fn view(id: &str, completed: bool) -> ManagedSessionView {
         snapshot: Some(ManagedSessionSnapshot {
             window: ProjectionWindow::of(&materialized),
             materialized,
-            operational,
+            operational: operational.into(),
             latest_credential_sync_signal: None,
             worker_build: None,
-            subagent_requests: vec![],
-            subagent_completions: vec![],
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue_error: None,
         }),
     }

@@ -530,6 +530,7 @@ impl Controller {
         let native_session_id = barrier
             .operational
             .native_session_id
+            .clone()
             .or_else(|| session.native_session_id.clone())
             .context("harness did not report its native session ID")?;
 

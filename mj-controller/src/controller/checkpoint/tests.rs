@@ -251,8 +251,8 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
     materialized.applied_event_ordinal = cursor.ordinal;
     materialized.applied_event_digest = cursor.digest.clone();
     ManagedSessionSnapshot {
-        subagent_requests: Vec::new(),
-        subagent_completions: Vec::new(),
+        subagent_requests: Default::default(),
+        subagent_completions: Default::default(),
         subagent_queue_error: None,
         window: mj_core::state::ProjectionWindow::of(&materialized),
         materialized,
@@ -322,7 +322,8 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             last_harness_turn_started_ordinal: None,
             background_commands: Vec::new(),
             background_work_known: None,
-        },
+        }
+        .into(),
     }
 }
 #[test]
@@ -2331,8 +2332,8 @@ async fn releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor() {
     let mut dispatched = None;
     for attempt in 0.. {
         let snapshot = relay.sync_snapshot().await.unwrap();
-        if let Some(active) = snapshot.operational.active_prompt {
-            dispatched = Some(active);
+        if let Some(active) = &snapshot.operational.active_prompt {
+            dispatched = Some(active.clone());
             break;
         }
         assert!(attempt < 200, "a released barrier still froze ACP dispatch");

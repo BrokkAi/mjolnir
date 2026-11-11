@@ -19,8 +19,10 @@ pub(super) struct PhoneSessionViews<'a> {
     /// What each managed session's relay last reported. This is where the
     /// projection learns what the agent can do, rather than guessing from the
     /// durable record, which knows only what was configured.
-    pub(super) operational:
-        &'a std::collections::BTreeMap<String, mj_core::relay::RelayOperationalState>,
+    pub(super) operational: &'a std::collections::BTreeMap<
+        String,
+        mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
+    >,
     /// Durable activity watermarks delivered with the materialized worker
     /// snapshots. Keeping this in the control-loop cache avoids a database
     /// read while rendering each viewer snapshot.
@@ -734,7 +736,7 @@ pub(super) fn viewer_snapshot_selected(
         {
             session.state = crate::server::LAUNCHING_STATE.to_owned();
         }
-        let live = operational.get(&session.id);
+        let live = operational.get(&session.id).map(|state| &**state);
         session.storage_problem = controller
             .state
             .sessions

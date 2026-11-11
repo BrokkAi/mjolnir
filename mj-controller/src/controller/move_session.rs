@@ -2355,7 +2355,7 @@ impl Controller {
             );
             let spec = self.reconnect_command(id)?;
             let relay = Box::pin(StandaloneSession::connect_command(&spec, id)).await?;
-            let store_id = relay.snapshot().operational.store_id.context("destination worker does not expose its durable store identity; upgrade the worker before admitting queued work")?;
+            let store_id = relay.snapshot().operational.store_id.clone().context("destination worker does not expose its durable store identity; upgrade the worker before admitting queued work")?;
             if let Some(expected) = &operation.destination_store_id {
                 ensure!(
                     *expected == store_id,

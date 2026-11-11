@@ -840,7 +840,7 @@ mod tests {
         let turn = store_finished_turn("child", "turn", 10);
         publish_idle_child(&manager, &turn).await;
         let observation = DelegationObservation {
-            requests: Vec::new(),
+            requests: Default::default(),
             completed: Vec::new(),
             in_flight: Vec::new(),
             credential_signal: None,
@@ -1031,7 +1031,7 @@ mod tests {
         };
         publish_idle_child(&manager, &newer).await;
         let observation = DelegationObservation {
-            requests: Vec::new(),
+            requests: Default::default(),
             completed: Vec::new(),
             in_flight: Vec::new(),
             credential_signal: None,
@@ -1176,7 +1176,7 @@ mod tests {
         state.install_report_backend(&backend);
         for child in ["child-off", "child-push"] {
             let observation = DelegationObservation {
-                requests: Vec::new(),
+                requests: Default::default(),
                 completed: Vec::new(),
                 in_flight: Vec::new(),
                 credential_signal: None,
