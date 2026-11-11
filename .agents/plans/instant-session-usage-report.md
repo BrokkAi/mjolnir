@@ -1,4 +1,4 @@
-# Load session usage with bounded database reads
+# Load session usage with bulk database queries
 
 This ExecPlan follows `.agents/PLANS.md` and remains a living record of the implementation.
 
@@ -13,7 +13,8 @@ Opening Usage by session should return promptly even when active parent sessions
 - [x] (2026-11-11) Replaced per-descendant turn queries with bulk reads and a single descendant-to-parent ownership map. SQLite plans use both time indexes; the copied-store SQL reads 566 completed turns and 14 active turns in about 156 ms.
 - [x] (2026-11-11) Validated migration compatibility and query work independent of historical turns and inactive sessions. All six focused checks passed; the complete copied-store report matches the original exactly and takes 813.907 ms instead of 22.698 seconds.
 - [x] (2026-11-11) Workspace Clippy passed with warnings denied; removed temporary measurement code after recording its results.
-- [ ] Finish the full controller suite, independent review, and push to origin/master. The user explicitly requested review in parallel with the full tests.
+- [x] (2026-11-11) Ran the full controller suite: 2,545 passed, with two failures resolved by targeted reruns. The Nitro migration regression now asserts the current schema revision, and the settings golden passes with isolated config/data directories and its expected default port. Final workspace Clippy passed.
+- [x] (2026-11-11) Independent implementation review of commit `4bbdadcac` finished clean in parallel with the full suite. The final test-and-notes follow-up goes through the standard review and publication workflow.
 
 ## Surprises & Discoveries
 
@@ -32,7 +33,7 @@ The original report snapshot is saved locally in `/tmp/mj-usage-1501/before.json
 
 ## Outcomes & Retrospective
 
-The bulk implementation preserves the complete report and reduces measured development-build read time from 22.698 seconds to 813.907 ms on the same 178-parent snapshot. The focused integration checks and workspace Clippy pass. The full controller suite and independent review are the remaining validation. The new regression protects both completed and active reads against work growing with inactive history.
+The bulk implementation preserves the complete report and reduces measured development-build read time from 22.698 seconds to 813.907 ms on the same 178-parent snapshot. All focused checks pass. The full controller run passed 2,545 cases; its two failures were a hardcoded previous revision in an existing migration test and the settings golden inheriting a named instance's port. Both targeted reruns passed after the revision assertion correction and explicit isolated config/data setup. Final workspace Clippy passed, and the independent implementation review was clean. The new regression protects both completed and active reads against work growing with inactive history. No new build was installed and the live store was not migrated.
 
 ## Context and Orientation
 
@@ -46,9 +47,9 @@ In migration 125, put the completion time first in the index because the query s
 
 ## Concrete Steps
 
-From the repository root, run focused checks with `MJ_INSTANCE=usage-aggregation-test cargo test -p brokk-mj-controller usage_report`. Run Cargo tests outside the restricted sandbox and use the existing mbx Cargo wrapper without changing target directories. After the final implementation, run `MJ_INSTANCE=usage-aggregation-test cargo test -p brokk-mj-controller` and `MJ_INSTANCE=usage-aggregation-check cargo clippy --all-targets -- -D warnings`.
+From the repository root, run focused checks with `MJ_INSTANCE=usage-aggregation-test cargo test -p brokk-mj-controller usage_report`. Run Cargo tests outside the restricted sandbox and use the existing mbx Cargo wrapper without changing target directories. For the full unit suite, use explicit isolated config/data directories and unset the inherited instance name: `env -u MJ_INSTANCE MJ_CONFIG_DIR=/tmp/mj-usage-controller-check/config MJ_DATA_DIR=/tmp/mj-usage-controller-check/data cargo test -p brokk-mj-controller`. Unit cases already give themselves temporary stores; the explicit outer directories also prevent access to live data while allowing the settings golden's default-port fixture. Daemon, CLI, and end-to-end tests still require a named instance. Run workspace Clippy with `MJ_INSTANCE=usage-aggregation-check cargo clippy --all-targets -- -D warnings`.
 
-The temporary ignored `usage_report_local_probe` was removed after measurement. It called `load_from` on the copied database with the default query and `now` frozen to `1794412800000`, measured elapsed time, and wrote `serde_json::to_vec(&report)` to a file for full comparison with `before.json`. Recreate that small ignored test inside the module's test block if measurements need repeating. Use a named `MJ_INSTANCE` for every test command.
+The temporary ignored `usage_report_local_probe` was removed after measurement. It called `load_from` on the copied database with the default query and `now` frozen to `1794412800000`, measured elapsed time, and wrote `serde_json::to_vec(&report)` to a file for full comparison with `before.json`. Recreate that small ignored test inside the module's test block if measurements need repeating, and use a named `MJ_INSTANCE` for that probe.
 
 ## Validation and Acceptance
 
@@ -69,3 +70,5 @@ Keep the public `load_session_usage_report` signature and `SessionUsageReport` A
 Revision note: 2026-11-11 — created after measurement showed that indexing individual historical-session queries was insufficient.
 
 Revision note: 2026-11-11 — recorded successful bulk-reader measurements and focused validation; full tests and requested parallel review remain in progress.
+
+Revision note: 2026-11-11 — recorded the clean implementation review, complete controller coverage with successful targeted corrections, and final Clippy result. Documented isolated unit-suite configuration to preserve the settings golden's port.

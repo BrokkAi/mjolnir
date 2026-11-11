@@ -3255,7 +3255,7 @@ mod reader_tests {
                 .is_err()
         );
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.revision, 124);
+        assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(124));
         assert!(state.ensure_supported_by(123).is_err());
     }
