@@ -16,7 +16,7 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - [x] (2026-11-10) Milestone 1: host engine `mj-worker microvm` and guest agent, proven by hand on the spike host. Code in `mj-worker/src/microvm/`; the transcript is under Artifacts and Notes. Scope change from the user: nested containers inside Nitro sessions are out of scope for #1494 and tracked in #1496, so the nested `podman run` acceptance check was dropped (see Surprises).
 - [x] (2026-11-10) Milestone 2: `ssh_nitro` target kind in mj-core, mj-controller, mj-tui, with breaking migration 124. Implemented against the Milestone 1 contract without the engine: unit-level and golden tests only. The controller's dependencies on the engine are listed under Artifacts and Notes, "Controller use of the engine"; nothing has run against a real host.
 - [x] (2026-11-10) Milestone 3: `mj ec2 create --runtime nitro` host bootstrap; AWS-boundary fixtures cover the Nitro launch requests and bootstrap. Registration and image preload remain for Milestone 4.
-- [ ] Milestone 4: integration and live acceptance on EC2.
+- [x] (2026-11-11) Milestone 4: integration and live acceptance on EC2. Registration and preload wired (`e0630dd9c`); four defects found live and fixed (`21b955298`, `dcc7aec87`, `9b0bd6e88`, `c95b16983`, see Surprises). Acceptance passed on a fresh m7i.4xlarge from an isolated `--instance nitro-live` (transcript under Artifacts and Notes). Remaining: per-volume lock files left after destroy (engine follow-up).
 - [ ] Milestone 5: Firecracker jailer.
 - [ ] Milestone 6: storage-preserving image upgrade for Nitro sessions.
 
@@ -45,6 +45,11 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Observation (Milestone 2): The admission refusal text was written for Macs ("this Mac has N GiB left after the macOS reserve"). Plan acceptance step 9 needs a message that names the pool, so the text (in `mj-core/src/state.rs` and the web viewer) now speaks of "this host" and explains both hard limits.
 - Observation (Milestone 2): The generic 20% host RAM reserve would have applied on top of the pool, which is already net of the host's own memory. A capacity reading now says whether its memory total is a boot-time pool (`DeploymentCapacityUsage::memory_pool`, set when the probe carries the engine's report), and `host_container_capacity` applies no reserve to a pool.
 - Observation (Milestone 2, review): two admission gaps are left for integration. (1) Admission charges sessions against the pool total, not the engine's reported free pool, so memory used by another daemon's sandboxes or the 2 MiB per-sandbox overhead is not seen until the engine's `run` refuses (which cleans up and names the pool). (2) A host that mixes Nitro with other runtimes keeps its physical RAM as the capacity total.
+
+- Observation (Milestone 4): AL2023 ships `curl-minimal`, so the bootstrap's `dnf install ... curl` conflicted and cloud-init stopped before setting the pool; the verify step reported only "CMA pool was not initialized". The CLI now waits for cloud-init with the Podman path's log-reporting check, and owns the reboot: it records the boot ID, issues `systemctl --no-block reboot`, and waits for SSH from a different boot ID (`wait_for_ec2_reboot`), so an answer from the old boot cannot pass for the new one.
+- Observation (Milestone 4): the engine install sat in the background poller's `host_is_running`, but `mj ec2 create` preloads through `refresh_host_image` directly, so the preload ran the engine before anything installed it ("command not found"). The install now lives in `refresh_host_image`, the entry point every refresh path shares.
+- Observation (Milestone 4): the controller uploads the harness profile with Podman's contents form `cp DIR/. CTR:DEST`, which the engine refused. The engine now implements it in both directions.
+- Observation (Milestone 4): gap (2) above bit in the common case: `mj ec2 create` registers a disabled bare sibling, so every EC2 Nitro host was sampled as physical RAM less the 20% reserve (a 48 GiB session was refused with 50.7 GiB free in the pool). A disabled target with no live session no longer decides how a host is sampled; the probe also fails visibly when an installed engine cannot report, instead of falling back to physical memory.
 
 ## Decision Log
 
@@ -500,6 +505,40 @@ Removal and failed run, from the lifecycle run:
     [exit 0]
 
 What the transcript shows: the engine reports the pool and Firecracker; the image flattens and inspects with the OCI config digest as its id; `run` returns a container id in 8 s the first time and 2.2 s afterwards; the guest reports its own kernel, PID 1 `mj-worker`, the image user `hel`, and a 196 GiB sparse workspace volume; a 200 MiB stdin round trip through `exec -i` has identical SHA-256 sums in both directions; a detached exec keeps running; a directory with a 5 MB file, a subdirectory and a symlink copies in and out identically; `container exists` and `container inspect` (JSON array and `--format`) answer as the controller's scripts expect; `stop --time 0` then `start` keeps the workspace; two VMs run at once and cannot reach each other, the host's VPC address, or the TAP gateway, while GitHub works and the IMDS token request fails with curl exit 7; after `rm` and `volume rm` there is no unit, TAP device, socket directory, VM directory, volume or used slot; a `run` asking for 60 GiB is refused naming the pool and leaves nothing; `image prune -f` keeps the referenced image. Other runs on the same host, not repeated in the transcript: three parallel 20 GiB `run` calls admitted exactly two; SIGTERM during `run` rolled back the unit, TAP, VM directory and volume; a hard kill of the Firecracker process left `exited` and `start` relaunched it; after a host reboot `start` rebuilt the nftables table and TAP and the synced workspace data was present; `exec -w /nonexistent` exits 127 and an unknown user exits 126.
+
+### Milestone 4 live acceptance, 2026-11-11
+
+Fresh host from an isolated instance (`MJ_INSTANCE=nitro-live`, own `MJ_CONFIG_DIR`/`MJ_DATA_DIR`, launcher under `env -i`), build `c95b16983`, profile `claude-aws` (Bedrock), fixture bundle cloned from `github.com/octocat/Hello-World`.
+
+    $ mj ec2 create --runtime nitro --zone us-east-1d --name nitro-live m7i.4xlarge     (6 min 40 s)
+    Launched i-0d8d21b935fa48552; waiting for EC2 status checks and cloud-init.
+    Rebooting i-0d8d21b935fa48552 to reserve the Nitro Enclaves memory pool.
+    Registered Nitro sandbox target nitro-live. Preloading ghcr.io/brokkai/mjolnir/agent-dev:latest.
+    Created nitro-live (i-0d8d21b935fa48552) at 44.194.87.72 in us-east-1d.
+
+    $ mj doctor
+    ready Nitro sandboxes for target nitro-live: Firecracker 1.18.0, 60124 MiB sandbox memory pool (60120 MiB free), kernel 6.18.56-126.188.amzn2023.x86_64; image ghcr.io/brokkai/mjolnir/agent-dev:latest is present.
+
+Session A (`mj new ... --target nitro-live`, first turn 80 s after `mj new` on a cold host), the agent's command output:
+
+    6.18.56-126.188.amzn2023.x86_64
+    mj-worker                                   (PID 1 is the guest agent)
+    uid=0(root) gid=0(root) groups=0(root)
+    4
+    Mem:            7889 ...
+    /dev/vda        196G  8.2G  188G   5% /
+    /dev/vdb        196G   11M  196G   1% /tmp
+    /workspace/07d29f220906f11f9a2129783f690188/fixture
+    github 200
+    curl: (7) Failed to connect to 169.254.169.254 port 80 after 0 ms
+    imds refused rc=7
+
+- Daemon restart during a turn that slept 60 s in the guest: `mj daemon restart` at guest uptime 49 s; the turn completed (62.9 s) with its full output. The workspace volume is `/dev/vdc`.
+- Suspend (`--acknowledge-unpublished-work`, the fixture clone is unpublished): no VM, unit or volume left; pool back to 60120 MiB free. Resume: running 27 s later in a new VM (guest uptime 26 s); the uncommitted `MARKER.txt` is back.
+- Daemon handoff to a newer build while A ran: A kept its VM (guest uptime 1069 s) and its background HTTP listener.
+- Session B with `--memory-gib 48` (sees 48125 MiB): A's listener on 10.200.0.2:8000 (200 from A itself) times out from B, as do the TAP gateway and the host's VPC address on port 22; GitHub answers 200.
+- With A (8 GiB) and B (48 GiB) running, an 8 GiB session C is refused: "this host has 2.7 GiB left" (engine: 2772 MiB free).
+- Destroy A and B: no VM, unit, TAP, volume, Firecracker process or used slot; pool 60120 MiB free. Per-volume lock files remained (follow-up).
 
 ## Interfaces and Dependencies
 
