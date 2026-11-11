@@ -3,7 +3,7 @@ import starlight from '@astrojs/starlight';
 import { defineConfig } from 'astro/config';
 import rehypeBasePathLinks from './rehype-base-path-links.mjs';
 
-const site = process.env.PUBLIC_DOCS_SITE ?? 'https://mjolnir.brokk.ai/';
+const site = process.env.PUBLIC_DOCS_SITE ?? 'https://mjolnir.slopcop.com/';
 const productionBase = process.env.PUBLIC_DOCS_BASE ?? '/';
 const isDev = process.argv.includes('dev');
 const base = isDev ? '/' : productionBase;

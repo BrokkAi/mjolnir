@@ -136,7 +136,11 @@ pub const RELAY_CHANGE_WAIT_PROTOCOL: u32 = 58;
 /// 59 adds paged, connection-only project-memory snapshot and replacement
 /// transfers so complete trees need not fit in one relay frame.
 pub const RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL: u32 = 59;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL;
+/// 60 makes ReserveIdle treat a saved goal as intent, while still refusing
+/// running goals, turns, and other work. Older workers need an observed-idle
+/// checkpoint barrier to bootstrap their replacement without changing goals.
+pub const RELAY_IDLE_GOAL_INTENT_PROTOCOL: u32 = 60;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_IDLE_GOAL_INTENT_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
