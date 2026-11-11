@@ -395,7 +395,7 @@ pub struct RuntimeSessionView {
     pub session_id: String,
     pub projection_ordinal: u64,
     pub projection_digest: String,
-    pub operational: Option<RelayOperationalState>,
+    pub operational: Option<mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>,
     pub latest_credential_sync_signal: Option<CredentialSyncSignal>,
     pub connected: bool,
     pub error: Option<ViewError>,

@@ -746,7 +746,7 @@ impl InputProgress {
                 _ => {}
             }
         }
-        for result in &snapshot.subagent_completions {
+        for result in snapshot.subagent_completions.iter() {
             let Some(mut value) = result.input_delivery.clone() else {
                 continue;
             };

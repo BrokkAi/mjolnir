@@ -430,12 +430,12 @@ fn projected_messages(projection: &mj_core::state::MaterializedSession) -> Vec<M
 fn summary_messages(summary: mj_transcript::summary::TranscriptSummary) -> Vec<Message> {
     use mj_transcript::summary::SummaryRole;
     let mut messages = Vec::with_capacity(summary.entries.len());
-    for entry in summary.entries {
+    for mut entry in summary.entries {
         let role = match entry.role {
             SummaryRole::User => Role::User,
             SummaryRole::Assistant => Role::Assistant,
             SummaryRole::Tool => {
-                if let Some(tool) = &entry.tool {
+                if let Some(tool) = entry.tool.take() {
                     messages.extend(tool_messages(tool, entry.created_at_ms));
                     continue;
                 }
@@ -455,7 +455,7 @@ fn summary_messages(summary: mj_transcript::summary::TranscriptSummary) -> Vec<M
 /// into a single summary line such as `→ execute(cargo test) ⇒ ok · 12 lines`.
 /// The result carries the output only so SessionWiki can count its lines and
 /// quote the first line of a failure; the index keeps neither in full.
-fn tool_messages(tool: &serde_json::Value, created_at_ms: i64) -> Vec<Message> {
+fn tool_messages(tool: serde_json::Value, created_at_ms: i64) -> Vec<Message> {
     use sessionwiki::model::{ToolCall, ToolResult};
     let ts = DateTime::from_timestamp_millis(created_at_ms);
     let text = |key: &str| tool.get(key).and_then(serde_json::Value::as_str);
@@ -499,22 +499,25 @@ fn tool_messages(tool: &serde_json::Value, created_at_ms: i64) -> Vec<Message> {
 }
 
 /// The text a finished tool call produced, as Mjolnir's transcript shows it.
-fn tool_output(tool: &serde_json::Value) -> String {
-    let Some(call) = tool.get("call").and_then(|call| {
-        serde_json::from_value::<agent_client_protocol::v1::schema::ToolCall>(call.clone()).ok()
+fn tool_output(mut tool: serde_json::Value) -> String {
+    let Some(call) = tool.get_mut("call").and_then(|call| {
+        serde_json::from_value::<agent_client_protocol::v1::schema::ToolCall>(call.take()).ok()
     }) else {
         return String::new();
     };
     let terminals: Vec<mj_core::transcript::TerminalOutputRecord> = tool
-        .get("terminals")
-        .and_then(serde_json::Value::as_object)
+        .get_mut("terminals")
+        .map(serde_json::Value::take)
+        .and_then(|value| match value {
+            serde_json::Value::Object(object) => Some(object),
+            _ => None,
+        })
         .into_iter()
         .flatten()
-        .filter_map(|(id, record)| {
-            let mut record = record.clone();
+        .filter_map(|(id, mut record)| {
             record
                 .as_object_mut()?
-                .insert("terminal_id".into(), id.clone().into());
+                .insert("terminal_id".into(), id.into());
             serde_json::from_value(record).ok()
         })
         .collect();
@@ -3192,7 +3195,7 @@ mod tests {
             ended: None,
             title: String::new(),
             subagent: false,
-            messages: tool_messages(&tool, 0),
+            messages: tool_messages(tool, 0),
             touched: Vec::new(),
             edits: Vec::new(),
         };

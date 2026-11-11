@@ -291,10 +291,14 @@ impl StandaloneSession {
             );
         }
         let mut operational = catch_up.state;
-        operational.acknowledged_through = cursor.ordinal;
-        operational.acknowledged_digest = cursor.digest;
-        if *self.operational != operational {
-            self.operational = operational.into();
+        if operational.acknowledged_through != cursor.ordinal
+            || operational.acknowledged_digest != cursor.digest
+        {
+            operational.acknowledged_through = cursor.ordinal;
+            operational.acknowledged_digest = cursor.digest;
+        }
+        if self.operational != operational {
+            self.operational = operational;
         }
         Ok(())
     }
@@ -377,11 +381,11 @@ impl StandaloneSession {
         ManagedSessionSnapshot {
             window: self.window.clone(),
             materialized: self.materialized.clone(),
-            operational: self.operational.clone().into_inner(),
+            operational: self.operational.clone(),
             latest_credential_sync_signal: self.latest_credential_sync_signal.clone(),
             worker_build: self.client.worker_build().map(str::to_owned),
-            subagent_requests: self.subagent_requests.clone().into_inner(),
-            subagent_completions: self.subagent_completions.clone().into_inner(),
+            subagent_requests: self.subagent_requests.clone(),
+            subagent_completions: self.subagent_completions.clone(),
             subagent_queue_error: self.subagent_queue_error.clone(),
         }
     }
