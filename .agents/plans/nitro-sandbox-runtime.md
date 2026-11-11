@@ -18,7 +18,7 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - [x] (2026-11-10) Milestone 3: `mj ec2 create --runtime nitro` host bootstrap; AWS-boundary fixtures cover the Nitro launch requests and bootstrap. Registration and image preload remain for Milestone 4.
 - [x] (2026-11-11) Milestone 4: integration and live acceptance on EC2. Registration and preload wired (`e0630dd9c`); four defects found live and fixed (`21b955298`, `dcc7aec87`, `9b0bd6e88`, `c95b16983`, see Surprises). Acceptance passed on a fresh m7i.4xlarge from an isolated `--instance nitro-live` (transcript under Artifacts and Notes). Remaining: per-volume lock files left after destroy (engine follow-up).
 - [x] (2026-11-11) Milestone 5: Firecracker jailer. Every VM's Firecracker now runs under the jailer 1.18.0 as its own unprivileged user (commit 556b7f144); proven on the spike host with the Milestone 1 transcript, the old-layout upgrade case, the isolation checks and a host reboot (see Artifacts and Notes, "Milestone 5 transcript").
-- [x] (2026-11-11) Milestone 6: storage-preserving image upgrade for Nitro sessions. Engine verbs and controller dispatch are in `f18ddd188`; the engine half is proven on the spike host (transcript under Artifacts and Notes); the session-level live check is in Artifacts and Notes, "Milestone 6 live check".
+- [x] (2026-11-11) Milestone 6: storage-preserving image upgrade for Nitro sessions. Engine verbs and controller dispatch are in `f18ddd188`; the engine half is proven on the spike host (transcript under Artifacts and Notes); the session-level live check is in Artifacts and Notes, "Milestone 6 live check". Review fixes (`9ff9b50e6`..`7131ccc09`): a static check of the new image's root disk at `stage` and durable directory syncs around the swap; a second live upgrade on build `7131ccc09` passed the check on the EC2 host and kept the workspace.
 
 ## Surprises & Discoveries
 
@@ -183,7 +183,11 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 
 ## Outcomes & Retrospective
 
-None yet.
+(2026-11-11) All six milestones are done and proven on real EC2 hardware. `mj ec2 create --runtime nitro` builds an AL2023 host with Firecracker 1.18, the jailer and a Nitro Enclaves memory pool, and registers an `ssh_nitro` target; sessions run in jailed microVMs (one unprivileged uid per VM, no capabilities, seccomp) with the AL2023 kernel, their own disks, NAT without IMDS, and no VM-to-VM or VM-to-host reachability. RAM is admitted against the pool; CPUs overcommit. Sessions survive daemon restarts and handoffs, suspend/resume, the engine upgrade from unjailed to jailed VMs, and storage-preserving image upgrades (`mj upgrade-container`, guarded by a static check of the new image's root disk).
+
+What the live runs found that unit and fixture tests did not: the AL2023 `curl-minimal` conflict, an engine-install gap on the CLI preload path, Podman's `cp DIR/.` form, and the disabled bare sibling turning the pool back into physical RAM less the reserve. Each now has a fix, and the last a test. Lesson: a new runtime behind a Podman-shaped CLI needs its contract checked against every call site the controller actually makes (the integration map caught most, not `cp DIR/.`), and the EC2 path needs one end-to-end run per change to bootstrap.
+
+Not done, tracked elsewhere: host-path mounts and the shared mbx cache (#1495, no virtio-fs in Firecracker); nested Docker/Podman inside sandboxes (#1496); per-repository devcontainer images (#1493); arm64 hosts (untested); registry authentication for private images.
 
 ## Context and Orientation
 
