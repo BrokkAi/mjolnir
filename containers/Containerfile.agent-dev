@@ -149,7 +149,7 @@ RUN apt-get update \
         passt \
         zip \
     && rm -rf /var/lib/apt/lists/* \
-    && rm /usr/local/bin/podman \
+    && rm -f /usr/local/bin/podman \
     && printf '%s\n' '#!/bin/sh' \
         'if [ -n "${CONTAINER_HOST:-}" ] || [ -n "${CONTAINER_CONNECTION:-}" ] || [ -S "/run/user/$(id -u)/podman/podman.sock" ] || [ -S /run/podman/podman.sock ]; then' \
         '  exec /usr/bin/podman-remote "$@"' \
