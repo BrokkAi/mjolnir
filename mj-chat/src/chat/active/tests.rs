@@ -325,8 +325,8 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
             materialized: session,
             latest_credential_sync_signal: None,
             worker_build: None,
-            subagent_requests: Vec::new(),
-            subagent_completions: Vec::new(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue_error: None,
             operational: mj_core::relay::RelayOperationalState {
                 assessment: None,
@@ -390,7 +390,8 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 last_harness_turn_started_ordinal: None,
                 background_commands: Vec::new(),
                 background_work_known: None,
-            },
+            }
+            .into(),
         }),
         connected: true,
         error: None,

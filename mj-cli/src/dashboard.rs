@@ -560,7 +560,7 @@ impl From<mj_core::state::ManagedSessionSnapshot> for MaterializedProjection {
     fn from(snapshot: mj_core::state::ManagedSessionSnapshot) -> Self {
         Self {
             materialized: snapshot.materialized,
-            assessment: snapshot.operational.assessment,
+            assessment: snapshot.operational.assessment.clone(),
         }
     }
 }
