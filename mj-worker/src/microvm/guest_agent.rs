@@ -521,7 +521,9 @@ impl Agent {
             .stderr(stderr);
         let detach = request.detach;
         let (uid, gid, groups) = (user.uid, user.gid, user.groups.clone());
-        let switch_user = uid != current_uid;
+        // A root agent always applies the requested group and supplementary
+        // groups, even for uid 0; a non-root agent (tests) can only keep its identity.
+        let switch_user = current_uid == 0 || uid != current_uid;
         // SAFETY: the closure runs between fork and exec and calls only
         // async-signal-safe functions (setsid, setgroups, setgid, setuid).
         unsafe {

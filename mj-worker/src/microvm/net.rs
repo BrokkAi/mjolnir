@@ -102,7 +102,19 @@ pub fn tap_exists(tap: &str) -> bool {
 /// The nftables ruleset, applied as one atomic replacement.
 fn ruleset() -> String {
     format!(
-        r#"add table ip {TABLE}
+        r#"add table ip6 {TABLE}
+delete table ip6 {TABLE}
+table ip6 {TABLE} {{
+    chain input {{
+        type filter hook input priority filter; policy accept;
+        iifname "{TAP_PREFIX}*" drop
+    }}
+    chain forward {{
+        type filter hook forward priority filter; policy accept;
+        iifname "{TAP_PREFIX}*" drop
+    }}
+}}
+add table ip {TABLE}
 delete table ip {TABLE}
 table ip {TABLE} {{
     chain input {{
