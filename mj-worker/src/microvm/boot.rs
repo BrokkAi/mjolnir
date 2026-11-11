@@ -101,12 +101,14 @@ pub fn ensure(layout: &Layout) -> Result<BootAssets> {
         _reservation: reservation,
     };
     if assets.kernel.is_file() && assets.initrd.is_file() {
+        make_readable(&assets)?;
         return Ok(assets);
     }
     layout.ensure()?;
     // One builder at a time; the second finds the first's result.
     let _lock = layout.lock_global()?;
     if assets.kernel.is_file() && assets.initrd.is_file() {
+        make_readable(&assets)?;
         return Ok(assets);
     }
     let scratch = layout
@@ -125,7 +127,26 @@ pub fn ensure(layout: &Layout) -> Result<BootAssets> {
             .with_context(|| format!("replace {}", directory.display()))?;
     }
     fs::rename(&scratch, &directory).with_context(|| format!("publish {}", directory.display()))?;
+    make_readable(&assets)?;
     Ok(assets)
+}
+
+/// Each VM's jail holds hard links to these two files and its unprivileged
+/// Firecracker reads them through the link, so the files must be readable by
+/// anyone. They hold nothing private: the host's kernel and this engine.
+fn make_readable(assets: &BootAssets) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for file in [&assets.kernel, &assets.initrd] {
+        let mode = fs::metadata(file)
+            .with_context(|| format!("stat {}", file.display()))?
+            .permissions()
+            .mode();
+        if mode & 0o777 != 0o644 {
+            fs::set_permissions(file, fs::Permissions::from_mode(0o644))
+                .with_context(|| format!("make {} readable", file.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn build(scratch: &std::path::Path, kernel_version: &str) -> Result<()> {

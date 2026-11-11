@@ -41,8 +41,30 @@ pub fn unit_name(name: &str) -> String {
     format!("mj-microvm-{name}.service")
 }
 
-pub fn socket_path(name: &str) -> PathBuf {
+/// VMs launched before the jailer keep their vsock socket in a systemd
+/// runtime directory.
+fn legacy_socket_path(name: &str) -> PathBuf {
     Path::new(RUNTIME_ROOT).join(name).join("v.sock")
+}
+
+/// Where the host reaches a VM's guest agent: in the jail for a jailed VM,
+/// in the runtime directory for one an earlier engine launched.
+pub fn agent_socket(layout: &Layout, state: &VmState) -> PathBuf {
+    if state.jailed {
+        layout.jail_root(state.slot).join("v.sock")
+    } else {
+        legacy_socket_path(&state.name)
+    }
+}
+
+/// Each jailed VM runs Firecracker as its own user and group, so a
+/// compromised VMM can touch neither another VM's files nor its processes.
+/// The ids come from the network slot, which is unique among existing VMs,
+/// above the range of ordinary and subordinate (rootless container) users.
+const JAIL_ID_BASE: u32 = 3_100_000;
+
+fn jail_ids(slot: u32) -> (u32, u32) {
+    (JAIL_ID_BASE + slot, JAIL_ID_BASE + slot)
 }
 
 /// systemd's `ActiveState`, reduced to what the engine decides on.
@@ -330,6 +352,7 @@ pub fn build_state(layout: &Layout, spec: &RunSpec, image_id: &str, slot: u32) -
             .collect(),
         slot,
         engine_build: mj_core::worker_build::WORKER_BUILD_ID.to_owned(),
+        jailed: true,
     })
 }
 
@@ -433,7 +456,8 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
         )?;
         // The clone owns its blocks now; the base image can be pruned.
         drop(image_lock);
-        launch(layout, &state)?;
+        let mut state = state;
+        launch(layout, &mut state)?;
         Ok(state)
     })();
     match result {
@@ -495,7 +519,7 @@ pub fn start(layout: &Layout, name: &str) -> Result<()> {
         "the microvm engine must run as root (use sudo -n)"
     );
     let vm_lock = layout.lock_vm(name)?;
-    let Some(state) = VmState::read(layout, name)? else {
+    let Some(mut state) = VmState::read(layout, name)? else {
         layout.forget_vm_lock(name, &vm_lock)?;
         bail!("no container with name or ID {name:?} found: no such container");
     };
@@ -509,11 +533,8 @@ pub fn start(layout: &Layout, name: &str) -> Result<()> {
         "container {name} has no root disk; it was not created completely, remove it"
     );
     sys::install_interrupt_handlers();
-    if let Err(error) = launch(layout, &state) {
-        let mut stopped = stop_unit(name);
-        if stopped.is_ok() {
-            stopped = net::tap_down(&Link::for_slot(state.slot)?.tap);
-        }
+    if let Err(error) = launch(layout, &mut state) {
+        let stopped = stop_unit(name).and_then(|()| release_host_resources(layout, state.slot));
         return match stopped {
             Ok(()) => Err(error),
             Err(cleanup) => Err(error.context(format!(
@@ -524,15 +545,12 @@ pub fn start(layout: &Layout, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn firecracker_config(
-    layout: &Layout,
-    state: &VmState,
-    boot: &boot::BootAssets,
-    link: &Link,
-) -> Result<Value> {
+/// The paths in a jailed VM's Firecracker configuration are relative to the
+/// jail: the engine hard-links the kernel, initrd and disks to these names.
+fn firecracker_config(layout: &Layout, state: &VmState, link: &Link) -> Result<Value> {
     let mut drives = vec![json!({
         "drive_id": "rootfs",
-        "path_on_host": layout.vm(&state.name).join("root.ext4"),
+        "path_on_host": "/root.ext4",
         "is_root_device": true,
         "is_read_only": false,
     })];
@@ -552,7 +570,7 @@ fn firecracker_config(
         };
         drives.push(json!({
             "drive_id": format!("vol{index}"),
-            "path_on_host": volume::disk_path(layout, &volume.name),
+            "path_on_host": format!("/vol{index}.ext4"),
             "is_root_device": false,
             "is_read_only": !volume.read_write && fresh == "old",
         }));
@@ -580,47 +598,124 @@ fn firecracker_config(
     );
     Ok(json!({
         "boot-source": {
-            "kernel_image_path": boot.kernel,
-            "initrd_path": boot.initrd,
+            "kernel_image_path": "/vmlinuz",
+            "initrd_path": "/initrd.img",
             "boot_args": boot_args,
         },
         "machine-config": { "vcpu_count": state.vcpus, "mem_size_mib": state.memory_bytes.div_ceil(1 << 20) },
         "drives": drives,
         "network-interfaces": [{ "iface_id": "eth0", "host_dev_name": link.tap, "guest_mac": link.mac }],
-        "vsock": { "guest_cid": 3, "uds_path": socket_path(&state.name) },
+        "vsock": { "guest_cid": 3, "uds_path": "/v.sock" },
         "enclave": { "direct_mode": true, "cpu_overcommit": true, "debug_mode": true },
     }))
 }
 
+/// Build the VM's jail: its root directory holds hard links to the kernel,
+/// the initrd and the disks, and the Firecracker configuration, all owned by
+/// the VM's user. The jailer adds the device nodes it needs (including
+/// `/dev/nitro_enclaves`) and its own copy of Firecracker when it starts.
+/// Hard links, so a disk is the same file inside and outside the jail and
+/// nothing is copied; they need the jail on the filesystem that holds the disks.
+fn prepare_jail(
+    layout: &Layout,
+    state: &VmState,
+    boot: &boot::BootAssets,
+    link: &Link,
+) -> Result<()> {
+    use std::os::unix::fs::{PermissionsExt, chown};
+    let (uid, gid) = jail_ids(state.slot);
+    // Left over from a crash, or from the previous run of this VM.
+    remove_jail(layout, state.slot)?;
+    let root = layout.jail_root(state.slot);
+    fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
+    let hard_link = |source: &Path, name: &str| -> Result<()> {
+        let target = root.join(name);
+        fs::hard_link(source, &target).with_context(|| {
+            format!(
+                "link {} into the jail as {} (the jail and the disks must be on one filesystem)",
+                source.display(),
+                target.display()
+            )
+        })
+    };
+    // The disks are private to the VM's user. They are shared inodes, so the
+    // ownership also holds outside the jail; the next launch sets it again.
+    let mut disks = vec![(
+        "root.ext4".to_owned(),
+        layout.vm(&state.name).join("root.ext4"),
+    )];
+    for (index, mounted) in state.volumes.iter().enumerate() {
+        disks.push((
+            format!("vol{index}.ext4"),
+            volume::disk_path(layout, &mounted.name),
+        ));
+    }
+    for (name, source) in &disks {
+        chown(source, Some(uid), Some(gid))
+            .with_context(|| format!("give {} to the VM's user", source.display()))?;
+        fs::set_permissions(source, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict {}", source.display()))?;
+        hard_link(source, name)?;
+    }
+    hard_link(&boot.kernel, "vmlinuz")?;
+    hard_link(&boot.initrd, "initrd.img")?;
+    let config = root.join("fc.json");
+    super::state::write_json_atomic(&config, &firecracker_config(layout, state, link)?)?;
+    chown(&config, Some(uid), Some(gid))
+        .with_context(|| format!("give {} to the VM's user", config.display()))?;
+    Ok(())
+}
+
+/// Delete a VM's jail. The links go; the disks they point to stay.
+pub fn remove_jail(layout: &Layout, slot: u32) -> Result<()> {
+    let directory = layout.jail_dir(slot);
+    match fs::remove_dir_all(&directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", directory.display())),
+    }
+}
+
+/// Remove what the host holds for a VM that is not running: its TAP device
+/// and its jail. Run by the VM's unit when it stops, and by the engine.
+pub fn release_host_resources(layout: &Layout, slot: u32) -> Result<()> {
+    net::tap_down(&Link::for_slot(slot)?.tap)?;
+    remove_jail(layout, slot)
+}
+
 /// Admit, wire up and start the VM's unit, wait for the guest agent, and
 /// start the container's main process. Leaves cleanup to the caller.
-fn launch(layout: &Layout, state: &VmState) -> Result<()> {
+fn launch(layout: &Layout, state: &mut VmState) -> Result<()> {
     let boot = boot::ensure(layout)?;
     let link = Link::for_slot(state.slot)?;
     let firecracker = sys::find_tool("firecracker")?;
+    let jailer = sys::find_tool("jailer")?;
     let engine = std::env::current_exe().context("locate the engine binary")?;
     let engine_text = engine.to_str().context("engine path is not UTF-8")?;
     ensure!(
         !engine_text.contains(char::is_whitespace) && !engine_text.contains('"'),
         "the engine path {engine_text:?} contains whitespace or quotes, which a systemd unit cannot carry"
     );
+    let (uid, gid) = jail_ids(state.slot);
     {
         let _global = layout.lock_global()?;
         sys::check_interrupted()?;
         net::check_no_route_overlap()?;
         net::apply_host_policy()?;
         admit(layout, state)?;
-        let config = layout.vm(&state.name).join("fc.json");
-        super::state::write_json_atomic(
-            &config,
-            &firecracker_config(layout, state, &boot, &link)?,
-        )?;
-        net::tap_up(&link)?;
+        // From here the VM is jailed, including one an earlier engine launched
+        // without the jailer; the state says where its socket is.
+        if !state.jailed || state.format < STATE_FORMAT {
+            state.jailed = true;
+            state.format = STATE_FORMAT;
+            state.write(layout)?;
+        }
+        prepare_jail(layout, state, &boot, &link)?;
+        net::tap_up(&link, (uid, gid))?;
         let unit = unit_name(&state.name);
-        let runtime = format!("RuntimeDirectory=mj-microvm/{}", state.name);
         let stop_post = format!(
-            "ExecStopPost={engine_text} microvm host-tap-down {}",
-            link.tap
+            "ExecStopPost={engine_text} microvm host-jail-down {}",
+            state.slot
         );
         let description = format!("Nitro Sandbox {}", state.name);
         sys::run_tool(
@@ -632,20 +727,32 @@ fn launch(layout: &Layout, state: &VmState) -> Result<()> {
                 &format!("--description={description}"),
                 "--property=KillMode=control-group",
                 "--property=TimeoutStopSec=30",
-                &format!("--property={runtime}"),
-                "--property=RuntimeDirectoryPreserve=no",
                 &format!("--property={stop_post}"),
+                jailer.to_str().context("jailer path is not UTF-8")?,
+                "--id",
+                &Layout::jail_id(state.slot),
+                "--exec-file",
                 firecracker
                     .to_str()
                     .context("firecracker path is not UTF-8")?,
+                "--uid",
+                &uid.to_string(),
+                "--gid",
+                &gid.to_string(),
+                "--chroot-base-dir",
+                layout
+                    .jail_base()
+                    .to_str()
+                    .context("jail path is not UTF-8")?,
+                "--",
                 "--no-api",
                 "--config-file",
-                config.to_str().context("config path is not UTF-8")?,
+                "/fc.json",
             ],
         )
         .context("start the VM unit")?;
     }
-    let client = wait_for_agent(&state.name)?;
+    let client = wait_for_agent(&state.name, &agent_socket(layout, state))?;
     // The agent starts after init has filled any new volume, and before the
     // command can write to one. Record that now, durably: a start that is
     // interrupted from here on must never be filled again over the command's data.
@@ -690,8 +797,7 @@ fn launch(layout: &Layout, state: &VmState) -> Result<()> {
 }
 
 /// Poll until the guest agent answers. Ends when the unit dies or a signal arrives.
-fn wait_for_agent(name: &str) -> Result<Client<UnixStream>> {
-    let socket = socket_path(name);
+fn wait_for_agent(name: &str, socket: &Path) -> Result<Client<UnixStream>> {
     loop {
         sys::check_interrupted()?;
         if activity(name)? == Activity::Stopped {
@@ -701,7 +807,7 @@ fn wait_for_agent(name: &str) -> Result<Client<UnixStream>> {
             );
         }
         if socket.exists()
-            && let Ok(client) = open_agent(name)
+            && let Ok(client) = open_agent(socket)
         {
             return Ok(client);
         }
@@ -723,8 +829,8 @@ fn journal_tail(name: &str) -> String {
 }
 
 /// Connect to a running VM's guest agent.
-pub fn open_agent(name: &str) -> Result<Client<UnixStream>> {
-    let stream = client::connect_unix(&socket_path(name), AGENT_PORT)?;
+pub fn open_agent(socket: &Path) -> Result<Client<UnixStream>> {
+    let stream = client::connect_unix(socket, AGENT_PORT)?;
     // Socket options belong to the open file, so the clone clears them for the client too.
     let control = stream.try_clone().context("clone the agent connection")?;
     let client = client::handshake(stream)?;
@@ -742,8 +848,8 @@ pub fn agent_for(layout: &Layout, name: &str) -> Result<(VmState, Client<UnixStr
     if activity(name)? != Activity::Running {
         bail!("can only use a running container: container state improper");
     }
-    let client =
-        open_agent(name).with_context(|| format!("connect to the guest agent of {name}"))?;
+    let client = open_agent(&agent_socket(layout, &state))
+        .with_context(|| format!("connect to the guest agent of {name}"))?;
     Ok((state, client))
 }
 
@@ -760,7 +866,7 @@ pub fn stop(layout: &Layout, name: &str, grace: Duration, ignore_missing: bool) 
     validate_name("container", name)?;
     let vm_lock = layout.lock_vm(name)?;
     match VmState::read(layout, name)? {
-        Some(_) => stop_locked(name, grace),
+        Some(state) => stop_locked(name, Some(&agent_socket(layout, &state)), grace),
         None => {
             layout.forget_vm_lock(name, &vm_lock)?;
             if ignore_missing {
@@ -772,10 +878,11 @@ pub fn stop(layout: &Layout, name: &str, grace: Duration, ignore_missing: bool) 
     }
 }
 
-fn stop_locked(name: &str, grace: Duration) -> Result<()> {
-    if activity(name)? == Activity::Running {
+fn stop_locked(name: &str, socket: Option<&Path>, grace: Duration) -> Result<()> {
+    // Without a state there is no socket, and so no guest to ask to flush.
+    if let (Activity::Running, Some(socket)) = (activity(name)?, socket) {
         let (done_sender, done) = std::sync::mpsc::channel();
-        let target = name.to_owned();
+        let target = socket.to_path_buf();
         let flusher = std::thread::Builder::new()
             .name("guest-flush".to_owned())
             .spawn(move || {
@@ -809,7 +916,7 @@ fn stop_locked(name: &str, grace: Duration) -> Result<()> {
 fn teardown(layout: &Layout, name: &str) -> Result<()> {
     stop_unit(name)?;
     if let Some(state) = VmState::read(layout, name).ok().flatten() {
-        net::tap_down(&Link::for_slot(state.slot)?.tap)?;
+        release_host_resources(layout, state.slot)?;
     }
     let directory = layout.vm(name);
     if directory.exists() {
@@ -852,7 +959,12 @@ pub fn remove(
             force,
             "cannot remove running container {name}: stop it first, or use --force"
         );
-        stop_locked(name, Duration::from_secs(DEFAULT_STOP_SECONDS))?;
+        let socket = state.as_ref().map(|state| agent_socket(layout, state));
+        stop_locked(
+            name,
+            socket.as_deref(),
+            Duration::from_secs(DEFAULT_STOP_SECONDS),
+        )?;
     }
     teardown(layout, name)?;
     if volumes && let Some(state) = state {
@@ -921,6 +1033,7 @@ pub fn inspect(layout: &Layout, name: &str) -> Result<Value> {
             "Privileged": false,
             "ReadonlyRootfs": false,
             "NetworkMode": "nitro",
+            "Isolation": if state.jailed { "jailer" } else { "none" },
         },
         "Mounts": mounts,
     }))
@@ -978,6 +1091,7 @@ pub fn info(layout: &Layout) -> Result<Value> {
         "firecracker_path": tool_path("firecracker"),
         "firecracker_version": firecracker_version,
         "crane_path": tool_path("crane"),
+        "jailer_path": tool_path("jailer"),
         "notes": [
             "--cap-add, --cap-drop and --security-opt are accepted and have no effect: the VM is the isolation boundary",
             "--user sets the default user of the container command and of exec",
