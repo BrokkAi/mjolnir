@@ -95,6 +95,15 @@ enum Ec2Runtime {
     Nitro,
 }
 
+impl Ec2Runtime {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Podman => "Podman",
+            Self::Nitro => "Nitro sandbox",
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 struct ListArgs {
     #[command(flatten)]
@@ -603,17 +612,6 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
                 &mj_controller::targets::ProcessExecutor,
             )?;
         }
-        if args.runtime == Ec2Runtime::Nitro {
-            return register_nitro_host(
-                &record,
-                &ssh,
-                platform,
-                &id,
-                host,
-                &args,
-                &record.operation,
-            );
-        }
         let image = mj_core::config::DEFAULT_CONTAINER_IMAGE;
         Config::update(|config| {
             ensure!(
@@ -625,24 +623,26 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             config
                 .machines
                 .insert(record.target.clone(), machine.clone());
+            let container = ContainerTemplate {
+                image: image.into(),
+                pull_policy: Default::default(),
+                platform: Some(platform.into()),
+                cpus: None,
+                memory: None,
+                environment: Default::default(),
+                workspace_storage: Default::default(),
+                build_cache: None,
+            };
+            let ssh = ssh.clone();
             config.targets.insert(
                 record.target.clone(),
-                TargetTemplate::SshPodman {
-                    ssh: ssh.clone(),
-                    container: ContainerTemplate {
-                        image: image.into(),
-                        pull_policy: Default::default(),
-                        platform: Some(platform.into()),
-                        cpus: None,
-                        memory: None,
-                        environment: Default::default(),
-                        workspace_storage: Default::default(),
-                        build_cache: None,
-                    },
+                match args.runtime {
+                    Ec2Runtime::Podman => TargetTemplate::SshPodman { ssh, container },
+                    Ec2Runtime::Nitro => TargetTemplate::SshNitro { ssh, container },
                 },
             );
             // A configured disabled kind suppresses runtime discovery, so a
-            // Podman-only host never acquires a second, usable bare target.
+            // Podman or Nitro host never acquires a second, usable bare target.
             let raw = mj_core::config::unique_config_id(
                 &config.targets,
                 &format!("{}-raw", record.target.chars().take(60).collect::<String>()),
@@ -670,11 +670,16 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
         // so destroying the registered host never waits for this download.
         drop(_lock);
         eprintln!(
-            "Registered Podman target {}. Preloading {image}.",
+            "Registered {} target {}. Preloading {image}.",
+            args.runtime.label(),
             record.target
         );
+        let image_host = match args.runtime {
+            Ec2Runtime::Podman => mj_core::targets::ImageHost::SshPodman((&ssh).into()),
+            Ec2Runtime::Nitro => mj_core::targets::ImageHost::SshNitro((&ssh).into()),
+        };
         let preload = mj_core::targets::image_refresh(
-            mj_core::targets::ImageHost::SshPodman((&ssh).into()),
+            image_host,
             image,
             Some(platform),
             mj_core::config::ImagePullPolicy::Missing,
@@ -707,11 +712,12 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&host)?);
     } else {
         println!(
-            "Created {} ({}) at {} in {}.\nPodman target: {}\n{}",
+            "Created {} ({}) at {} in {}.\n{} target: {}\n{}",
             record.target,
             host["instance_id"].as_str().unwrap_or_default(),
             host["public_ip"].as_str().unwrap_or_default(),
             args.zone,
+            args.runtime.label(),
             record.target,
             cleanup_command(&record)
         );
@@ -1117,20 +1123,6 @@ reboot
     )
 }
 
-fn register_nitro_host(
-    _record: &Record,
-    _ssh: &SshConnection,
-    _platform: &str,
-    _instance_id: &str,
-    _public_ip: &str,
-    _args: &CreateArgs,
-    _operation: &str,
-) -> Result<Value> {
-    bail!(
-        "Nitro host bootstrap is complete, but ssh_nitro target registration and image preload are not wired yet"
-    )
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -1504,8 +1496,7 @@ else:
         fs::write(bin.join("nitro"), "").unwrap();
         let mut args = create_args();
         args.runtime = Ec2Runtime::Nitro;
-        let error = create(args, &root).unwrap_err();
-        assert!(format!("{error:#}").contains("registration and image preload are not wired yet"));
+        create(args, &root).unwrap();
 
         let calls: Vec<Value> = fs::read_to_string(bin.join("calls"))
             .unwrap()
@@ -1537,7 +1528,11 @@ else:
         assert!(ssh_calls.contains("ec2-user@192.0.2.7"));
         let record = records(&root).unwrap().pop().unwrap();
         assert_eq!(record.instance_id.as_deref(), Some("i-test"));
-        assert!(!Config::load().unwrap().machines.contains_key("builder"));
+        let config = Config::load().unwrap();
+        assert!(matches!(
+            config.targets.get("builder"),
+            Some(TargetTemplate::SshNitro { .. })
+        ));
         assert!(
             calls
                 .iter()
