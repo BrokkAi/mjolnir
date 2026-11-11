@@ -111,6 +111,9 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Decision: The engine also offers `ps [--all] [--filter label=KEY[=VALUE]]... [--format json|TEMPLATE]` (a JSON array in Podman's shape with `Id`, `Names`, `Labels`, `State`, `Image`, `ImageID`, `Created`, `Mounts`), for the controller's recovery scan. `--env KEY` without a value takes the engine's own value and is omitted when unset, so the controller can pass secrets through `sudo --preserve-env` instead of the command line.
   Rationale: contract additions from the target-kind implementer (Milestone 2).
   Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: The flattened root disk is sparse and sized to the filesystem that holds it, like a volume (196 GiB on the spike host, 8.2 GiB used), with the default inode density; no headroom figure is baked into an image. Operands that name a container accept the id `run` printed or an unambiguous prefix of 12 or more hex characters; a name wins. A new volume is filled from the image only at its first read-write attach (the host records `initialized` after a container starts with it), so deleting a volume's contents does not bring them back, and a volume first attached read-only stays new. Fractional `--cpus` is refused: a vCPU is a whole core given to the hypervisor and nothing on the host can throttle it.
+  Rationale: review findings on speculative sizes, Podman compatibility and resurrected data.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
 
 ## Outcomes & Retrospective
 
