@@ -61,8 +61,13 @@ pub fn status(
         AuthScheme::NativeLogin => {
             let authenticated =
                 crate::setup::harness_is_authenticated_with_executor(profile, executor);
-            #[cfg(target_os = "macos")]
-            if profile.kind == HarnessKind::Claude && !profile.authentication_marker().is_file() {
+            if matches!(
+                profile
+                    .kind
+                    .login_store(mj_core::config::HarnessHost::current(), &profile.home),
+                mj_core::config::HarnessLoginStore::MacKeychain
+            ) && !profile.authentication_marker().is_file()
+            {
                 return if authenticated {
                     LoginStatus::SignedIn
                 } else {

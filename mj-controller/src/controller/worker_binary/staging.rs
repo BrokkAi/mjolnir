@@ -62,44 +62,41 @@ pub(super) fn claude_environment_login_present(
         })
 }
 
-/// Carry the host's native Claude login into a target whose process cannot
-/// reach the controller's macOS Keychain. The setup token takes precedence:
-/// when that environment variable is present, Claude never reads this file.
+/// Carry the host's native Claude login into a session's staged home when the
+/// host keeps it in the macOS Keychain ([`mj_core::config::HarnessKind::login_store`]).
+///
+/// Every session runs with `CLAUDE_CONFIG_DIR` set to its staged home, so
+/// Claude Code looks in a Keychain item named after that directory, which
+/// never exists, and then in the home's `.credentials.json`. That file is
+/// where the login reaches every target, local ones included. The copy omits
+/// the refresh token like every other copy: the daemon renews the Keychain
+/// login and the credential sync pushes the result (`copies_omit_refresh_token`).
+///
+/// The setup token takes precedence: when that environment variable is
+/// present, Claude never reads this file.
 pub(super) fn stage_claude_keychain_login(
     profile: &mj_core::config::HarnessProfile,
+    host: mj_core::config::HarnessHost,
     destination: &Path,
-    backend: &targets::TargetLocator,
     environment_login_present: bool,
     executor: &impl CommandExecutor,
 ) -> Result<()> {
-    #[cfg(target_os = "macos")]
+    if profile.kind != mj_core::config::HarnessKind::Claude
+        || !profile.auth_scheme().uses_native_login_file()
+        || environment_login_present
+        || !matches!(
+            profile.kind.login_store(host, &profile.home),
+            mj_core::config::HarnessLoginStore::MacKeychain
+        )
     {
-        if profile.kind != mj_core::config::HarnessKind::Claude
-            || !profile.auth_scheme().uses_native_login_file()
-            || environment_login_present
-            || matches!(backend, targets::TargetLocator::LocalBare { .. })
-        {
-            return Ok(());
-        }
-        // Staged whole, refresh token included: nothing on a Mac renews a
-        // Keychain login in a container copy (`copies_omit_refresh_token`).
-        if let Some(credentials) = crate::setup::claude_keychain_credentials(executor)? {
-            let path = destination.join(profile.kind.credential_file_name());
-            mj_core::credentials::write_credential_file(profile.kind, &path, &credentials)
-                .with_context(|| {
-                    format!("stage Claude's macOS Keychain login at {}", path.display())
-                })?;
-        }
+        return Ok(());
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (
-            profile,
-            destination,
-            backend,
-            environment_login_present,
-            executor,
-        );
+    if let Some(credentials) = crate::setup::claude_keychain_credentials(executor)? {
+        let copy = mj_core::credentials::credential_copy_for_harness(profile.kind, &credentials);
+        let path = destination.join(profile.kind.credential_file_name());
+        mj_core::credentials::write_credential_file(profile.kind, &path, &copy).with_context(
+            || format!("stage Claude's macOS Keychain login at {}", path.display()),
+        )?;
     }
     Ok(())
 }

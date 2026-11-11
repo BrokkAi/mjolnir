@@ -239,14 +239,12 @@ impl HarnessKind {
     /// (#1490). Without the key, Claude Code never refreshes or writes the file
     /// and rereads a replaced one by modification time.
     ///
-    /// Not on macOS: there the host login lives in the Keychain, not in the
-    /// profile home. The credential sync never reads or writes it, and the
-    /// daemon does not refresh it, so a stripped container copy could not be
-    /// renewed and would die after one access-token lifetime. Copies staged
-    /// from the Keychain keep their refresh token and refresh themselves, as
-    /// before.
+    /// The same on every host. Where the host's own login lives is
+    /// [`HarnessKind::login_store`]'s business (on macOS it is the Keychain,
+    /// which the sync reads and the refresher renews); the copies are files
+    /// either way.
     pub fn copies_omit_refresh_token(self) -> bool {
-        self == Self::Claude && self.keeps_login_in_home(crate::config::HarnessHost::current())
+        self == Self::Claude
     }
 }
 

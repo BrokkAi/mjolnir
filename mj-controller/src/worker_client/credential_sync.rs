@@ -1,5 +1,6 @@
 use super::*;
 use crate::session_manager::{RelayConnectionJob, RelayJobDeferred, SessionManagerControl};
+use mj_core::config::harness_authentication_marker;
 use mj_core::credentials::{credential_copy_for_harness, credential_holds_refresh_token};
 
 /// How a reconciliation reaches each session's worker.
@@ -704,12 +705,14 @@ pub(super) async fn reconcile_profile_guarded(
                 CanonicalSkills::failed(&format!("skills collection task stopped: {error}"))
             }),
     );
+    let login = login_for_pass(targets).await;
     let pass_context = PassContext {
         relays,
         gate,
         runtime,
         skills: &skills,
         slopcop_login: &slopcop_login,
+        login: &login,
         triggered_by,
         steps,
     };
@@ -1001,6 +1004,7 @@ struct PassContext<'a> {
     runtime: Option<&'a Arc<crate::daemon::RuntimeState>>,
     skills: &'a Arc<CanonicalSkills>,
     slopcop_login: &'a HostSlopcopLogin,
+    login: &'a PassLogin,
     triggered_by: Option<&'a str>,
     steps: &'a SessionSteps,
 }
@@ -1110,6 +1114,7 @@ async fn reconcile_target(
         runtime,
         skills,
         slopcop_login,
+        login,
         triggered_by,
         steps,
     } = context;
@@ -1138,7 +1143,10 @@ async fn reconcile_target(
             skills,
             &github,
             aws_credentials,
-            slopcop_login,
+            HostLogins {
+                slopcop: slopcop_login,
+                harness: login,
+            },
             hold,
         )
         .await
@@ -1905,9 +1913,98 @@ impl CanonicalSkills {
 
 /// The profile's login as the controller holds it.
 pub(super) struct CanonicalLogin {
-    pub(super) path: std::path::PathBuf,
+    /// Where the controller keeps it: a file, or the macOS Keychain.
+    pub(super) store: mj_core::config::HarnessLoginStore,
     pub(super) credential: CredentialSnapshot,
     pub(super) bytes: Vec<u8>,
+}
+
+/// A login as read from where its store keeps it.
+type LoginRead = Result<(CredentialSnapshot, Vec<u8>), String>;
+
+/// The host's logins a pass reads once for all of a profile's sessions.
+pub(super) struct HostLogins<'a> {
+    pub(super) slopcop: &'a HostSlopcopLogin,
+    pub(super) harness: &'a PassLogin,
+}
+
+/// Where a pass finds the profile's login. Decided once per pass, from
+/// [`mj_core::config::HarnessKind::login_store`], so every session of the
+/// profile agrees on it.
+pub(super) enum PassLogin {
+    /// A file (or a login database): each session reads it when its turn
+    /// comes, so a refresh during the pass is seen.
+    PerSession,
+    /// The macOS Keychain, read once for the whole pass: every session of the
+    /// profile reconciles against the same item, and each read spawns
+    /// `security`. A read that is slightly stale by the time a late session is
+    /// reached is harmless: a session never replaces the Keychain login, and a
+    /// push of an older login is refused by the session for being older.
+    Keychain(Arc<LoginRead>),
+}
+
+/// Read the login a profile keeps in `store`. Blocking: a file read, or a
+/// `security` process.
+fn read_login_from_store(
+    kind: mj_core::config::HarnessKind,
+    store: &mj_core::config::HarnessLoginStore,
+    security: &(impl crate::targets::CommandExecutor + ?Sized),
+) -> Result<(CredentialSnapshot, Vec<u8>)> {
+    match store {
+        mj_core::config::HarnessLoginStore::File { marker } => read_credential_file(kind, marker),
+        mj_core::config::HarnessLoginStore::MacKeychain => {
+            match crate::setup::read_claude_keychain_login(security)? {
+                crate::setup::KeychainLogin::Present(bytes) => {
+                    Ok((CredentialSnapshot::of(kind, &bytes), bytes))
+                }
+                crate::setup::KeychainLogin::Missing => {
+                    Ok((CredentialSnapshot::absent(), Vec::new()))
+                }
+                // Treating a locked Keychain as "no login" would let the
+                // sync act on a login that merely could not be read.
+                crate::setup::KeychainLogin::Unreadable { status } => Err(anyhow!(
+                    "the macOS Keychain could not be read (security exited with status {status})"
+                )),
+            }
+        }
+    }
+}
+
+/// [`read_login_from_store`] with the daemon's bounded `security` lookup, off
+/// the scheduler thread.
+async fn read_login_blocking(
+    kind: mj_core::config::HarnessKind,
+    store: mj_core::config::HarnessLoginStore,
+) -> Result<(CredentialSnapshot, Vec<u8>)> {
+    tokio::task::spawn_blocking(move || {
+        read_login_from_store(
+            kind,
+            &store,
+            &crate::targets::BoundedProcessExecutor::new(crate::setup::KEYCHAIN_READ_TIMEOUT),
+        )
+    })
+    .await
+    .context("read profile credentials task stopped")?
+}
+
+/// Decide where the pass finds the profile's login, and read it when that is
+/// the Keychain and any of the pass's sessions needs it.
+async fn login_for_pass(targets: &[CredentialSyncTarget]) -> PassLogin {
+    let Some(target) = targets.iter().find(|target| !target.skips_login_file_sync) else {
+        return PassLogin::PerSession;
+    };
+    let store = target.harness.login_store(
+        mj_core::config::HarnessHost::current(),
+        &target.profile_home,
+    );
+    if store != mj_core::config::HarnessLoginStore::MacKeychain {
+        return PassLogin::PerSession;
+    }
+    PassLogin::Keychain(Arc::new(
+        read_login_blocking(target.harness, store)
+            .await
+            .map_err(|error| format!("{error:#}")),
+    ))
 }
 
 /// What one session is reconciled against, read on the controller before its
@@ -1926,24 +2023,46 @@ impl SessionCanonical {
         target: &CredentialSyncTarget,
         skills: Arc<CanonicalSkills>,
         github: GithubSync,
+        login: &PassLogin,
     ) -> Self {
         let read_login = || -> Result<CanonicalLogin> {
-            let path = harness_authentication_marker(target.harness, &target.profile_home);
             // A login database is read where the harness keeps it; the
             // profile home holds no copy of it.
-            let (credential, bytes) = if target.harness.keeps_logins_in_database() {
-                match crate::opencode_logins::home_logins(&target.profile_home)? {
-                    Some(bytes) => (CredentialSnapshot::of(target.harness, &bytes), bytes),
-                    None => (CredentialSnapshot::absent(), Vec::new()),
+            if target.harness.keeps_logins_in_database() {
+                let marker = harness_authentication_marker(target.harness, &target.profile_home);
+                let (credential, bytes) =
+                    match crate::opencode_logins::home_logins(&target.profile_home)? {
+                        Some(bytes) => (CredentialSnapshot::of(target.harness, &bytes), bytes),
+                        None => (CredentialSnapshot::absent(), Vec::new()),
+                    };
+                return Ok(CanonicalLogin {
+                    store: mj_core::config::HarnessLoginStore::File { marker },
+                    credential,
+                    bytes,
+                });
+            }
+            match login {
+                // The pass read the Keychain for every session of the profile.
+                PassLogin::Keychain(read) => {
+                    let (credential, bytes) =
+                        read.as_ref().clone().map_err(|error| anyhow!("{error}"))?;
+                    Ok(CanonicalLogin {
+                        store: mj_core::config::HarnessLoginStore::MacKeychain,
+                        credential,
+                        bytes,
+                    })
                 }
-            } else {
-                read_credential_file(target.harness, &path)?
-            };
-            Ok(CanonicalLogin {
-                path,
-                credential,
-                bytes,
-            })
+                PassLogin::PerSession => {
+                    let marker =
+                        harness_authentication_marker(target.harness, &target.profile_home);
+                    let (credential, bytes) = read_credential_file(target.harness, &marker)?;
+                    Ok(CanonicalLogin {
+                        store: mj_core::config::HarnessLoginStore::File { marker },
+                        credential,
+                        bytes,
+                    })
+                }
+            }
         };
         Self {
             // A profile without a login file has nothing to read.
@@ -1980,12 +2099,13 @@ pub(super) async fn reconcile_session(
     skills: &Arc<CanonicalSkills>,
     github: &GithubSync,
     aws: &AwsSync,
-    slopcop_login: &HostSlopcopLogin,
+    host: HostLogins<'_>,
     hold: JobHold,
 ) -> Result<Option<SessionSync>> {
-    let mut canonical = SessionCanonical::read(target, skills.clone(), github.clone());
+    let mut canonical =
+        SessionCanonical::read(target, skills.clone(), github.clone(), host.harness);
     canonical.aws = aws.clone();
-    canonical.slopcop_login = slopcop_login.clone();
+    canonical.slopcop_login = host.slopcop.clone();
     run_on_session(relays, target, SyncWork::Full(Box::new(canonical)), hold).await
 }
 
@@ -2124,7 +2244,7 @@ pub(super) async fn reconcile_on(
                 match reconcile_credentials(
                     client,
                     target,
-                    &login.path,
+                    &login.store,
                     &login.credential,
                     &login.bytes,
                     actions,
@@ -2410,7 +2530,7 @@ impl RelayConnectionJob for CredentialSyncJob {
 pub(super) async fn reconcile_credentials(
     client: &mut RelayClient,
     target: &CredentialSyncTarget,
-    canonical_path: &Path,
+    store: &mj_core::config::HarnessLoginStore,
     canonical: &CredentialSnapshot,
     canonical_bytes: &[u8],
     actions: &mut Vec<CredentialSyncAction>,
@@ -2500,6 +2620,21 @@ pub(super) async fn reconcile_credentials(
                 session = installed;
             }
             SyncAction::Pull => {
+                // The Keychain login is the host's alone: only the daemon
+                // writes it, from a grant it renewed itself. A session whose
+                // copy is strictly newer with its own refresh token (someone
+                // ran /login inside it) keeps it; neither side changes.
+                let canonical_path = match store {
+                    mj_core::config::HarnessLoginStore::File { marker } => marker,
+                    mj_core::config::HarnessLoginStore::MacKeychain => {
+                        tracing::debug!(
+                            session_id = %target.session_id,
+                            profile_id = %target.profile_id,
+                            "the session holds a newer login than the macOS Keychain; leaving both alone"
+                        );
+                        return Ok(None);
+                    }
+                };
                 let received = client.read_credentials().await?;
                 validate_credential_payload(kind, &received).with_context(|| {
                     format!(
@@ -2556,10 +2691,7 @@ pub(super) async fn reconcile_credentials(
         // state now, rather than turning a stale decision into a clean check.
         // Every repeat follows a changed snapshot; no lock spans relay I/O.
         unchanged = false;
-        let path = canonical_path.to_owned();
-        (current, bytes) = tokio::task::spawn_blocking(move || read_credential_file(kind, &path))
-            .await
-            .context("reread profile credentials task stopped")??;
+        (current, bytes) = read_login_blocking(kind, store.clone()).await?;
     }
 }
 

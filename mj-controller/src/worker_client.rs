@@ -1,7 +1,6 @@
 //! Controller-side client for a session relay's JSON-lines proxy.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
@@ -13,7 +12,6 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
 
 use crate::targets::{CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SshSessionLease, ssh_refusal};
-use mj_core::config::harness_authentication_marker;
 use mj_core::credentials::{
     CredentialSnapshot, CredentialSyncAction, CredentialSyncHandle, CredentialSyncOutcome,
     CredentialSyncResult, CredentialSyncTarget, SYNC_INTERVAL, StepFailure, SyncAction, SyncStep,

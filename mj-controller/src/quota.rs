@@ -501,8 +501,8 @@ fn quota_container(
 /// What the daemon's early Claude grant refresh decided for one profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaudeGrantCheck {
-    /// Not a profile whose grant the daemon renews (another harness, no
-    /// native login file, or a macOS Keychain login).
+    /// Not a profile whose grant the daemon renews (another harness, or one
+    /// that does not sign in with the harness's own login).
     NotApplicable,
     /// Nothing to do now. `due_at_ms` is when the grant needs renewing, from
     /// the login as it is now (after a renewal, the new one). `None` when the
@@ -522,11 +522,7 @@ pub(crate) async fn refresh_claude_grant(
     launcher: &claude_usage::ClaudeLauncher,
     gate: &std::sync::Arc<crate::upgrade::Gate>,
 ) -> ClaudeGrantCheck {
-    // macOS keeps the login in the Keychain, which only Claude Code reads.
-    if request.harness != HarnessKind::Claude
-        || !request.auth_scheme.uses_native_login_file()
-        || cfg!(target_os = "macos")
-    {
+    if request.harness != HarnessKind::Claude || !request.auth_scheme.uses_native_login_file() {
         return ClaudeGrantCheck::NotApplicable;
     }
     let environment = request
@@ -534,28 +530,69 @@ pub(crate) async fn refresh_claude_grant(
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<HashMap<_, _>>();
-    // The launcher says whether this host can run Claude Code, so `auto`
-    // picks a container exactly when it cannot.
-    let container = match quota_container(
-        &request.runtime,
+    let (source, container) = match request.harness.login_store(
+        mj_core::config::HarnessHost::current(),
         &request.source_home,
-        launcher.host_can_run(&environment),
     ) {
-        Ok(container) => container,
-        Err(error) => {
-            tracing::warn!(
-                profile_id = %request.profile_id,
-                error = %format!("{error:#}"),
-                "could not choose where to refresh the Claude login"
-            );
-            return ClaudeGrantCheck::Failed;
+        // A Keychain login is renewed by Claude Code on this host, never in
+        // a container: the image cannot write the Keychain. A host that
+        // cannot run Claude Code fails visibly in `refresh_grant_if_due`.
+        mj_core::config::HarnessLoginStore::MacKeychain => {
+            let lock_marker = match mj_core::config::HarnessLoginStore::MacKeychain.lock_marker() {
+                Ok(marker) => marker,
+                Err(error) => {
+                    tracing::warn!(
+                        profile_id = %request.profile_id,
+                        error = %format!("{error:#}"),
+                        "could not find where Claude Code locks the Keychain login"
+                    );
+                    return ClaudeGrantCheck::Failed;
+                }
+            };
+            (
+                claude_usage::LoginSource::Keychain {
+                    lock_marker,
+                    // `security` can wait on a Keychain prompt; the same bound
+                    // as the other host lookups. The login exchange itself
+                    // runs under no deadline.
+                    security: std::sync::Arc::new(crate::targets::BoundedProcessExecutor::new(
+                        crate::setup::KEYCHAIN_READ_TIMEOUT,
+                    )),
+                },
+                None,
+            )
+        }
+        mj_core::config::HarnessLoginStore::File { .. } => {
+            // The launcher says whether this host can run Claude Code, so
+            // `auto` picks a container exactly when it cannot.
+            let container = match quota_container(
+                &request.runtime,
+                &request.source_home,
+                launcher.host_can_run(&environment),
+            ) {
+                Ok(container) => container,
+                Err(error) => {
+                    tracing::warn!(
+                        profile_id = %request.profile_id,
+                        error = %format!("{error:#}"),
+                        "could not choose where to refresh the Claude login"
+                    );
+                    return ClaudeGrantCheck::Failed;
+                }
+            };
+            (
+                claude_usage::LoginSource::File {
+                    home: request.source_home.clone(),
+                },
+                container,
+            )
         }
     };
     // No deadline and no cancellation: a started login exchange runs to its
     // own end (see `claude_usage::run_claude_refresh`).
     let executor = std::sync::Arc::new(crate::targets::ProcessExecutor);
     match claude_usage::refresh_grant_if_due(
-        request.source_home.clone(),
+        source,
         environment,
         executor,
         container,

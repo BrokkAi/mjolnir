@@ -1343,7 +1343,10 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
             &skills,
             &credential_sync::GithubSync::Known(None),
             &credential_sync::AwsSync::Unmanaged,
-            &credential_sync::HostSlopcopLogin::Unknown,
+            credential_sync::HostLogins {
+                slopcop: &credential_sync::HostSlopcopLogin::Unknown,
+                harness: &credential_sync::PassLogin::PerSession,
+            },
             credential_sync::JobHold::new(None, None, None, None),
         )
         .await
@@ -2433,7 +2436,10 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
                 skills,
                 &credential_sync::GithubSync::Known(None),
                 &aws,
-                &credential_sync::HostSlopcopLogin::Unknown,
+                credential_sync::HostLogins {
+                    slopcop: &credential_sync::HostSlopcopLogin::Unknown,
+                    harness: &credential_sync::PassLogin::PerSession,
+                },
                 credential_sync::JobHold::new(None, None, None, None),
             )
             .await
@@ -2925,6 +2931,86 @@ async fn claude_sync_converges_copies_to_the_hosts_login_without_its_refresh_tok
             std::fs::read(&received).unwrap(),
             session_after,
             "{name}: session"
+        );
+    }
+}
+
+/// #1491: a login the macOS Keychain holds reaches sessions as the stripped
+/// copy, and nothing a session holds ever replaces it: a copy with its own
+/// newer login (someone ran /login inside the session) stays in that session,
+/// and the host's profile home gets no credential file.
+#[cfg(unix)]
+#[tokio::test]
+async fn keychain_login_sync_pushes_stripped_copies_and_never_pulls_into_the_keychain() {
+    let kind = mj_core::config::HarnessKind::Claude;
+    let host_login = claude_login(2_000, "access-host", Some("refresh-host"));
+    let stripped_host =
+        mj_core::credentials::credential_copy_for_harness(kind, &host_login).into_owned();
+    let own_login = claude_login(3_000, "access-own", Some("refresh-own"));
+    #[allow(clippy::type_complexity, reason = "one-off table of scenarios")]
+    let cases: [(&str, Vec<u8>, Vec<CredentialSyncAction>, Vec<u8>); 4] = [
+        (
+            "pre-upgrade copy that still holds the refresh token",
+            host_login.clone(),
+            vec![CredentialSyncAction::Pushed],
+            stripped_host.clone(),
+        ),
+        (
+            "converged copy",
+            stripped_host.clone(),
+            vec![],
+            stripped_host.clone(),
+        ),
+        (
+            "older copy",
+            claude_login(1_000, "access-old", None),
+            vec![CredentialSyncAction::Pushed],
+            stripped_host.clone(),
+        ),
+        (
+            "copy with its own newer login",
+            own_login.clone(),
+            vec![],
+            own_login.clone(),
+        ),
+    ];
+    for (name, session_login, actions, session_after) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let received = scratch.path().join("session-login");
+        let target = claude_sync_target(home.path(), "claude-session", &session_login, &received);
+        let skills = Arc::new(CanonicalSkills::collect(&target));
+        let read = (
+            CredentialSnapshot::of(kind, &host_login),
+            host_login.clone(),
+        );
+
+        let sync = reconcile_session(
+            &SessionRelays::Direct,
+            &target,
+            &skills,
+            &credential_sync::GithubSync::Known(None),
+            &credential_sync::AwsSync::Unmanaged,
+            credential_sync::HostLogins {
+                slopcop: &credential_sync::HostSlopcopLogin::Unknown,
+                harness: &credential_sync::PassLogin::Keychain(Arc::new(Ok(read))),
+            },
+            credential_sync::JobHold::new(None, None, None, None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(sync.failures.is_empty(), "{name}: {:?}", sync.failures);
+        assert_eq!(sync.actions, actions, "{name}");
+        assert_eq!(
+            std::fs::read(&received).unwrap(),
+            session_after,
+            "{name}: session"
+        );
+        assert!(
+            !home.path().join(".credentials.json").exists(),
+            "{name}: the profile home gains no login file"
         );
     }
 }

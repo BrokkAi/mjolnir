@@ -276,8 +276,8 @@ impl Controller {
         }
         stage_claude_keychain_login(
             profile,
+            mj_core::config::HarnessHost::current(),
             &profile_stage,
-            backend,
             claude_environment_login_present(profile, &launch.environment),
             executor,
         )?;

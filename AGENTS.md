@@ -264,8 +264,10 @@ container sessions run the same harness versions as managed bare workers:
   `bridge_fallback_pins_match_the_agent_dev_containerfile` fails if the
   Containerfile and the pins disagree.
 - Claude Code or its bridge: run `python3 tests/e2e/claude_stripped_credentials.py`
-  against the new pin. Sessions hold a login without a refresh token and rely
-  on Claude Code never refreshing it and rereading a replaced file (#1490).
+  against the new pin on Linux and on a Mac. Sessions hold a login without a
+  refresh token and rely on Claude Code never refreshing it and rereading a
+  replaced file (#1490); on macOS, also on Claude Code reading that file when
+  the Keychain has no item for the session's config directory (#1491).
 - Muse: update `mj-core/assets/muse/runtime.json`. The image installs Muse
   from that file.
 - dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs` and
