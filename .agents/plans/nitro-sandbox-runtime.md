@@ -108,6 +108,9 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Decision: A launch holds a shared lock on its boot-assets directory (`locks/boot-<tag>.lock`) from before it names the assets until the guest agent answers, and `image prune` removes other builds' assets only when it can take the exclusive lock without waiting. `stop --time 0` keeps the 10-second flush bound on purpose (review asked for an immediate kill): the controller stops sessions with `--time 0` and keeps their volumes, and a kill loses the guest's unwritten data. IPv6 from TAP devices is dropped by an `ip6` table beside the `ip` one, and a root guest agent always applies the requested group.
   Rationale: review findings; one lock order, no unobserved cap added.
   Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: The engine also offers `ps [--all] [--filter label=KEY[=VALUE]]... [--format json|TEMPLATE]` (a JSON array in Podman's shape with `Id`, `Names`, `Labels`, `State`, `Image`, `ImageID`, `Created`, `Mounts`), for the controller's recovery scan. `--env KEY` without a value takes the engine's own value and is omitted when unset, so the controller can pass secrets through `sudo --preserve-env` instead of the command line.
+  Rationale: contract additions from the target-kind implementer (Milestone 2).
+  Date/Author: 2026-11-10, Milestone 1 implementer.
 
 ## Outcomes & Retrospective
 
