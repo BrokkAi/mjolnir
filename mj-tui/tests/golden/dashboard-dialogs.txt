@@ -646,33 +646,81 @@ Ent
 │›   │                                                                                                            │    │
 │    │Total ? · last hour · estimated API USD                                                                     │    │
 │    │                                                                                                            │    │
-│    │Write release notes [claude]  $6.200+                                                                       │    │
-│    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │    │
+│    │Primary agents  $7.200+                                                                                     │    │
+│    │  claude-opus-5-5  $6.200+                                                                                  │    │
+│    │  gpt-6.1-terra  $1.000+                                                                                    │    │
+│    │                                                                                                            │    │
+│    │Subagents  $5.105+                                                                                          │    │
+│    │  gpt-6.1-sol  $5.000+                                                                                      │    │
+│    │  gpt-6-luna  $0.105+                                                                                       │    │
+│    │                                                                                                            │    │
+│    │Reviewers  ?                                                                                                │    │
+│    │  claude-opus-5-5  $7.100+                                                                                  │    │
+│    │  custom-model  ?                                                                                           │    │
+│    │                                                                                                            │    │
+│    │Write release notes [claude]  $8.200+                                                                       │  ──╯
+│    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │  ──╮
+│    │    gpt-6.1-sol  $2.000  tokens unknown                                                                     │    │
 │    │    0 sub-agents · 3/5 turns reported                                                                       │    │
-│    │                                                                                                            │    │
-│    │Investigate recovery [codex]  ?                                                                             │    │
-│    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │    │
-│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
-│    │    custom-model  ?  tokens unknown                                                                         │    │
-│    │    2 sub-agents · 4/4 turns reported                                                                       │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ──╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▄ ╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ▄ ╮
+│    │Investigate recovery [codex]  ?                                                                             │  ▄ ╮
+│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │    │
+│    │    gpt-6.1-terra  $1.000  tokens unknown                                                                   │  ──╯
+│    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │  ▄ ╮
 │    │                                                                                                            │    │
 │    │Sub-agents included · profile filters turns · + partial · base rates                                        │    │
 │    │  Refresh     Close                                                                                         │    │
 │    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
 ╰──                                                                                                                  ──╯
 Ent
+
+=== Usage narrow last model total (70x22) ===
+╭                                                                    ╮
+│                                                                    │
+╰  ╭ × Usage by session ──────────────────────────────────────────╮  ╯
+╭  │Profile All ▾                           Period Hourly ▾       │  ╮
+│  │                                                              │  │
+│  │☐ Include suspended sessions                                  │  │
+│  │                                                              │  │
+│  │Total ? · last hour · estimated API USD                       │  │
+╰  │                                                              │  ╯
+╭  │                                                              │  ╮
+│  │Reviewers  ?                                                  │  │
+╰  │  claude-opus-5-5  $7.100+                                    │  ╯
+╭  │  custom-model  ?                                             │  ╮
+│  │                                                              │  │
+╰  │Write release notes [claude]  $8.200+                         │  ╯
+╭  │    claude-opus-5-5  $6.200  tokens unknown                   │  ╮
+│  │                                                              │  │
+╰  │Sub-agents included · profile filters turns · + partial · base│  ╯
+╭  │  Refresh     Close                                           │  ╮
+│  ╰──────────────────────────────────────────────────────────────╯  ▐
+╰                                                                    ╯
+E
+
+=== Usage narrow last session (70x22) ===
+╭                                                                    ╮
+│                                                                    │
+╰  ╭ × Usage by session ──────────────────────────────────────────╮  ╯
+╭  │Profile All ▾                           Period Hourly ▾       │  ╮
+│  │                                                              │  │
+│  │☐ Include suspended sessions                                  │  │
+│  │                                                              │  │
+│  │Total ? · last hour · estimated API USD                       │  │
+╰  │                                                              │  ╯
+╭  │    gpt-6.1-sol  $3.000  tokens unknown                       │  ╮
+│  │    gpt-6.1-terra  $1.000  tokens unknown                     │  │
+╰  │    claude-opus-5-5  $7.100  tokens unknown                   │  ╯
+╭  │    gpt-6-luna  $0.105  tokens unknown                        │  ╮
+│  │    custom-model  ?  tokens unknown                           │  │
+╰  │    2 sub-agents · 4/4 turns reported                         │  ╯
+╭  │                                                              │  ╮
+│  │                                                              │  │
+╰  │Sub-agents included · profile filters turns · + partial · base│  ╯
+╭  │  Refresh     Close                                           │  ╮
+│  ╰──────────────────────────────────────────────────────────────╯  ▐
+╰                                                                    ╯
+E
 
 === Usage profile dropdown (120x36) ===
 ╭ W                                                                                                                  ──╮
@@ -684,22 +732,60 @@ Ent
 │›   │        │claude    │                                                                                        │    │
 │    │Total ? │claude-1  │· estimated API USD                                                                     │    │
 │    │        │codex     │                                                                                        │    │
-│    │Write re│codex-1   │[claude]  $6.200+                                                                       │    │
-│    │    clau│codex-2   │ $6.200  tokens unknown                                                                 │    │
-│    │    0 su╰──────────╯/5 turns reported                                                                       │    │
+│    │Primary │codex-1   │00+                                                                                     │    │
+│    │  claude│codex-2   │6.200+                                                                                  │    │
+│    │  gpt-6.╰──────────╯000+                                                                                    │    │
+│    │                                                                                                            │    │
+│    │Subagents  $5.105+                                                                                          │    │
+│    │  gpt-6.1-sol  $5.000+                                                                                      │    │
+│    │  gpt-6-luna  $0.105+                                                                                       │    │
+│    │                                                                                                            │    │
+│    │Reviewers  ?                                                                                                │    │
+│    │  claude-opus-5-5  $7.100+                                                                                  │    │
+│    │  custom-model  ?                                                                                           │    │
+│    │                                                                                                            │    │
+│    │Write release notes [claude]  $8.200+                                                                       │  ──╯
+│    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │  ──╮
+│    │    gpt-6.1-sol  $2.000  tokens unknown                                                                     │    │
+│    │    0 sub-agents · 3/5 turns reported                                                                       │    │
+│    │                                                                                                            │  ──╯
+│    │Investigate recovery [codex]  ?                                                                             │  ▄ ╮
+│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │    │
+│    │    gpt-6.1-terra  $1.000  tokens unknown                                                                   │  ──╯
+│    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │  ▄ ╮
+│    │                                                                                                            │    │
+│    │Sub-agents included · profile filters turns · + partial · base rates                                        │    │
+│    │  Refresh     Close                                                                                         │    │
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent
+
+=== Usage Codex with model totals (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile codex ▾                                                                       Period Hourly ▾       │    │
+│ C  │                                                                                                            │    │
+│he  │☐ Include suspended sessions                                                                                │    │
+│›   │                                                                                                            │    │
+│    │Total ? · last hour · estimated API USD                                                                     │    │
+│    │                                                                                                            │    │
+│    │Primary agents  $1.000                                                                                      │    │
+│    │  gpt-6.1-terra  $1.000                                                                                     │    │
+│    │                                                                                                            │    │
+│    │Subagents  $3.105                                                                                           │    │
+│    │  gpt-6.1-sol  $3.000                                                                                       │    │
+│    │  gpt-6-luna  $0.105                                                                                        │    │
+│    │                                                                                                            │    │
+│    │Reviewers  ?                                                                                                │    │
+│    │  custom-model  ?                                                                                           │    │
 │    │                                                                                                            │    │
 │    │Investigate recovery [codex]  ?                                                                             │    │
-│    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │    │
-│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
+│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │    │
+│    │    gpt-6.1-terra  $1.000  tokens unknown                                                                   │  ──╯
+│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │  ──╮
 │    │    custom-model  ?  tokens unknown                                                                         │    │
 │    │    2 sub-agents · 4/4 turns reported                                                                       │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ──╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
@@ -716,28 +802,28 @@ Ent
 ╭ W                                                                                                                  ──╮
 │ d                                                                                                                    │
 ╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile claude ▾                                                                      Period Hourly ▾       │    │
+╭ S  │Profile codex ▾                                                                       Period Hourly ▾       │    │
 │ C  │                                                                                             ╭Period───╮    │    │
 │he  │☐ Include suspended sessions                                                                 │Hourly   │    │    │
 │›   │                                                                                             │Daily    │    │    │
-│    │Total $0.000 · last hour · estimated API USD                                                 │Weekly   │    │    │
+│    │Total ? · last hour · estimated API USD                                                      │Weekly   │    │    │
 │    │                                                                                             │Monthly  │    │    │
-│    │No sessions match these filters.                                                             ╰─────────╯    │    │
+│    │Primary agents  $1.000                                                                       ╰─────────╯    │    │
+│    │  gpt-6.1-terra  $1.000                                                                                     │    │
 │    │                                                                                                            │    │
+│    │Subagents  $3.105                                                                                           │    │
+│    │  gpt-6.1-sol  $3.000                                                                                       │    │
+│    │  gpt-6-luna  $0.105                                                                                        │    │
 │    │                                                                                                            │    │
+│    │Reviewers  ?                                                                                                │    │
+│    │  custom-model  ?                                                                                           │    │
 │    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ──╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
+│    │Investigate recovery [codex]  ?                                                                             │    │
+│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │    │
+│    │    gpt-6.1-terra  $1.000  tokens unknown                                                                   │  ──╯
+│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │  ──╮
+│    │    custom-model  ?  tokens unknown                                                                         │    │
+│    │    2 sub-agents · 4/4 turns reported                                                                       │    │
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
@@ -754,28 +840,28 @@ Ent
 ╭ W                                                                                                                  ──╮
 │ d                                                                                                                    │
 ╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile claude ▾                                                                      Period Daily ▾        │    │
+╭ S  │Profile codex ▾                                                                       Period Daily ▾        │    │
 │ C  │                                                                                                            │    │
 │he  │☐ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
 │    │Total ? · last 24 hours · estimated API USD                                                                 │    │
 │    │                                                                                                            │    │
-│    │Write release notes [claude]  $6.200+                                                                       │    │
-│    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │    │
-│    │    0 sub-agents · 3/5 turns reported                                                                       │    │
+│    │Primary agents  $1.000                                                                                      │    │
+│    │  gpt-6.1-terra  $1.000                                                                                     │    │
+│    │                                                                                                            │    │
+│    │Subagents  $3.105                                                                                           │    │
+│    │  gpt-6.1-sol  $3.000                                                                                       │    │
+│    │  gpt-6-luna  $0.105                                                                                        │    │
+│    │                                                                                                            │    │
+│    │Reviewers  ?                                                                                                │    │
+│    │  custom-model  ?                                                                                           │    │
 │    │                                                                                                            │    │
 │    │Investigate recovery [codex]  ?                                                                             │    │
-│    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │    │
-│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
+│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │    │
+│    │    gpt-6.1-terra  $1.000  tokens unknown                                                                   │  ──╯
+│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │  ──╮
 │    │    custom-model  ?  tokens unknown                                                                         │    │
 │    │    2 sub-agents · 4/4 turns reported                                                                       │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ──╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
@@ -792,28 +878,28 @@ Ent
 ╭ W                                                                                                                  ──╮
 │ d                                                                                                                    │
 ╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile claude ▾                                                                      Period Weekly ▾       │    │
+╭ S  │Profile codex ▾                                                                       Period Weekly ▾       │    │
 │ C  │                                                                                                            │    │
 │he  │☒ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │
 │    │Total ? · last 7 days · estimated API USD                                                                   │    │
 │    │                                                                                                            │    │
-│    │Write release notes [claude]  $6.200+ · suspended                                                           │    │
-│    │    claude-opus-5-5  $6.200  tokens unknown                                                                 │    │
-│    │    0 sub-agents · 3/5 turns reported                                                                       │    │
+│    │Primary agents  $1.000                                                                                      │    │
+│    │  gpt-6.1-terra  $1.000                                                                                     │    │
 │    │                                                                                                            │    │
-│    │Investigate recovery [codex]  ?                                                                             │    │
-│    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │    │
-│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
+│    │Subagents  $3.105                                                                                           │    │
+│    │  gpt-6.1-sol  $3.000                                                                                       │    │
+│    │  gpt-6-luna  $0.105                                                                                        │    │
+│    │                                                                                                            │    │
+│    │Reviewers  ?                                                                                                │    │
+│    │  custom-model  ?                                                                                           │    │
+│    │                                                                                                            │    │
+│    │Investigate recovery [codex]  ? · suspended                                                                 │    │
+│    │    gpt-6.1-sol  $3.000  tokens unknown                                                                     │    │
+│    │    gpt-6.1-terra  $1.000  tokens unknown                                                                   │  ──╯
+│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │  ──╮
 │    │    custom-model  ?  tokens unknown                                                                         │    │
 │    │    2 sub-agents · 4/4 turns reported                                                                       │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
-│    │                                                                                                            │  ──╯
-│    │                                                                                                            │  ──╮
-│    │                                                                                                            │    │
-│    │                                                                                                            │    │
 │    │                                                                                                            │  ──╯
 │    │                                                                                                            │  ▄ ╮
 │    │                                                                                                            │    │
@@ -830,7 +916,7 @@ Ent
 ╭ W                                                                                                                  ──╮
 │ d                                                                                                                    │
 ╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
-╭ S  │Profile claude ▾                                                                      Period Weekly ▾       │    │
+╭ S  │Profile codex ▾                                                                       Period Weekly ▾       │    │
 │ C  │                                                                                                            │    │
 │he  │☒ Include suspended sessions                                                                                │    │
 │›   │                                                                                                            │    │

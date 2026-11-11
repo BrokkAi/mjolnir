@@ -162,15 +162,18 @@ pub(crate) mod fake {
         }
 
         /// Fail any write made without Claude Code's refresh lock in `dir`.
+        #[cfg(unix)]
         pub(crate) fn requiring_lock_in(self, dir: &std::path::Path) -> Self {
             self.state.lock().unwrap().lock_dir = Some(dir.canonicalize().unwrap());
             self
         }
 
+        #[cfg(unix)]
         pub(crate) fn refuse_writes(&self) {
             self.state.lock().unwrap().refuse_writes = true;
         }
 
+        #[cfg(unix)]
         pub(crate) fn login(&self) -> Option<Vec<u8>> {
             self.state.lock().unwrap().login.clone()
         }

@@ -408,6 +408,11 @@ pub fn write_json_atomic<V: Serialize>(path: &Path, value: &V) -> Result<()> {
     file.sync_all()
         .with_context(|| format!("sync {}", temporary.display()))?;
     fs::rename(&temporary, path).with_context(|| format!("publish {}", path.display()))?;
+    // The rename is only durable once the directory is: a caller may delete
+    // what this file replaces, or answer a controller that acts on it.
+    File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("sync {}", directory.display()))?;
     Ok(())
 }
 

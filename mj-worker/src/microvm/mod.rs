@@ -15,6 +15,8 @@ pub mod guest_agent;
 pub mod image;
 pub mod net;
 pub mod protocol;
+pub mod replace_root;
+pub mod root_check;
 pub mod state;
 pub mod sys;
 pub mod tarcopy;

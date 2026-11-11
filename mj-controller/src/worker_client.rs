@@ -37,9 +37,9 @@ pub(crate) type SubagentQueueSnapshot = (
 const RELAY_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const RELAY_SLOW_OPERATION_WARNING: Duration = Duration::from_secs(5);
 /// Starting a target-side proxy may page the full worker executable in and
-/// traverse a container runtime before the relay sees `hello`. That is worker
-/// startup latency, not an ordinary in-connection RPC.
-const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(300);
+/// traverse a container runtime before the relay sees `hello`. This 60-second
+/// budget applies to both initial connects and reconnect handshakes.
+const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// An attachment can decompress a transport-sized page from cold journal
 /// segments. It remains bounded by the relay frame budget, but cold or loaded
 /// storage needs a filesystem deadline rather than an in-memory RPC deadline.

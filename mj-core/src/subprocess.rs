@@ -484,8 +484,8 @@ fn spawn_detached_unix(command: &mut Command) -> Result<u32> {
     Ok(u32::from_ne_bytes(pid_bytes))
 }
 
-/// One past the highest descriptor this process can hold, for the per-fd
-/// loop in [`mark_inherited_descriptors_cloexec`].
+/// One past the highest descriptor this process can hold, for the last-resort
+/// per-fd loop in [`mark_inherited_descriptors_cloexec`].
 #[cfg(unix)]
 fn inherited_descriptor_limit() -> libc::c_int {
     let mut limit = libc::rlimit {
@@ -506,26 +506,19 @@ fn inherited_descriptor_limit() -> libc::c_int {
 
 /// Set `FD_CLOEXEC` on every descriptor from 3 upward. Runs between fork and
 /// exec, so it uses only async-signal-safe calls.
+///
+/// The cost must follow the descriptors actually open, not the soft limit:
+/// [`raise_open_file_limit`] lifts that limit to a million or more. The kernel
+/// shortcut and the descriptor listing both qualify. Only a platform with
+/// neither pays for the per-descriptor loop up to `limit`.
 #[cfg(unix)]
 fn mark_inherited_descriptors_cloexec(limit: libc::c_int) {
-    // Linux 5.11+ marks the whole range in one call. It is invoked as a raw
-    // syscall so the glibc 2.28 build does not need the newer libc wrapper;
-    // older kernels reject it and take the per-descriptor loop.
     #[cfg(target_os = "linux")]
-    {
-        // SAFETY: close_range with CLOSE_RANGE_CLOEXEC only changes
-        // descriptor flags.
-        let marked = unsafe {
-            libc::syscall(
-                libc::SYS_close_range,
-                3 as libc::c_uint,
-                libc::c_uint::MAX,
-                libc::CLOSE_RANGE_CLOEXEC,
-            )
-        };
-        if marked == 0 {
-            return;
-        }
+    if mark_range_cloexec() {
+        return;
+    }
+    if mark_listed_descriptors_cloexec() {
+        return;
     }
     for fd in 3..limit {
         // SAFETY: F_SETFD on a closed descriptor fails with EBADF and changes
@@ -534,6 +527,253 @@ fn mark_inherited_descriptors_cloexec(limit: libc::c_int) {
             libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
         }
     }
+}
+
+/// Linux 5.11+ marks the whole range in one call. It is invoked as a raw
+/// syscall so the glibc 2.28 build does not need the newer libc wrapper;
+/// older kernels reject it.
+#[cfg(target_os = "linux")]
+fn mark_range_cloexec() -> bool {
+    // SAFETY: close_range with CLOSE_RANGE_CLOEXEC only changes descriptor
+    // flags.
+    let marked = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3 as libc::c_uint,
+            libc::c_uint::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    marked == 0
+}
+
+/// Mark the descriptors the kernel lists for this process, and only those.
+/// Returns false when the listing was unavailable or incomplete, so the caller
+/// must scan by number instead.
+///
+/// The listing is read from the forked child, which has one thread, so it is
+/// the exact table the child inherited: a descriptor another thread of the
+/// launcher opened before the fork is in it, and nothing can be opened
+/// concurrently. Setting `FD_CLOEXEC` does not add or remove entries, so the
+/// walk is stable. CPython's `_posixsubprocess` reads `/proc/self/fd` the same
+/// way.
+#[cfg(target_os = "linux")]
+fn mark_listed_descriptors_cloexec() -> bool {
+    // Room for many entries per call; the kernel returns what fits and the
+    // loop asks again, so the size only sets the number of syscalls.
+    #[repr(C, align(8))]
+    struct DirentBuffer([u8; 4096]);
+    // linux_dirent64: u64 d_ino, i64 d_off, u16 d_reclen, u8 d_type, name.
+    const RECLEN_OFFSET: usize = 16;
+    const NAME_OFFSET: usize = 19;
+
+    // SAFETY: the path is a NUL-terminated literal; open has no other
+    // requirement.
+    let directory = unsafe {
+        libc::open(
+            c"/proc/self/fd".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if directory < 0 {
+        return false;
+    }
+    let mut buffer = DirentBuffer([0; 4096]);
+    let mut complete = true;
+    loop {
+        // SAFETY: the buffer is writable for its whole length.
+        let filled = unsafe {
+            libc::syscall(
+                libc::SYS_getdents64,
+                directory,
+                buffer.0.as_mut_ptr(),
+                buffer.0.len(),
+            )
+        };
+        if filled < 0 {
+            complete = false;
+            break;
+        }
+        if filled == 0 {
+            break;
+        }
+        let filled = filled as usize;
+        let mut offset = 0;
+        while offset + NAME_OFFSET < filled {
+            let reclen = usize::from(u16::from_ne_bytes([
+                buffer.0[offset + RECLEN_OFFSET],
+                buffer.0[offset + RECLEN_OFFSET + 1],
+            ]));
+            if reclen == 0 || offset + reclen > filled {
+                complete = false;
+                break;
+            }
+            // The name is a decimal descriptor number, or "." and "..".
+            let mut fd: libc::c_int = 0;
+            let mut digits = 0;
+            let mut index = offset + NAME_OFFSET;
+            while index < offset + reclen && buffer.0[index] != 0 {
+                let byte = buffer.0[index];
+                if !byte.is_ascii_digit() {
+                    digits = 0;
+                    break;
+                }
+                fd = fd
+                    .saturating_mul(10)
+                    .saturating_add(libc::c_int::from(byte - b'0'));
+                digits += 1;
+                index += 1;
+            }
+            if digits > 0 && fd >= 3 {
+                // SAFETY: only sets close-on-exec on a descriptor this
+                // process holds. It also reaches `directory`, which is
+                // already close-on-exec.
+                unsafe {
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                }
+            }
+            offset += reclen;
+        }
+        if !complete {
+            break;
+        }
+    }
+    // SAFETY: `directory` is the descriptor opened above.
+    unsafe {
+        libc::close(directory);
+    }
+    complete
+}
+
+/// macOS has no listing in the filesystem that is safe to read after a fork:
+/// `/dev/fd` needs `opendir`, which allocates. `proc_pidinfo(PROC_PIDLISTFDS)`
+/// is a plain system call wrapper that fills a caller-supplied buffer, so it
+/// is async-signal-safe in practice, and the kernel lists only open
+/// descriptors. A table larger than the buffer returns a full buffer; that
+/// cannot be told from an exact fit, so it reports incomplete and the caller
+/// falls back to the bounded scan.
+#[cfg(target_os = "macos")]
+fn mark_listed_descriptors_cloexec() -> bool {
+    const ENTRIES: usize = 4096;
+    let mut entries = [libc::proc_fdinfo {
+        proc_fd: 0,
+        proc_fdtype: 0,
+    }; ENTRIES];
+    let capacity = std::mem::size_of_val(&entries) as libc::c_int;
+    // SAFETY: `entries` is writable for `capacity` bytes; getpid is
+    // async-signal-safe and names the forked child itself.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDLISTFDS,
+            0,
+            entries.as_mut_ptr().cast(),
+            capacity,
+        )
+    };
+    if written <= 0 || written >= capacity {
+        return false;
+    }
+    let count = written as usize / std::mem::size_of::<libc::proc_fdinfo>();
+    for entry in &entries[..count] {
+        if entry.proc_fd >= 3 {
+            // SAFETY: only sets close-on-exec on a descriptor this process
+            // holds.
+            unsafe {
+                libc::fcntl(entry.proc_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+        }
+    }
+    true
+}
+
+/// Other Unixes take the bounded scan.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn mark_listed_descriptors_cloexec() -> bool {
+    false
+}
+
+/// Raise this process's soft open-file limit as far as the system allows, so
+/// it and every child it starts (children inherit the limit) can hold many
+/// descriptors. A launcher's soft limit is often 1024, which a process holding
+/// a few descriptors per child exhausts at a few hundred children.
+///
+/// Call this first in every binary's `main`. A failure is reported on stderr
+/// and otherwise ignored: the limit stays what it was and startup continues.
+/// Logging is not up yet at the call sites, so this does not use `tracing`.
+pub fn raise_open_file_limit() {
+    if let Err(error) = raise_open_file_limit_impl() {
+        eprintln!("warning: could not raise the open file limit: {error}");
+    }
+}
+
+#[cfg(unix)]
+fn raise_open_file_limit_impl() -> std::io::Result<()> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a valid, writable rlimit.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let target = open_file_limit_target(limit.rlim_max)?;
+    if limit.rlim_cur >= target {
+        return Ok(());
+    }
+    limit.rlim_cur = target;
+    // SAFETY: `limit` is a valid rlimit; the hard limit is left unchanged.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The soft limit to ask for given the hard limit. macOS reports an unlimited
+/// hard limit but refuses a soft limit above `kern.maxfilesperproc`; Go's
+/// runtime applies the same ceiling. Linux refuses anything above
+/// `fs.nr_open`, which is what an unlimited hard limit really means there.
+#[cfg(unix)]
+fn open_file_limit_target(hard: libc::rlim_t) -> std::io::Result<libc::rlim_t> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut per_process: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>();
+        // SAFETY: the name is NUL-terminated and the output is a c_int of the
+        // size passed.
+        let read = unsafe {
+            libc::sysctlbyname(
+                c"kern.maxfilesperproc".as_ptr(),
+                (&mut per_process as *mut libc::c_int).cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if read != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(hard.min(libc::rlim_t::try_from(per_process).unwrap_or(hard)))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if hard != libc::RLIM_INFINITY {
+            Ok(hard)
+        } else if cfg!(target_os = "linux") {
+            std::fs::read_to_string("/proc/sys/fs/nr_open")?
+                .trim()
+                .parse()
+                .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))
+        } else {
+            Ok(hard)
+        }
+    }
+}
+
+/// Windows has no descriptor limit to raise.
+#[cfg(not(unix))]
+fn raise_open_file_limit_impl() -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Run `command` with `input` written to its stdin, returning the captured
@@ -1012,6 +1252,55 @@ mod tests {
         outcome
             .expect("the pipe must reach EOF while the detached child is still running")
             .expect("read the pipe to EOF");
+    }
+
+    // The descriptor listing is the cloexec path on a kernel without
+    // close_range, and on macOS. Exercise a descriptor far above 1024 when
+    // the hard limit permits it, and an ordinary descriptor otherwise. Run
+    // in the pre-exec child, as it is for `spawn_detached`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn descriptor_listing_marks_an_inherited_descriptor_cloexec() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::process::CommandExt as _;
+
+        raise_open_file_limit();
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `limit` is a valid, writable rlimit.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        let minimum = if limit.rlim_cur > 5000 { 5000 } else { 3 };
+
+        let file = std::fs::File::open("/dev/null").expect("open /dev/null");
+        // SAFETY: F_DUPFD chooses an unused descriptor without FD_CLOEXEC,
+        // so exec would keep it. It cannot overwrite another test's fd.
+        let inherited = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, minimum) };
+        assert!(inherited >= minimum, "{}", std::io::Error::last_os_error());
+        // SAFETY: this test owns the new descriptor returned above.
+        let inherited = unsafe { OwnedFd::from_raw_fd(inherited) };
+        let high = inherited.as_raw_fd();
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(format!("! [ -e /dev/fd/{high} ]"));
+        // SAFETY: the closure only calls async-signal-safe functions.
+        unsafe {
+            command.pre_exec(|| {
+                if mark_listed_descriptors_cloexec() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other("descriptor listing unavailable"))
+                }
+            });
+        }
+        let status = command.status();
+        assert!(
+            status.expect("spawn sh").success(),
+            "descriptor {high} leaked into the child"
+        );
     }
 
     #[cfg(unix)]

@@ -139,11 +139,18 @@ fn host_claude_on_path(environment: &HashMap<String, String>) -> Option<PathBuf>
     mj_core::program_path::find_executable_on_path(claude_program(), path.as_deref())
 }
 
+/// What keeps a managed Claude Code installed while a renewal runs it.
+/// Mjolnir installs none on Windows, so there is nothing to hold there.
+#[cfg(unix)]
+type Installation = mj_core::harness_install::Located;
+#[cfg(not(unix))]
+type Installation = std::convert::Infallible;
+
 /// The `claude` a host renewal runs, and what keeps it installed meanwhile.
 struct ClaudeProgram {
     command: PathBuf,
     environment: HashMap<String, String>,
-    _installation: Option<mj_core::harness_install::Located>,
+    _installation: Option<Installation>,
 }
 
 impl ClaudeLauncher {

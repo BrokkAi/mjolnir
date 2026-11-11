@@ -2810,6 +2810,7 @@ async fn a_clean_later_pass_replaces_the_failure_an_earlier_one_reported() {
 
 /// A Claude login as the sync sees it. A copy without `refresh` is what a
 /// harness holds since #1490.
+#[cfg(unix)]
 fn claude_login(expires_at: i64, access: &str, refresh: Option<&str>) -> Vec<u8> {
     let mut oauth = serde_json::json!({
         "accessToken": access,

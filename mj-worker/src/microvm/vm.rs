@@ -238,7 +238,7 @@ fn validate_destination(destination: &str) -> Result<()> {
     Ok(())
 }
 
-fn random_id() -> Result<String> {
+pub(super) fn random_id() -> Result<String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|error| anyhow!("generate a container id: {error}"))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -257,7 +257,7 @@ fn allocate_slot(layout: &Layout) -> Result<u32> {
 /// Copy-on-write clone of a file on a reflink-capable filesystem (XFS with
 /// `reflink=1`, btrfs). Fails visibly elsewhere: a full copy of an 11 GiB
 /// image per VM is not a fallback worth hiding.
-fn reflink(source: &Path, destination: &Path) -> Result<()> {
+pub(super) fn reflink(source: &Path, destination: &Path) -> Result<()> {
     const FICLONE: u32 = 0x4004_9409;
     let source_file =
         fs::File::open(source).with_context(|| format!("open {}", source.display()))?;
@@ -519,6 +519,9 @@ pub fn start(layout: &Layout, name: &str) -> Result<()> {
         "the microvm engine must run as root (use sudo -n)"
     );
     let vm_lock = layout.lock_vm(name)?;
+    // A crash can leave a root replacement half done; finish it under this
+    // lock before the VM boots from whichever disk is in place.
+    super::replace_root::resume_interrupted_locked(layout, name)?;
     let Some(mut state) = VmState::read(layout, name)? else {
         layout.forget_vm_lock(name, &vm_lock)?;
         bail!("no container with name or ID {name:?} found: no such container");
@@ -986,6 +989,7 @@ pub fn inspect(layout: &Layout, name: &str) -> Result<Value> {
     validate_name("container", name)?;
     let state = VmState::read(layout, name)?
         .ok_or_else(|| anyhow!("no container with name or ID {name:?} found: no such container"))?;
+    let state = super::replace_root::observed(layout, name, state)?;
     let activity = activity(name)?;
     let status = match activity {
         Activity::Running => "running",

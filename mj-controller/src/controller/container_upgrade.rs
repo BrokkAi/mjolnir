@@ -291,7 +291,8 @@ impl Controller {
             TargetTemplate::LocalPodman { container }
             | TargetTemplate::LocalDocker { container }
             | TargetTemplate::SshPodman { container, .. }
-            | TargetTemplate::SshDocker { container, .. } => container,
+            | TargetTemplate::SshDocker { container, .. }
+            | TargetTemplate::SshNitro { container, .. } => container,
             _ => bail!("this target does not support storage-preserving container upgrades"),
         };
         let workspace = targets::container_workspace_root(session.container_workspace.as_deref());

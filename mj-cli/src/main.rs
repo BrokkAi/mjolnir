@@ -516,6 +516,8 @@ enum SetupPlatform {
 }
 
 fn main() -> Result<()> {
+    // First, before any thread or child: every child inherits the limit.
+    mj_core::subprocess::raise_open_file_limit();
     mj_controller::server::install_rustls_crypto_provider();
     let cli = Cli::parse();
     if let Some(notice) = replacement_notice(cli.command.as_ref()) {
@@ -2314,9 +2316,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             )?;
             if stop.suspend_sessions {
                 let stopped = suspend_all_sessions(stop.acknowledge_unpublished_work).await?;
-                let mut daemon = daemon::connect_management().await?;
-                daemon::stop_and_wait(&mut daemon).await?;
-                node::withdraw_endpoint();
+                daemon::stop_instance().await?;
                 match stopped {
                     0 => println!("Mjolnir daemon stopped; no sessions were active."),
                     1 => println!("Mjolnir daemon stopped after stopping its active session."),
@@ -2324,16 +2324,10 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
                 }
                 return Ok(());
             }
-            let mut daemon = match daemon::connect_management().await {
-                Ok(daemon) => daemon,
-                Err(error) if daemon::daemon_not_running(&error).is_some() => {
-                    println!("Mjolnir daemon is already stopped.");
-                    return Ok(());
-                }
-                Err(error) => return Err(error.context("Mjolnir daemon is not answering")),
-            };
-            daemon::stop_and_wait(&mut daemon).await?;
-            node::withdraw_endpoint();
+            if !daemon::stop_instance().await? {
+                println!("Mjolnir daemon is already stopped.");
+                return Ok(());
+            }
             println!(
                 "Mjolnir daemon stopped; detached workers remain active. \
                  `{}` suspends them too.",

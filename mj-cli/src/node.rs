@@ -53,8 +53,8 @@ pub(crate) fn write_endpoint(endpoint: &NodeEndpoint) -> Result<()> {
     mj_core::config::atomic_write(&path, &serde_json::to_vec_pretty(endpoint)?)
 }
 
-/// The daemon was stopped on purpose: its node has nothing to serve and
-/// exits as soon as it notices, instead of waiting for a daemon to return.
+/// The daemon was stopped on purpose; withdrawing its endpoint tells the node
+/// to exit instead of waiting for a daemon to return.
 pub(crate) fn withdraw_endpoint() {
     match std::fs::remove_file(endpoint_path()) {
         Ok(()) => {}
@@ -73,9 +73,6 @@ fn read_endpoint() -> Result<Option<NodeEndpoint>> {
     }
 }
 
-/// A node with nothing to serve for this long exits; the next launcher starts
-/// another. Workers it started are detached and keep running.
-const IDLE_EXIT: Duration = Duration::from_secs(120);
 /// How long a new node waits for the previous one to step aside.
 const LOCK_WAIT: Duration = Duration::from_secs(60);
 const FIRST_RETRY: Duration = Duration::from_millis(250);
@@ -95,7 +92,7 @@ pub(crate) fn spawn_node() -> Result<()> {
 }
 
 /// Start a node if none holds this instance's node lock. A daemon of this
-/// build runs nothing on this computer without one.
+/// build needs one node to run local work on this computer.
 pub(crate) async fn ensure_node() {
     let checked = tokio::task::spawn_blocking(|| -> Result<bool> {
         let path = lock_path();
@@ -139,7 +136,6 @@ pub(crate) async fn run_node() -> Result<()> {
     let node_id = node_id()?;
     let own_build = mj_client::build_identity::this_build().published();
     let mut retry = FIRST_RETRY;
-    let mut last_served = Instant::now();
     loop {
         let endpoint = tokio::task::spawn_blocking(read_endpoint)
             .await
@@ -167,7 +163,6 @@ pub(crate) async fn run_node() -> Result<()> {
                 Ok(mj_core::node::ServeEnd::Closed) => {
                     tracing::info!("the daemon closed the node connection");
                     retry = FIRST_RETRY;
-                    last_served = Instant::now();
                     continue;
                 }
                 Err(error) => {
@@ -177,10 +172,6 @@ pub(crate) async fn run_node() -> Result<()> {
                     );
                 }
             }
-        }
-        if last_served.elapsed() >= IDLE_EXIT {
-            tracing::info!("no daemon to serve; the node exits");
-            return Ok(());
         }
         tokio::time::sleep(retry).await;
         retry = (retry * 2).min(MAX_RETRY);

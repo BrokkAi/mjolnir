@@ -209,6 +209,11 @@ impl Controller {
                 } else {
                     CheckpointExportPolicy::ReuseUnchangedArchive
                 };
+                let exclusivity = if operation.quota_stop_reason.is_some() {
+                    LatchExclusivity::HoldThroughQuotaClose
+                } else {
+                    LatchExclusivity::HoldThroughClose
+                };
                 self.suspend_session_controlled_with_manager(
                     session_id,
                     executor,
@@ -219,7 +224,7 @@ impl Controller {
                     true,
                     None,
                     source_relay.take(),
-                    LatchExclusivity::HoldThroughClose,
+                    exclusivity,
                 )
                 .await
             },
@@ -280,7 +285,7 @@ impl Controller {
             Ok(latched) => latched,
             Err(error) => {
                 let record = self.state.sessions.get_mut(session_id).unwrap();
-                if exclusivity == LatchExclusivity::HoldThroughIdleClose
+                if exclusivity.close_purpose().is_some()
                     && super::checkpoint::checkpoint_was_deferred(&error)
                 {
                     // Nothing failed: the session is working, so the close
@@ -445,7 +450,7 @@ impl Controller {
             let record = self.state.sessions.get_mut(session_id).unwrap();
             record.state = state_after_unsealed_close(&previous);
             // An automatic close that stands down did not fail.
-            if exclusivity != LatchExclusivity::HoldThroughIdleClose
+            if exclusivity.close_purpose().is_none()
                 || !super::checkpoint::checkpoint_was_deferred(&error)
             {
                 record.last_error = Some(format!("{error:#}"));

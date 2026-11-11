@@ -128,6 +128,33 @@ impl SessionUsageEstimate {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageAgentRole {
+    Primary,
+    Subagent,
+    Reviewer,
+    UnclassifiedSubagent,
+}
+
+impl UsageAgentRole {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Primary => "Primary agents",
+            Self::Subagent => "Subagents",
+            Self::Reviewer => "Reviewers",
+            Self::UnclassifiedSubagent => "Unclassified subagents",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentUsageEstimate {
+    pub role: UsageAgentRole,
+    pub models: Vec<ModelUsageEstimate>,
+    pub cost_usd_ticks: CostUsdTicks,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionUsageReport {
     pub since_ms: i64,
@@ -136,6 +163,10 @@ pub struct SessionUsageReport {
     /// configured.
     pub profiles: Vec<String>,
     pub sessions: Vec<SessionUsageEstimate>,
+    /// Filtered model totals grouped by each session's own role. Full Destroy
+    /// can remove a child's kind; its retained usage remains unclassified.
+    #[serde(default)]
+    pub agent_usage: Vec<AgentUsageEstimate>,
     /// Sum of `sessions`; unknown when any session's cost is unknown.
     pub cost_usd_ticks: CostUsdTicks,
 }
@@ -147,6 +178,7 @@ impl Default for SessionUsageReport {
             until_ms: 0,
             profiles: Vec::new(),
             sessions: Vec::new(),
+            agent_usage: Vec::new(),
             cost_usd_ticks: Ok(0),
         }
     }
