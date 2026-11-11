@@ -1065,9 +1065,11 @@ impl GuestSystem for MachineSystem {
         unsafe {
             libc::kill(-1, libc::SIGKILL);
         }
-        // Give the killed processes a moment to release their mounts. Their
-        // exit is observed by the reaper, but nothing needs to wait on it.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // A process that is still exiting can hold a mount or write to it, so
+        // flush and unmount only once every other process is gone.
+        while other_processes_alive() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         // SAFETY: sync has no preconditions.
         unsafe { libc::sync() };
         unmount_data_filesystems();
@@ -1094,6 +1096,36 @@ impl GuestSystem for MachineSystem {
             std::thread::park();
         }
     }
+}
+
+/// Whether any process other than PID 1 is still running. Zombies (already
+/// dead, waiting to be reaped) and kernel threads do not count.
+fn other_processes_alive() -> bool {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        if pid == 1 || pid == 2 {
+            return false;
+        }
+        // /proc/PID/stat is "pid (comm) state ppid ..."; comm may contain ")".
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            return false; // exited while we looked
+        };
+        let Some((_, after)) = stat.rsplit_once(") ") else {
+            return false;
+        };
+        let mut fields = after.split(' ');
+        let (state, parent) = (fields.next(), fields.next());
+        state != Some("Z") && parent != Some("2")
+    })
 }
 
 /// Unmount every ext4 filesystem except the root, newest first.

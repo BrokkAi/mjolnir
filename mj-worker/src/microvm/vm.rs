@@ -271,11 +271,18 @@ pub fn build_state(layout: &Layout, spec: &RunSpec, image_id: &str, slot: u32) -
     let cpus = match spec.cpus {
         Some(cpus) => cpus,
         None => std::thread::available_parallelism()
-            .map(|n| n.get() as f64)
+            .map(|n| n.get().min(MAX_VCPUS as usize) as f64)
             .unwrap_or(1.0),
     };
     ensure!(cpus > 0.0, "--cpus must be positive");
-    let vcpus = (cpus.ceil() as u32).clamp(1, MAX_VCPUS);
+    // A VM's vCPUs are whole cores handed to the Nitro hypervisor; nothing on
+    // the host can throttle one to a fraction, so a fraction is refused
+    // rather than quietly rounded up to more CPU than was asked for.
+    ensure!(
+        cpus.fract() == 0.0 && cpus <= f64::from(MAX_VCPUS),
+        "--cpus must be a whole number of vCPUs from 1 to {MAX_VCPUS}, not {cpus}"
+    );
+    let vcpus = cpus as u32;
     let mut env = image.env.clone();
     for entry in &spec.env {
         let key = entry.split_once('=').map(|(key, _)| key).unwrap_or(entry);
@@ -511,10 +518,17 @@ fn firecracker_config(
             "is_root_device": false,
             "is_read_only": !volume.read_write,
         }));
+        // `new` until a launch has started the container with the volume
+        // attached; only then is the volume's content its own.
+        let fresh = if layout.volume(&volume.name).join("initialized").exists() {
+            "old"
+        } else {
+            "new"
+        };
         volume_map.push((
             volume.destination.matches('/').count(),
             format!(
-                "{device}:{}:{}",
+                "{device}:{}:{}:{fresh}",
                 volume.destination,
                 if volume.read_write { "rw" } else { "ro" }
             ),
@@ -627,6 +641,11 @@ fn launch(layout: &Layout, state: &VmState) -> Result<()> {
                 .collect(),
         })
         .context("start the container command")?;
+    // The volumes were filled from the image if they were new; never again.
+    for mounted in &state.volumes {
+        let marker = layout.volume(&mounted.name).join("initialized");
+        fs::write(&marker, b"").with_context(|| format!("record {}", marker.display()))?;
+    }
     Ok(())
 }
 

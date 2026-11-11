@@ -2,7 +2,7 @@
 # The microVM's /init, run from the dracut initrd. The engine builds the initrd (boot.rs) and
 # passes per-VM parameters on the kernel command line:
 #   sbx.name=<hostname> sbx.ip=<addr/len> sbx.gw=<addr> sbx.dns=<addr>
-#   sbx.vols=<dev>:<destination>:<rw|ro>[,...]   (devices in Firecracker drive order after the root)
+#   sbx.vols=<dev>:<destination>:<rw|ro>:<new|old>[,...]   (devices in Firecracker drive order after the root)
 # It prepares the machine, then replaces itself with the guest agent (PID 1) in the image's root.
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc
@@ -37,12 +37,13 @@ for i in $(seq 1 100); do [ -b /dev/vda ] && break; sleep 0.1; done
 [ -b /dev/vda ] || fatal "no /dev/vda"
 mount -t ext4 -o rw,noatime /dev/vda /newroot || fatal "mount root failed"
 
-# Volumes. A volume that is new (empty apart from lost+found) is filled from the image directory it
+# Volumes. A volume that is new (the engine says `new` until a container has started with it, and it
+# holds only lost+found) is filled from the image directory it
 # covers, with that directory's owner and mode, the way a named volume copies up from the image.
 IFS=',' read -ra vols <<< "$sbx_vols"
 for entry in "${vols[@]}"; do
   [ -n "$entry" ] || continue
-  dev=${entry%%:*}; rest=${entry#*:}; dest=${rest%%:*}; mode=${rest#*:}
+  dev=${entry%%:*}; rest=${entry#*:}; dest=${rest%%:*}; opts=${rest#*:}; mode=${opts%%:*}; fresh=${opts#*:}
   for i in $(seq 1 100); do [ -b "/dev/$dev" ] && break; sleep 0.1; done
   [ -b "/dev/$dev" ] || fatal "no /dev/$dev for $dest"
   mkdir -p "/newroot$dest"
@@ -51,7 +52,7 @@ for entry in "${vols[@]}"; do
   if [ "$mode" = rw ]; then
     mkdir -p /volume-staging
     mount -t ext4 -o "rw,noatime" "/dev/$dev" /volume-staging || fatal "mount $dev failed"
-    if [ -z "$(ls -A /volume-staging | grep -v '^lost+found$')" ]; then
+    if [ "$fresh" = new ] && [ -z "$(ls -A /volume-staging | grep -v '^lost+found$')" ]; then
       cp -a "/newroot$dest/." /volume-staging/ || fatal "copy $dest into its volume failed"
       chown "${covered% *}" /volume-staging; chmod "${covered#* }" /volume-staging
     fi
