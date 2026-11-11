@@ -48,16 +48,14 @@ for entry in "${vols[@]}"; do
   [ -b "/dev/$dev" ] || fatal "no /dev/$dev for $dest"
   mkdir -p "/newroot$dest"
   covered=$(stat -c '%u:%g %a' "/newroot$dest")
-  # A read-only drive cannot be mounted read-write, and a read-only volume cannot be copied up to.
-  if [ "$mode" = rw ]; then
+  # A `new` volume has never been used by a container (the engine attaches its drive writable even
+  # for `ro`, this once), so anything on it is from an interrupted copy: start the copy over.
+  if [ "$fresh" = new ]; then
     mkdir -p /volume-staging
     mount -t ext4 -o "rw,noatime" "/dev/$dev" /volume-staging || fatal "mount $dev failed"
-    # A `new` volume has never been used by a container, so anything on it is from an interrupted
-    # copy: finish it without overwriting.
-    if [ "$fresh" = new ]; then
-      cp -an "/newroot$dest/." /volume-staging/ || fatal "copy $dest into its volume failed"
-      chown "${covered% *}" /volume-staging; chmod "${covered#* }" /volume-staging
-    fi
+    (shopt -s dotglob nullglob; for f in /volume-staging/*; do [ "${f##*/}" = lost+found ] || rm -rf "$f"; done)
+    cp -a "/newroot$dest/." /volume-staging/ || fatal "copy $dest into its volume failed"
+    chown "${covered% *}" /volume-staging; chmod "${covered#* }" /volume-staging
     umount /volume-staging || fatal "unmount staging for $dev failed"
   fi
   mount -t ext4 -o "$mode,noatime" "/dev/$dev" "/newroot$dest" || fatal "mount $dev on $dest failed"

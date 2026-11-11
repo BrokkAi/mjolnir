@@ -21,7 +21,7 @@ const INIT_SCRIPT: &str = include_str!("guest-init.sh");
 const GUEST_DRIVERS: &str = "virtio_pci virtio_blk virtio_net ext4 vmw_vsock_virtio_transport nsm overlay fuse tun veth bridge br_netfilter nf_tables nft_ct nft_nat nft_masq nft_chain_nat nft_compat nf_conntrack nf_nat nft_reject_inet nft_reject nf_reject_ipv4 xt_MASQUERADE xt_conntrack xt_addrtype xt_comment xt_mark xt_nat iptable_nat";
 
 /// Programs `/init` runs.
-const INIT_PROGRAMS: &str = "mount umount modprobe ip switch_root mkdir hostname cat cut sleep cp ls seq grep head tee echo ln chmod chown stat";
+const INIT_PROGRAMS: &str = "mount umount modprobe ip switch_root mkdir hostname cat cut sleep cp ls seq grep head tee echo ln chmod chown stat rm";
 
 /// The assets directory name for this kernel and engine build.
 fn current_tag() -> Result<String> {

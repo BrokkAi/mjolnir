@@ -533,19 +533,21 @@ fn firecracker_config(
     let mut volume_map: Vec<(usize, String)> = Vec::new();
     for (index, volume) in state.volumes.iter().enumerate() {
         let device = format!("vd{}", (b'b' + index as u8) as char);
-        drives.push(json!({
-            "drive_id": format!("vol{index}"),
-            "path_on_host": volume::disk_path(layout, &volume.name),
-            "is_root_device": false,
-            "is_read_only": !volume.read_write,
-        }));
         // `new` until a launch has started the container with the volume
-        // attached; only then is the volume's content its own.
+        // attached; only then is the volume's content its own. A new volume's
+        // drive is writable even when it will be mounted read-only, so init
+        // can fill it from the image first.
         let fresh = if layout.volume(&volume.name).join("initialized").exists() {
             "old"
         } else {
             "new"
         };
+        drives.push(json!({
+            "drive_id": format!("vol{index}"),
+            "path_on_host": volume::disk_path(layout, &volume.name),
+            "is_root_device": false,
+            "is_read_only": !volume.read_write && fresh == "old",
+        }));
         volume_map.push((
             volume.destination.matches('/').count(),
             format!(
@@ -663,8 +665,7 @@ fn launch(layout: &Layout, state: &VmState) -> Result<()> {
         })
         .context("start the container command")?;
     // The volumes were filled from the image if they were new; never again.
-    // A volume attached read-only could not be filled, so it stays new.
-    for mounted in state.volumes.iter().filter(|mounted| mounted.read_write) {
+    for mounted in &state.volumes {
         let marker = layout.volume(&mounted.name).join("initialized");
         fs::write(&marker, b"").with_context(|| format!("record {}", marker.display()))?;
     }

@@ -1048,20 +1048,34 @@ fn vsock_listen(port: u32) -> Result<OwnedFd> {
     Ok(fd)
 }
 
+/// Accept the next connection from the host. A connection from any other
+/// CID (the guest's own, over loopback) is closed unanswered: the protocol
+/// carries no credentials, and exec as root must not be open to guest processes.
 fn vsock_accept(listener: &OwnedFd) -> io::Result<VsockStream> {
     loop {
-        // SAFETY: accept4 with null address pointers is permitted.
+        // SAFETY: sockaddr_vm is plain old data that accept4 fills in.
+        let mut peer: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
+        let mut length = std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t;
+        // SAFETY: `peer` and `length` are valid for the call.
         let fd = unsafe {
             libc::accept4(
                 listener.as_raw_fd(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                (&mut peer as *mut libc::sockaddr_vm).cast(),
+                &mut length,
                 libc::SOCK_CLOEXEC,
             )
         };
         if fd >= 0 {
             // SAFETY: `fd` is a fresh descriptor this function owns.
-            return Ok(VsockStream(unsafe { OwnedFd::from_raw_fd(fd) }));
+            let stream = VsockStream(unsafe { OwnedFd::from_raw_fd(fd) });
+            if peer.svm_cid == libc::VMADDR_CID_HOST {
+                return Ok(stream);
+            }
+            klog(&format!(
+                "refused a connection from vsock CID {}",
+                peer.svm_cid
+            ));
+            continue;
         }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
