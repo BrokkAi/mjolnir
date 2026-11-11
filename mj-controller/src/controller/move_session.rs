@@ -465,6 +465,37 @@ pub use mj_core::state::{MoveOutcome, MovePreparation, MoveSelection, MoveSessio
 use crate::targets::{CommandExecutor, ProvisionStage, ProvisionStageGuard};
 use mj_core::relay::RelayCommand;
 
+/// Bind automatic Move confirmation to the turn that stopped for quota.
+pub(crate) fn quota_move_fingerprint(
+    base: &str,
+    operational: &mj_core::relay::RelayOperationalState,
+) -> Result<String> {
+    digest(&(
+        base,
+        &operational.continuation.user_command_id,
+        &operational.continuation.completed_command_id,
+    ))
+}
+
+pub(in crate::controller) fn quota_move_recovery(
+    operational: &mj_core::relay::RelayOperationalState,
+) -> Result<&mj_core::continuation::QuotaRecovery> {
+    let continuation = &operational.continuation;
+    let recovery = continuation
+        .quota_recovery
+        .as_ref()
+        .context("quota Move recovery was superseded")?;
+    ensure!(
+        !continuation.quota_suppressed
+            && !recovery.submitted
+            && continuation.user_command_id.as_deref() == Some(recovery.user_command_id.as_str())
+            && continuation.completed_command_id.as_deref()
+                == Some(recovery.completed_command_id.as_str()),
+        "quota Move recovery was superseded"
+    );
+    Ok(recovery)
+}
+
 /// Observe preparation state without taking the worker's mutation permit.
 /// Confirmed execution leases and refreshes the source before interruption.
 pub async fn refresh_move_source(
@@ -1090,9 +1121,7 @@ impl Controller {
                 missing_move_checkpoint_recovery(&self.state, &source.id)
             );
         }
-        let retry = previous.as_ref().is_some_and(|op| {
-            !op.is_resolved() && (op.restore_artifact().is_some() || source.checkpoint.is_some())
-        });
+        let retry = previous.as_ref().is_some_and(|op| op.checkpoint_retained());
         ensure!(
             matches!(
                 source.state,
@@ -1370,7 +1399,12 @@ impl Controller {
                         let mut operational = snapshot.operational.clone();
                         operational.queued_prompts.clear();
                         operational.checkpoint_barrier = None;
-                        !operational.safe_to_replace(source_harness)
+                        let purpose = if quota_move.is_some() && checked.in_place && !checked.cross_harness {
+                            mj_core::activity::MovePurpose::QuotaRetry
+                        } else {
+                            mj_core::activity::MovePurpose::Manual
+                        };
+                        !operational.safe_to_move(source_harness, purpose)
                     });
                 if let Some(snapshot) = &snapshot {
                     let _timing = MovePhaseTimer::new(&id, "preflight destination configuration");
@@ -1382,7 +1416,11 @@ impl Controller {
                     .await?;
                 }
                 checked.queued_commands = queue;
-                checked.fingerprint = fingerprint;
+                checked.fingerprint = if quota_move.is_some() {
+                    let operational = &snapshot.as_ref().context("quota Move source unavailable")?.operational;
+                    quota_move_recovery(operational)?;
+                    quota_move_fingerprint(&fingerprint, operational)?
+                } else { fingerprint };
             }
             checked
         };
@@ -1405,9 +1443,7 @@ impl Controller {
         }
         let old_operation = crate::database::load_move_operation(&id)?;
         let retry = old_operation.filter(|op| {
-            op.selection == prepared.selection
-                && !op.is_resolved()
-                && op.restore_artifact().is_some()
+            op.selection == prepared.selection && op.checkpoint_retained()
         });
         if retry.is_none() && move_changes_nothing(&source, &checked.selection) {
             return Ok(outcome(
@@ -1464,13 +1500,7 @@ impl Controller {
                 },
                 handoff: None,
                 source_checkpoint_only: false,
-                in_place: in_place_move_eligible(
-                    &source,
-                    &checked.selection,
-                    &self.config.targets,
-                    self.state.subagents.contains_key(&id),
-                    false,
-                ),
+                in_place: checked.in_place,
                 operation_id: prepared.operation_id.clone(),
                 selection: checked.selection.clone(),
                 source_profile_id: source.last_profile.clone(),
@@ -2672,10 +2702,7 @@ pub(crate) fn move_in_place_for_record(
     is_subagent: bool,
     previous: Option<&MoveOperation>,
 ) -> bool {
-    let retry = previous.is_some_and(|operation| {
-        !operation.is_resolved()
-            && (operation.restore_artifact().is_some() || source.checkpoint.is_some())
-    });
+    let retry = previous.is_some_and(|operation| operation.checkpoint_retained());
     previous
         .is_some_and(|operation| retry && operation.in_place && operation.selection == *selection)
         || in_place_move_eligible(source, selection, targets, is_subagent, retry)

@@ -273,7 +273,7 @@ impl Controller {
                 // An automatic close is not worth restarting a worker for.
                 match exclusivity {
                     LatchExclusivity::HoldThroughClose => true,
-                    LatchExclusivity::HoldThroughIdleClose => false,
+                    LatchExclusivity::HoldThroughIdleClose | LatchExclusivity::HoldThroughQuotaClose => false,
                     LatchExclusivity::ReleaseAfterLatch => {
                         session.harness_kind != HarnessKind::Kimi
                     }
@@ -284,6 +284,10 @@ impl Controller {
         if let Some(captured) = &prestaged_capture {
             record_checkpoint_report_notice(&mut relay, session_id, captured).await;
         }
+        let quota_recovery = if exclusivity == LatchExclusivity::HoldThroughQuotaClose {
+            let snapshot = relay.connection_mut().sync().await?;
+            Some(super::super::move_session::quota_move_recovery(&snapshot.operational)?.clone())
+        } else { None };
         let (barrier, barrier_command_id) = loop {
             let snapshot = relay.connection_mut().sync().await?;
             // Restored native identity is not current-process readiness.
@@ -325,13 +329,13 @@ impl Controller {
                         .await?;
                 }
             }
-            if exclusivity == LatchExclusivity::HoldThroughIdleClose {
+            if let Some(purpose) = exclusivity.close_purpose() {
                 // Ask the predicate the upgrade observer asked, again, before
                 // opening a barrier: the session can start working after the
                 // observation, and an automatic close must not wait behind
                 // that work or interrupt it.
                 let snapshot = relay.connection_mut().sync().await?;
-                if !snapshot.operational.safe_to_replace(session.harness_kind) {
+                if !snapshot.operational.safe_to_move(session.harness_kind, purpose) {
                     relay.release();
                     return Err(CheckpointDeferred::harness_busy().into());
                 }
@@ -389,7 +393,7 @@ impl Controller {
                 Ok(barrier) => break (barrier, barrier_command_id),
                 Err(error)
                     if !restarted_worker
-                        && exclusivity != LatchExclusivity::HoldThroughIdleClose
+                        && exclusivity.close_purpose().is_none()
                         && checkpoint_barrier_needs_worker_restart(&error) =>
                 {
                     if exclusivity == LatchExclusivity::ReleaseAfterLatch
@@ -450,16 +454,22 @@ impl Controller {
                 Err(error) => return Err(error),
             }
         };
-        if exclusivity == LatchExclusivity::HoldThroughIdleClose {
+        if let Some(purpose) = exclusivity.close_purpose() {
             // The barrier freezes new turns, but background commands and
             // agent terminals run on. Tearing the target down would end them,
             // so an automatic close lets go instead.
             let mut settled = barrier.operational.clone();
             settled.checkpoint_barrier = None;
-            if !settled.safe_to_replace(session.harness_kind) {
+            if !settled.safe_to_move(session.harness_kind, purpose) {
                 relay.cancel_abandoned_barrier().await?;
                 return Err(CheckpointDeferred::harness_busy().into());
             }
+        }
+        if let Some(expected) = &quota_recovery
+            && super::super::move_session::quota_move_recovery(&barrier.operational).ok() != Some(expected)
+        {
+            relay.cancel_abandoned_barrier().await?;
+            anyhow::bail!("quota Move recovery changed before source close");
         }
         let barrier_ready_at = Instant::now();
         // Project memory is checkpoint state, not relay connection state.
