@@ -214,13 +214,32 @@ impl QuotaRefreshRequest {
             mj_core::config::HarnessHost::current(),
             &mut environment,
         );
-        // A stored OpenCode login may itself be an API key the person typed
-        // in rather than exported, and nothing here tells those apart; this
-        // only catches the key-through-environment case `mj doctor` and the
-        // sign-in status already recognize ([`HarnessProfile::opencode_environment_logins`]).
+        // A profile with no stored OpenCode login is usage-priced exactly
+        // when the environment supplies a provider key ([`mj doctor`] and the
+        // sign-in status recognize the same signal,
+        // [`HarnessProfile::opencode_environment_logins`]). A profile with a
+        // stored login is usage-priced too when every stored credential is
+        // itself a plain API key (`value.type == "key"`, whether exported
+        // from the environment or typed into `opencode auth login`); any
+        // stored OAuth login, for this provider or another, leaves billing
+        // unknown, because OpenCode's own login database does not say which
+        // credential the session actually uses.
         let opencode_usage_priced = profile.kind == HarnessKind::OpenCode
-            && matches!(crate::opencode_logins::profile_logins(profile), Ok(None))
-            && !profile.opencode_environment_logins().is_empty();
+            && match crate::opencode_logins::profile_logins(profile) {
+                Ok(None) => !profile.opencode_environment_logins().is_empty(),
+                Ok(Some(logins)) => serde_json::from_slice::<Vec<Value>>(&logins).is_ok_and(
+                    |logins| {
+                        logins.iter().all(|login| {
+                            login
+                                .get("value")
+                                .and_then(|value| value.get("type"))
+                                .and_then(Value::as_str)
+                                == Some("key")
+                        })
+                    },
+                ),
+                Err(_) => false,
+            };
         Self {
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
