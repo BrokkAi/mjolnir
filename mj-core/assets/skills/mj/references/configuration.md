@@ -1007,7 +1007,7 @@ when it is `local`.
 
 | Field | TOML type | Required | Default | Accepted values |
 | --- | --- | --- | --- | --- |
-| `kind` | string enum | yes | none | `bare`, `podman`, `docker`, or `apple-container`. |
+| `kind` | string enum | yes | none | `bare`, `podman`, `docker`, `apple-container`, or `nitro`. |
 | `machine` | string | no | `"local"` | The id of a `[machines.<id>]` entry, or `local`. |
 | `enabled` | boolean | no | `true` | `false` keeps the runtime configured but out of every picker; launch, resume and move refuse it, and running sessions continue. Written only when `false`. Detection never adds a kind its machine already has configured, enabled or not. |
 
@@ -1058,7 +1058,7 @@ work when Git is older.
 
 ### Common container fields
 
-`podman`, `docker`, and `apple-container` accept the same container fields.
+`podman`, `docker`, `apple-container`, and `nitro` accept the same container fields.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
@@ -1171,6 +1171,28 @@ All common fields except a non-default `workspace_storage` are supported. With
 `machine = "local"` the container runs on this Mac; with an `ssh` machine it
 runs on that remote Apple-silicon Mac, which must run macOS 26 or newer. See
 [Apple container](/apple-container/).
+
+### `nitro`
+
+```toml
+[machines.ec2]
+kind = "ssh"
+host = "ec2-host.example.com"
+
+[targets.nitro]
+kind = "nitro"
+machine = "ec2"
+cpus = "4"
+memory = "8g"
+```
+
+A session runs in its own Firecracker microVM (an AWS Nitro Sandbox) on an EC2
+host reached over SSH; `machine` must name an `ssh` machine, and
+`mj ec2 create --runtime nitro` writes both tables. All common fields except a
+non-default `workspace_storage` are supported, but a sandbox cannot attach host
+directories or share the host's mbx build cache: a session that asks for them
+starts without and says so. RAM is a hard limit, taken from the memory pool the
+host reserved at boot.
 
 ### Files written before version 12
 

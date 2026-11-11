@@ -2361,6 +2361,48 @@ fn host_capacity_probe_measures_storage_beside_cpu_and_memory() {
     assert!(usage.memory_total_bytes > 0);
     assert!(!usage.storage.is_empty());
     assert!(usage.storage[0].filesystems[0].total_bytes > 0);
+    assert!(!usage.memory_pool);
+
+    // A Nitro host appends the engine's report, and the pool replaces host RAM
+    // as the total. The engine and `sudo` are stand-ins that record nothing:
+    // the point is the line the probe adds and how it is read.
+    let home = tempfile::tempdir().unwrap();
+    let engine = home.path().join(mj_core::targets::MICROVM_ENGINE_WORKER);
+    std::fs::create_dir_all(engine.parent().unwrap()).unwrap();
+    std::fs::write(
+        &engine,
+        "#!/bin/sh\nprintf '{\\n \"engine_version\":\"2.70.0\",\"state_format\":1,\"firecracker_version\":\"1.18.0\",\"kernel_version\":\"6.18.56\",\\n \"memory_pool_total_mib\":49152,\"memory_pool_free_mib\":45054,\"slots_in_use\":1,\"slots_total\":80,\"cpus\":16}\\n'\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let fakes = tempfile::tempdir().unwrap();
+    mj_core::test_hooks::install_fake_command(
+        fakes.path(),
+        "sudo",
+        "#!/bin/sh\nshift\nexec \"$@\"\n",
+    );
+    let nitro = ssh_nitro_host_capacity_command(&ssh, &[".cache/mjolnir".into()]);
+    let mut probe =
+        CommandSpec::new("sh", ["-c", nitro.args.last().unwrap()]).purpose("test Nitro host probe");
+    probe
+        .env
+        .insert("HOME".into(), home.path().display().to_string());
+    probe.env.insert(
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fakes.path().display()),
+    );
+    let output = ProcessExecutor.execute(&probe).unwrap();
+    assert_eq!(
+        output.status,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let usage = parse_host_capacity(&output.stdout, "host").unwrap();
+    assert!(usage.memory_pool);
+    assert_eq!(usage.memory_total_bytes, 49152 << 20);
+    assert_eq!(usage.memory_used_bytes, 4098 << 20);
 }
 
 #[test]

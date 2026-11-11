@@ -241,6 +241,80 @@ fn github_token_is_inherited_only_by_managed_containers() {
     );
 }
 
+/// `sudo` logs every command line it runs to the host's journal, and a
+/// sandbox's engine runs under `sudo`. A value that came from a reference must
+/// reach the engine through the ssh command's environment, never its argv.
+#[test]
+fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
+    use mj_core::config::{Environment, EnvironmentValue, SecretResolver, with_secret_resolver};
+    let resolver = SecretResolver::fixed(
+        BTreeMap::new(),
+        BTreeMap::from([("stored".to_owned(), "sk-secret-value".to_owned())]),
+    );
+    let mut container = container_target("dev:1", Default::default());
+    container.environment = with_secret_resolver(resolver, || {
+        Environment::from_sources(BTreeMap::from([
+            (
+                "API_KEY".to_owned(),
+                EnvironmentValue::FromSecret("stored".to_owned()),
+            ),
+            (
+                "MODE".to_owned(),
+                EnvironmentValue::Literal("fast".to_owned()),
+            ),
+        ]))
+    });
+    let template = TargetTemplate::SshNitro {
+        ssh: SshConnection {
+            host: "ec2.example.test".into(),
+            user: None,
+            identity_file: None,
+            extra_args: vec![],
+        },
+        container: container.clone(),
+    };
+    let target = backend_target(&template, None, ContainerOverrides::default()).unwrap();
+    let session_id = "0123456789abcdef";
+    let bundle = targets::ProjectBundleSpec {
+        primary: "app".into(),
+        repositories: vec![targets::RepositorySpec {
+            url: Some("https://example.test/app.git".into()),
+            push_urls: vec![],
+            destination: "app".into(),
+            git_ref: None,
+            reference: None,
+            history_cutoff: None,
+        }],
+    };
+    let mut plan = targets::provision_plan_named(
+        &target,
+        session_id,
+        &bundle,
+        &[],
+        None,
+        &targets::resource_name(session_id).unwrap(),
+        None,
+    )
+    .unwrap();
+    let secrets = container_environment(&container, ContainerOverrides::default(), true).secrets;
+    plan.provide_target_environment_secrets(&target, &secrets)
+        .unwrap();
+    let run = plan
+        .commands
+        .iter()
+        .find(|command| command.creates_target)
+        .unwrap();
+    let line = run.args.last().unwrap();
+    assert!(!line.contains("sk-secret-value"), "{line}");
+    assert!(line.contains("--preserve-env=API_KEY"), "{line}");
+    assert!(line.contains("'--env' 'API_KEY'"), "{line}");
+    assert!(line.contains("'--env' 'MODE=fast'"), "{line}");
+    assert_eq!(
+        run.to_node_run(false).sensitive_stdin.as_deref(),
+        Some(&b"sk-secret-value\n"[..])
+    );
+}
+
 fn container_target(image: &str, pull_policy: mj_core::config::ImagePullPolicy) -> ConfigContainer {
     ConfigContainer {
         build_cache: None,

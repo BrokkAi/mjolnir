@@ -662,6 +662,9 @@ pub(super) fn worker_binary_upload_plan(
         }
         | targets::TargetLocator::SshAppleContainer {
             ssh, container_id, ..
+        }
+        | targets::TargetLocator::SshNitro {
+            ssh, container_id, ..
         } => {
             let engine = locator
                 .container_engine()
@@ -682,38 +685,28 @@ pub(super) fn worker_binary_upload_plan(
                     None => crate::targets::scp_upload(ssh, worker_binary, &upload, false),
                 }
                 .purpose("stage replacement Mjolnir worker"),
-                crate::targets::ssh_command(
+                crate::targets::ssh_engine_command(
                     ssh,
-                    [engine, "cp", &upload, &format!("{container_id}:{staged}")],
+                    engine,
+                    ["cp", &upload, &format!("{container_id}:{staged}")],
                 )
                 .purpose("stage replacement Mjolnir worker"),
-                crate::targets::ssh_command(
+                crate::targets::ssh_engine_command(
                     ssh,
-                    std::iter::once(engine.to_owned()).chain(container_upload_ownership_args(
-                        engine,
-                        container_id,
-                        &worker_root,
-                        &[&staged],
-                    )),
+                    engine,
+                    container_upload_ownership_args(engine, container_id, &worker_root, &[&staged]),
                 )
                 .purpose("match replacement worker to the worker directory owner"),
-                crate::targets::ssh_command(
+                crate::targets::ssh_engine_command(
                     ssh,
-                    [
-                        engine,
-                        "exec",
-                        container_id,
-                        "mv",
-                        "-f",
-                        "--",
-                        &staged,
-                        &installed,
-                    ],
+                    engine,
+                    ["exec", container_id, "mv", "-f", "--", &staged, &installed],
                 )
                 .purpose("replace installed Mjolnir worker"),
-                crate::targets::ssh_command(
+                crate::targets::ssh_engine_command(
                     ssh,
-                    [engine, "exec", container_id, "chmod", "700", &installed],
+                    engine,
+                    ["exec", container_id, "chmod", "700", &installed],
                 )
                 .purpose("make replaced Mjolnir worker executable"),
                 crate::targets::ssh_command(ssh, ["rm", "-f", "--", &upload])

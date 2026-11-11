@@ -2926,10 +2926,42 @@ host = "mac.example.com"
 kind = "apple-container"
 machine = "mac"
 image = "example.invalid/agent:latest"
+[machines.ec2]
+kind = "ssh"
+host = "ec2.example.com"
+[targets.ec2-nitro]
+kind = "nitro"
+machine = "ec2"
 "#
     );
     fs::write(&path, &source).unwrap();
     let config = Config::load_from(&path).unwrap();
+    // A Nitro sandbox is the same shape: a stored `nitro` runtime on an SSH
+    // machine fuses into the remote kind, and a saved file never mentions it.
+    let TargetTemplate::SshNitro { ssh, container } = &config.targets["ec2-nitro"] else {
+        panic!("nitro on an ssh machine must fuse into the remote kind");
+    };
+    assert_eq!(ssh.host, "ec2.example.com");
+    assert_eq!(container.image, DEFAULT_CONTAINER_IMAGE);
+    assert_eq!(runtime_kind_name(&config.targets["ec2-nitro"]), "nitro");
+    assert_eq!(config.targets["ec2-nitro"].kind_name(), "ssh-nitro");
+    assert!(config.targets["ec2-nitro"].execution_policy() == ExecutionPolicy::Unconstrained);
+    assert!(super::container_memory_is_hard_limit(
+        &config.targets["ec2-nitro"]
+    ));
+    // No machine can host a sandbox but an SSH one.
+    fs::write(
+        directory.path().join("local.toml"),
+        format!(
+            "version = {CONFIG_VERSION}\n[targets.here]\nkind = \"nitro\"\nmachine = \"local\"\n"
+        ),
+    )
+    .unwrap();
+    let error = Config::load_from(&directory.path().join("local.toml")).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("runs on an SSH machine"),
+        "{error:#}"
+    );
     let TargetTemplate::SshAppleContainer { ssh, container } = &config.targets["mac-apple"] else {
         panic!("apple-container on an ssh machine must fuse into the remote kind");
     };
@@ -2946,6 +2978,8 @@ image = "example.invalid/agent:latest"
     assert!(saved.contains("kind = \"apple-container\""), "{saved}");
     assert!(saved.contains("machine = \"mac\""), "{saved}");
     assert!(!saved.contains("ssh-apple-container"), "{saved}");
+    assert!(saved.contains("kind = \"nitro\""), "{saved}");
+    assert!(!saved.contains("ssh-nitro"), "{saved}");
     assert_eq!(Config::load_from(&path).unwrap().targets, config.targets);
 }
 

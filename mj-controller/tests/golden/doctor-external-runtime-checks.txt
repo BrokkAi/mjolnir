@@ -1,4 +1,9 @@
 ready Remote Docker for target remote-docker: Remote Docker 27.5.1 is available via dev@docker.example.test; image ghcr.io/example/dev:1.2.3 is present. It carries worker build 2.0.0+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, not this Mjolnir's <this build>, so sessions install the host worker. Run `mj doctor --json --smoke` to verify remote OverlayFS attachments.
+ready Nitro sandboxes for target nitro-ready: Firecracker 1.18.0, 49152 MiB sandbox memory pool (45054 MiB free), kernel 6.18.56-126.188.amzn2023; image ghcr.io/example/dev:1.2.3 is present. Run `mj doctor --json --smoke` to verify a disposable sandbox.
+fixable Nitro sandboxes for target nitro-fresh: Nitro sandbox preflight failed on ec2-user@nitro.example.test: `read the Nitro sandbox engine's host report` exited with status 1: sh: 1: exec: /home/ec2-user/.local/share/hel/microvm/hel: not found
+  remediation: Start a session on target nitro-fresh, or use Test in the Targets pane: the first use installs the sandbox engine on ec2-user@nitro.example.test.
+fixable Nitro sandboxes for target nitro-no-pool: Nitro sandbox preflight failed on ec2-user@nitro.example.test: no memory is reserved for sandboxes. Boot the host with `nitro_enclaves.mempool=95%-1G` and restart it.
+  remediation: Fix the host as the message says, or recreate it with `mj ec2 create --runtime nitro`.
 warning Host limits for target remote-podman: The login user on dev@docker.example.test holds 174 of its 200 kernel keyring quota, and `kernel.keys.maxkeys` is 1000. sshd MaxStartups is 10:30:100. Every container takes a session keyring, so `podman run` fails with `crun: create keyring` once the quota is gone.
   remediation: Raise `kernel.keys.maxkeys` and `kernel.keys.maxbytes` with sysctl on dev@docker.example.test, and close finished sessions promptly.
 warning Host limits for target missing-ssh: Could not read the kernel keyring quota or sshd MaxStartups from dev@docker.example.test: ssh executable is unavailable

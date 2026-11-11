@@ -477,6 +477,7 @@ fn adopted_container_workspace(
             | targets::TargetLocator::SshPodman { .. }
             | targets::TargetLocator::SshDocker { .. }
             | targets::TargetLocator::SshAppleContainer { .. }
+            | targets::TargetLocator::SshNitro { .. }
     ) {
         return None;
     }
@@ -655,6 +656,25 @@ fn scan_target_workers(
                 executor,
                 ssh_spec(ssh, remote),
                 "scan remote Docker workers",
+            )?;
+            candidates_from_container_json(target_id, template, &output.stdout)?
+        }
+        TargetTemplate::SshNitro { ssh, .. } => {
+            // The engine lists sandboxes as Podman lists containers: `ps`
+            // with a label filter, one JSON object per line.
+            let remote = targets::with_engine_argv(vec![
+                targets::MICROVM_ENGINE.into(),
+                "ps".into(),
+                "--all".into(),
+                "--filter".into(),
+                format!("label={}=true", targets::MANAGED_LABEL),
+                "--format".into(),
+                "json".into(),
+            ]);
+            let output = execute_scan(
+                executor,
+                ssh_spec(ssh, remote),
+                "scan remote Nitro sandbox workers",
             )?;
             candidates_from_container_json(target_id, template, &output.stdout)?
         }
@@ -888,6 +908,11 @@ fn candidates_from_container_json(
                         container_id: generated,
                     }
                 }
+                TargetTemplate::SshNitro { ssh, .. } => TargetLocator::SshNitro {
+                    borrowed_from: None,
+                    host: ssh.host.clone(),
+                    container_id: generated,
+                },
                 _ => return None,
             };
             Some(RecoveryCandidate {
@@ -1204,6 +1229,21 @@ fn recovery_backend_locator(
                 bail!("recovery SSH Apple container host does not match target template")
             }
             targets::TargetLocator::SshAppleContainer {
+                borrowed_from: None,
+                ssh: SshTarget::from(ssh),
+                container_id: container_id.clone(),
+            }
+        }
+        (
+            TargetTemplate::SshNitro { ssh, .. },
+            TargetLocator::SshNitro {
+                host, container_id, ..
+            },
+        ) => {
+            if host != &ssh.host {
+                bail!("recovery SSH Nitro host does not match target template")
+            }
+            targets::TargetLocator::SshNitro {
                 borrowed_from: None,
                 ssh: SshTarget::from(ssh),
                 container_id: container_id.clone(),

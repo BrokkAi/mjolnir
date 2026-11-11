@@ -211,7 +211,8 @@ fn cleanup_transfer_staging(
     let command = match locator {
         TargetLocator::SshPodman { ssh, .. }
         | TargetLocator::SshDocker { ssh, .. }
-        | TargetLocator::SshAppleContainer { ssh, .. } => Some(
+        | TargetLocator::SshAppleContainer { ssh, .. }
+        | TargetLocator::SshNitro { ssh, .. } => Some(
             crate::targets::ssh_command(ssh, ["rm", "-f", "--", staging])
                 .purpose("remove remote checkpoint staging"),
         ),
@@ -286,18 +287,17 @@ pub fn transfer_plan(
         }
         | TargetLocator::SshAppleContainer {
             ssh, container_id, ..
+        }
+        | TargetLocator::SshNitro {
+            ssh, container_id, ..
         } => {
             vec![
                 crate::targets::ssh_command(ssh, ["mkdir", "-p", ".local/share/hel/transfers"])
                     .purpose("create remote checkpoint staging directory"),
-                crate::targets::ssh_command(
+                crate::targets::ssh_engine_command(
                     ssh,
-                    [
-                        locator.container_engine().expect("remote container"),
-                        "cp",
-                        &format!("{container_id}:{remote_archive}"),
-                        staging,
-                    ],
+                    locator.container_engine().expect("remote container"),
+                    ["cp", &format!("{container_id}:{remote_archive}"), staging],
                 )
                 .purpose("stage remote container checkpoint"),
             ]
@@ -305,7 +305,8 @@ pub fn transfer_plan(
     };
     if let TargetLocator::SshPodman { ssh, .. }
     | TargetLocator::SshDocker { ssh, .. }
-    | TargetLocator::SshAppleContainer { ssh, .. } = locator
+    | TargetLocator::SshAppleContainer { ssh, .. }
+    | TargetLocator::SshNitro { ssh, .. } = locator
     {
         commands.push(
             crate::targets::scp_download(ssh, staging, &local)

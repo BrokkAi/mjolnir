@@ -1212,7 +1212,7 @@ fn newly_unknown_target_keys(
         matches!(key, "kind" | "machine")
             || match kind {
                 "bare" => key == "permissions",
-                "podman" | "docker" | "apple-container" => {
+                "podman" | "docker" | "apple-container" | "nitro" => {
                     targets::CONTAINER_TEMPLATE_KEYS.contains(&key)
                 }
                 _ => true,

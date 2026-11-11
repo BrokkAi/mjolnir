@@ -696,7 +696,8 @@ fn borrowed_locator(
         | TargetLocator::AppleContainer { borrowed_from, .. }
         | TargetLocator::SshPodman { borrowed_from, .. }
         | TargetLocator::SshDocker { borrowed_from, .. }
-        | TargetLocator::SshAppleContainer { borrowed_from, .. } => {
+        | TargetLocator::SshAppleContainer { borrowed_from, .. }
+        | TargetLocator::SshNitro { borrowed_from, .. } => {
             borrowed_from.as_deref().unwrap_or(parent_id)
         }
         _ => parent_id,
@@ -755,6 +756,13 @@ fn borrowed_locator(
         TargetLocator::SshAppleContainer {
             host, container_id, ..
         } => TargetLocator::SshAppleContainer {
+            host: host.clone(),
+            container_id: container_id.clone(),
+            borrowed_from: Some(container_owner.to_owned()),
+        },
+        TargetLocator::SshNitro {
+            host, container_id, ..
+        } => TargetLocator::SshNitro {
             host: host.clone(),
             container_id: container_id.clone(),
             borrowed_from: Some(container_owner.to_owned()),

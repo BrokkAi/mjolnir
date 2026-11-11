@@ -260,6 +260,7 @@ fn documentation_dashboard() -> DashboardState {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(27),
             memory_used_bytes: 19 * 1024 * 1024 * 1024,
             memory_total_bytes: 64 * 1024 * 1024 * 1024,

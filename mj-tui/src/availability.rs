@@ -307,6 +307,7 @@ impl DashboardState {
             | TargetTemplate::SshPodman { .. }
             | TargetTemplate::SshDocker { .. }
             | TargetTemplate::SshAppleContainer { .. }
+            | TargetTemplate::SshNitro { .. }
             | TargetTemplate::AwsEc2 { .. } => {
                 let machine_id = target_machine_id(target, &self.config.machines)?;
                 let probe =
