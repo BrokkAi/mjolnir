@@ -19,7 +19,8 @@ small terminal.
 - [x] (2026-11-11) Added role/model aggregates from the daemon's existing filtered usage snapshot.
 - [x] (2026-11-11) Rendered three role groups, plus unclassified fully destroyed children when present.
 - [x] (2026-11-11) Store integration, HTTP compatibility and grouped TUI goldens pass, including navigation at 70x22.
-- [ ] (2026-11-11) Finish full checks, review, commit, merge upstream and push.
+- [x] (2026-11-11) Full suites for core, controller, TUI and CLI passed; workspace clippy, rustfmt and diff checks passed.
+- [x] (2026-11-11) Implementation committed as `53f044a8c` and `3bf071766`. Final review/publication are tracked by Git review refs and origin/master.
 
 ## Surprises & Discoveries
 
@@ -113,10 +114,18 @@ No crate, protocol revision, new runtime task, or external service is needed.
 
 Initial Terra pricing and ungrouped model totals are validated. Role grouping
 and Park/Close classification pass focused store/API and rendered golden tests.
-Full validation and final review remain.
+The full touched-crate suites, workspace clippy and formatting checks pass.
+The initial review's clipping finding is fixed with scrollable role/model rows.
+Two later review preparations timed out; a third reported a closed node stream.
+The installed daemon still reports the session running; retry review after that
+connection check, then merge unrelated upstream work and push. No installation
+or live store change is part of this request.
 
 Revision note: expanded the initial pricing fix to the explicitly requested
 role/model aggregation, and retained the review-driven scrolling correction.
 
 Revision note: the user excluded backfilling full Destroy. Simplified role
 classification to existing child records and removed the planned migration.
+
+Revision note: recorded full validation and review transport failures. The
+implementation is complete; Git review refs and upstream history record delivery.
