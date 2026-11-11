@@ -10,6 +10,7 @@ import { helpRequest, helpQuestions, helpAnswers, type HelpSearchRequest } from 
 import { githubItemRequest, githubItemAnswers, githubItemQuestions, githubItemRequestV2, githubItemAnswersV2, githubItemQuestionsV2, type GithubItemEvidence, type GithubItemEvidenceV2 } from "./github-item.ts";
 import { effortRequest, effortAnswers, effortQuestions, type EffortRequest } from "./effort.ts";
 import { questionLocatorRequest, questionLocatorAnswers, questionLocatorQuestions, type QuestionLocatorRequest } from "./question-locator.ts";
+import { afkQuestionRequest, afkQuestionAnswers, afkQuestionQuestions, type AfkQuestionRequest } from "./afk-question.ts";
 
 export interface Env {
   TYPESAFE_API_KEY: string;
@@ -280,7 +281,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body));
 }
 
-async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | TurnEvidenceV6 | HelpSearchRequest | ContinuationEvidence | GithubItemEvidence | GithubItemEvidenceV2 | EffortRequest | QuestionLocatorRequest, key: string, version: 1 | 2 | 3 | 4 | 5 | 6 | 7 = 1, continuationV2 = false, githubV2 = false): Promise<Response> {
+async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | TurnEvidenceV6 | HelpSearchRequest | ContinuationEvidence | GithubItemEvidence | GithubItemEvidenceV2 | EffortRequest | QuestionLocatorRequest | AfkQuestionRequest, key: string, version: 1 | 2 | 3 | 4 | 5 | 6 | 7 = 1, continuationV2 = false, githubV2 = false): Promise<Response> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -293,7 +294,8 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
     return await Promise.race([
       deadline,
       (async () => {
-        const questionsForState = "latest_user_message" in state ? questionLocatorQuestions(state)
+        const questionsForState = "current_question" in state ? afkQuestionQuestions
+          : "latest_user_message" in state ? questionLocatorQuestions(state)
           : "task_name" in state ? effortQuestions
           : githubV2 ? githubItemQuestionsV2
             : "item" in state ? githubItemQuestions
@@ -319,7 +321,8 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
           return error("upstream_unavailable", 502);
         }
         const body = await readBounded(upstream);
-        const result = "latest_user_message" in state ? questionLocatorAnswers(body, state)
+        const result = "current_question" in state ? afkQuestionAnswers(body)
+          : "latest_user_message" in state ? questionLocatorAnswers(body, state)
           : "task_name" in state ? effortAnswers(body)
           : githubV2 ? githubItemAnswersV2(body)
             : "item" in state ? githubItemAnswers(body)
@@ -330,7 +333,7 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
                 : version === 5 ? answersV5(body)
                   : version === 4 ? answersV4(body)
                     : version === 3 ? answersV3(body) : answers(body);
-        return result ? json("latest_user_message" in state || "entries" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
+        return result ? json("current_question" in state || "latest_user_message" in state || "entries" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
       })(),
     ]);
   } catch (cause) {
@@ -347,12 +350,13 @@ export default {
     const url = new URL(request.url);
     const search = url.pathname === "/v1/help-search";
     const questionLocator = url.pathname === "/v1/question-locator";
+    const afkQuestion = url.pathname === "/v1/afk-question-verdict";
     const githubItem = url.pathname === "/v1/github-item-verdict";
     const githubItemV2 = url.pathname === "/v2/github-item-verdict";
     const effort = url.pathname === "/v1/effort-verdict";
     const continuationV2 = url.pathname === "/v2/continuation-verdict";
     const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
-    if ((!search && !questionLocator && !githubItem && !githubItemV2 && !effort && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!afkQuestion && !search && !questionLocator && !githubItem && !githubItemV2 && !effort && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
@@ -376,6 +380,7 @@ export default {
     if (githubItem) return githubItemRequest(state) ? classify(state, key) : error("invalid_github_item_request", 400);
     if (githubItemV2) return githubItemRequestV2(state) ? classify(state, key, 1, false, true) : error("invalid_github_item_request", 400);
     if (questionLocator) return questionLocatorRequest(state) ? classify(state, key) : error("invalid_evidence", 400);
+    if (afkQuestion) return afkQuestionRequest(state) ? classify(state, key) : error("invalid_evidence", 400);
     if (effort) return effortRequest(state) ? classify(state, key) : error("invalid_effort_request", 400);
     if (continuationV2) return continuationRequestV2(state) ? classify(state, key, 1, true) : error("invalid_continuation_request", 400);
     if (continuation) return continuationRequest(state) ? classify(state, key) : error("invalid_continuation_request", 400);

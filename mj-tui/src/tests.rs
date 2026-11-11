@@ -2534,6 +2534,141 @@ fn golden_attention_navigation() {
     )
     .expect("write wrapped action");
 
+    let mut tied = dashboard_with_attention_mix();
+    tied.set_active_workspace(Some("default".into()));
+    tied.session_details
+        .get_mut("done")
+        .unwrap()
+        .pending_elicitations = vec![question("done")];
+    for (id, activity) in [("asks", 10), ("done", 20), ("remote", 30)] {
+        tied.session_details
+            .get_mut(id)
+            .unwrap()
+            .last_activity_at_ms = Some(activity);
+    }
+    tied.select_active_session("quiet");
+    let action = chord(&mut tied, CommandId::NextAttention);
+    append_attention_state(
+        &mut output,
+        "equal urgency prefers the current workspace then newest activity",
+        &mut tied,
+        140,
+        40,
+    );
+    writeln!(output, "{}", attention_values(&tied)).unwrap();
+    writeln!(
+        output,
+        "action: {action:?}; selected: {:?}",
+        tied.selected_session_id()
+    )
+    .unwrap();
+    tied.set_active_workspace(Some("other".into()));
+    writeln!(
+        output,
+        "after switching workspace: {}",
+        attention_values(&tied)
+    )
+    .unwrap();
+    tied.set_active_workspace(Some("default".into()));
+    tied.state.sessions.get_mut("remote").unwrap().state = SessionState::Error;
+    tied.select_active_session("quiet");
+    let action = chord(&mut tied, CommandId::NextAttention);
+    writeln!(
+        output,
+        "higher urgency elsewhere: {}; action: {action:?}",
+        attention_values(&tied)
+    )
+    .unwrap();
+
+    let mut cycling = dashboard_with_attention_mix();
+    cycling.state.sessions.get_mut("done").unwrap().workspace_id = "third".into();
+    cycling
+        .session_details
+        .get_mut("done")
+        .unwrap()
+        .pending_elicitations = vec![question("done")];
+    cycling.set_active_workspace(Some("default".into()));
+    cycling.select_active_session("quiet");
+    for command in [CommandId::NextAttention, CommandId::PreviousAttention] {
+        let mut visited = Vec::new();
+        for _ in 0..6 {
+            // Hard-won: c7d63771d: changing workspace preference during navigation stranded notifications.
+            let action = chord(&mut cycling, command);
+            if let DashboardAction::SelectWorkspace { workspace_id } = action {
+                cycling.set_active_workspace(Some(workspace_id));
+                cycling.take_navigation_session();
+            }
+            visited.push(cycling.selected_session_id().unwrap().to_owned());
+        }
+        writeln!(output, "three-workspace {command:?}: {visited:?}").unwrap();
+    }
+    cycling.set_active_workspace(Some("third".into()));
+    cycling.select_active_session("done");
+    let action = chord(&mut cycling, CommandId::PreviousAttention);
+    writeln!(
+        output,
+        "manual selection resets workspace preference: {action:?}"
+    )
+    .unwrap();
+
+    for interruption in [
+        "session selection",
+        "workspace switch",
+        "resolved notification",
+    ] {
+        let mut interrupted = dashboard_with_attention_mix();
+        interrupted
+            .state
+            .sessions
+            .get_mut("done")
+            .unwrap()
+            .workspace_id = "third".into();
+        interrupted
+            .state
+            .sessions
+            .get_mut("quiet")
+            .unwrap()
+            .workspace_id = "other".into();
+        for (id, activity) in [("asks", 40), ("remote", 30), ("done", 20), ("quiet", 10)] {
+            let detail = interrupted.session_details.get_mut(id).unwrap();
+            detail.pending_elicitations = vec![question(id)];
+            detail.last_activity_at_ms = Some(activity);
+        }
+        interrupted.set_active_workspace(Some("default".into()));
+        interrupted.select_active_session("asks");
+        let action = chord(&mut interrupted, CommandId::NextAttention);
+        assert_eq!(
+            action,
+            DashboardAction::SelectWorkspace {
+                workspace_id: "other".into()
+            }
+        );
+        interrupted.set_active_workspace(Some("other".into()));
+        interrupted.take_navigation_session();
+        match interruption {
+            "session selection" => interrupted.select_active_session("remote"),
+            "workspace switch" => {
+                interrupted.set_active_workspace(Some("default".into()));
+                interrupted.set_active_workspace(Some("other".into()));
+            }
+            "resolved notification" => interrupted
+                .session_details
+                .get_mut("remote")
+                .unwrap()
+                .pending_elicitations
+                .clear(),
+            _ => unreachable!(),
+        }
+        // Hard-won: 01e5b6981: restoring the same selection retained an earlier workspace's preference.
+        // Hard-won: 406dfc203: resolving a selected notification retained the earlier preference.
+        let action = chord(&mut interrupted, CommandId::NextAttention);
+        writeln!(
+            output,
+            "workspace preference after {interruption}: {action:?}"
+        )
+        .unwrap();
+    }
+
     let mut folded = dashboard_with_attention_mix();
     folded.set_active_workspace(Some("default".into()));
     let before_fold = append_attention_state(

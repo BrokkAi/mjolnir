@@ -601,7 +601,12 @@ pub(super) async fn await_elicitation_response(
                 answer.await.ok()
             }
         }
-        response = &mut answer => response.ok(),
+        response = async {
+            tokio::select! {
+                response = &mut answer => response.ok(),
+                () = pending.refine_question(id) => (&mut answer).await.ok(),
+            }
+        } => response,
     }
 }
 

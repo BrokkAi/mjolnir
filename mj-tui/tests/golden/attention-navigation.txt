@@ -518,6 +518,58 @@ selected: Some("asks")
 Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: Open { session_id: "asks" }; selected: Some("asks")
 
+=== equal urgency prefers the current workspace then newest activity (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ Default !2  Other !1                     ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│[1] asks ───────────────────────────────────││                                                                                            │
+│  ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  Question  podman  codex-1                 ││                                                                                            │
+│  │ Choose a path                           ││                                                                                            │
+│  │                                         ││                                                                                            │
+│                                            ││                                      ✦  M J O L N I R                                      │
+│[2] done ───────────────────────────────────││                                                                                            │
+│› ! ACP pretty name                     ◇ ⋯ ││                         Select a session to open its conversation.                         │
+│  Question  podman  codex-1                 ││                                                                                            │
+│  │ Choose a path                           ││                                                                                            │
+│  │                                         ││                                                                                            │
+│                                            ││                                                                                            │
+│[3] quiet ──────────────────────────────────││                                                                                            │
+│  · ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  Idle  podman  codex-1                     ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ No conversation open ──────────────────────────────────────────────────────────────────────╮
+│                                            ││No conversation open.                                                                       │
+│                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · o next (!3) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+attention levels: asks=Waiting, remote=Waiting, done=Waiting, quiet=Idle, missing=Inactive; queue: [done:Waiting, asks:Waiting, remote:Waiting]
+action: Open { session_id: "done" }; selected: Some("done")
+after switching workspace: attention levels: asks=Waiting, remote=Waiting, done=Waiting, quiet=Idle, missing=Inactive; queue: [remote:Waiting, done:Waiting, asks:Waiting]
+higher urgency elsewhere: attention levels: asks=Waiting, remote=Failed, done=Waiting, quiet=Idle, missing=Inactive; queue: [remote:Failed, done:Waiting, asks:Waiting]; action: SelectWorkspace { workspace_id: "other" }
+three-workspace NextAttention: ["asks", "done", "remote", "asks", "done", "remote"]
+three-workspace PreviousAttention: ["done", "asks", "remote", "done", "asks", "remote"]
+manual selection resets workspace preference: SelectWorkspace { workspace_id: "other" }
+workspace preference after session selection: Open { session_id: "quiet" }
+workspace preference after workspace switch: Open { session_id: "quiet" }
+workspace preference after resolved notification: Open { session_id: "quiet" }
+
 === project rows before folding (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ Default !1  Other !1                     ≡ ││                                                                                            │

@@ -11,12 +11,53 @@ const SECRET_RUN_CHARS: usize = 24;
 /// API keys and account ids are all long runs of base64url, hex or dotted JWT
 /// segments, and a diagnostic has no use for them.
 pub fn redact_secrets(text: &str) -> String {
+    redact_token_runs(text, |_| "[redacted]".into())
+}
+
+fn anonymous_label(text: &str, labels: &mut std::collections::BTreeMap<String, usize>) -> String {
+    let next = labels.len();
+    let label = labels.entry(text.to_owned()).or_insert(next);
+    format!("[redacted token {label}]")
+}
+
+/// Keep punctuation outside labels so formatting cannot change identifier equality.
+fn redact_secrets_distinct(
+    text: &str,
+    labels: &mut std::collections::BTreeMap<String, usize>,
+) -> String {
+    redact_token_runs(text, |token| {
+        if !token.chars().any(|ch| ch.is_ascii_alphanumeric()) {
+            return anonymous_label(token, labels);
+        }
+        let mut result = String::new();
+        let mut start = 0;
+        for (index, ch) in token.char_indices() {
+            if !ch.is_ascii_alphanumeric() {
+                if start < index {
+                    result.push_str(&anonymous_label(&token[start..index], labels));
+                }
+                result.push(ch);
+                start = index + ch.len_utf8();
+            }
+        }
+        if start < token.len() {
+            result.push_str(&anonymous_label(&token[start..], labels));
+        }
+        result
+    })
+}
+
+fn redact_token_runs(text: &str, mut replacement: impl FnMut(&str) -> String) -> String {
     fn is_token_char(ch: char) -> bool {
         ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '+')
     }
-    fn flush(run: &mut String, redacted: &mut String) {
+    fn flush(
+        run: &mut String,
+        redacted: &mut String,
+        replacement: &mut impl FnMut(&str) -> String,
+    ) {
         if run.chars().count() >= SECRET_RUN_CHARS {
-            redacted.push_str("[redacted]");
+            redacted.push_str(&replacement(run));
         } else {
             redacted.push_str(run);
         }
@@ -28,11 +69,11 @@ pub fn redact_secrets(text: &str) -> String {
         if is_token_char(ch) {
             run.push(ch);
         } else {
-            flush(&mut run, &mut redacted);
+            flush(&mut run, &mut redacted, &mut replacement);
             redacted.push(ch);
         }
     }
-    flush(&mut run, &mut redacted);
+    flush(&mut run, &mut redacted, &mut replacement);
     redacted
 }
 
@@ -41,15 +82,43 @@ pub fn redact_secrets(text: &str) -> String {
 /// `*_id` key are Mjolnir's own identifiers, which the receiver matches
 /// against each other, so they are kept.
 pub fn redact_json_strings(value: &mut Value) {
+    redact_json_strings_with(value, true, &mut |text| redact_secrets(text));
+}
+
+/// Redact string values before serialization so escapes cannot alter identity.
+pub fn redact_json_strings_distinct(
+    value: &mut Value,
+    labels: &mut std::collections::BTreeMap<String, usize>,
+) {
+    redact_json_strings_with(value, false, &mut |text| {
+        redact_secrets_distinct(text, labels)
+    });
+}
+
+/// Secret answer choices need anonymous labels even when they are short.
+pub fn anonymize_json_strings(
+    value: &mut Value,
+    labels: &mut std::collections::BTreeMap<String, usize>,
+) {
+    redact_json_strings_with(value, false, &mut |text| anonymous_label(text, labels));
+}
+
+fn redact_json_strings_with(
+    value: &mut Value,
+    keep_ids: bool,
+    redactor: &mut impl FnMut(&str) -> String,
+) {
     match value {
-        Value::String(text) => *text = redact_secrets(text),
-        Value::Array(items) => items.iter_mut().for_each(redact_json_strings),
+        Value::String(text) => *text = redactor(text),
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|value| redact_json_strings_with(value, keep_ids, redactor)),
         Value::Object(fields) => {
             for (key, field) in fields.iter_mut() {
-                if key == "id" || key.ends_with("_id") {
+                if keep_ids && (key == "id" || key.ends_with("_id")) {
                     continue;
                 }
-                redact_json_strings(field);
+                redact_json_strings_with(field, keep_ids, redactor);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
