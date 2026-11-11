@@ -837,12 +837,18 @@ pub fn mount_history_host(template: &TargetTemplate) -> Option<&str> {
         | TargetTemplate::AwsEc2 { .. } => Some("local"),
         TargetTemplate::SshPodman { ssh, .. }
         | TargetTemplate::SshDocker { ssh, .. }
-        | TargetTemplate::SshAppleContainer { ssh, .. } => Some(&ssh.host),
-        // A sandbox is a VM and cannot attach a host directory.
-        TargetTemplate::SshNitro { .. }
-        | TargetTemplate::LocalBare
-        | TargetTemplate::SshBare { .. } => None,
+        | TargetTemplate::SshAppleContainer { ssh, .. }
+        | TargetTemplate::SshNitro { ssh, .. } => Some(&ssh.host),
+        TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => None,
     }
+}
+
+/// Whether a launch surface should offer attached host directories for
+/// `template`. A Nitro sandbox is a VM that cannot attach one, but a request
+/// that carries attachments (an API call, a resumed session) is still
+/// accepted: the launch drops them and says so, instead of refusing.
+pub fn offers_attached_directories(template: &TargetTemplate) -> bool {
+    mount_history_host(template).is_some() && !matches!(template, TargetTemplate::SshNitro { .. })
 }
 
 /// The host key whose project-directory history belongs to `template`.
