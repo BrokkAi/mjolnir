@@ -21,10 +21,8 @@ pub(crate) fn inspect_container_storage(
         ssh, container_id, ..
     } = locator
     {
-        ensure!(
-            attachments.is_empty(),
-            "Nitro sandboxes cannot attach host directories"
-        );
+        // The session may still record attachments the user chose; a launch
+        // dropped them (with a notice), so the sandbox has none to verify.
         let command = nitro_inspect_command(ssh, container_id);
         let output = executor.execute(&command)?;
         ensure!(
