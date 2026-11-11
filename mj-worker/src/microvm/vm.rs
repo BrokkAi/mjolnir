@@ -638,6 +638,20 @@ fn launch(layout: &Layout, state: &VmState) -> Result<()> {
         .context("start the VM unit")?;
     }
     let client = wait_for_agent(&state.name)?;
+    // The agent starts after init has filled any new volume, and before the
+    // command can write to one. Record that now, durably: a start that is
+    // interrupted from here on must never be filled again over the command's data.
+    for mounted in &state.volumes {
+        let marker = layout.volume(&mounted.name).join("initialized");
+        let file =
+            fs::File::create(&marker).with_context(|| format!("record {}", marker.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", marker.display()))?;
+        // The directory entry too, or a crash could lose the file itself.
+        fs::File::open(layout.volume(&mounted.name))
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("sync the directory of {}", marker.display()))?;
+    }
     let argv: Vec<String> = state
         .entrypoint
         .iter()
@@ -664,11 +678,6 @@ fn launch(layout: &Layout, state: &VmState) -> Result<()> {
                 .collect(),
         })
         .context("start the container command")?;
-    // The volumes were filled from the image if they were new; never again.
-    for mounted in &state.volumes {
-        let marker = layout.volume(&mounted.name).join("initialized");
-        fs::write(&marker, b"").with_context(|| format!("record {}", marker.display()))?;
-    }
     Ok(())
 }
 
