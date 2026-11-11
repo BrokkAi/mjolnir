@@ -905,6 +905,43 @@ pub enum MailboxDeliveryPath {
     Wake,
 }
 
+/// When a mailbox message reaches a recipient that is already working.
+///
+/// The recipient's worker decides this once and publishes it in its
+/// operational state; senders and the daemon read that fact and never derive
+/// it from configuration themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailboxDeliveryMode {
+    /// The message arrives at the recipient's next tool boundary, without
+    /// ending the turn.
+    ToolBoundary,
+    /// The message waits for the current turn to end, then arrives with the
+    /// next prompt or starts a wake turn.
+    TurnBoundary,
+}
+
+impl MailboxDeliveryMode {
+    /// What a Codex session on `provider` accepts. `None` is Codex's default
+    /// OpenAI provider.
+    ///
+    /// Codex records a `PostToolUse` hook's context as a developer message
+    /// between a tool call and its output. DeepSeek's chat API rejects any
+    /// history holding a tool call that its output does not immediately
+    /// follow, so one mid-turn delivery poisons every later request of the
+    /// session (#1277). A provider pointing at DeepSeek's service therefore
+    /// waits for the turn boundary; other providers retain tool-boundary
+    /// delivery, since no rejection has been observed for them. The provider
+    /// is recognized by its host through `CodexProvider::kind`, the same
+    /// classification quota and utility calls use.
+    pub fn for_codex_provider(provider: Option<&crate::codex_provider::CodexProvider>) -> Self {
+        match provider.map(crate::codex_provider::CodexProvider::kind) {
+            Some(crate::codex_provider::CodexProviderKind::DeepSeek) => Self::TurnBoundary,
+            _ => Self::ToolBoundary,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

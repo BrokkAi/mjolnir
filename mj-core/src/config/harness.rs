@@ -41,6 +41,71 @@ impl HarnessHost {
     }
 }
 
+/// Where a profile's login lives on the machine that runs its harness's CLI.
+/// See [`HarnessKind::login_store`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HarnessLoginStore {
+    /// The login is the file at `marker`.
+    File { marker: PathBuf },
+    /// The login is the macOS Keychain item [`CLAUDE_KEYCHAIN_SERVICE`], which
+    /// every Claude profile there shares because its commands run with
+    /// `CLAUDE_CONFIG_DIR` unset, and nothing else: a `.credentials.json` on a
+    /// Mac (a profile home's, left by earlier releases, or Claude Code's own
+    /// plaintext fallback when its Keychain write fails) is not a login.
+    /// Claude Code takes its refresh locks under `~/.claude`; see
+    /// [`HarnessLoginStore::lock_marker`].
+    MacKeychain,
+}
+
+/// The Keychain item Claude Code stores its login in when `CLAUDE_CONFIG_DIR`
+/// is unset (CC 2.1.321: a set variable adds `-<sha256(dir)[:8]>`).
+pub const CLAUDE_KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// The Keychain account Claude Code uses when `$USER` is missing or holds
+/// characters outside `[a-zA-Z0-9._-]`.
+const CLAUDE_KEYCHAIN_FALLBACK_ACCOUNT: &str = "claude-code-user";
+
+/// The account of Claude Code's Keychain item, by Claude Code's own rule
+/// (2.1.321): `$USER` when it is non-empty and made only of
+/// `[a-zA-Z0-9._-]`, otherwise a fixed name. Reading and writing with the
+/// same account addresses the item Claude Code uses instead of adding a
+/// second one.
+pub fn claude_keychain_account(user: Option<&str>) -> String {
+    match user {
+        Some(user)
+            if !user.is_empty()
+                && user.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                }) =>
+        {
+            user.to_owned()
+        }
+        _ => CLAUDE_KEYCHAIN_FALLBACK_ACCOUNT.to_owned(),
+    }
+}
+
+impl HarnessLoginStore {
+    /// The credential file whose directory carries the locks every writer of
+    /// this login takes. For a file that is the file itself. For the Keychain
+    /// it is `~/.claude/.credentials.json`: Claude Code derives its lock
+    /// directories from its config directory, which is `~/.claude` while the
+    /// variable is unset, so Mjolnir's renewals serialize with Claude Code's
+    /// own.
+    pub fn lock_marker(&self) -> anyhow::Result<PathBuf> {
+        match self {
+            Self::File { marker } => Ok(marker.clone()),
+            Self::MacKeychain => {
+                let home = crate::path_input::user_home()
+                    .context("the user's home directory is unknown")?;
+                Ok(harness_authentication_marker(
+                    HarnessKind::Claude,
+                    &home.join(HarnessKind::Claude.default_home_leaf()),
+                ))
+            }
+        }
+    }
+}
+
 /// The target-level execution policy Hel applies independently of the selected
 /// harness. Raw targets may preserve configured approvals; isolated targets
 /// force full access because their boundary contains the blast radius.
@@ -377,15 +442,33 @@ impl HarnessKind {
     /// Whether this harness keeps its login inside its home on `host`, so that
     /// pointing [`HarnessKind::home_env`] at a home selects that home's login.
     ///
-    /// Claude Code on macOS keeps every profile's OAuth credentials in one
-    /// Keychain item, `Claude Code-credentials`, whatever `CLAUDE_CONFIG_DIR`
-    /// says (anthropics/claude-code#20553). A Claude home there holds
-    /// settings, history and MCP servers, but not the login. A session still
-    /// runs from its own staged home there; only the commands that act on the
-    /// person's own home leave the variable unset
-    /// ([`HarnessKind::configure_profile_home_environment`]).
+    /// Claude Code on macOS keeps the login in the Keychain. With
+    /// `CLAUDE_CONFIG_DIR` unset the item is `Claude Code-credentials`, so
+    /// every profile whose commands run that way shares one item; with the
+    /// variable set it looks for an item named after a hash of the directory,
+    /// which Mjolnir never creates. A Claude home there holds settings,
+    /// history and MCP servers, but not the host's login. A session still runs
+    /// from its own staged home there, with a copy of the login staged as a
+    /// file; only the commands that act on the person's own home leave the
+    /// variable unset ([`HarnessKind::configure_profile_home_environment`]).
+    ///
+    /// [`HarnessKind::login_store`] is the one place that turns this into a
+    /// location; ask it, not this, where a login is.
     pub const fn keeps_login_in_home(self, host: HarnessHost) -> bool {
         !matches!((self, host), (Self::Claude, HarnessHost::MacOs))
+    }
+
+    /// Where the login of the profile with home `home` lives on `host`. This
+    /// is the one owner of that fact: credential sync, the grant refresher,
+    /// staging and the authentication check all ask it.
+    pub fn login_store(self, host: HarnessHost, home: &Path) -> HarnessLoginStore {
+        if self.keeps_login_in_home(host) {
+            HarnessLoginStore::File {
+                marker: harness_authentication_marker(self, home),
+            }
+        } else {
+            HarnessLoginStore::MacKeychain
+        }
     }
 
     /// Whether this harness's home is a named subdirectory of the directory

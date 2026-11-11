@@ -505,12 +505,8 @@ async fn refresh_and_retry(
     // Held until the renewal has persisted the new login, even if this
     // future is dropped (see `run_claude_refresh`).
     let admission = admit_renewal(crate::upgrade::gate())?;
-    let locks = mj_core::credentials::CredentialWriteGuard::acquire(
-        mj_core::config::HarnessKind::Claude,
-        &home.join(".credentials.json"),
-    )
-    .await
-    .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
+    let source = LoginSource::File { home: home.clone() };
+    let locks = source.lock().await?;
     let active = read_credentials(&home).await?;
     if let Ok(token) = oauth_access_token(&active, mj_core::clock::epoch_millis())
         && rejected_token.as_deref() != Some(token)
@@ -520,7 +516,7 @@ async fn refresh_and_retry(
     }
     let credentials = renew_locked(
         active,
-        home.clone(),
+        &source,
         environment,
         executor,
         Renewal {
@@ -573,7 +569,7 @@ pub(crate) enum GrantRefresh {
 /// token. The decision does not consult the usage API's rate-limit hold, which
 /// covers usage requests only.
 pub(crate) async fn refresh_grant_if_due(
-    home: PathBuf,
+    source: LoginSource,
     environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     container: Option<crate::quota_runtime::ContainerCheck>,
@@ -589,7 +585,7 @@ pub(crate) async fn refresh_grant_if_due(
             credentials.get("claudeAiOauth")?,
         )?))
     };
-    let credentials = match read_credentials(&home).await {
+    let credentials = match source.read().await {
         Ok(credentials) => credentials,
         Err(ClaudeUsageError::NotSignedIn) => return Ok(GrantRefresh::NotRefreshable),
         Err(error) => return Err(error),
@@ -616,13 +612,8 @@ pub(crate) async fn refresh_grant_if_due(
             return Ok(GrantRefresh::Deferred);
         }
     };
-    let locks = mj_core::credentials::CredentialWriteGuard::acquire(
-        mj_core::config::HarnessKind::Claude,
-        &home.join(".credentials.json"),
-    )
-    .await
-    .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
-    let active = read_credentials(&home).await?;
+    let locks = source.lock().await?;
+    let active = source.read().await?;
     match due_at(&active) {
         None => return Ok(GrantRefresh::NotRefreshable),
         Some(due_at_ms) if due_at_ms > now_ms => {
@@ -640,11 +631,104 @@ pub(crate) async fn refresh_grant_if_due(
         _admission: admission,
         program,
     };
-    let renewed = renew_locked(active, home, environment, executor, renewal, container).await?;
+    let renewed = renew_locked(active, &source, environment, executor, renewal, container).await?;
     Ok(GrantRefresh::Renewed {
         by_this_call: true,
         expires_at_ms: renewed.get("claudeAiOauth").and_then(oauth_expires_at),
     })
+}
+
+/// Where the login a renewal works on is kept, and how Claude Code is told to
+/// find it. Built from [`mj_core::config::HarnessKind::login_store`].
+#[derive(Clone)]
+pub(crate) enum LoginSource {
+    /// `<home>/.credentials.json`, with `CLAUDE_CONFIG_DIR` pointing at `home`.
+    File { home: PathBuf },
+    /// The macOS Keychain item every profile shares. `claude auth login` must
+    /// run with `CLAUDE_CONFIG_DIR` unset, which is the only way it writes
+    /// that item. `lock_marker` is the credential file under `~/.claude`
+    /// whose directory carries the locks Claude Code itself takes; `security`
+    /// reads the item.
+    Keychain {
+        lock_marker: PathBuf,
+        security: Arc<dyn CommandExecutor + Send + Sync>,
+    },
+}
+
+impl LoginSource {
+    /// Take the native refresh locks every writer of this login takes.
+    async fn lock(&self) -> Result<mj_core::credentials::CredentialWriteGuard, ClaudeUsageError> {
+        let marker = match self {
+            Self::File { home } => home.join(".credentials.json"),
+            Self::Keychain { lock_marker, .. } => lock_marker.clone(),
+        };
+        mj_core::credentials::CredentialWriteGuard::acquire(
+            mj_core::config::HarnessKind::Claude,
+            &marker,
+        )
+        .await
+        .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))
+    }
+
+    /// The login as it is now. A Keychain that cannot be read is an error,
+    /// never "not signed in": a renewal spends the refresh token, and one
+    /// started on a login that merely could not be read would lose the grant.
+    async fn read(&self) -> Result<Value, ClaudeUsageError> {
+        match self {
+            Self::File { home } => read_credentials(home).await,
+            Self::Keychain { security, .. } => {
+                let security = Arc::clone(security);
+                let login = tokio::task::spawn_blocking(move || {
+                    crate::setup::read_claude_keychain_login(&*security)
+                })
+                .await
+                .map_err(|error| ClaudeUsageError::Refresh(format!("worker failed: {error}")))?
+                .map_err(|error| ClaudeUsageError::Refresh(format!("{error:#}")))?;
+                match login {
+                    crate::setup::KeychainLogin::Missing => Err(ClaudeUsageError::NotSignedIn),
+                    crate::setup::KeychainLogin::Unreadable { status } => {
+                        Err(ClaudeUsageError::Refresh(format!(
+                            "the macOS Keychain could not be read (security exited with status {status}); unlock it and the renewal will be retried"
+                        )))
+                    }
+                    crate::setup::KeychainLogin::Present(bytes) => {
+                        serde_json::from_slice(&bytes).map_err(|_| ClaudeUsageError::NotSignedIn)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Set the variables `claude auth login` needs to find this login.
+    fn configure_environment(&self, environment: &mut HashMap<String, String>) {
+        match self {
+            Self::File { home } => {
+                environment.insert(
+                    "CLAUDE_CONFIG_DIR".into(),
+                    home.to_string_lossy().into_owned(),
+                );
+            }
+            Self::Keychain { .. } => {
+                environment.remove("CLAUDE_CONFIG_DIR");
+            }
+        }
+    }
+
+    /// Point a Keychain renewal at the item the daemon reads and writes. An
+    /// inherited `CLAUDE_CONFIG_DIR` would rename the item, and a `USER` from
+    /// the profile's environment would change its account (Claude Code names
+    /// the account after `USER`): either way the renewed login would land
+    /// where nothing reads it, after the old refresh token was spent.
+    fn confine_command(&self, command: &mut CommandSpec) {
+        if matches!(self, Self::Keychain { .. }) {
+            command.env.remove("CLAUDE_CONFIG_DIR");
+            command.env_remove.push("CLAUDE_CONFIG_DIR".into());
+            command.env_remove.retain(|name| name != "USER");
+            command
+                .env
+                .insert("USER".into(), crate::setup::claude_keychain_account());
+        }
+    }
 }
 
 /// What one login renewal holds from before its first lock until the child
@@ -661,7 +745,7 @@ struct Renewal {
 /// access token did not change.
 async fn renew_locked(
     active: Value,
-    home: PathBuf,
+    source: &LoginSource,
     mut environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     renewal: Renewal,
@@ -671,14 +755,12 @@ async fn renew_locked(
         .pointer("/claudeAiOauth/accessToken")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    environment.insert(
-        "CLAUDE_CONFIG_DIR".into(),
-        home.to_string_lossy().into_owned(),
-    );
-    let refresh_error = run_claude_refresh(active, environment, executor, renewal, container)
-        .await
-        .err();
-    let credentials = match read_credentials(&home).await {
+    source.configure_environment(&mut environment);
+    let refresh_error =
+        run_claude_refresh(active, source, environment, executor, renewal, container)
+            .await
+            .err();
+    let credentials = match source.read().await {
         Ok(credentials) => credentials,
         Err(error) => return Err(refresh_error.unwrap_or(error)),
     };
@@ -720,6 +802,7 @@ async fn run_claude_usage(
 
 async fn run_claude_refresh(
     credentials: Value,
+    source: &LoginSource,
     mut environment: HashMap<String, String>,
     executor: Arc<dyn CommandExecutor + Send + Sync>,
     renewal: Renewal,
@@ -758,9 +841,17 @@ async fn run_claude_refresh(
             );
             command.env.extend(program.environment.clone());
             command.env.extend(environment);
+            source.confine_command(&mut command);
             (command, None)
         }
         Some(check) => {
+            if matches!(source, LoginSource::Keychain { .. }) {
+                // The image cannot write the host's Keychain.
+                return Err(ClaudeUsageError::Refresh(
+                    "a login held in the macOS Keychain can only be renewed by Claude Code on this Mac"
+                        .into(),
+                ));
+            }
             check
                 .runtime
                 .ensure_image_async()
@@ -2013,5 +2104,204 @@ Last 7d · 5966 requests · 78 sessions
             oauth_access_token(&credentials, 1_999).expect("token"),
             "sk-ant-oat01-test"
         );
+    }
+    /// A macOS Keychain and the `claude` that writes it, in one fake: `security`
+    /// answers with the stored login, `claude auth login` swaps in the renewed
+    /// one. It checks what a Keychain renewal must look like to Claude Code:
+    /// no `CLAUDE_CONFIG_DIR`, and the `~/.claude` locks held.
+    struct FakeMac {
+        login: Mutex<Option<Value>>,
+        security_status: i32,
+        renewed: Value,
+        /// The directory Claude Code takes its refresh locks under.
+        lock_home: PathBuf,
+        claude_runs: Mutex<Vec<CommandSpec>>,
+    }
+
+    impl CommandExecutor for FakeMac {
+        fn execute(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
+            if command.program == "security" {
+                assert_eq!(command.args[0], "find-generic-password");
+                assert_eq!(command.args[1], "-a");
+                assert_eq!(command.args[3..], ["-s", "Claude Code-credentials", "-w"]);
+                return Ok(CommandOutput {
+                    status: self.security_status,
+                    stdout: self
+                        .login
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|login| serde_json::to_vec(login).unwrap())
+                        .unwrap_or_default(),
+                    stderr: Vec::new(),
+                });
+            }
+            assert_eq!(command.args, ["auth", "login"]);
+            assert!(!command.env.contains_key("CLAUDE_CONFIG_DIR"));
+            assert!(command.env_remove.contains(&"CLAUDE_CONFIG_DIR".to_owned()));
+            assert_eq!(
+                command.env.get("USER"),
+                Some(&crate::setup::claude_keychain_account()),
+                "the renewal writes the account the daemon reads"
+            );
+            assert!(self.lock_home.join(".oauth_refresh.lock").is_dir());
+            self.claude_runs.lock().unwrap().push(command.clone());
+            *self.login.lock().unwrap() = Some(self.renewed.clone());
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    fn fake_mac(
+        directory: &std::path::Path,
+        security_status: i32,
+        expires_in_ms: i64,
+    ) -> Arc<FakeMac> {
+        let now = mj_core::clock::epoch_millis();
+        Arc::new(FakeMac {
+            login: Mutex::new(Some(credentials(
+                "access-1",
+                Some("refresh-1"),
+                now + expires_in_ms,
+            ))),
+            security_status,
+            renewed: credentials("access-2", Some("refresh-2"), now + 8 * 3_600_000),
+            lock_home: directory.canonicalize().unwrap(),
+            claude_runs: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn keychain_source(directory: &std::path::Path, mac: &Arc<FakeMac>) -> LoginSource {
+        LoginSource::Keychain {
+            lock_marker: directory.join(".credentials.json"),
+            security: mac.clone(),
+        }
+    }
+
+    const ONE_HOUR_MS: i64 = 3_600_000;
+
+    async fn renew_keychain_login(
+        source: LoginSource,
+        mac: &Arc<FakeMac>,
+    ) -> Result<GrantRefresh, ClaudeUsageError> {
+        // An ambient `CLAUDE_CONFIG_DIR`, as a profile's own environment may
+        // set, must not reach the renewal.
+        // Nor may a `USER` from that environment, which would move the
+        // renewed login to another Keychain account.
+        let environment = HashMap::from([
+            ("CLAUDE_CONFIG_DIR".to_owned(), "/elsewhere".to_owned()),
+            ("USER".to_owned(), "someone-else".to_owned()),
+        ]);
+        refresh_grant_if_due(
+            source,
+            environment,
+            mac.clone(),
+            None,
+            &ClaudeLauncher::Program(PathBuf::from("claude")),
+            &Arc::new(crate::upgrade::Gate::default()),
+            mj_core::clock::epoch_millis(),
+        )
+        .await
+    }
+
+    /// #1491: a Keychain login is renewed through the Keychain as the source,
+    /// under the locks Claude Code takes for `~/.claude`, with
+    /// `CLAUDE_CONFIG_DIR` unset so `claude auth login` writes the item the
+    /// sessions' copies come from; the next look finds it current.
+    #[tokio::test]
+    async fn a_due_keychain_login_is_renewed_with_no_config_dir_under_the_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let mac = fake_mac(directory.path(), 0, ONE_HOUR_MS);
+
+        let first = renew_keychain_login(keychain_source(directory.path(), &mac), &mac)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                first,
+                GrantRefresh::Renewed {
+                    by_this_call: true,
+                    ..
+                }
+            ),
+            "{first:?}"
+        );
+        {
+            let runs = mac.claude_runs.lock().unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].env["CLAUDE_CODE_OAUTH_REFRESH_TOKEN"], "refresh-1");
+        }
+        assert!(!directory.path().join(".oauth_refresh.lock").exists());
+
+        let second = renew_keychain_login(keychain_source(directory.path(), &mac), &mac)
+            .await
+            .unwrap();
+        assert!(matches!(second, GrantRefresh::Current { .. }), "{second:?}");
+        assert_eq!(mac.claude_runs.lock().unwrap().len(), 1);
+    }
+
+    /// #1491: profiles on one Mac share the Keychain item. A renewal that waits
+    /// for another's lock rereads the item under it, finds it renewed, and
+    /// spends no second refresh token.
+    #[tokio::test]
+    async fn a_waiting_keychain_renewal_follows_the_one_that_held_the_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let mac = fake_mac(directory.path(), 0, ONE_HOUR_MS);
+        let held = mj_core::credentials::CredentialWriteGuard::acquire(
+            mj_core::config::HarnessKind::Claude,
+            &directory.path().join(".credentials.json"),
+        )
+        .await
+        .unwrap();
+        let follower = tokio::spawn({
+            let (source, mac) = (keychain_source(directory.path(), &mac), mac.clone());
+            async move { renew_keychain_login(source, &mac).await }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!follower.is_finished(), "the lock is held");
+        // The holder finishes its renewal, then lets go.
+        *mac.login.lock().unwrap() = Some(mac.renewed.clone());
+        drop(held);
+
+        let outcome = follower.await.unwrap().unwrap();
+        assert!(
+            matches!(
+                outcome,
+                GrantRefresh::Renewed {
+                    by_this_call: false,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert!(mac.claude_runs.lock().unwrap().is_empty());
+    }
+
+    /// #1491: a Keychain that cannot be read (locked) is not a missing login.
+    /// The exchange spends the single-use refresh token, so none may start
+    /// while the result could not be read back; the failure is reported.
+    #[tokio::test]
+    async fn a_locked_keychain_starts_no_renewal() {
+        let directory = tempfile::tempdir().unwrap();
+        let mac = fake_mac(directory.path(), 36, ONE_HOUR_MS);
+
+        let error = renew_keychain_login(keychain_source(directory.path(), &mac), &mac)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, ClaudeUsageError::Refresh(message) if message.contains("Keychain")),
+            "{error}"
+        );
+        assert!(mac.claude_runs.lock().unwrap().is_empty());
+        // And no login in the Keychain is simply nothing to renew.
+        let absent = fake_mac(directory.path(), 44, ONE_HOUR_MS);
+        let outcome = renew_keychain_login(keychain_source(directory.path(), &absent), &absent)
+            .await
+            .unwrap();
+        assert_eq!(outcome, GrantRefresh::NotRefreshable);
     }
 }

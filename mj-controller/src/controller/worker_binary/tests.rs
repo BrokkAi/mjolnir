@@ -779,76 +779,56 @@ fn blank_claude_auth_environment_values_do_not_count_as_logins() {
     assert!(!claude_environment_login_present(&profile, &environment));
 }
 
-#[cfg(target_os = "macos")]
 #[test]
-fn an_apple_container_takes_macs_claude_keychain_login_unless_a_setup_token_does() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+fn macs_claude_keychain_login_is_the_only_staged_login_and_has_no_refresh_token() {
+    use crate::claude_login::fake::FakeKeychain;
+    use mj_core::config::HarnessHost;
 
     const KEYCHAIN_LOGIN: &[u8] =
         br#"{"claudeAiOauth":{"accessToken":"keychain","refreshToken":"keychain-refresh","expiresAt":100}}"#;
-    const PREVIOUS_ACCOUNT_LOGIN: &[u8] =
+    const STAGED_LOGIN: &[u8] = br#"{"claudeAiOauth":{"accessToken":"keychain","expiresAt":100}}"#;
+    // What `stage_profile` copies from a profile home that an earlier release
+    // filled from a session.
+    const LEFTOVER_LOGIN: &[u8] =
         br#"{"claudeAiOauth":{"accessToken":"previous","refreshToken":"previous","expiresAt":200}}"#;
-
-    struct KeychainExecutor {
-        calls: AtomicUsize,
-    }
-
-    impl CommandExecutor for KeychainExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            assert_eq!(command.program, "security");
-            assert_eq!(
-                command.args,
-                [
-                    "find-generic-password",
-                    "-s",
-                    "Claude Code-credentials",
-                    "-w"
-                ]
-            );
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Ok(CommandOutput {
-                status: 0,
-                stdout: KEYCHAIN_LOGIN.to_vec(),
-                stderr: Vec::new(),
-            })
-        }
-    }
 
     let directory = tempfile::tempdir().unwrap();
     let staged = directory.path().join("profile");
     std::fs::create_dir(&staged).unwrap();
-    let profile = mj_core::config::HarnessProfile {
-        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, directory.path().join("claude"))
-    };
-    let backend = targets::TargetLocator::AppleContainer {
-        borrowed_from: None,
-        container_id: "hel-session".into(),
-    };
-    let executor = KeychainExecutor {
-        calls: AtomicUsize::new(0),
-    };
+    let staged_login = staged.join(".credentials.json");
+    let profile =
+        mj_core::config::HarnessProfile::new(HarnessKind::Claude, directory.path().join("claude"));
+    let keychain = FakeKeychain::holding(KEYCHAIN_LOGIN);
 
-    stage_claude_keychain_login(&profile, &staged, &backend, true, &executor).unwrap();
-    assert_eq!(executor.calls.load(Ordering::Relaxed), 0);
-    assert!(!staged.join(".credentials.json").exists());
+    // The Keychain holds the login on a Mac only: nothing else asks it.
+    stage_claude_keychain_login(&profile, HarnessHost::Other, &staged, false, &keychain).unwrap();
+    assert!(keychain.calls().is_empty());
 
-    stage_claude_keychain_login(&profile, &staged, &backend, false, &executor).unwrap();
-    assert_eq!(executor.calls.load(Ordering::Relaxed), 1);
-    assert_eq!(
-        std::fs::read(staged.join(".credentials.json")).unwrap(),
-        KEYCHAIN_LOGIN
-    );
+    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, true, &keychain).unwrap();
+    assert!(keychain.calls().is_empty());
+    assert!(!staged_login.exists());
+
+    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain).unwrap();
+    assert_eq!(std::fs::read(&staged_login).unwrap(), STAGED_LOGIN);
 
     // Freshness cannot distinguish a refreshed grant from another account.
     // The current Keychain login stays authoritative even when an earlier
     // staged copy has a later expiry.
-    std::fs::write(staged.join(".credentials.json"), PREVIOUS_ACCOUNT_LOGIN).unwrap();
-    stage_claude_keychain_login(&profile, &staged, &backend, false, &executor).unwrap();
-    assert_eq!(executor.calls.load(Ordering::Relaxed), 2);
-    assert_eq!(
-        std::fs::read(staged.join(".credentials.json")).unwrap(),
-        KEYCHAIN_LOGIN
-    );
+    std::fs::write(&staged_login, LEFTOVER_LOGIN).unwrap();
+    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain).unwrap();
+    assert_eq!(std::fs::read(&staged_login).unwrap(), STAGED_LOGIN);
+
+    // With no Keychain item, or a locked one, a leftover profile-home file is
+    // not a login and is never staged as one.
+    for keychain in [
+        FakeKeychain::default(),
+        FakeKeychain::holding(KEYCHAIN_LOGIN).locked(),
+    ] {
+        std::fs::write(&staged_login, LEFTOVER_LOGIN).unwrap();
+        stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain)
+            .unwrap();
+        assert!(!staged_login.exists());
+    }
 }
 
 #[test]

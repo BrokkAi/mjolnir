@@ -2,11 +2,13 @@
 """Delegation without web access, then durable accounting, in a named instance."""
 
 import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import socket
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 import zipfile
@@ -31,6 +33,8 @@ HELD_PROMPTS = (
     "Return the legacy attachment evidence.",
     "Return a judgment report.",
     "Report the session override.",
+    "Hold OpenAI Codex turn for mailbox delivery.",
+    "Hold DeepSeek Codex turn for deferred mailbox delivery.",
 )
 
 
@@ -39,10 +43,12 @@ def main():
     parser.add_argument("--mj", type=Path, required=True)
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--instance", required=True)
+    parser.add_argument("--mailbox-regression-only", action="store_true")
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named test instance")
     lab = reliability_lab.Lab(args.mj, "delegation", 1171)
+    catalog_proxy = None
     try:
         lab.prepare(fake_acp_prompt_delay_ms=10000)
         bridge = lab.runtime_root / "fake_acp.py"
@@ -164,6 +170,65 @@ def main():
         )
         env.pop("MJ_SESSION_ID", None)
 
+        # Keep the default fixture explicitly OpenAI-backed for its subagents.
+        (lab.profile / "config.toml").write_text('model_provider = "openai"\n')
+        config_path = lab.config / "config.toml"
+        if args.mailbox_regression_only:
+            class CatalogProxyHandler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    body = json.dumps({
+                        "object": "list",
+                        "data": [{"id": "tiny"}, {"id": "deepseek-fixture"}],
+                    }).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, _format, *_args):
+                    pass
+
+            # Keep provider classification on DeepSeek's real host while
+            # serving its catalog locally; the test does not depend on its API.
+            catalog_proxy = ThreadingHTTPServer(("127.0.0.1", 0), CatalogProxyHandler)
+            threading.Thread(target=catalog_proxy.serve_forever, daemon=True).start()
+            proxy_url = f"http://127.0.0.1:{catalog_proxy.server_port}"
+            env.update(HTTP_PROXY=proxy_url, http_proxy=proxy_url)
+            env.update(NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
+
+            deepseek_home = lab.runtime_root / "profile-deepseek"
+            deepseek_home.mkdir()
+            (deepseek_home / "config.toml").write_text(
+                'model_provider = "deepseek-fixture"\n'
+                '[model_providers.deepseek-fixture]\n'
+                'name = "DeepSeek fixture"\n'
+                'base_url = "http://api.deepseek.com"\n'
+                'wire_api = "responses"\n'
+                'env_key = "DEEPSEEK_API_KEY"\n'
+            )
+            fixture_bin = lab.runtime_root / "bin"
+            profile_environment = {
+                "MJ_FAKE_ACP_LOG": str(lab.runtime_root / "fake-acp.log"),
+                "MJ_FAKE_ACP_DELAY_MS": "0",
+                "MJ_FAKE_ACP_PROMPT_DELAY_MS": "10000",
+                "MJ_FAKE_ACP_SWALLOW_PROMPT": "0",
+                "MJ_FAKE_ACP_SWALLOW_BANNER": "",
+                "PATH": str(fixture_bin),
+                "XDG_CACHE_HOME": str(lab.runtime_root / "cache"),
+                "DEEPSEEK_API_KEY": "fixture-api-key",
+            }
+            env_toml = ", ".join(
+                f"{key} = {json.dumps(value)}" for key, value in profile_environment.items()
+            )
+            config_path.write_text(
+                config_path.read_text()
+                + "\n[profiles.fake-deepseek]\n"
+                + 'kind = "codex"\n'
+                + f"home = {json.dumps(str(deepseek_home))}\n"
+                + f"environment = {{ {env_toml} }}\n"
+            )
+
         def cli(*command):
             result = subprocess.run(
                 [str(args.mj.resolve()), "--instance", args.instance, *command],
@@ -231,7 +296,14 @@ def main():
                 connection.settimeout(WAIT_SECONDS)
                 connection.connect(str(endpoint(session)))
                 connection.sendall(json.dumps(request).encode() + b"\n")
-                reply = json.loads(connection.makefile("rb").readline())
+                response_line = connection.makefile("rb").readline()
+                if not response_line:
+                    lab.capture_process_tree()
+                    lab.preserve_runtime()
+                    raise RuntimeError(
+                        f"session tool socket closed without replying: {session}, {action}"
+                    )
+                reply = json.loads(response_line)
             with (lab.root / "tools.jsonl").open("a") as log:
                 log.write(
                     json.dumps(
@@ -275,6 +347,17 @@ def main():
                     assert response["result"] == "ok", response
                     assert response["payload"]["type"] == "status", response
                     return response["payload"]["data"]
+
+        def wait_worker_ready(session):
+            deadline = time.monotonic() + WAIT_SECONDS
+            last_error = None
+            while time.monotonic() < deadline:
+                try:
+                    return worker_status(session)
+                except (OSError, TimeoutError, json.JSONDecodeError, AssertionError) as error:
+                    last_error = error
+                    time.sleep(0.05)
+            raise RuntimeError(f"worker control socket did not become ready: {session}: {last_error}")
 
         def wait_recorded_parent_turn():
             # The fake agent has already observed the user message. A missing
@@ -343,7 +426,8 @@ def main():
             time.sleep(0.25)
         else:
             raise RuntimeError(f"parent did not finish provisioning: {sessions}")
-        config = lab.config / "config.toml"
+        wait_worker_ready(parent)
+        config = config_path
         config.write_text(
             config.read_text().replace(
                 "[phone]\nenabled = true", "[phone]\nenabled = false"
@@ -352,17 +436,6 @@ def main():
         cli("daemon", "restart")
         assert "disabled" in cli("daemon", "status").lower()
         tool(parent, "list_agents")
-        model_gate.touch()
-        spawned = tool(
-            parent,
-            "spawn",
-            {
-                "task_name": "fixture-child",
-                "task_type": "straightforward",
-                "instructions": "Return a short fixture report.",
-            },
-        )
-        child = spawned["child_session_id"]
 
         def listed_session_ids(*options):
             response = json.loads(cli("sessions", *options, "--json"))
@@ -413,6 +486,131 @@ def main():
                 time.sleep(0.1)
             raise RuntimeError(f"report was not acknowledged in the outbox: {session}, {finished_child}, {rows}")
 
+        def mailbox_acceptance(session, text):
+            with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                rows = database.execute(
+                    "SELECT event_json, accepted_at FROM mailbox_outbox WHERE target_session_id=?",
+                    (session,),
+                ).fetchall()
+            for event_json, accepted_at in rows:
+                if text in event_json:
+                    return True, accepted_at
+            return False, None
+
+        def wait_mailbox_acceptance(session, text):
+            deadline = time.monotonic() + WAIT_SECONDS
+            while time.monotonic() < deadline:
+                found, accepted_at = mailbox_acceptance(session, text)
+                if found and accepted_at is not None:
+                    return
+                time.sleep(0.05)
+            raise RuntimeError(f"mailbox event was not accepted: {session}, {text}")
+
+        # Hard-won: #1492: exercise both provider delivery modes through real
+        # workers without traversing the independent child-startup regression.
+        if args.mailbox_regression_only:
+            config.write_text(config.read_text().replace(
+                "[phone]\nenabled = false", "[phone]\nenabled = true"
+            ))
+            cli("daemon", "restart")
+
+            def wait_running(session):
+                deadline = time.monotonic() + WAIT_SECONDS
+                while time.monotonic() < deadline:
+                    sessions = json.loads(cli("sessions", "--json"))
+                    rows = sessions if isinstance(sessions, list) else sessions.get("sessions", [])
+                    record = next(
+                        (row for row in rows if row.get("id", row.get("session_id")) == session),
+                        {},
+                    )
+                    if str(record.get("state", "")).lower() == "running":
+                        wait_worker_ready(session)
+                        return
+                    time.sleep(0.25)
+                raise RuntimeError(f"session did not finish provisioning: {session}, {record}")
+
+            def wait_fixture_prompt(session, text):
+                deadline = time.monotonic() + WAIT_SECONDS
+                while time.monotonic() < deadline:
+                    for marker in lab.runtime_root.rglob("fixture-prompt.txt"):
+                        if session in marker.parts and text in marker.read_text():
+                            return marker
+                    time.sleep(0.05)
+                raise RuntimeError(f"worker did not begin prompt: {session}, {text}")
+
+            for profile_id, provider_mode, prompt in [
+                ("fake", "tool_boundary", "Hold OpenAI Codex turn for mailbox delivery."),
+                ("fake-deepseek", "turn_boundary", "Hold DeepSeek Codex turn for deferred mailbox delivery."),
+            ]:
+                if prompt not in HELD_PROMPTS:
+                    raise AssertionError(f"fixture prompt is not held: {prompt}")
+                recipient = json.loads(cli(
+                    "new", "--workspace", "Delegation test", "--profile", profile_id,
+                    "--target", "localhost", "--project-directory", str(lab.project), "--json",
+                ))["session_id"]
+                wait_running(recipient)
+                prompt_command = lab.daemon_request({
+                    "action": "submit_session_command",
+                    "arguments": {
+                        "session_id": recipient,
+                        "command_id": f"hold-{provider_mode}-mailbox-turn",
+                        "command": {"type": "prompt", "data": {
+                            "prompt": [{"type": "text", "text": prompt}],
+                        }},
+                    },
+                }, timeout=WAIT_SECONDS)
+                assert prompt_command["reply"] == "ordinal", prompt_command
+                wait_fixture_prompt(recipient, prompt)
+                active = worker_status(recipient)["active_prompt"]
+                assert active is not None
+                message_text = f"{profile_id} mailbox delivery at {provider_mode}."
+                response = tool(parent, "send_message", {
+                    "child_session_id": recipient, "message": message_text,
+                })
+                assert response["status"] == "queued", response
+                assert response["mailbox_delivery"] == provider_mode, response
+                if provider_mode == "turn_boundary":
+                    assert "deferred until" in response["note"], response
+                else:
+                    assert "note" not in response, response
+                wait_mailbox_acceptance(recipient, message_text)
+                hook = run_mailbox_hook(recipient)
+                assert worker_status(recipient)["active_prompt"] == active
+                if provider_mode == "tool_boundary":
+                    assert message_text in hook.get("hookSpecificOutput", {}).get("additionalContext", ""), hook
+                else:
+                    assert hook == {}, hook
+                marker = wait_fixture_prompt(recipient, prompt)
+                release_marker = marker.with_name("fixture-release.tmp")
+                release_marker.write_text(prompt)
+                release_marker.replace(marker.with_name("fixture-release"))
+                deadline = time.monotonic() + WAIT_SECONDS
+                while marker.with_name("fixture-release").exists():
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(f"held prompt did not take its release: {prompt}")
+                    time.sleep(0.05)
+                if provider_mode == "turn_boundary":
+                    wait_fixture_prompt(recipient, message_text)
+            print(json.dumps({
+                "instance": args.instance,
+                "artifacts": str(lab.root),
+                "result": "passed",
+                "mailbox_delivery": ["tool_boundary", "turn_boundary"],
+            }), flush=True)
+            return
+
+        model_gate.touch()
+        spawned = tool(
+            parent,
+            "spawn",
+            {
+                "task_name": "fixture-child",
+                "task_type": "straightforward",
+                "instructions": "Return a short fixture report.",
+            },
+        )
+        child = spawned["child_session_id"]
+
         # Hard-won: #1394: a parent message started the child between model and effort, before its brief.
         deadline = time.monotonic() + WAIT_SECONDS
         while not any(
@@ -422,6 +620,7 @@ def main():
             if time.monotonic() >= deadline:
                 raise RuntimeError("child never reached the held startup configuration")
             time.sleep(0.05)
+        wait_worker_ready(child)
         early_message = tool(parent, "send_message", {
             "child_session_id": child, "message": "Follow-up after the original brief.",
         })
@@ -583,11 +782,19 @@ def main():
         assert message["status"] == "queued", (
             "a child message is queued without cancelling its turn"
         )
+        assert message["mailbox_delivery"] == "tool_boundary", message
+        assert "note" not in message, message
+        active_before_hook = worker_status(child)["active_prompt"]
+        assert active_before_hook is not None
+        wait_mailbox_acceptance(child, "after daemon replacement")
         hook = run_mailbox_hook(child)
         additional_context = hook.get("hookSpecificOutput", {}).get(
             "additionalContext", ""
         )
         assert "after daemon replacement" in additional_context, hook
+        assert worker_status(child)["active_prompt"] == active_before_hook, (
+            "OpenAI-backed Codex receives the message at a tool boundary without ending its turn"
+        )
         deadline = time.monotonic() + WAIT_SECONDS
         while time.monotonic() < deadline:
             listed = tool(parent, "list_agents")
@@ -613,6 +820,7 @@ def main():
         wait_report(parent, child, "second report across daemon replacement")
         tool(parent, "list_agents")
         wait_parked(child)
+
         # Delegation above works with the viewer disabled. Usage is an HTTP
         # command, so enable its API for the accounting checks below.
         config.write_text(config.read_text().replace("[phone]\nenabled = false", "[phone]\nenabled = true"))
@@ -868,6 +1076,9 @@ def main():
             flush=True,
         )
     finally:
+        if catalog_proxy is not None:
+            catalog_proxy.shutdown()
+            catalog_proxy.server_close()
         lab.cleanup_owned()
 
 

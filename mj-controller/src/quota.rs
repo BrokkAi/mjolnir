@@ -50,6 +50,11 @@ pub struct QuotaRefreshRequest {
     pub cwd: std::path::PathBuf,
     /// Where a Codex profile's quota comes from. Other harnesses ignore it.
     pub codex_source: CodexQuotaSource,
+    /// Whether an OpenCode profile signs in through an environment-supplied
+    /// provider key rather than a login OpenCode itself stores, so it is
+    /// billed by usage the way Dsh and a Codex custom provider are. Other
+    /// harnesses ignore it.
+    pub opencode_usage_priced: bool,
     /// Where a check that starts the harness runs it (`[quota] runtime`).
     pub runtime: QuotaRuntimeConfig,
 }
@@ -190,6 +195,7 @@ impl QuotaRefreshRequest {
             }
             CodexQuotaSource::Unreadable(_) => hash.update(b"unreadable\0"),
         }
+        hash.update([u8::from(self.opencode_usage_priced)]);
         mj_core::hex::lower_hex(hash.finalize())
     }
 
@@ -208,6 +214,32 @@ impl QuotaRefreshRequest {
             mj_core::config::HarnessHost::current(),
             &mut environment,
         );
+        // A profile with no stored OpenCode login is usage-priced exactly
+        // when the environment supplies a provider key ([`mj doctor`] and the
+        // sign-in status recognize the same signal,
+        // [`HarnessProfile::opencode_environment_logins`]). A profile with a
+        // stored login is usage-priced too when every stored credential is
+        // itself a plain API key (`value.type == "key"`, whether exported
+        // from the environment or typed into `opencode auth login`); any
+        // stored OAuth login, for this provider or another, leaves billing
+        // unknown, because OpenCode's own login database does not say which
+        // credential the session actually uses.
+        let opencode_usage_priced = profile.kind == HarnessKind::OpenCode
+            && match crate::opencode_logins::profile_logins(profile) {
+                Ok(None) => !profile.opencode_environment_logins().is_empty(),
+                Ok(Some(logins)) => serde_json::from_slice::<Vec<Value>>(&logins).is_ok_and(
+                    |logins| {
+                        logins.iter().all(|login| {
+                            login
+                                .get("value")
+                                .and_then(|value| value.get("type"))
+                                .and_then(Value::as_str)
+                                == Some("key")
+                        })
+                    },
+                ),
+                Err(_) => false,
+            };
         Self {
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
@@ -216,6 +248,7 @@ impl QuotaRefreshRequest {
             environment,
             cwd,
             codex_source: CodexQuotaSource::of_profile(profile),
+            opencode_usage_priced,
             runtime,
         }
     }
@@ -501,8 +534,8 @@ fn quota_container(
 /// What the daemon's early Claude grant refresh decided for one profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaudeGrantCheck {
-    /// Not a profile whose grant the daemon renews (another harness, no
-    /// native login file, or a macOS Keychain login).
+    /// Not a profile whose grant the daemon renews (another harness, or one
+    /// that does not sign in with the harness's own login).
     NotApplicable,
     /// Nothing to do now. `due_at_ms` is when the grant needs renewing, from
     /// the login as it is now (after a renewal, the new one). `None` when the
@@ -522,11 +555,7 @@ pub(crate) async fn refresh_claude_grant(
     launcher: &claude_usage::ClaudeLauncher,
     gate: &std::sync::Arc<crate::upgrade::Gate>,
 ) -> ClaudeGrantCheck {
-    // macOS keeps the login in the Keychain, which only Claude Code reads.
-    if request.harness != HarnessKind::Claude
-        || !request.auth_scheme.uses_native_login_file()
-        || cfg!(target_os = "macos")
-    {
+    if request.harness != HarnessKind::Claude || !request.auth_scheme.uses_native_login_file() {
         return ClaudeGrantCheck::NotApplicable;
     }
     let environment = request
@@ -534,28 +563,69 @@ pub(crate) async fn refresh_claude_grant(
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<HashMap<_, _>>();
-    // The launcher says whether this host can run Claude Code, so `auto`
-    // picks a container exactly when it cannot.
-    let container = match quota_container(
-        &request.runtime,
+    let (source, container) = match request.harness.login_store(
+        mj_core::config::HarnessHost::current(),
         &request.source_home,
-        launcher.host_can_run(&environment),
     ) {
-        Ok(container) => container,
-        Err(error) => {
-            tracing::warn!(
-                profile_id = %request.profile_id,
-                error = %format!("{error:#}"),
-                "could not choose where to refresh the Claude login"
-            );
-            return ClaudeGrantCheck::Failed;
+        // A Keychain login is renewed by Claude Code on this host, never in
+        // a container: the image cannot write the Keychain. A host that
+        // cannot run Claude Code fails visibly in `refresh_grant_if_due`.
+        mj_core::config::HarnessLoginStore::MacKeychain => {
+            let lock_marker = match mj_core::config::HarnessLoginStore::MacKeychain.lock_marker() {
+                Ok(marker) => marker,
+                Err(error) => {
+                    tracing::warn!(
+                        profile_id = %request.profile_id,
+                        error = %format!("{error:#}"),
+                        "could not find where Claude Code locks the Keychain login"
+                    );
+                    return ClaudeGrantCheck::Failed;
+                }
+            };
+            (
+                claude_usage::LoginSource::Keychain {
+                    lock_marker,
+                    // `security` can wait on a Keychain prompt; the same bound
+                    // as the other host lookups. The login exchange itself
+                    // runs under no deadline.
+                    security: std::sync::Arc::new(crate::targets::BoundedProcessExecutor::new(
+                        crate::setup::KEYCHAIN_READ_TIMEOUT,
+                    )),
+                },
+                None,
+            )
+        }
+        mj_core::config::HarnessLoginStore::File { .. } => {
+            // The launcher says whether this host can run Claude Code, so
+            // `auto` picks a container exactly when it cannot.
+            let container = match quota_container(
+                &request.runtime,
+                &request.source_home,
+                launcher.host_can_run(&environment),
+            ) {
+                Ok(container) => container,
+                Err(error) => {
+                    tracing::warn!(
+                        profile_id = %request.profile_id,
+                        error = %format!("{error:#}"),
+                        "could not choose where to refresh the Claude login"
+                    );
+                    return ClaudeGrantCheck::Failed;
+                }
+            };
+            (
+                claude_usage::LoginSource::File {
+                    home: request.source_home.clone(),
+                },
+                container,
+            )
         }
     };
     // No deadline and no cancellation: a started login exchange runs to its
     // own end (see `claude_usage::run_claude_refresh`).
     let executor = std::sync::Arc::new(crate::targets::ProcessExecutor);
     match claude_usage::refresh_grant_if_due(
-        request.source_home.clone(),
+        source,
         environment,
         executor,
         container,
@@ -636,6 +706,7 @@ async fn refresh_profile_with_cache_root(
         environment,
         cwd,
         codex_source,
+        opencode_usage_priced,
         runtime,
     } = request;
     // Only the checks that start a harness program consult the runtime, each
@@ -981,8 +1052,15 @@ async fn refresh_profile_with_cache_root(
                 rate_limited_until_epoch_seconds: None,
             }),
         // OpenCode reads no allowance from any provider: rate-limit headers
-        // reach it only on failed requests.
-        HarnessKind::OpenCode => Ok(not_reported()),
+        // reach it only on failed requests. A profile signed in through an
+        // environment-supplied provider key (OpenRouter and the like) is
+        // still billed by usage even though OpenCode never shares it, so it
+        // gets the same `API` label as Dsh rather than reading as unavailable.
+        HarnessKind::OpenCode => Ok(if opencode_usage_priced {
+            usage_priced()
+        } else {
+            not_reported()
+        }),
         // dsh-acp talks to DeepSeek's API, which bills by usage.
         HarnessKind::Dsh => Ok(usage_priced()),
     };

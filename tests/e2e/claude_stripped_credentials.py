@@ -15,9 +15,16 @@ against the real pinned binaries so a pin bump that changes one fails here:
   3. A file replaced by atomic rename while the process runs is used by the next
      API request, directly and through a long-lived claude-agent-acp session.
 
+On macOS the same checks also cover the Keychain (#1491): Claude Code looks a
+login up in the Keychain item named for its CLAUDE_CONFIG_DIR before reading
+`.credentials.json`, and mj stages every macOS session's login as that file.
+The checks pass only if the staged file, not a Keychain item, is what Claude
+Code sends.
+
 No credentials or paid calls: tokens are synthetic, the API is a local fake, and
-the whole run happens in a private network namespace (`unshare -rn`), so nothing
-can reach a real endpoint. Linux only. Opt-in, like the other tests/e2e scripts:
+the whole run happens with only loopback reachable (a private network namespace
+from `unshare -rn` on Linux, a `sandbox-exec` profile on macOS), so nothing can
+reach a real endpoint. Opt-in, like the other tests/e2e scripts:
 
     python3 tests/e2e/claude_stripped_credentials.py [--bundle <managed claude install>]
 
@@ -49,22 +56,42 @@ REPO = Path(__file__).resolve().parents[2]
 TOKEN_HOST = "platform.claude.com"  # TOKEN_URL in the pinned Claude Code bundle
 
 
+# Everything but loopback is refused. Unix sockets stay open for the system
+# services Claude Code talks to locally (the Keychain goes through Mach, not these).
+MACOS_LOOPBACK_ONLY = """(version 1)
+(allow default)
+(deny network-outbound)
+(allow network-outbound (remote ip "localhost:*"))
+(allow network-outbound (remote unix-socket))
+"""
+
+
 def enter_private_network():
-    """Re-execute inside a user+network namespace with only loopback."""
+    """Re-execute where only loopback is reachable."""
     if os.environ.get("CLAUDE_STRIPPED_NETNS") != "1":
-        if sys.platform != "linux" or not shutil.which("unshare"):
-            sys.exit("this test needs Linux and unshare(1) for network isolation")
         os.environ["CLAUDE_STRIPPED_NETNS"] = "1"
-        os.execvp("unshare", ["unshare", "-rn", sys.executable, *sys.argv])
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    flags = struct.unpack("16sH14x", fcntl.ioctl(sock, 0x8913, struct.pack("16sH14x", b"lo", 0)))[1]
-    fcntl.ioctl(sock, 0x8914, struct.pack("16sH14x", b"lo", flags | 1))
+        if sys.platform == "linux" and shutil.which("unshare"):
+            os.execvp("unshare", ["unshare", "-rn", sys.executable, *sys.argv])
+        if sys.platform == "darwin":
+            os.execv("/usr/bin/sandbox-exec", ["sandbox-exec", "-p", MACOS_LOOPBACK_ONLY, sys.executable, *sys.argv])
+        sys.exit("this test needs Linux with unshare(1) or macOS with sandbox-exec for network isolation")
+    if sys.platform == "linux":
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        flags = struct.unpack("16sH14x", fcntl.ioctl(sock, 0x8913, struct.pack("16sH14x", b"lo", 0)))[1]
+        fcntl.ioctl(sock, 0x8914, struct.pack("16sH14x", b"lo", flags | 1))
     # Nothing outside loopback may be reachable; fail loudly if isolation is not real.
     probe = socket.socket()
     probe.settimeout(2)
     try:
         probe.connect(("192.0.2.1", 9))
         sys.exit("network namespace is not isolated")
+    except OSError:
+        pass
+    probe = socket.socket()
+    probe.settimeout(2)
+    try:
+        probe.connect(("1.1.1.1", 443))
+        sys.exit("network is not isolated: reached 1.1.1.1:443")
     except OSError:
         pass
 

@@ -95,7 +95,10 @@ pub struct CredentialInstall {
 enum InstallPolicy {
     /// The profile's own login: only a strictly newer copy replaces it, and a
     /// copy without a refresh token never replaces one that has it, because
-    /// that would drop the grant the daemon alone refreshes.
+    /// that would drop the grant the daemon alone refreshes. Where copies omit
+    /// the refresh token (Claude), only a copy holding one replaces it at all,
+    /// so a host without a login (after a logout) is not handed a stripped
+    /// session copy nothing can renew.
     Canonical,
     /// A harness's copy of the login. Also replaced by a same-expiry copy
     /// without a refresh token, which is how a copy staged before the daemon
@@ -110,9 +113,11 @@ fn replaces(
     incoming: (&CredentialSnapshot, &[u8]),
 ) -> bool {
     if reconcile(current.0, incoming.0) == SyncAction::Pull {
+        let incoming_holds_grant = super::credential_holds_refresh_token(kind, incoming.1);
         return policy == InstallPolicy::SessionCopy
-            || !(super::credential_holds_refresh_token(kind, current.1)
-                && !super::credential_holds_refresh_token(kind, incoming.1));
+            || incoming_holds_grant
+            || (!kind.copies_omit_refresh_token()
+                && !super::credential_holds_refresh_token(kind, current.1));
     }
     policy == InstallPolicy::SessionCopy
         && kind == HarnessKind::Claude
@@ -121,6 +126,17 @@ fn replaces(
         && current.0.freshness_epoch_ms.is_some()
         && current.0.freshness_epoch_ms == incoming.0.freshness_epoch_ms
         && current.0.fingerprint != incoming.0.fingerprint
+}
+
+/// Whether the profile's own login `current` gives way to `incoming`: the
+/// rule [`install_credentials_if_newer`] applies, for a login whose store
+/// does the writing itself (the macOS Keychain).
+pub fn canonical_login_is_replaced_by(
+    kind: HarnessKind,
+    current: (&CredentialSnapshot, &[u8]),
+    incoming: (&CredentialSnapshot, &[u8]),
+) -> bool {
+    replaces(InstallPolicy::Canonical, kind, current, incoming)
 }
 
 /// Install a copy into the profile's own login, only when it is newer and does

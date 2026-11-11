@@ -235,6 +235,11 @@ pub struct DurableRelay {
     /// How this harness receives an accepted steer. Claude never uses ACP
     /// steering because its bridge can cancel an in-flight tool hook.
     steering_delivery_mode: SteeringDeliveryMode,
+    /// When this worker delivers mailbox messages to a working Codex session,
+    /// resolved from its staged provider. `None` until preparation resolves it,
+    /// and for harnesses whose delivery is not classified here; `None` never
+    /// permits a `PostToolUse` delivery.
+    mailbox_delivery_mode: Option<mj_core::mailbox::MailboxDeliveryMode>,
     snapshot: RelaySnapshot,
     /// Canonical, non-overlapping slices of the durable journal. Event bodies
     /// stay on disk; only enough metadata to locate a requested ordinal is
@@ -583,6 +588,7 @@ impl DurableRelay {
             steering_delivery_mode: harness
                 .map(|harness| SteeringDeliveryMode::for_harness(harness, false))
                 .unwrap_or_default(),
+            mailbox_delivery_mode: None,
             snapshot,
             journal_spans,
             hot_events,
@@ -849,6 +855,7 @@ impl DurableRelay {
         state.acp_ready = Some(self.is_acp_ready());
         state.checkpoint_only = self.checkpoint_only;
         state.steering_supported = self.steering_supported;
+        state.mailbox_delivery = self.mailbox_delivery_mode;
         // Harness-initiated turns have no owned prompt ID. Keep their existing
         // explicit interrupt surface; queue steering always needs an owned turn.
         state.turn_controls = (self.snapshot.active_prompt.is_some()
@@ -928,6 +935,13 @@ impl DurableRelay {
     ) {
         self.steering_delivery_mode =
             SteeringDeliveryMode::for_harness(harness, claude_post_tool_batch_hook);
+    }
+
+    /// Set when a Codex session's mailbox messages may reach it, from the
+    /// provider in its staged configuration. The `PostToolUse` drain and the
+    /// published operational state both read this one field.
+    pub fn set_mailbox_delivery_mode(&mut self, mode: mj_core::mailbox::MailboxDeliveryMode) {
+        self.mailbox_delivery_mode = Some(mode);
     }
 
     /// The relay-owned turn boundary shared by command promotion, checkpoint

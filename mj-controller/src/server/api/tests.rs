@@ -1280,6 +1280,8 @@ impl SubagentBackend for FakeBackend {
             Ok(SessionMessageResponse {
                 session_id: target_session_id,
                 via: "mailbox".into(),
+                mailbox_delivery: None,
+                note: None,
                 turn_id: None,
                 managed_child: false,
             })

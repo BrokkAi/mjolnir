@@ -181,9 +181,12 @@ impl ApiBackend {
         if mailbox_route_exists {
             self.enqueue_session_message(&target_session_id, &event, &event_key, managed_child)
                 .await?;
+            let mailbox_delivery = self.published_mailbox_delivery(&target_session_id).await;
             return Ok(crate::server::api::SessionMessageResponse {
                 session_id: target_session_id,
                 via: "mailbox".into(),
+                note: mailbox_delivery_note(mailbox_delivery.as_ref()),
+                mailbox_delivery,
                 turn_id: None,
                 managed_child: false,
             });
@@ -195,6 +198,8 @@ impl ApiBackend {
             return Ok(crate::server::api::SessionMessageResponse {
                 session_id: target_session_id,
                 via: "turn".into(),
+                mailbox_delivery: None,
+                note: None,
                 turn_id: Some(ordinal),
                 managed_child: false,
             });
@@ -220,9 +225,12 @@ impl ApiBackend {
         if mailbox_supported {
             self.enqueue_session_message(&target_session_id, &event, &event_key, managed_child)
                 .await?;
+            let mailbox_delivery = self.published_mailbox_delivery(&target_session_id).await;
             return Ok(crate::server::api::SessionMessageResponse {
                 session_id: target_session_id,
                 via: "mailbox".into(),
+                note: mailbox_delivery_note(mailbox_delivery.as_ref()),
+                mailbox_delivery,
                 turn_id: None,
                 managed_child: false,
             });
@@ -235,6 +243,8 @@ impl ApiBackend {
         Ok(crate::server::api::SessionMessageResponse {
             session_id: target_session_id,
             via: "turn".into(),
+            mailbox_delivery: None,
+            note: None,
             turn_id: Some(turn_id),
             managed_child: false,
         })
@@ -265,12 +275,33 @@ impl ApiBackend {
             SubagentInputDelivery::Mailbox => ("mailbox", None),
             SubagentInputDelivery::Turn { ordinal } => ("turn", Some(ordinal)),
         };
+        let mailbox_delivery = if via == "mailbox" {
+            self.published_mailbox_delivery(&child_session_id).await
+        } else {
+            None
+        };
         Ok(crate::server::api::SessionMessageResponse {
             session_id: child_session_id,
             via: via.into(),
+            note: mailbox_delivery_note(mailbox_delivery.as_ref()),
+            mailbox_delivery,
             turn_id,
             managed_child: true,
         })
+    }
+
+    /// Read the capability from the worker state already published by its
+    /// session actor. Older or disconnected workers leave it unknown.
+    pub(super) async fn published_mailbox_delivery(
+        &self,
+        session_id: &str,
+    ) -> Option<mj_core::mailbox::MailboxDeliveryMode> {
+        self.sessions
+            .session(session_id.to_owned())
+            .await
+            .ok()
+            .and_then(|handle| handle.view().snapshot)
+            .and_then(|snapshot| snapshot.operational.mailbox_delivery)
     }
 
     async fn enqueue_session_message(
@@ -589,6 +620,17 @@ impl ApiBackend {
             .into());
         }
         Ok(())
+    }
+}
+
+pub(super) fn mailbox_delivery_note(
+    delivery: Option<&mj_core::mailbox::MailboxDeliveryMode>,
+) -> Option<String> {
+    match delivery {
+        Some(mj_core::mailbox::MailboxDeliveryMode::TurnBoundary) => Some(
+            "If the recipient is working, delivery is deferred until its current turn ends.".into(),
+        ),
+        Some(mj_core::mailbox::MailboxDeliveryMode::ToolBoundary) | None => None,
     }
 }
 
