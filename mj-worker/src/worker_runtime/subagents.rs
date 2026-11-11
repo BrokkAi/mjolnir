@@ -20,6 +20,8 @@ use mj_core::subagent::{SubagentToolRequest, SubagentToolResult};
 
 mod feed;
 pub(super) use feed::SubagentFeed;
+#[cfg(test)]
+mod handback_tests;
 mod replies;
 
 use crate::subagent_mcp::DaemonContact;
@@ -886,11 +888,15 @@ struct Collections {
     last: Option<Instant>,
 }
 
+type HandbackRequestLocks = BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>;
+
 #[derive(Clone)]
 pub struct SubagentEndpoint {
     path: PathBuf,
     admission: Arc<SocketAdmission>,
     relay: Option<Arc<crate::relay::RelayCell>>,
+    subagent_kind: Option<mj_core::subagent::SubagentKind>,
+    handback_requests: Arc<Mutex<HandbackRequestLocks>>,
     state: Arc<Mutex<QueueState>>,
     /// Woken whenever a result lands, so a socket call awaiting its own request
     /// returns the moment the daemon completes it.
@@ -916,12 +922,83 @@ impl SubagentEndpoint {
             path,
             admission: Arc::default(),
             relay: None,
+            subagent_kind: None,
+            handback_requests: Arc::default(),
             state: Arc::new(Mutex::new(state)),
             completed: Arc::new(Notify::new()),
             generations: Arc::new(tokio::sync::watch::Sender::new(0)),
         };
         endpoint.import_legacy_results()?;
         Ok(endpoint)
+    }
+
+    async fn check_handback(
+        &self,
+        request: &mut SubagentToolRequest,
+    ) -> Result<Option<SubagentToolResult>> {
+        use mj_core::subagent::{SubagentKind, SubagentToolAction};
+        let SubagentToolAction::Handback { message } = &request.action else {
+            return Ok(None);
+        };
+        if self.subagent_kind != Some(SubagentKind::Worker)
+            || self.cached_result(&request.request_id)?.is_some()
+            || self
+                .state
+                .lock()
+                .expect("sub-agent queue lock poisoned")
+                .requests
+                .contains_key(&request.request_id)
+        {
+            return Ok(None);
+        }
+        let Some(relay) = &self.relay else {
+            return Ok(None);
+        };
+        let prepared = {
+            let mut owner = relay.lock().expect("relay lock poisoned");
+            if owner.uses_claude_harness_turns() {
+                owner.open_harness_turn_if_allowed()?;
+            }
+            request.originating_command_id = owner.originating_command_id();
+            let client = owner.handback_verdict_client.clone();
+            match client {
+                Some(client) => owner
+                    .prepare_handback_check(message)?
+                    .map(|(session, generation, evidence)| (client, session, generation, evidence)),
+                None => None,
+            }
+        };
+        let Some((client, session, generation, evidence)) = prepared else {
+            return Ok(None);
+        };
+        let (mut attempt, answer) = client
+            .ask_handback_logged(&session, generation, &evidence)
+            .await;
+        let bounce = match answer {
+            Ok(answer) => answer.assessment.as_ref().is_some_and(|verdict| {
+                evidence
+                    .authorization
+                    .as_ref()
+                    .is_some_and(|c| c.authorization_complete)
+                    && mj_core::assessment::handback_needs_more_work(verdict)
+            }),
+            Err(_) => {
+                attempt.finish("unchanged", "request_failed");
+                return Ok(None);
+            }
+        };
+        attempt.finish(
+            if bounce { "bounced" } else { "delivered" },
+            if bounce {
+                "handback_unfinished"
+            } else {
+                "handback_accepted"
+            },
+        );
+        Ok(bounce.then(|| SubagentToolResult {
+            request_id: request.request_id.clone(), completed_at_ms: mj_core::clock::epoch_millis(), is_error: false,
+            message: "Not delivered: an automatic check judged that your assigned task still has work you can do without further input. Continue it. If the check is wrong — the task is done, your instructions let you stop at this point, what remains is outside your assignment, or you need instructions or a decision from the parent — call handback again (put your question in the report); it will be delivered without another check.".into(),
+        }))
     }
 
     fn cached_result(&self, request_id: &str) -> Result<Option<SubagentToolResult>> {
@@ -1016,9 +1093,18 @@ impl SubagentEndpoint {
 
     /// Queue `request`. Also return any result already recorded for it, and
     /// the number of daemon reads that happened before it joined the queue.
+    #[cfg(test)]
     fn enqueue_marked(
         &self,
+        request: SubagentToolRequest,
+    ) -> Result<(bool, Option<SubagentToolResult>, u64)> {
+        self.enqueue_marked_at_origin(request, None)
+    }
+
+    fn enqueue_marked_at_origin(
+        &self,
         mut request: SubagentToolRequest,
+        captured_origin: Option<String>,
     ) -> Result<(bool, Option<SubagentToolResult>, u64)> {
         // One owner selects the originating turn and keeps it selected until
         // the request is durable; a later daemon never reconstructs this fact.
@@ -1071,7 +1157,10 @@ impl SubagentEndpoint {
             {
                 relay.open_harness_turn_if_allowed()?;
             }
-            request.originating_command_id = relay.originating_command_id();
+            // Only the socket handler supplies a worker-captured origin. Never
+            // trust an originating_command_id carried in an incoming request.
+            request.originating_command_id =
+                captured_origin.or_else(|| relay.originating_command_id());
         }
         let mut next = state.clone();
         next.requests
@@ -2916,11 +3005,13 @@ pub(super) fn serve(
     root: &Path,
     relay: Arc<crate::relay::RelayCell>,
     _harness: mj_core::config::HarnessKind,
+    subagent_kind: Option<mj_core::subagent::SubagentKind>,
 ) -> Result<(SubagentEndpoint, SubagentSocketGuard)> {
     let mut endpoint = SubagentEndpoint::open(root)?;
     // Preserve a closed gate if this worker restarts during Move recovery. A
     // replacement worker explicitly reopens admission after it reconnects.
     endpoint.relay = Some(relay);
+    endpoint.subagent_kind = subagent_kind;
     let path = root.join(SUBAGENT_SOCKET);
     let _ = std::fs::remove_file(&path);
     let listener = mj_core::local_sockets::bind_unix_listener(&path)
@@ -3000,7 +3091,7 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
         Acknowledge { acknowledge_result: String },
         Tool(SubagentToolRequest),
     }
-    let request = match serde_json::from_str(&line).context("parse sub-agent request")? {
+    let mut request = match serde_json::from_str(&line).context("parse sub-agent request")? {
         SocketRequest::Tool(request) => request,
         SocketRequest::Acknowledge { acknowledge_result } => {
             endpoint.acknowledge_replies(&[acknowledge_result], true)?;
@@ -3016,6 +3107,8 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
             .await;
         }
     };
+    // Origin attribution belongs to this worker, never to the socket caller.
+    request.originating_command_id = None;
     let lane = if matches!(
         request.action,
         mj_core::subagent::SubagentToolAction::Spawn { .. }
@@ -3055,7 +3148,37 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
     let mut waiter = queued_input
         .is_none()
         .then(|| endpoint.register_waiter(&request_id));
-    let (accepted, queued, mark) = endpoint.enqueue_marked(request)?;
+    // Retries with the same request ID join the first socket's decision rather
+    // than publishing its report while that socket is still checking it.
+    let handback_lock = matches!(
+        request.action,
+        mj_core::subagent::SubagentToolAction::Handback { .. }
+    )
+    .then(|| {
+        let mut locks = endpoint
+            .handback_requests
+            .lock()
+            .expect("handback request lock poisoned");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        let entry = locks.entry(request_id.clone()).or_default();
+        let lock = entry
+            .upgrade()
+            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
+        *entry = Arc::downgrade(&lock);
+        lock
+    });
+    let handback_guard = match &handback_lock {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
+    // The classifier's 10-second HTTP deadline is inside this call's existing
+    // 120-second reply budget, including the worker's response margin.
+    if let Some(result) = endpoint.check_handback(&mut request).await? {
+        endpoint.complete(result)?;
+    }
+    let captured_origin = request.originating_command_id.take();
+    let (accepted, queued, mark) = endpoint.enqueue_marked_at_origin(request, captured_origin)?;
+    drop(handback_guard);
     if !accepted {
         return write_reply(
             &mut write,

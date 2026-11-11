@@ -13,7 +13,8 @@ use super::*;
 /// fails if the two ever disagree.
 pub fn observation_changes_state(observation: &RelayObservation) -> bool {
     match observation {
-        RelayObservation::TurnAssessmentUpdated { .. }
+        RelayObservation::HandbackCheckStarted { .. }
+        | RelayObservation::TurnAssessmentUpdated { .. }
         | RelayObservation::SteeringUnconfirmed { .. }
         | RelayObservation::AgentInitialized { .. }
         | RelayObservation::SessionOpened { .. }
@@ -219,6 +220,12 @@ fn complete_hook_steering(
 pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Result<()> {
     validate_relay_event(snapshot.latest_ordinal, &snapshot.latest_digest, event)?;
     match &event.observation {
+        RelayObservation::HandbackCheckStarted { assignment_id } => {
+            snapshot
+                .handback_checks
+                .checked
+                .insert(assignment_id.clone());
+        }
         RelayObservation::TurnAssessmentUpdated { assessment } => {
             let current = snapshot
                 .assessment
@@ -1868,6 +1875,20 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             ..
         } => delivered = Some(&steering.queued_prompt_id),
         _ => {}
+    }
+    if let Some(id) = delivered
+        && let Some(prompt) = snapshot
+            .dispatches
+            .get(id)
+            .and_then(|d| d.command.prompt_blocks())
+    {
+        if crate::continuation::GeneratedPrompt::is_subagent_assignment(id) {
+            snapshot.handback_checks.assignment_id = Some(id.clone());
+            snapshot.handback_checks.context.get_or_insert_default();
+        }
+        if let Some(context) = &mut snapshot.handback_checks.context {
+            context.handback_user(id, &prompt);
+        }
     }
     if let Some(id) = delivered
         && let Some(prompt) = snapshot

@@ -300,6 +300,7 @@ pub struct DurableRelay {
     /// Whether the daemon will act on a `Continue` verdict. Off when the
     /// launch environment says automatic continuation is disabled.
     continuation_enabled: bool,
+    pub(crate) handback_verdict_client: Option<crate::acp::verdict_client::VerdictClient>,
     /// When a Claude background task last completed or failed, until the
     /// harness turn that answers it opens. Claude Code always follows such a
     /// settle with a task-notification turn; publishing the settle time lets
@@ -611,6 +612,7 @@ impl DurableRelay {
             kimi_observed_tool_ids: BTreeSet::new(),
             background_work_known: None,
             continuation_enabled: true,
+            handback_verdict_client: None,
             task_settled_at_ms: None,
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
@@ -1734,3 +1736,6 @@ mod attachment_tests;
 
 #[cfg(test)]
 mod continuation_tests;
+
+#[cfg(test)]
+mod handback_tests;

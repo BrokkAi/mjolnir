@@ -85,6 +85,8 @@ impl VerdictAttempt {
         });
         if let Some(diagnostic) = &self.diagnostic {
             let (status, action) = match (outcome, reason) {
+                ("bounced", "handback_unfinished") => ("bounced", "Handback was not delivered; the child was asked to continue unfinished assigned work.".into()),
+                ("delivered", "handback_accepted") => ("delivered", "Handback check allowed delivery to the parent.".into()),
                 (_, "assessment_uncertain") => ("uncertain", "Jev was uncertain; Mj retained the result until relevant evidence changes.".into()),
                 (_, "authorized_continuation_ready") => ("deferred", "Authorized unfinished work remains; continuation awaits atomic worker admission.".into()),
                 (_, "quota_resolution_required") => ("deferred", "Subscription quota reached; the controller will resolve the provider reset deadline.".into()),
@@ -442,9 +444,13 @@ impl VerdictClient {
         self
     }
 
-    fn request_body(&self, evidence: &TurnEvidence) -> serde_json::Value {
+    fn request_body(
+        &self,
+        evidence: &TurnEvidence,
+        question_set: &serde_json::Value,
+    ) -> serde_json::Value {
         let direct_questions = match self.source {
-            VerdictSource::Direct { .. } => Some(questions()),
+            VerdictSource::Direct { .. } => Some(question_set.clone()),
             VerdictSource::Hosted { .. } => None,
         };
         mj_core::jev::request_body(evidence, direct_questions)
@@ -456,6 +462,28 @@ impl VerdictClient {
         generation: u64,
         evidence: &TurnEvidence,
     ) -> (VerdictAttempt, Result<TurnVerdict>) {
+        self.ask_logged_for(session, generation, evidence, false, questions())
+            .await
+    }
+
+    pub(crate) async fn ask_handback_logged(
+        &self,
+        session: &str,
+        generation: u64,
+        evidence: &TurnEvidence,
+    ) -> (VerdictAttempt, Result<TurnVerdict>) {
+        self.ask_logged_for(session, generation, evidence, true, questions())
+            .await
+    }
+
+    async fn ask_logged_for(
+        &self,
+        session: &str,
+        generation: u64,
+        evidence: &TurnEvidence,
+        handback: bool,
+        question_set: serde_json::Value,
+    ) -> (VerdictAttempt, Result<TurnVerdict>) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
         // Completed-turn diagnostics belong to the durable relay owner. A
@@ -463,17 +491,23 @@ impl VerdictClient {
         let diagnostic = self
             .log
             .as_ref()
-            .filter(|_| evidence.phase == mj_core::activity::verdict::TurnPhase::Running)
+            .filter(|_| {
+                handback || evidence.phase == mj_core::activity::verdict::TurnPhase::Running
+            })
             .map(|log| {
                 log.start(
                     session,
                     "activity",
-                    "Does the running turn require user input?",
+                    if handback {
+                        "Does this handback leave authorized work unfinished?"
+                    } else {
+                        "Does the running turn require user input?"
+                    },
                     "Current conversation and live runtime facts.",
                 )
             });
         if let Some(diagnostic) = &diagnostic {
-            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v7", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "required_input_probability":mj_core::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":mj_core::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":mj_core::assessment::FINISHED_WORK_PROBABILITY, "stale_failure_probability":mj_core::activity::verdict::STALE_FAILURE_PROBABILITY, "stale_reply_probability":mj_core::activity::verdict::STALE_REPLY_PROBABILITY, "stale_finished_silence_s":mj_core::activity::verdict::STALE_FINISHED_SILENCE.as_secs(), "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
+            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence, &question_set), "contract":"turn-verdict-v7", "questions":question_set, "handback":handback, "handback_failure_threshold":mj_core::assessment::HANDBACK_FAILURE_CONFIDENCE, "handback_work_probability_threshold":mj_core::assessment::HANDBACK_WORK_PROBABILITY, "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "required_input_probability":mj_core::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":mj_core::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":mj_core::assessment::FINISHED_WORK_PROBABILITY, "stale_failure_probability":mj_core::activity::verdict::STALE_FAILURE_PROBABILITY, "stale_reply_probability":mj_core::activity::verdict::STALE_REPLY_PROBABILITY, "stale_finished_silence_s":mj_core::activity::verdict::STALE_FINISHED_SILENCE.as_secs(), "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
         }
         let mut attempt = VerdictAttempt {
             diagnostic,
@@ -496,7 +530,7 @@ impl VerdictClient {
             summary_bytes = evidence.transcript_summary.len(),
             active_tools = evidence.tools_in_flight.len(),
             "Jev classification requested");
-        let result = self.ask(evidence).await;
+        let result = self.ask(evidence, &question_set).await;
         if let Some(diagnostic) = &attempt.diagnostic {
             match &result {
                 Ok(answer) => {
@@ -526,7 +560,11 @@ impl VerdictClient {
         (attempt, result)
     }
 
-    pub(crate) async fn ask(&self, evidence: &TurnEvidence) -> Result<TurnVerdict> {
+    pub(crate) async fn ask(
+        &self,
+        evidence: &TurnEvidence,
+        question_set: &serde_json::Value,
+    ) -> Result<TurnVerdict> {
         const MAX_RESPONSE_BYTES: usize = 64 * 1024;
         // Both sources are held to the direct shape: the proxy adds the same
         // questions before it calls TypeSafe.
@@ -539,11 +577,11 @@ impl VerdictClient {
                 .client
                 .post(endpoint)
                 .bearer_auth(key)
-                .json(&self.request_body(evidence)),
+                .json(&self.request_body(evidence, question_set)),
             VerdictSource::Hosted { endpoint } => self
                 .client
                 .post(endpoint)
-                .json(&self.request_body(evidence)),
+                .json(&self.request_body(evidence, question_set)),
         };
         let mut response = request
             .send()
@@ -936,7 +974,7 @@ mod tests {
                 socket.write_all(format!("HTTP/1.1 {status} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             });
             let client = VerdictClient::new(VerdictSource::Hosted { endpoint }).unwrap();
-            let result = client.ask(&secret_bearing).await;
+            let result = client.ask(&secret_bearing, &questions()).await;
             assert_eq!(result.is_ok(), status == 200);
             if let Ok(verdict) = result {
                 assert_eq!(verdict.work_state, WorkState::BackgroundWork);
@@ -948,7 +986,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_classifier_body_is_rejected() {
         let (client, server) = server(" ".repeat(128 * 1024)).await;
-        let error = client.ask(&evidence()).await.unwrap_err();
+        let error = client.ask(&evidence(), &questions()).await.unwrap_err();
         assert!(error.to_string().contains("exceeds byte limit"));
         server.await.unwrap();
     }

@@ -261,8 +261,13 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         operation: tokio::sync::Mutex::new(()),
     });
     let (subagents, subagent_socket_guard) = if subagent_role.is_some() {
-        let (endpoint, guard) =
-            super::subagents::serve(&runtime, &root, relay.clone(), config.harness)?;
+        let (endpoint, guard) = super::subagents::serve(
+            &runtime,
+            &root,
+            relay.clone(),
+            config.harness,
+            config.subagent_kind,
+        )?;
         (Some(endpoint), Some(guard))
     } else {
         (None, None)

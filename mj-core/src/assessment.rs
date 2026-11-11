@@ -10,6 +10,10 @@ use crate::continuation::{ASSISTANT_BYTES, EvidenceMessage, USER_BYTES};
 
 pub const PROTOCOL: u32 = 25;
 pub const AUTOMATION_CONFIDENCE: f32 = 0.90;
+// Handback bounces cost one additional tool round, unlike autonomous continuation.
+// Keep their thresholds independent so corpus tuning cannot change automation.
+pub const HANDBACK_FAILURE_CONFIDENCE: f32 = 0.90;
+pub const HANDBACK_WORK_PROBABILITY: f64 = 0.90;
 pub const REQUIRED_INPUT_PROBABILITY: f64 = 0.50;
 pub const REQUIRED_INPUT_RATIO: f64 = 2.5;
 pub const FINISHED_WORK_PROBABILITY: f64 = 0.80;
@@ -84,6 +88,21 @@ pub struct Verdict {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<Judgment<Reply>>,
 }
+/// Whether the report leaves authorized work unfinished, regardless of input needs.
+/// The caller separately requires complete assignment authorization evidence.
+pub fn handback_needs_more_work(verdict: &Verdict) -> bool {
+    verdict.failure.choice == Failure::None
+        && verdict.failure.confidence >= HANDBACK_FAILURE_CONFIDENCE
+        && verdict.work.choice == Work::AuthorizedUnfinished
+        && verdict
+            .work
+            .probabilities
+            .get("authorized_unfinished")
+            .is_some_and(|probability| {
+                *probability + PROBABILITY_EPSILON >= HANDBACK_WORK_PROBABILITY
+            })
+}
+
 impl Verdict {
     pub fn parse(response: &Value) -> Result<Self> {
         fn choice<T: serde::de::DeserializeOwned>(
@@ -474,6 +493,24 @@ impl ContextHistory {
     }
 
     pub fn user(&mut self, id: &str, prompt: &[agent_client_protocol::v1::schema::ContentBlock]) {
+        self.user_with_source(id, prompt, false);
+    }
+
+    /// Include the parent's assignments only in handback-check evidence.
+    pub fn handback_user(
+        &mut self,
+        id: &str,
+        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
+    ) {
+        self.user_with_source(id, prompt, true);
+    }
+
+    fn user_with_source(
+        &mut self,
+        id: &str,
+        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
+        handback: bool,
+    ) {
         use agent_client_protocol::v1::schema::ContentBlock;
         self.open_assistant_id = None;
         let mut text = String::new();
@@ -489,7 +526,9 @@ impl ContextHistory {
             }
         }
         // A prompt Mjolnir submitted is not the person's, whatever it carries.
-        if !crate::continuation::is_user_authored_message(Some(id), &text) {
+        if !(crate::continuation::is_user_authored_message(Some(id), &text)
+            || handback && crate::continuation::GeneratedPrompt::is_subagent_assignment(id))
+        {
             return;
         }
         if non_text {
@@ -907,6 +946,32 @@ mod tests {
             &typed,
         );
         assert!(context.messages.is_empty());
+        let mut handback = ContextHistory::default();
+        for id in ["subagent-spawn-first", "subagent-input-next"] {
+            context.user(id, &typed);
+            handback.handback_user(id, &typed);
+        }
+        for id in [
+            "subagent-wait-123",
+            "handback-reminder-7",
+            "session-message-turn-peer-1",
+            "mailbox-wake-8",
+            "auto-continue-9",
+        ] {
+            handback.handback_user(id, &typed);
+        }
+        assert!(
+            context.messages.is_empty(),
+            "global authorization must still exclude assignments"
+        );
+        assert_eq!(
+            handback
+                .messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["user:subagent-spawn-first", "user:subagent-input-next"]
+        );
         // Hard-won: 97731d30a: a history stored before the upgrade kept a peer message as user authorization.
         let written = serde_json::json!({
             "messages": [

@@ -703,6 +703,7 @@ impl Controller {
         launch.oracle = oracle_launch_enabled(session, subagent.is_some(), &self.config.subagents);
         // Registration decided whether this child can be given the tool.
         launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
+        launch.subagent_kind = subagent.as_ref().map(|child| child.kind);
         // The child's harness opens on its spawn model instead of switching
         // to it from the profile default before the first turn (issue 1217).
         launch.initial_model = subagent.as_ref().and_then(|child| child.model.clone());
@@ -1257,6 +1258,7 @@ pub(super) fn worker_launch_config_with_checkout(
             session_id: session_id.to_string(),
             subagents: mj_core::subagent::SubagentPolicy::Native,
             handback_tool: false,
+            subagent_kind: None,
             agent_mailboxes_enabled: true,
             subtle_subagents: true,
             initial_model: None,

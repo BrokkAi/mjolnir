@@ -46,6 +46,10 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                 .decision_log(),
         )
     });
+    relay
+        .lock()
+        .expect("relay state lock poisoned")
+        .handback_verdict_client = verdict.clone();
     // Owned by this coordinator: dropping it cancels HTTP requests on every
     // exit path, and joining reports panics instead of losing background errors.
     let mut verdict_tasks = tokio::task::JoinSet::new();

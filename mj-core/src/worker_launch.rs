@@ -182,6 +182,9 @@ pub struct WorkerLaunchConfig {
     /// the `mj-agents` MCP server's `handback` tool. Children suppress native delegation.
     #[serde(default)]
     pub handback_tool: bool,
+    /// Explicit child identity; older launch files deliver handbacks unchecked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_kind: Option<crate::subagent::SubagentKind>,
     /// Legacy wire flag retained for older workers. New workers ignore it.
     /// Mailbox delivery and hooks are always present in protocol-41 workers.
     #[serde(default = "default_agent_mailboxes_enabled")]
@@ -909,6 +912,27 @@ mod tests {
     fn oracle_defaults_off_and_is_written_only_when_on() {
         let launch: WorkerLaunchConfig = serde_json::from_value(launch_json()).unwrap();
         assert!(!launch.oracle);
+        assert!(launch.subagent_kind.is_none());
+        assert!(
+            serde_json::to_value(&launch)
+                .unwrap()
+                .get("subagent_kind")
+                .is_none()
+        );
+        for kind in [
+            crate::subagent::SubagentKind::Worker,
+            crate::subagent::SubagentKind::Reviewer,
+            crate::subagent::SubagentKind::Oracle,
+        ] {
+            let mut wire = launch_json();
+            wire["subagent_kind"] = serde_json::to_value(kind).unwrap();
+            let decoded: WorkerLaunchConfig = serde_json::from_value(wire).unwrap();
+            assert_eq!(decoded.subagent_kind, Some(kind));
+            assert_eq!(
+                serde_json::to_value(decoded).unwrap()["subagent_kind"],
+                serde_json::to_value(kind).unwrap()
+            );
+        }
         assert!(
             serde_json::to_value(&launch)
                 .unwrap()

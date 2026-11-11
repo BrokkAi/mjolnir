@@ -158,6 +158,7 @@ impl NativeHistoryEvidence {
             | RelayObservation::MailboxHookLeaseReturned { .. }
             | RelayObservation::MailboxEventsDelivered { .. }
             | RelayObservation::Closing
+            | RelayObservation::HandbackCheckStarted { .. }
             | RelayObservation::TurnAssessmentUpdated { .. }
             | RelayObservation::Closed => {}
         }

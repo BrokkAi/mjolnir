@@ -1547,3 +1547,60 @@ mod settled_task_tests {
         assert!(relay.activity_facts().task_settled_at_ms.is_none());
     }
 }
+
+impl DurableRelay {
+    /// The delivery events own assignment identity. Reminders and provider retries
+    /// do not replace it, so all their handbacks consume the original assignment.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn prepare_handback_check(
+        &mut self,
+        report: &str,
+    ) -> Result<Option<(String, u64, TurnEvidence)>> {
+        if !self.continuation_enabled || mj_core::jev::continuation_disabled_by_environment() {
+            return Ok(None);
+        }
+        let Some(harness) = self.verdict_harness else {
+            return Ok(None);
+        };
+        let Some(assignment_id) = self.snapshot.handback_checks.assignment_id.clone() else {
+            return Ok(None);
+        };
+        if self
+            .snapshot
+            .handback_checks
+            .checked
+            .contains(&assignment_id)
+        {
+            return Ok(None);
+        }
+        let Some(mut context) = self.snapshot.handback_checks.context.clone() else {
+            return Ok(None);
+        };
+        // Journal before HTTP: a crash or cancelled socket consumes the attempt.
+        self.record_observation(RelayObservation::HandbackCheckStarted { assignment_id })?;
+        context.open_assistant_id = None;
+        context.assistant(
+            Some("handback-report"),
+            self.snapshot.latest_ordinal,
+            report,
+        );
+        let mut evidence = self.turn_context.evidence(
+            harness,
+            TurnPhase::Replied,
+            &self.activity_facts(),
+            epoch_millis(),
+        );
+        evidence.assistant_text_tail = report.to_owned();
+        evidence.final_tool_calls.clear();
+        evidence.tools_in_flight.clear();
+        evidence.completion = Some(mj_core::activity::verdict::CompletionEvidence::bounded(
+            "end_turn", None,
+        ));
+        crate::acp::verdict_client::bound_authorization(&mut evidence, Some(context));
+        Ok(Some((
+            self.snapshot.session_id.clone(),
+            self.snapshot.latest_ordinal,
+            evidence,
+        )))
+    }
+}

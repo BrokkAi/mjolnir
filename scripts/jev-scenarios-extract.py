@@ -257,6 +257,8 @@ GENERATED_PROMPT_PREFIXES = (
     "quota-retry-",
     "review-forward-",
     "archive-",
+    "subagent-spawn-",
+    "subagent-input-",
     "subagent-",
     "mailbox-wake-",
     "handback-reminder-",
