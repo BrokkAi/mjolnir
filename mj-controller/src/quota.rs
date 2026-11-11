@@ -50,6 +50,11 @@ pub struct QuotaRefreshRequest {
     pub cwd: std::path::PathBuf,
     /// Where a Codex profile's quota comes from. Other harnesses ignore it.
     pub codex_source: CodexQuotaSource,
+    /// Whether an OpenCode profile signs in through an environment-supplied
+    /// provider key rather than a login OpenCode itself stores, so it is
+    /// billed by usage the way Dsh and a Codex custom provider are. Other
+    /// harnesses ignore it.
+    pub opencode_usage_priced: bool,
     /// Where a check that starts the harness runs it (`[quota] runtime`).
     pub runtime: QuotaRuntimeConfig,
 }
@@ -190,6 +195,7 @@ impl QuotaRefreshRequest {
             }
             CodexQuotaSource::Unreadable(_) => hash.update(b"unreadable\0"),
         }
+        hash.update([u8::from(self.opencode_usage_priced)]);
         mj_core::hex::lower_hex(hash.finalize())
     }
 
@@ -208,6 +214,13 @@ impl QuotaRefreshRequest {
             mj_core::config::HarnessHost::current(),
             &mut environment,
         );
+        // A stored OpenCode login may itself be an API key the person typed
+        // in rather than exported, and nothing here tells those apart; this
+        // only catches the key-through-environment case `mj doctor` and the
+        // sign-in status already recognize ([`HarnessProfile::opencode_environment_logins`]).
+        let opencode_usage_priced = profile.kind == HarnessKind::OpenCode
+            && matches!(crate::opencode_logins::profile_logins(profile), Ok(None))
+            && !profile.opencode_environment_logins().is_empty();
         Self {
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
@@ -216,6 +229,7 @@ impl QuotaRefreshRequest {
             environment,
             cwd,
             codex_source: CodexQuotaSource::of_profile(profile),
+            opencode_usage_priced,
             runtime,
         }
     }
@@ -636,6 +650,7 @@ async fn refresh_profile_with_cache_root(
         environment,
         cwd,
         codex_source,
+        opencode_usage_priced,
         runtime,
     } = request;
     // Only the checks that start a harness program consult the runtime, each
@@ -981,8 +996,15 @@ async fn refresh_profile_with_cache_root(
                 rate_limited_until_epoch_seconds: None,
             }),
         // OpenCode reads no allowance from any provider: rate-limit headers
-        // reach it only on failed requests.
-        HarnessKind::OpenCode => Ok(not_reported()),
+        // reach it only on failed requests. A profile signed in through an
+        // environment-supplied provider key (OpenRouter and the like) is
+        // still billed by usage even though OpenCode never shares it, so it
+        // gets the same `API` label as Dsh rather than reading as unavailable.
+        HarnessKind::OpenCode => Ok(if opencode_usage_priced {
+            usage_priced()
+        } else {
+            not_reported()
+        }),
         // dsh-acp talks to DeepSeek's API, which bills by usage.
         HarnessKind::Dsh => Ok(usage_priced()),
     };

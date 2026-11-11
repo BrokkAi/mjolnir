@@ -406,6 +406,7 @@ fn probeless_request(id: &str) -> QuotaRefreshRequest {
             host: "example.invalid".into(),
             api_key: "key".into(),
         }),
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     }
 }
@@ -692,6 +693,7 @@ printf '{{"claudeAiOauth":{{"accessToken":"access-%s","refreshToken":"refresh-%s
         codex_source: crate::quota::CodexQuotaSource::UsagePriced {
             provider: String::new(),
         },
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     (request, credentials)

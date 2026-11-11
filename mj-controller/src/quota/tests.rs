@@ -401,6 +401,7 @@ fn codex_quota_request(
         environment,
         cwd: directory.to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     }
 }
@@ -920,6 +921,7 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
             )]),
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
+            opencode_usage_priced: false,
             runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
@@ -982,6 +984,7 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     let mut manager = QuotaManager::default();
@@ -1087,6 +1090,7 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     // Lines logged at exactly info that contain `text`.
@@ -1285,6 +1289,7 @@ async fn expired_claude_credentials_report_login_expired() {
             environment: BTreeMap::new(),
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
+            opencode_usage_priced: false,
             runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
@@ -1541,6 +1546,7 @@ while IFS= read -r line; do :; done
         ]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
 
