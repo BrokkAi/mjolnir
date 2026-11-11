@@ -404,8 +404,34 @@ fn bootstrap_login_environment(
     anyhow::bail!("target login environment requires a Unix worker")
 }
 
+/// `mj-worker microvm ...`: the Nitro Sandbox host engine and guest agent.
+/// They have their own command line (a Podman-compatible one), so they are
+/// dispatched before the worker's parser sees the arguments.
+#[cfg(not(target_os = "linux"))]
+fn run_microvm() -> Result<()> {
+    anyhow::bail!("mj-worker microvm runs only on Linux hosts")
+}
+
+#[cfg(target_os = "linux")]
+fn run_microvm() -> Result<()> {
+    install_stderr_logging()?;
+    let arguments: Vec<_> = std::env::args_os().skip(2).collect();
+    // Engine failures exit 125, as Podman's do.
+    let status = match mj_worker::microvm::main(arguments) {
+        Ok(status) => status,
+        Err(error) => {
+            mj_core::diagnostic_stderr!("Error: {error:#}");
+            125
+        }
+    };
+    std::process::exit(status);
+}
+
 fn main() -> Result<()> {
     std::hint::black_box(mj_core::worker_build::WORKER_BUILD_STAMP);
+    if std::env::args_os().nth(1).is_some_and(|word| word == "microvm") {
+        return run_microvm();
+    }
     // The standalone worker uses the same ring provider as the daemon.
     let _ = rustls::crypto::ring::default_provider().install_default();
     install_stderr_logging()?;

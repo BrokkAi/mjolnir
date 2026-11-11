@@ -13,7 +13,7 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 ## Progress
 
 - [x] (2026-11-10) Spike on a real m7i.4xlarge AL2023 host: agent-dev boots as a Nitro Sandbox in direct mode, vsock, two drives, NAT with IMDS refused, nested rootless Podman, stop/relaunch from retained disks. Notes and scripts: `.agents/docs/nitro-sandbox-spike.md` and `.agents/docs/nitro-sandbox-spike/`.
-- [ ] Milestone 1: host engine `mj-worker microvm` and guest agent, proven by hand on the spike host.
+- [x] (2026-11-10) Milestone 1: host engine `mj-worker microvm` and guest agent, proven by hand on the spike host. Code in `mj-worker/src/microvm/`; the transcript is under Artifacts and Notes. Scope change from the user: nested containers inside Nitro sessions are out of scope for #1494 and tracked in #1496, so the nested `podman run` acceptance check was dropped (see Surprises).
 - [x] (2026-11-10) Milestone 2: `ssh_nitro` target kind in mj-core, mj-controller, mj-tui, with breaking migration 124. Implemented against the Milestone 1 contract without the engine: unit-level and golden tests only. The controller's dependencies on the engine are listed under Artifacts and Notes, "Controller use of the engine"; nothing has run against a real host.
 - [x] (2026-11-10) Milestone 3: `mj ec2 create --runtime nitro` host bootstrap; AWS-boundary fixtures cover the Nitro launch requests and bootstrap. Registration and image preload remain for Milestone 4.
 - [ ] Milestone 4: integration and live acceptance on EC2.
@@ -30,6 +30,15 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Observation: Without udev in the guest, `/dev/net/tun` and `/dev/fuse` must be made mode 0666 by init, and `/` must be made rshared for rootless Podman. A bind mount of `/lib/modules` is deleted by `switch_root`; copying into a tmpfs works.
 - Observation: The Firecracker vsock Unix socket is `root:root 0755`; only root can connect to it.
 - Observation: Launch to vsock-ready is 2.6–3.3 s; a reflink clone of an 11 GiB root image takes 4–5 ms and no space on XFS.
+- Observation: Milestone 1 timings on the spike host (m7i.4xlarge, debug build of the engine): `pull` of agent-dev 97 s (flattened root image 14,994,636,800 bytes apparent, about 8.3 GiB used); `run` to a running container 2.2–2.5 s once the initrd exists (8 s the first time, which includes the dracut build); `stop --time 0` 0.6 s including the guest flush; `start` 2.5 s; a 200 MiB stdin round trip through `exec -i` 0.4 s.
+  Evidence: transcript under Artifacts and Notes.
+- Observation: std's `Command::spawn` asserts that waiting for a child whose exec failed succeeds. A PID 1 reaper that calls `waitpid(-1)` collects that child first, so any failed spawn (for example `exec -w /nonexistent`) panicked inside std and poisoned the reaper's lock, breaking every later exec in that VM. Waiting for SIGCHLD with `sigwait` is also fragile, because the signal goes to any thread that does not block it.
+  Evidence: `exec -w /nonexistent rb pwd` returned "connection closed", then "reaper lock was poisoned". The reaper now blocks in `waitid(WNOWAIT)` and reaps under the spawn lock; `mj-worker/tests/microvm_reaper.rs` covers it.
+- Observation: `WORKER_BUILD_ID`, which keys the cached kernel and initrd (`/var/lib/mj-microvm/boot/<kver>-<build>/`), hashes the committed worker inputs. Uncommitted edits keep the old id, so a rebuilt engine silently boots VMs with the old guest agent until the change is committed (or the boot directory is deleted).
+- Observation: A debug build of the musl worker is 245 MB, which does not belong in an initrd that sits in guest RAM. Stripping it gives 67 MB and boots as fast as the spike (2.2–2.5 s). Release builds are smaller still.
+- Observation: Killing Firecracker (`systemctl kill -s KILL`) loses whatever the guest had not yet written to disk; ext4 recovers its journal but the last seconds of writes are gone. `stop` asks the guest to flush first and does not lose them. After a host reboot every unit, TAP device, nftables table and the slot count (back to 4) are gone, and `start` rebuilt all of them from the retained disks.
+- Observation: The published agent-dev image has no `/usr/bin/podman` (only the `podman-remote` symlink at `/usr/local/bin/podman`), so the nested-Podman check could not run against it. As a side check that the guest environment is sound, Podman was installed with apt into a disposable VM and `/usr/bin/podman run --rm docker.io/library/alpine echo ok` ran as the image user `hel` (rootless, `XDG_RUNTIME_DIR` created by the agent, `/dev/net/tun` and `/dev/fuse` mode 0666 from init) in 0.65 s.
+- Observation: The Cargo package is named `brokk-mj-worker`; `cargo -p mj-worker` does not match anything.
 
 - Observation (Milestone 2): `environment_workers`, the physical-ownership ledger from revision 122, carries its own `kind` CHECK, so a new target kind has two constraints to widen, not one. Rebuilding that table with foreign keys on would clear every `environments.target_lease_id` (`ON DELETE SET NULL` on the drop); migration 124 turns enforcement off for the rebuild and the migration test checks the lease survives.
 - Observation (Milestone 2): `sudo` resets the environment and logs the full command line. A value that came from a reference (`from_env`, `from_secret`) or from the controller's own environment is therefore never put on the line: `container_environment` (mj-controller `controller/backend.rs`) emits a valueless `--env NAME` and returns the value, provisioning feeds the values on the ssh command's stdin (`CommandPlan::provide_target_environment_secrets`, which exports them in the remote shell), and the `run` prefix preserves exactly the valueless names (`--preserve-env=A,B`, derived from the same argument list). The engine must inherit a valueless `--env NAME` from its environment. Literal values stay as `--env NAME=value`.
@@ -77,6 +86,42 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Decision: The daemon installs the host-architecture worker binary on the EC2 host with the same machinery it uses for `ssh_bare` hosts and invokes the engine from that path. The engine's on-disk state format and the guest-agent vsock protocol are versioned and stay readable by newer builds, because VMs and their agents outlive engine upgrades.
   Rationale: upgrades complete without user intervention (AGENTS.md).
   Date/Author: 2026-11-10, lead.
+- Decision: Admission uses the engine's own ledger. A launch needs `memory + 2 MiB` (the Nitro overhead measured in the spike) to fit in the pool total minus the same figure summed over every VM whose unit is not inactive, evaluated under the global lock that also covers starting the unit; the kernel's free figure is checked as well, to notice memory the engine did not hand out. Slots follow the same count and are raised in steps of 8 up to `pcie_slots_total`. The refusal names the pool. Three parallel 20 GiB runs into a 48 GiB pool admitted exactly two.
+  Rationale: one owner decides the fact (AGENTS.md); the kernel's momentary free figure lags the unit start, so two racing launches could both pass it.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: `stop` always gives the guest a chance to flush: it sends a stop request over vsock, the agent kills the remaining processes, syncs, unmounts and answers, and then the unit is stopped. The grace period is `--time N`, and 10 seconds (Podman's documented default) for `--time 0` or no `--time`, after which the unit is stopped anyway.
+  Rationale: a kill-only stop loses guest page cache; the controller always passes `--time 0`.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: The CLI is stricter than Podman where a VM cannot honor Podman's meaning: `run` requires `--detach` and `--memory` (a VM has no unlimited memory), `--cpus` defaults to the host CPU count capped at Firecracker's 32, `--volume` accepts named volumes with options `rw`, `ro`, `U` only, `--stop-signal` must be KILL, and `cp`/`exec` need a running VM. `U` chowns the whole volume to the container user at every start, as Podman does. A new volume (only `lost+found` on it) is filled from the image directory it covers, with that directory's owner and mode, which is Podman's copy-up. Nested volume destinations are mounted shallowest first. `inspect` has no `State.ExitCode`: the guest powers off when the command exits and the status is not kept, and a made-up zero would be wrong.
+  Rationale: the controller passes `--user 0:0`, `--volume name:/workspace:rw,U` and `--volume name:/tmp:rw`, and `/tmp` must end up 1777.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: `volume rm` refuses a volume that a VM's state lists, even with `--force` (which only ignores missing volumes); `rm --volumes` removes the VM's named volumes after the VM; a failed `run` removes only volumes that call created. Copy-in entries are owned by the container user (Docker's rule); copy-out entries belong to `SUDO_UID:SUDO_GID` when run under sudo, so the SSH user can read what `scp` then fetches. Unpacking accepts only files, directories and symlinks, rejects `..` and absolute names, and never writes through a symlink, because the guest is the less trusted side.
+  Rationale: a privileged engine must not delete a VM's disks by accident or unpack a hostile tar.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: Image ids are the SHA-256 of the OCI configuration blob (Podman's image id), references map to ids in `images/refs.json`, and `image prune -f` removes images that no reference or VM names, scratch from interrupted pulls, and boot assets built for other kernels or engine builds. Flattening pipes `crane export` into the system `tar` (no pipe handling in the engine; each process logs to a file).
+  Rationale: matches what the controller pins and compares; avoids the Rust `tar` crate's gaps with device nodes and xattrs.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: There is no timeout on waiting for the guest agent. The wait ends when the unit dies (the error carries the last 30 journal lines) or when SIGINT, SIGTERM or SIGHUP arrives, which rolls the launch back. Nothing has been observed to hang, and a cap would be a guess.
+  Rationale: AGENTS.md on speculative caps.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: The guest agent reaps through one thread that blocks in `waitid(WNOWAIT)` and collects under the lock spawns hold, and exec output pumps poll an eventfd that fires when the process exits, so a descendant that keeps a pipe open cannot hold an exec session open (Podman behaves the same). Firecracker runs with `debug_mode: true` so boot failures reach the unit journal; the guest console shows kernel errors and agent errors only.
+  Rationale: see Surprises; spike measured about 150 console lines per boot.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: `info --format json` keys are the contract for Milestone 2 preflight: `engine_version`, `engine_build`, `state_format`, `protocol_version`, `kernel_version`, `architecture`, `cpus`, `nitro_enclaves`, `memory_pool_total_mib`, `memory_pool_free_mib`, `memory_committed_mib`, `slots_in_use`, `slots_total`, `slots_enabled`, `firecracker_path`, `firecracker_version`, `crane_path`, `notes`. `--format` templates support `{{.A.B}}`, `{{json .A.B}}` and `{{index .Map "key"}}`; anything else fails naming the template.
+  Rationale: the plan listed the facts but not their names; the Podman scripts in the controller use exactly those template forms.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: Engine lock order is VM, image, volumes in name order, global. `pull` holds the image lock from flattening through recording the reference; `run` holds the image lock until the root disk is cloned and every volume lock until the VM state that lists the volumes is written; `image prune` and `volume rm` decide under those same locks. A volume can be listed by only one VM, because two kernels writing one ext4 image would corrupt it. `pull` resolves a tag to a digest first and fetches the configuration and the filesystem by that digest. The module is compiled on Linux only.
+  Rationale: review of the first implementation found each of these as a race between two engine verbs or a hang; a single lock order makes them structurally impossible (AGENTS.md concurrency rule). Verified live: a read-only volume mounts read-only, `cp` with a missing source fails at once, a second VM on an attached volume is refused and leaves nothing.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: A launch holds a shared lock on its boot-assets directory (`locks/boot-<tag>.lock`) from before it names the assets until the guest agent answers, and `image prune` removes other builds' assets only when it can take the exclusive lock without waiting. `stop --time 0` keeps the 10-second flush bound on purpose (review asked for an immediate kill): the controller stops sessions with `--time 0` and keeps their volumes, and a kill loses the guest's unwritten data. IPv6 from TAP devices is dropped by an `ip6` table beside the `ip` one, and a root guest agent always applies the requested group.
+  Rationale: review findings; one lock order, no unobserved cap added.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: The engine also offers `ps [--all] [--filter label=KEY[=VALUE]]... [--format json|TEMPLATE]` (a JSON array in Podman's shape with `Id`, `Names`, `Labels`, `State`, `Image`, `ImageID`, `Created`, `Mounts`), for the controller's recovery scan. `--env KEY` without a value takes the engine's own value and is omitted when unset, so the controller can pass secrets through `sudo --preserve-env` instead of the command line.
+  Rationale: contract additions from the target-kind implementer (Milestone 2).
+  Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: The flattened root disk is sparse and sized to the filesystem that holds it, like a volume (196 GiB on the spike host, 8.2 GiB used), with the default inode density; no headroom figure is baked into an image. Operands that name a container accept the id `run` printed or an unambiguous prefix of 12 or more hex characters; a name wins. A new volume is filled from the image only at its first read-write attach (the host records `initialized` after a container starts with it), so deleting a volume's contents does not bring them back, and a volume first attached read-only stays new. Fractional `--cpus` is refused: a vCPU is a whole core given to the hypervisor and nothing on the host can throttle it.
+  Rationale: review findings on speculative sizes, Podman compatibility and resurrected data.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
 
 - Decision: In configuration the runtime is `kind = "nitro"` on an `ssh` machine (`StoredTarget::Nitro`), fused in memory into `TargetTemplate::SshNitro` (`kind_name` `ssh-nitro`), exactly as `apple-container` resolves to `SshAppleContainer`. The plan text said `ssh_nitro`; the code spells kinds in kebab-case and splits machine from runtime since config version 11. A `nitro` runtime on `local` or an EC2-template machine is refused at load. `mj ec2 create --runtime nitro` should build `TargetTemplate::SshNitro` and let `stored_target` write the file.
   Rationale: one shape for every remote VM-backed runtime.
@@ -208,6 +253,253 @@ Every command is `ssh <host> <engine prefix> <verb...>`, so the engine sees exac
 | Recovery scan | `ps --all --filter label=dev.mj.managed=true --format json` | one JSON object per line with `Labels` as `k=v,k=v` | needs: `ps` |
 
 The controller does not use `exec --user`, `--mount`, `--cap-add`, `--security-opt`, `--pids-limit`, `--platform` on `run` (a VM runs the host architecture; the platform applies to `pull`), `rm --volumes`, or `run --rm --entrypoint`.
+
+### Milestone 1 transcript
+
+Milestone 1 transcript, 2026-11-10, on the spike host (m7i.4xlarge, AL2023 kernel 6.18.56, Firecracker 1.18.0, pool 48 GiB) with a stripped dev-profile musl build of `mj-worker` copied to `~/mj-worker`, run as `ec2-user` with `sudo -n`, from a clean `/var/lib/mj-microvm`. Commands are shown after `$`; `[exit N]` is the shell status. The first part is the lifecycle run (`transcript.sh`); the network part is a second run (`transcript-net.sh`) with the same engine because the first run's script guessed the second VM's address wrongly (its curl controls timed out for that reason, and nothing else in that run depended on it).
+
+
+    $ sudo -n ./mj-worker microvm info --format json | head -24
+    {
+      "engine_version": "2.70.0",
+      "state_format": 1,
+      "protocol_version": 1,
+      "kernel_version": "6.18.56-126.188.amzn2023.x86_64",
+      "cpus": 16,
+      "nitro_enclaves": true,
+      "memory_pool_total_mib": 49152,
+      "memory_pool_free_mib": 49148,
+      "slots_in_use": 0,
+      "slots_total": 80,
+      "slots_enabled": 4,
+      "firecracker_path": "/usr/local/bin/firecracker",
+      "firecracker_version": "1.18.0",
+      "crane_path": "/usr/local/bin/crane",
+      "notes": [
+        "--cap-add, --cap-drop and --security-opt are accepted and have no effect: the VM is the isolation boundary",
+        "--user sets the default user of the container command and of exec",
+        "volume option U changes only the owner of the volume's root directory"
+    [exit 0]
+
+    $ time sudo -n ./mj-worker microvm pull ghcr.io/brokkai/mjolnir/agent-dev:latest
+    a398831a90a6832eeb0d3395bef6f35c722eba9ae481ef882f9effd0c048b470
+
+    real	1m37.153s
+    user	1m14.444s
+    sys	0m19.323s
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm image inspect --format '{{.Id}}' ghcr.io/brokkai/mjolnir/agent-dev:latest
+    a398831a90a6832eeb0d3395bef6f35c722eba9ae481ef882f9effd0c048b470
+    [exit 0]
+
+    $ time sudo -n ./mj-worker microvm run --detach --name t1 --label dev.mj.managed=true --label dev.mj.session=s1 --cpus 2 --memory 4g --env A=1 --volume t1-ws:/workspace:rw --volume t1-tmp:/tmp:rw ghcr.io/brokkai/mjolnir/agent-dev:latest sleep infinity
+    2750a345b051ef840df60f1efe3962670b365855df31e80767aed426304adad6
+
+    real	0m8.101s
+    user	0m12.984s
+    sys	0m1.776s
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm exec t1 sh -c 'uname -r; cat /proc/1/comm; id -un; echo A=$A; df -h /workspace | tail -1'
+    6.18.56-126.188.amzn2023.x86_64
+    mj-worker
+    hel
+    A=1
+    /dev/vdb        196G   28K  196G   1% /workspace
+    [exit 0]
+
+    $ sha256sum /tmp/big200
+    3d3d0a828c9b678513cb5edbb25ca491a1482df3ea8cb2714a6f37dc78c9ff68  /tmp/big200
+    [exit 0]
+
+    $ time sudo -n ./mj-worker microvm exec -i t1 sh -c 'cat >/workspace/big; wc -c /workspace/big; sha256sum /workspace/big' < /tmp/big200
+    209715200 /workspace/big
+    3d3d0a828c9b678513cb5edbb25ca491a1482df3ea8cb2714a6f37dc78c9ff68  /workspace/big
+
+    real	0m0.398s
+    user	0m0.041s
+    sys	0m0.050s
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm exec -i t1 cat < /tmp/big200 | sha256sum
+    3d3d0a828c9b678513cb5edbb25ca491a1482df3ea8cb2714a6f37dc78c9ff68  -
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm exec --detach t1 sh -c 'sleep 100'
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm exec t1 sh -c 'ps -eo pid,ppid,comm | grep -E "sleep|Z"'
+     1018     1 sleep
+     1045  1044 sleep
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm cp ./dir t1:/workspace/dir
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm cp t1:/workspace/dir ./back
+    [exit 0]
+
+    $ diff -r ~/dir ~/back && echo directories identical
+    directories identical
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm container exists t1
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm container inspect t1 | python3 -c 'import json,sys; d=json.load(sys.stdin)[0]; print(len(json.load(open("/dev/null")) if False else [d]), d["State"], d["Config"]["Labels"], d["Mounts"][0]["Name"], d["HostConfig"])'
+    1 {'Status': 'running', 'Running': True, 'Paused': False, 'ExitCode': 0} {'dev.mj.managed': 'true', 'dev.mj.session': 's1'} t1-ws {'Memory': 4294967296, 'NanoCpus': 2000000000, 'AutoRemove': False, 'Privileged': False, 'ReadonlyRootfs': False, 'NetworkMode': 'nitro'}
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm container inspect --format '{{index .Config.Labels "dev.mj.managed"}}|{{index .Config.Labels "dev.mj.session"}}' t1
+    true|s1
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm exec t1 sh -c 'echo kept-across-stop > /workspace/marker.txt'
+    [exit 0]
+
+    $ time sudo -n ./mj-worker microvm stop --time 0 --ignore t1
+    t1
+
+    real	0m0.612s
+    user	0m0.015s
+    sys	0m0.013s
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm container inspect --format '{{.State.Status}}' t1
+    exited
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm exec t1 true
+    Error: can only use a running container: container state improper
+    [exit 125]
+
+    $ time sudo -n ./mj-worker microvm start t1
+    t1
+
+    real	0m2.451s
+    user	0m0.048s
+    sys	0m0.004s
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm exec t1 sh -c 'cat /workspace/marker.txt; sha256sum /workspace/big'
+    kept-across-stop
+    3d3d0a828c9b678513cb5edbb25ca491a1482df3ea8cb2714a6f37dc78c9ff68  /workspace/big
+    [exit 0]
+
+The network part, with controls that prove each blocked path would work without the firewall rules (the host reaches both the VM and itself):
+
+    $ sudo -n ./mj-worker microvm run --detach --name t1 --label dev.mj.managed=true --label dev.mj.session=s1 --cpus 2 --memory 4g --volume t1-ws:/workspace:rw ghcr.io/brokkai/mjolnir/agent-dev:latest sleep infinity
+    b8025ffb15cab36985eac83e3f5c0990656e39e576d875886624c99b03d2405c
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm run --detach --name t2 --label dev.mj.managed=true --label dev.mj.session=s2 --cpus 1 --memory 2g --volume t2-ws:/workspace:rw ghcr.io/brokkai/mjolnir/agent-dev:latest sleep infinity
+    32028c5a4aa7811faf9f46d7068c3c64407db5a31f3748ad03ed8e1e2e2985d0
+    [exit 0]
+
+    $ cat /sys/class/misc/nitro_enclaves/pcie_slots_in_use
+    2
+    [exit 0]
+    t2 address: 10.200.0.6   host VPC address: 172.31.8.23
+
+    $ curl -s -m 3 -o /dev/null -w 'control: host -> t2 http %{http_code}\n' http://10.200.0.6:8080/
+    control: host -> t2 http 200
+    [exit 0]
+
+    $ curl -s -m 3 -o /dev/null -w 'control: host -> host http %{http_code}\n' http://172.31.8.23:8099/
+    control: host -> host http 200
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm exec t1 curl -s -m 3 -o /dev/null -w 't1 -> t2 http %{http_code}\n' http://10.200.0.6:8080/
+    t1 -> t2 http 000
+    [exit 28]
+
+    $ sudo -n ./mj-worker microvm exec t2 curl -s -m 3 -o /dev/null -w 't2 -> t1 http %{http_code}\n' http://10.200.0.2:8080/
+    t2 -> t1 http 000
+    [exit 28]
+
+    $ sudo -n ./mj-worker microvm exec t1 curl -s -m 3 -o /dev/null -w 't1 -> host (VPC address) http %{http_code}\n' http://172.31.8.23:8099/
+    t1 -> host (VPC address) http 000
+    [exit 28]
+
+    $ sudo -n ./mj-worker microvm exec t1 curl -s -m 3 -o /dev/null -w 't1 -> host (TAP gateway) http %{http_code}\n' http://10.200.0.1:8099/
+    t1 -> host (TAP gateway) http 000
+    [exit 28]
+
+    $ sudo -n ./mj-worker microvm exec t1 curl -s -m 5 -o /dev/null -w 't1 -> github.com http %{http_code}\n' https://github.com
+    t1 -> github.com http 200
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm exec t1 curl -s -m 3 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60'
+    [exit 7]
+
+    $ sudo -n ./mj-worker microvm rm --force --volumes t1 t2
+    t1
+    t2
+    [exit 0]
+
+    $ systemctl list-units 'mj-microvm-*' --no-legend | wc -l; ip -br link | grep -c '^mjt'; ls /var/lib/mj-microvm/vms /var/lib/mj-microvm/volumes | wc -l
+    0
+    0
+    3
+    [exit 0]
+
+Removal and failed run, from the lifecycle run:
+
+    === removal leaves nothing behind
+
+    $ leftovers
+    units:  2  taps: 2  sockets: 2  vm dirs: 2  volumes: 3  slots in use: 2
+    [exit 0]
+
+    $ time sudo -n ./mj-worker microvm rm --force --ignore t1
+    t1
+
+    real	0m0.616s
+    user	0m0.030s
+    sys	0m0.012s
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm volume rm t1-ws t1-tmp
+    t1-ws
+    t1-tmp
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm rm --force --volumes t2
+    t2
+    [exit 0]
+
+    $ leftovers
+    units:  0  taps: 0  sockets: 0  vm dirs: 0  volumes: 0  slots in use: 0
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm volume ls
+    DRIVER    VOLUME NAME
+    [exit 0]
+
+    === a failed run leaves nothing behind
+
+    $ sudo -n ./mj-worker microvm run --detach --name big --label dev.mj.session=s9 --memory 60g --volume big-ws:/workspace:rw ghcr.io/brokkai/mjolnir/agent-dev:latest sleep infinity
+    Error: the Nitro Sandbox memory pool cannot fit this VM: pool 49152 MiB, 0 MiB committed to 0 running VMs, 61442 MiB needed
+    [exit 125]
+
+    $ leftovers
+    units:  0  taps: 0  sockets: 0  vm dirs: 0  volumes: 0  slots in use: 0
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm container exists big
+    [exit 1]
+
+    === image prune
+
+    $ sudo -n ./mj-worker microvm image prune -f
+    [exit 0]
+
+    $ sudo -n ./mj-worker microvm image inspect --format '{{.Id}}' ghcr.io/brokkai/mjolnir/agent-dev:latest
+    a398831a90a6832eeb0d3395bef6f35c722eba9ae481ef882f9effd0c048b470
+    [exit 0]
+
+What the transcript shows: the engine reports the pool and Firecracker; the image flattens and inspects with the OCI config digest as its id; `run` returns a container id in 8 s the first time and 2.2 s afterwards; the guest reports its own kernel, PID 1 `mj-worker`, the image user `hel`, and a 196 GiB sparse workspace volume; a 200 MiB stdin round trip through `exec -i` has identical SHA-256 sums in both directions; a detached exec keeps running; a directory with a 5 MB file, a subdirectory and a symlink copies in and out identically; `container exists` and `container inspect` (JSON array and `--format`) answer as the controller's scripts expect; `stop --time 0` then `start` keeps the workspace; two VMs run at once and cannot reach each other, the host's VPC address, or the TAP gateway, while GitHub works and the IMDS token request fails with curl exit 7; after `rm` and `volume rm` there is no unit, TAP device, socket directory, VM directory, volume or used slot; a `run` asking for 60 GiB is refused naming the pool and leaves nothing; `image prune -f` keeps the referenced image. Other runs on the same host, not repeated in the transcript: three parallel 20 GiB `run` calls admitted exactly two; SIGTERM during `run` rolled back the unit, TAP, VM directory and volume; a hard kill of the Firecracker process left `exited` and `start` relaunched it; after a host reboot `start` rebuilt the nftables table and TAP and the synced workspace data was present; `exec -w /nonexistent` exits 127 and an unknown user exits 126.
 
 ## Interfaces and Dependencies
 
