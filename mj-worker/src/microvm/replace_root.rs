@@ -305,6 +305,9 @@ fn apply_stopped(
         // a recovery that finds `previous` skips the clone.
         sync_directory(&directory)?;
         fs::rename(&root, &previous).with_context(|| format!("set aside {}", root.display()))?;
+        // Durable before the replacement is installed: a recovery that finds no
+        // `previous` takes the installed clone for the original root.
+        sync_directory(&directory)?;
     }
     // From here the old root disk is `previous` and `next` is complete; a
     // second `apply` continues exactly here.
