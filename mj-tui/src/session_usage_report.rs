@@ -10,7 +10,9 @@ use mj_chat::{
     selection::FrameSurfaces,
     theme,
 };
-use mj_core::usage::{CostUsdTicks, SessionUsageQuery, SessionUsageReport, UsagePeriod};
+use mj_core::usage::{
+    CostUsdTicks, SessionUsageQuery, SessionUsageReport, UsagePeriod, add_cost, descending_cost,
+};
 use ratatui::{
     Frame,
     layout::{Margin, Rect},
@@ -18,6 +20,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UsageControl {
@@ -174,6 +177,29 @@ fn dollars(cost: CostUsdTicks, partial: bool) -> String {
     format!("${:.3}{plus}", ticks as f64 / 10_000_000_000.0)
 }
 
+fn model_costs(report: &SessionUsageReport) -> anyhow::Result<String> {
+    let mut costs = BTreeMap::new();
+    for model in report.sessions.iter().flat_map(|session| &session.models) {
+        let total = costs.entry(model.model.as_deref()).or_insert(Ok(0));
+        *total = add_cost(*total, model.cost_usd_ticks)?;
+    }
+    let mut costs: Vec<_> = costs.into_iter().collect();
+    costs.sort_by(|(a_model, a_cost), (b_model, b_cost)| {
+        descending_cost(a_cost, b_cost).then_with(|| a_model.cmp(b_model))
+    });
+    Ok(costs
+        .into_iter()
+        .map(|(model, cost)| {
+            format!(
+                "{} {}",
+                model.unwrap_or("Unknown model"),
+                dollars(cost, false)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · "))
+}
+
 pub(crate) fn render(
     frame: &mut Frame,
     area: Rect,
@@ -252,7 +278,6 @@ pub(crate) fn render(
         UsagePeriod::Weekly => "last 7 days",
         UsagePeriod::Monthly => "last 30 days",
     };
-    let total_area = Rect::new(inner.x, inner.y + 4, inner.width, 1);
     let rows_area = Rect::new(inner.x, inner.y + 6, inner.width, inner.height - 9);
     match &dialog.report {
         None => frame.render_widget(
@@ -267,12 +292,30 @@ pub(crate) fn render(
         ),
         Some(Ok(report)) => {
             let partial = report.sessions.iter().any(|s| s.is_partial());
+            let mut summary = vec![Line::raw(format!(
+                "Total {} · {window} · estimated API USD",
+                dollars(report.cost_usd_ticks, partial),
+            ))];
+            match model_costs(report) {
+                Ok(models) if !models.is_empty() => {
+                    summary.push(Line::raw(format!("By model: {models}")));
+                }
+                Ok(_) => {}
+                Err(error) => summary.push(Line::raw(format!("Model totals failed: {error}"))),
+            }
+            let summary = Paragraph::new(summary).wrap(ratatui::widgets::Wrap { trim: false });
+            let summary_height = u16::try_from(summary.line_count(inner.width))
+                .unwrap_or(u16::MAX)
+                .min(inner.height.saturating_sub(9));
             frame.render_widget(
-                Paragraph::new(format!(
-                    "Total {} · {window} · estimated API USD",
-                    dollars(report.cost_usd_ticks, partial),
-                )),
-                total_area,
+                summary,
+                Rect::new(inner.x, inner.y + 4, inner.width, summary_height),
+            );
+            let rows_area = Rect::new(
+                inner.x,
+                inner.y + 5 + summary_height,
+                inner.width,
+                inner.height.saturating_sub(8 + summary_height),
             );
             let mut lines = Vec::new();
             let mut row_map = Vec::new();

@@ -1146,12 +1146,19 @@ fn golden_dashboard_dialogs() {
                 session_id: "session-2".into(),
                 title: "Write release notes".into(),
                 profile: "claude".into(),
-                cost_usd_ticks: Ok(62_000_000_000),
-                models: vec![ModelUsageEstimate {
-                    model: Some("claude-opus-5-5".into()),
-                    cost_usd_ticks: Ok(62_000_000_000),
-                    ..Default::default()
-                }],
+                cost_usd_ticks: Ok(82_000_000_000),
+                models: vec![
+                    ModelUsageEstimate {
+                        model: Some("claude-opus-5-5".into()),
+                        cost_usd_ticks: Ok(62_000_000_000),
+                        ..Default::default()
+                    },
+                    ModelUsageEstimate {
+                        model: Some("gpt-6.1-sol".into()),
+                        cost_usd_ticks: Ok(20_000_000_000),
+                        ..Default::default()
+                    },
+                ],
                 coverage: mj_core::storage::UsageCoverage {
                     recorded_turns: 5,
                     full_turn_reports: 3,
@@ -1167,6 +1174,16 @@ fn golden_dashboard_dialogs() {
                 subagent_count: 2,
                 cost_usd_ticks: Err(UnknownCost),
                 models: vec![
+                    ModelUsageEstimate {
+                        model: Some("gpt-6.1-sol".into()),
+                        cost_usd_ticks: Ok(30_000_000_000),
+                        ..Default::default()
+                    },
+                    ModelUsageEstimate {
+                        model: Some("gpt-6.1-terra".into()),
+                        cost_usd_ticks: Ok(10_000_000_000),
+                        ..Default::default()
+                    },
                     ModelUsageEstimate {
                         model: Some("claude-opus-5-5".into()),
                         cost_usd_ticks: Ok(71_000_000_000),
@@ -1209,21 +1226,33 @@ fn golden_dashboard_dialogs() {
         36,
         &drawn(&mut usage, 120, 36),
     );
-    usage.handle_key(key(KeyCode::Down));
+    let Mode::SessionUsageReport(dialog) = &usage.mode else {
+        panic!("usage dialog closed");
+    };
+    let codex_index = dialog.profiles.iter().position(|p| p == "codex").unwrap() + 1;
+    for _ in 0..codex_index {
+        usage.handle_key(key(KeyCode::Down));
+    }
     usage.handle_key(key(KeyCode::Enter));
     let (profile_request, query) = usage.session_usage_request().unwrap();
-    assert_eq!(query.profile.as_deref(), Some("claude"));
+    assert_eq!(query.profile.as_deref(), Some("codex"));
     // The old All result cannot replace the filtered loading state.
     usage.apply_session_usage_result(first, Ok(report.clone()));
     assert!(matches!(&usage.mode,Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
-    usage.apply_session_usage_result(
-        profile_request,
-        Ok(SessionUsageReport {
-            profiles: report.profiles.clone(),
-            ..Default::default()
-        }),
+    let mut codex_report = report.clone();
+    codex_report.sessions = vec![report.sessions[1].clone()];
+    codex_report.sessions[0]
+        .models
+        .retain(|model| model.model.as_deref() != Some("claude-opus-5-5"));
+    usage.apply_session_usage_result(profile_request, Ok(codex_report.clone()));
+    // Hard-won: #1501: unknown totals hid the known per-model sums in both views.
+    append_dialog_render(
+        &mut output,
+        "Usage Codex with model totals",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
     );
-    drawn(&mut usage, 120, 36);
     usage.handle_key(key(KeyCode::Tab));
     usage.handle_key(key(KeyCode::Enter));
     append_dialog_render(
@@ -1240,7 +1269,7 @@ fn golden_dashboard_dialogs() {
         UsagePeriod::Daily
     );
     let (daily_request, _) = usage.session_usage_request().unwrap();
-    usage.apply_session_usage_result(daily_request, Ok(report.clone()));
+    usage.apply_session_usage_result(daily_request, Ok(codex_report.clone()));
     append_dialog_render(
         &mut output,
         "Usage daily",
@@ -1261,7 +1290,7 @@ fn golden_dashboard_dialogs() {
     usage.handle_key(key(KeyCode::Char(' ')));
     let (weekly_request, query) = usage.session_usage_request().unwrap();
     assert!(query.include_suspended);
-    let mut suspended = report.clone();
+    let mut suspended = codex_report;
     suspended.sessions[0].suspended = true;
     usage.apply_session_usage_result(weekly_request, Ok(suspended));
     append_dialog_render(
