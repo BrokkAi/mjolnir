@@ -77,7 +77,9 @@ pub fn unpack<R: Read>(reader: R, destination: &Path, owner: Option<(u32, u32)>)
         let relative = entry.path().context("read tar entry path")?.into_owned();
         let relative = rename_top(&relative, rename.as_deref())?;
         let target = checked_target(&root, &relative)?;
-        let mode = entry.header().mode().unwrap_or(0o644) & 0o7777;
+        // Never carry setuid or setgid across the VM boundary: a guest-made
+        // setuid file would become a privileged file on the host.
+        let mode = entry.header().mode().unwrap_or(0o644) & 0o1777;
         match entry.header().entry_type() {
             tar::EntryType::Directory => {
                 match fs::symlink_metadata(&target) {

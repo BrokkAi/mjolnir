@@ -140,10 +140,6 @@ impl Layout {
         }
     }
 
-    pub fn boot_lock_path(&self, tag: &str) -> PathBuf {
-        self.locks().join(format!("boot-{tag}.lock"))
-    }
-
     fn open_lock_file(&self, file_name: &str) -> Result<File> {
         fs::create_dir_all(self.locks())
             .with_context(|| format!("create {}", self.locks().display()))?;

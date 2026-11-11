@@ -63,9 +63,8 @@ pub fn prune(layout: &Layout) -> Result<Vec<String>> {
             continue;
         };
         fs::remove_dir_all(entry.path()).with_context(|| format!("remove boot assets {name}"))?;
-        if let Err(error) = fs::remove_file(layout.boot_lock_path(&name)) {
-            tracing::warn!(%error, tag = name, "could not remove a boot lock file");
-        }
+        // The lock file stays: every reservation of this tag must keep
+        // synchronizing on the same file.
         removed.push(name);
     }
     Ok(removed)
