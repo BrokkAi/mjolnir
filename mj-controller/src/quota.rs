@@ -227,8 +227,8 @@ impl QuotaRefreshRequest {
         let opencode_usage_priced = profile.kind == HarnessKind::OpenCode
             && match crate::opencode_logins::profile_logins(profile) {
                 Ok(None) => !profile.opencode_environment_logins().is_empty(),
-                Ok(Some(logins)) => serde_json::from_slice::<Vec<Value>>(&logins).is_ok_and(
-                    |logins| {
+                Ok(Some(logins)) => {
+                    serde_json::from_slice::<Vec<Value>>(&logins).is_ok_and(|logins| {
                         logins.iter().all(|login| {
                             login
                                 .get("value")
@@ -236,8 +236,8 @@ impl QuotaRefreshRequest {
                                 .and_then(Value::as_str)
                                 == Some("key")
                         })
-                    },
-                ),
+                    })
+                }
                 Err(_) => false,
             };
         Self {
