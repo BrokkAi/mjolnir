@@ -429,7 +429,10 @@ fn run_microvm() -> Result<()> {
 
 fn main() -> Result<()> {
     std::hint::black_box(mj_core::worker_build::WORKER_BUILD_STAMP);
-    if std::env::args_os().nth(1).is_some_and(|word| word == "microvm") {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|word| word == "microvm")
+    {
         return run_microvm();
     }
     // The standalone worker uses the same ring provider as the daemon.
