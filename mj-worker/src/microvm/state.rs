@@ -13,8 +13,9 @@ use anyhow::{Context, Result, bail, ensure};
 use mj_core::file_lock::FileLock;
 use serde::{Deserialize, Serialize};
 
-/// The format of `state.json` this build writes.
-pub const STATE_FORMAT: u32 = 1;
+/// The format of `state.json` this build writes. Format 2 added `jailed`;
+/// format 1 files (VMs launched before the jailer) still read, as `jailed: false`.
+pub const STATE_FORMAT: u32 = 2;
 /// The format of image and volume metadata files this build writes.
 pub const METADATA_FORMAT: u32 = 1;
 
@@ -70,6 +71,30 @@ impl Layout {
 
     pub fn boot(&self) -> PathBuf {
         self.root.join("boot")
+    }
+
+    /// The jailer's chroot base. It must be on the filesystem that holds the
+    /// disks, because the jail holds hard links to them.
+    pub fn jail_base(&self) -> PathBuf {
+        self.root.join("jail")
+    }
+
+    /// The jailer's id for a network slot (unique among existing VMs).
+    pub fn jail_id(slot: u32) -> String {
+        format!("vm{slot}")
+    }
+
+    /// `<base>/firecracker/<id>`: the jailer puts the chroot under the name
+    /// of the executable it runs.
+    pub fn jail_dir(&self, slot: u32) -> PathBuf {
+        self.jail_base()
+            .join("firecracker")
+            .join(Self::jail_id(slot))
+    }
+
+    /// The jailed process's `/`.
+    pub fn jail_root(&self, slot: u32) -> PathBuf {
+        self.jail_dir(slot).join("root")
     }
 
     pub fn locks(&self) -> PathBuf {
@@ -288,6 +313,10 @@ pub struct VmState {
     pub slot: u32,
     /// The engine build that created the VM.
     pub engine_build: String,
+    /// Whether the VM's Firecracker runs under the jailer. VMs launched by an
+    /// engine before the jailer are `false` until they are next started.
+    #[serde(default)]
+    pub jailed: bool,
 }
 
 impl VmState {
@@ -541,6 +570,7 @@ mod tests {
             }],
             slot: 3,
             engine_build: "test".to_owned(),
+            jailed: true,
         }
     }
 
@@ -554,6 +584,13 @@ mod tests {
         state.write(&layout).unwrap();
         assert_eq!(VmState::read(&layout, "t1").unwrap(), Some(state.clone()));
         assert_eq!(VmState::read(&layout, "absent").unwrap(), None);
+
+        // A format 1 file, from before the jailer, reads back as not jailed.
+        let mut older = serde_json::to_value(&state).unwrap();
+        older["format"] = serde_json::json!(1);
+        older.as_object_mut().unwrap().remove("jailed");
+        let older = VmState::parse(&serde_json::to_vec(&older).unwrap()).unwrap();
+        assert_eq!((older.format, older.jailed), (1, false));
 
         // A file from a future engine: unknown fields are not ours to drop.
         let mut newer = serde_json::to_value(&state).unwrap();

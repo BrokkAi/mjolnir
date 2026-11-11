@@ -69,6 +69,9 @@ enum Command {
     /// Remove a TAP device; run by the VM's systemd unit when it stops.
     #[command(hide = true)]
     HostTapDown { tap: String },
+    /// Remove a stopped VM's TAP device and jail; run by the VM's unit when it stops.
+    #[command(hide = true)]
+    HostJailDown { slot: u32 },
 }
 
 #[derive(Debug, Args)]
@@ -282,6 +285,10 @@ fn dispatch(layout: &Layout, command: Command) -> Result<i32> {
     match command {
         Command::GuestAgent => {
             super::guest_agent::run_guest_agent()?;
+            Ok(0)
+        }
+        Command::HostJailDown { slot } => {
+            vm::release_host_resources(layout, slot)?;
             Ok(0)
         }
         Command::HostTapDown { tap } => {

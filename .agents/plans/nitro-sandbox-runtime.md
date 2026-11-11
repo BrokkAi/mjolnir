@@ -17,7 +17,7 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - [x] (2026-11-10) Milestone 2: `ssh_nitro` target kind in mj-core, mj-controller, mj-tui, with breaking migration 124. Implemented against the Milestone 1 contract without the engine: unit-level and golden tests only. The controller's dependencies on the engine are listed under Artifacts and Notes, "Controller use of the engine"; nothing has run against a real host.
 - [x] (2026-11-10) Milestone 3: `mj ec2 create --runtime nitro` host bootstrap; AWS-boundary fixtures cover the Nitro launch requests and bootstrap. Registration and image preload remain for Milestone 4.
 - [x] (2026-11-11) Milestone 4: integration and live acceptance on EC2. Registration and preload wired (`e0630dd9c`); four defects found live and fixed (`21b955298`, `dcc7aec87`, `9b0bd6e88`, `c95b16983`, see Surprises). Acceptance passed on a fresh m7i.4xlarge from an isolated `--instance nitro-live` (transcript under Artifacts and Notes). Remaining: per-volume lock files left after destroy (engine follow-up).
-- [ ] Milestone 5: Firecracker jailer.
+- [x] (2026-11-11) Milestone 5: Firecracker jailer. Every VM's Firecracker now runs under the jailer 1.18.0 as its own unprivileged user (commit 556b7f144); proven on the spike host with the Milestone 1 transcript, the old-layout upgrade case, the isolation checks and a host reboot (see Artifacts and Notes, "Milestone 5 transcript").
 - [ ] Milestone 6: storage-preserving image upgrade for Nitro sessions.
 
 ## Surprises & Discoveries
@@ -50,6 +50,12 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Observation (Milestone 4): the engine install sat in the background poller's `host_is_running`, but `mj ec2 create` preloads through `refresh_host_image` directly, so the preload ran the engine before anything installed it ("command not found"). The install now lives in `refresh_host_image`, the entry point every refresh path shares.
 - Observation (Milestone 4): the controller uploads the harness profile with Podman's contents form `cp DIR/. CTR:DEST`, which the engine refused. The engine now implements it in both directions.
 - Observation (Milestone 4): gap (2) above bit in the common case: `mj ec2 create` registers a disabled bare sibling, so every EC2 Nitro host was sampled as physical RAM less the 20% reserve (a 48 GiB session was refused with 50.7 GiB free in the pool). A disabled target with no live session no longer decides how a host is sampled; the probe also fails visibly when an installed engine cannot report, instead of falling back to physical memory.
+
+- Observation: Jailer 1.18.0 runs the Nitro backend in direct mode with nothing special. It creates `dev/nitro_enclaves` (and `kvm`, `urandom`, `userfaultfd`) in the chroot itself, so the engine does not bind or mknod the device; the guest booted to "listening" on the first manual try. Firecracker then runs as the VM's user with no capabilities (`CapEff` 0), `NoNewPrivs` 1 and the jailer's seccomp filter, and the pool, slots and 0.2 s stop behave as before. An unprivileged Firecracker attaches to a TAP only if that TAP is owned by its user, so the engine now creates it with `ip tuntap add ... user U group U`.
+  Evidence: manual probe on the spike host, then the Milestone 5 transcript.
+- Observation: Without `--new-pid-ns` the jailer `exec`s Firecracker, so the systemd unit's main process is the VMM itself and every property of the unit (stop, `ExecStopPost`, accounting) is unchanged. With `--new-pid-ns` the jailer parent exits and the unit deactivated at once in the probe, so systemd could not track the VMM.
+- Observation: The jail holds hard links, not copies, to the root disk, the volume disks, the kernel and the initrd, so a launch copies nothing and a disk is one file inside and outside. Hard links need the jail on the same filesystem as the disks (the engine puts it under `/var/lib/mj-microvm/jail`) and make the kernel and initrd shared inodes, so those two files are now mode 0644 (they hold only the host kernel and the engine). The links also pin the files of a running VM against `image prune`.
+- Observation: `sudo -u '#UID'` refuses a numeric user that has no passwd entry; the isolation checks use `setpriv --reuid --regid --clear-groups` to act as a VM's user.
 
 ## Decision Log
 
@@ -148,6 +154,19 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Decision: Containers inside Nitro sessions (nested Podman or Docker) are out of scope; the agent-dev image stays unchanged.
   Rationale: ordinary Podman sessions cannot run containers either (the image's `podman` is `podman-remote` with no socket in sessions), so this would be a new capability, not parity, and it would grow every session's image. The user chose to drop it on 2026-11-10; it is tracked in #1496. The guest init keeps the modules and device setup the spike used, which cost nothing at boot.
   Date/Author: 2026-11-10, lead (user decision).
+
+- Decision (Milestone 5): Each VM gets its own user and group id, `3,100,000 + network slot`, so VMs cannot read each other's files or signal each other, and an id is unique among existing VMs because the slot is. The base sits above ordinary users and the rootless subordinate range (100000-165535). The ids are not allocated or recorded anywhere else; they are derived from the slot in `jail_ids`.
+  Rationale: one owner for the fact (the slot); a shared id would let one compromised VMM read every VM's disks.
+  Date/Author: 2026-11-11, Milestone 5 implementer.
+- Decision (Milestone 5): The jail is `/var/lib/mj-microvm/jail/firecracker/vm<slot>/root`, rebuilt at every launch (a stale one from a crash or reboot is removed first) and removed by the VM's unit through `ExecStopPost=<engine> microvm host-jail-down <slot>`, which also removes the TAP, and by the engine's own teardown. Paths in the Firecracker configuration are relative to the jail (`/root.ext4`, `/vol<i>.ext4`, `/vmlinuz`, `/initrd.img`, `/v.sock`). The configuration is no longer written under `vms/<name>/`. The vsock socket lives in the jail, so the old systemd `RuntimeDirectory` is not used for a jailed VM. Disks are chowned to the VM's user at launch and stay owned by it afterwards; the engine runs as root and does not mind.
+  Rationale: process teardown before file removal on every exit path (a guest that powers itself off still gets its TAP and jail removed); a fresh jail per launch means no stale socket.
+  Date/Author: 2026-11-11, Milestone 5 implementer.
+- Decision (Milestone 5): The jailer is given no cgroup settings and no `--new-pid-ns` and no `--netns`. The unit's own cgroup already holds the VMM and gives accounting and a kill boundary, and Nitro memory and vCPUs are not governed by host cgroups. A PID namespace would break the unit's tracking (see Surprises), and a network namespace would need a veth pair to the NAT table in place of the TAP; the unprivileged user, empty capability set, chroot, mount namespace and seccomp filter, plus the TAP owned by the VM's user, are the isolation the production guide asks for that matters here.
+  Rationale: smallest change that keeps every existing guarantee; revisit if a network namespace becomes necessary.
+  Date/Author: 2026-11-11, Milestone 5 implementer.
+- Decision (Milestone 5): `state.json` format 2 adds `jailed`. Format 1 files read back with `jailed: false` and behave as before: `exec`, `cp`, `stop` (with its flush), `rm` and inspect use the old runtime-directory socket, and the old unit's `ExecStopPost` (`host-tap-down`, still supported) cleans its TAP. The next `start` of such a VM launches it in a jail and rewrites its state as format 2, so a running session on an existing host survives an engine upgrade untouched and moves into a jail the next time it is stopped and started. An engine that only knows format 1 refuses a format 2 file, as designed. `inspect` reports `HostConfig.Isolation` as `jailer` or `none`. `info` reports `jailer_path`, and a launch needs the jailer installed.
+  Rationale: upgrades must complete without intervention (AGENTS.md); no running VM is restarted by an upgrade.
+  Date/Author: 2026-11-11, Milestone 5 implementer.
 
 ## Outcomes & Retrospective
 
@@ -539,6 +558,39 @@ Session A (`mj new ... --target nitro-live`, first turn 80 s after `mj new` on a
 - Session B with `--memory-gib 48` (sees 48125 MiB): A's listener on 10.200.0.2:8000 (200 from A itself) times out from B, as do the TAP gateway and the host's VPC address on port 22; GitHub answers 200.
 - With A (8 GiB) and B (48 GiB) running, an 8 GiB session C is refused: "this host has 2.7 GiB left" (engine: 2772 MiB free).
 - Destroy A and B: no VM, unit, TAP, volume, Firecracker process or used slot; pool 60120 MiB free. Per-volume lock files remained (follow-up).
+
+Milestone 5 transcript, 2026-11-11, on the spike host, engine `556b7f144` (stripped dev musl build) over VMs that an engine without the jailer had launched.
+
+Upgrade case. The old engine (state format 1) launched `old1` (left running, workspace marker written) and `old2` (stopped). The engine binary was then replaced in place by the new one:
+
+    $ mj-worker microvm info --format json | grep -E 'engine_build|state_format'    (before)  "state_format": 1
+    $ mj-worker microvm info --format json | grep -E 'state_format|jailer_path'      (after)   "state_format": 2, "jailer_path": "/usr/local/bin/jailer"
+    $ inspect --format '{{.State.Status}} isolation={{.HostConfig.Isolation}}'      old1: running isolation=none     old2: exited isolation=none
+    $ exec old1 cat /workspace/marker           old1-data      (through the old socket path)
+    $ cp /etc/hostname old1:/tmp/hn             [exit 0]
+    $ start old2                                 old2: running isolation=jailer; marker old2-data; state.json "format": 2, "jailed": true
+    $ stop --time 0 old1; start old1             old1: exited, then running isolation=jailer; marker old1-data
+    $ ps -o user,uid,comm -C firecracker         3100000 firecracker, 3100001 firecracker
+    $ rm -f -v old1 old2                         jails 0, TAPs 0, units 0
+
+Two jailed VMs (`j1` 2 vCPU 2g with two volumes, `j2` 1 vCPU 1g). The full lifecycle and network checks of the Milestone 1 transcript pass unchanged; the lines that differ because of the jailer:
+
+    j1: Uid 3100000 Gid 3100000 CapEff 0000000000000000 NoNewPrivs 1 Seccomp 2   root: /  cwd: /   mount ns mnt:[4026532900]   (host: mnt:[4026531832])
+    j2: Uid 3100001 Gid 3100001 CapEff 0000000000000000 NoNewPrivs 1 Seccomp 2
+    jail/firecracker/vm0/root:  drwx------ 3100000 .   dev/ (kvm, nitro_enclaves, urandom, userfaultfd, owned by 3100000)
+                                 -rw------- 3100000 root.ext4 (2 links), vol0.ext4, vol1.ext4 (2 links); initrd.img, vmlinuz 0644 (3 links); fc.json; firecracker; v.sock
+    $ ip -d tuntap show      mjt0: tap vnet_hdr persist user 3100000 group 3100000    mjt1: ... user 3100001 group 3100001
+    as the VMM of i2 (setpriv --reuid=3100001):
+      cat .../vm0/root/root.ext4     Permission denied        ls .../vm0/root          Permission denied
+      ls /var/lib/mj-microvm          Permission denied        kill -0 <VMM of i1>      Operation not permitted
+      cat .../volumes/i1-ws/disk.ext4 Permission denied
+    $ exec -i j1 ... < 200MiB       209715200 bytes, identical SHA-256     $ cp dir / cp dir/. in and out     identical
+    $ stop --time 0 j1              0.48 s, exited jailer     $ start j1      2.27 s, marker and 200 MiB file intact
+    j1 -> j2 000 (exit 28), j1 -> host VPC address 000 (exit 28), j1 -> github.com 200, IMDS PUT exit 7; control host -> j2 200
+    guest-initiated power off (run ... sh -c 'sleep 2; exit 3'): exited; its jail and TAP gone; start + exec cat /workspace/q works
+    run --memory 60g: refused naming the pool, nothing left; SIGTERM mid-run: "interrupted", nothing left
+    three parallel 20g runs: 2 admitted, 1 refused; after rm -f -v: units 0, TAPs 0, jails 0, VM dirs 0, slots in use 0
+    host reboot with a jailed VM running: afterwards status exited, no unit/TAP/jail; start restored it with its data ("survives-reboot-jailed")
 
 ## Interfaces and Dependencies
 

@@ -52,16 +52,29 @@ pub fn is_engine_tap(name: &str) -> bool {
         .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Create the TAP device for a VM, addressed on the host side. Safe to repeat.
-pub fn tap_up(link: &Link) -> Result<()> {
+/// Create the TAP device for a VM, addressed on the host side and owned by
+/// `owner`, the user the jailed Firecracker runs as: an unprivileged process
+/// may attach to a persistent TAP only if it owns it. A stale device from an
+/// earlier run is replaced, since its owner may differ.
+pub fn tap_up(link: &Link, owner: (u32, u32)) -> Result<()> {
     let ip = sys::find_tool("ip")?;
-    let exists = sys::run_unchecked(&ip, &["link", "show", link.tap.as_str()])?;
-    if !exists.status.success() {
-        sys::run_checked(
-            &ip,
-            &["tuntap", "add", "dev", link.tap.as_str(), "mode", "tap"],
-        )?;
-    }
+    tap_down(&link.tap)?;
+    let (uid, gid) = (owner.0.to_string(), owner.1.to_string());
+    sys::run_checked(
+        &ip,
+        &[
+            "tuntap",
+            "add",
+            "dev",
+            link.tap.as_str(),
+            "mode",
+            "tap",
+            "user",
+            uid.as_str(),
+            "group",
+            gid.as_str(),
+        ],
+    )?;
     let address = format!("{}/30", link.host);
     sys::run_checked(
         &ip,
