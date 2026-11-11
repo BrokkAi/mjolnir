@@ -62,7 +62,23 @@ async fn cleanup_notices_are_authenticated_and_readable_after_session_removal() 
 // the same store query, with authentication and no caching on the report.
 #[tokio::test]
 async fn usage_report_http_contract_preserves_filters_and_requires_authentication() {
-    let backend = Arc::new(FakeBackend::default());
+    let expected = mj_core::usage::SessionUsageReport {
+        agent_usage: vec![mj_core::usage::AgentUsageEstimate {
+            role: mj_core::usage::UsageAgentRole::Primary,
+            models: vec![mj_core::usage::ModelUsageEstimate {
+                model: Some("gpt-6.1-terra".into()),
+                cost_usd_ticks: Ok(10_000_000_000),
+                ..Default::default()
+            }],
+            cost_usd_ticks: Ok(10_000_000_000),
+        }],
+        cost_usd_ticks: Ok(10_000_000_000),
+        ..Default::default()
+    };
+    let backend = Arc::new(FakeBackend {
+        usage_result: expected.clone(),
+        ..Default::default()
+    });
     let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |_| {});
     let denied = app
         .clone()
@@ -88,7 +104,13 @@ async fn usage_report_http_contract_preserves_filters_and_requires_authenticatio
         assert_eq!(response.headers()["cache-control"], "no-store");
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let report: mj_core::usage::SessionUsageReport = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(report, mj_core::usage::SessionUsageReport::default());
+        assert_eq!(report, expected);
+        // Responses from older daemons lack the additive role summary.
+        let mut legacy = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+        legacy.as_object_mut().unwrap().remove("agent_usage");
+        let legacy: mj_core::usage::SessionUsageReport = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.agent_usage.is_empty());
+        assert_eq!(legacy.cost_usd_ticks, report.cost_usd_ticks);
     }
     assert_eq!(
         *backend.usage_queries.lock().unwrap(),
@@ -1002,6 +1024,7 @@ struct FakeBackend {
     /// for the second before it finishes.
     record_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     usage_queries: Mutex<Vec<mj_core::usage::SessionUsageQuery>>,
+    usage_result: mj_core::usage::SessionUsageReport,
     workspaces: FakeWorkspaces,
     /// Successive answers to `turn_state`, newest last. The final entry
     /// repeats once exhausted, so a wait loop settles rather than spinning.
@@ -1077,7 +1100,7 @@ impl SubagentBackend for FakeBackend {
         query: mj_core::usage::SessionUsageQuery,
     ) -> BoxFuture<'_, AnyResult<mj_core::usage::SessionUsageReport>> {
         self.usage_queries.lock().unwrap().push(query);
-        Box::pin(async { Ok(mj_core::usage::SessionUsageReport::default()) })
+        Box::pin(async { Ok(self.usage_result.clone()) })
     }
     fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
         Box::pin(async {

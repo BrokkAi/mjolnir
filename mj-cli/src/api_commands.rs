@@ -4234,11 +4234,17 @@ mod tests {
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-usage-tree", &output);
     }
 
+    // Hard-won: #1501: Terra was missing from the shared pricing table.
     #[test]
     fn api_models_matches_cli_golden() {
         let choices = mj_core::worker_launch::ProfileConfig {
             model: Some("deepseek-flash".to_owned()),
             models: vec![
+                mj_core::acp::SessionConfigChoice {
+                    value: "gpt-6.1-terra".to_owned(),
+                    name: "GPT-6.1 Terra".to_owned(),
+                    description: None,
+                },
                 mj_core::acp::SessionConfigChoice {
                     value: "deepseek-flash".to_owned(),
                     name: "DeepSeek Flash".to_owned(),
