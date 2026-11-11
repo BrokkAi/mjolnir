@@ -714,12 +714,19 @@ impl LoginSource {
         }
     }
 
-    /// Keep an inherited `CLAUDE_CONFIG_DIR` out of a Keychain renewal: it
-    /// would move the login to an item nothing else reads.
+    /// Point a Keychain renewal at the item the daemon reads and writes. An
+    /// inherited `CLAUDE_CONFIG_DIR` would rename the item, and a `USER` from
+    /// the profile's environment would change its account (Claude Code names
+    /// the account after `USER`): either way the renewed login would land
+    /// where nothing reads it, after the old refresh token was spent.
     fn confine_command(&self, command: &mut CommandSpec) {
         if matches!(self, Self::Keychain { .. }) {
             command.env.remove("CLAUDE_CONFIG_DIR");
             command.env_remove.push("CLAUDE_CONFIG_DIR".into());
+            command.env_remove.retain(|name| name != "USER");
+            command
+                .env
+                .insert("USER".into(), crate::setup::claude_keychain_account());
         }
     }
 }
@@ -2132,6 +2139,11 @@ Last 7d · 5966 requests · 78 sessions
             assert_eq!(command.args, ["auth", "login"]);
             assert!(!command.env.contains_key("CLAUDE_CONFIG_DIR"));
             assert!(command.env_remove.contains(&"CLAUDE_CONFIG_DIR".to_owned()));
+            assert_eq!(
+                command.env.get("USER"),
+                Some(&crate::setup::claude_keychain_account()),
+                "the renewal writes the account the daemon reads"
+            );
             assert!(self.lock_home.join(".oauth_refresh.lock").is_dir());
             self.claude_runs.lock().unwrap().push(command.clone());
             *self.login.lock().unwrap() = Some(self.renewed.clone());
@@ -2177,8 +2189,12 @@ Last 7d · 5966 requests · 78 sessions
     ) -> Result<GrantRefresh, ClaudeUsageError> {
         // An ambient `CLAUDE_CONFIG_DIR`, as a profile's own environment may
         // set, must not reach the renewal.
-        let environment =
-            HashMap::from([("CLAUDE_CONFIG_DIR".to_owned(), "/elsewhere".to_owned())]);
+        // Nor may a `USER` from that environment, which would move the
+        // renewed login to another Keychain account.
+        let environment = HashMap::from([
+            ("CLAUDE_CONFIG_DIR".to_owned(), "/elsewhere".to_owned()),
+            ("USER".to_owned(), "someone-else".to_owned()),
+        ]);
         refresh_grant_if_due(
             source,
             environment,

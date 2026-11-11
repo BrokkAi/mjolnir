@@ -155,7 +155,12 @@ fn discovers_default_and_overridden_homes_with_authentication_markers() {
     );
 
     assert_eq!(homes.len(), 5);
-    assert!(homes.iter().all(|home| home.authenticated));
+    // On a Mac the Keychain is the only Claude login (#1491): a home holding
+    // just a `.credentials.json` is not signed in there.
+    for home in &homes {
+        let keychain_only = home.kind == HarnessKind::Claude && cfg!(target_os = "macos");
+        assert_eq!(home.authenticated, !keychain_only, "{home:?}");
+    }
     let codex_profiles = homes
         .iter()
         .filter(|home| home.path == codex)

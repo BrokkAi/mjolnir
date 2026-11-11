@@ -511,7 +511,12 @@ pub(crate) enum KeychainLogin {
 /// reader and the writer ([`crate::claude_login::write_claude_keychain_login`]) share it, so both
 /// address the item Claude Code uses.
 pub(crate) fn claude_keychain_account() -> String {
-    mj_core::config::claude_keychain_account(std::env::var("USER").ok().as_deref())
+    // Claude Code takes `$USER || os.userInfo().username`.
+    let user = std::env::var("USER")
+        .ok()
+        .filter(|user| !user.is_empty())
+        .or_else(|| mj_core::login_environment::account_name().ok());
+    mj_core::config::claude_keychain_account(user.as_deref())
 }
 
 /// How long a `security` lookup of the Keychain login may take before it is

@@ -167,6 +167,18 @@ pub fn account_shell() -> Result<std::path::PathBuf> {
     anyhow::bail!("target shell environment requires a Unix account")
 }
 
+/// The effective user's account name from the account database, as Node's
+/// `os.userInfo().username` reports it.
+#[cfg(unix)]
+pub fn account_name() -> Result<String> {
+    Ok(Account::current()?.user)
+}
+
+#[cfg(not(unix))]
+pub fn account_name() -> Result<String> {
+    anyhow::bail!("account names come from the Unix account database")
+}
+
 #[cfg(unix)]
 struct Account {
     user: String,
