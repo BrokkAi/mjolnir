@@ -7448,7 +7448,9 @@ fn pending_mailbox_events_and_dedup_keys_survive_journal_replay() {
 // developer message between a tool call and its output in the rollout, and
 // DeepSeek then rejected every later request, permanently killing the session.
 #[test]
-fn mailbox_post_tool_use_drains_stay_empty_and_leave_events_for_turn_boundaries() {
+fn mailbox_post_tool_use_drains_follow_the_resolved_delivery_mode() {
+    use mj_core::mailbox::MailboxDeliveryMode;
+
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
     let event = mailbox_fixture_event("codex-mid-turn", false);
@@ -7459,38 +7461,47 @@ fn mailbox_post_tool_use_drains_stay_empty_and_leave_events_for_turn_boundaries(
             event: event.clone(),
         },
     );
-
-    let response = relay.handle(relay_request(
-        "post-tool-use-drain",
-        RelayRequest::DrainMailbox {
-            hook_event: "PostToolUse".into(),
-        },
-    ));
-    assert!(matches!(
-        response.body,
-        RelayResponseBody::Ok {
-            payload: RelayResponsePayload::MailboxDrained {
-                lease_id: None,
-                text: None,
-                count: 0,
+    let post_tool_use_drain =
+        |relay: &mut DurableRelay| match relay.drain_mailbox("PostToolUse").unwrap() {
+            RelayResponsePayload::MailboxDrained {
+                lease_id,
+                text,
+                count,
                 ..
-            }
-        }
-    ));
+            } => (text, count, lease_id),
+            other => panic!("unexpected PostToolUse response: {other:?}"),
+        };
+
+    // Before the worker resolves the provider the mode is unknown, and an
+    // unknown mode is never published or treated as tool-boundary delivery.
+    assert_eq!(relay.operational_state().mailbox_delivery, None);
+    assert_eq!(post_tool_use_drain(&mut relay), (None, 0, None));
+    relay.set_mailbox_delivery_mode(MailboxDeliveryMode::TurnBoundary);
+    assert_eq!(
+        relay.operational_state().mailbox_delivery,
+        Some(MailboxDeliveryMode::TurnBoundary)
+    );
+    assert_eq!(post_tool_use_drain(&mut relay), (None, 0, None));
     assert!(relay.snapshot.mailbox_hook_lease.is_none());
     assert_eq!(
         relay.snapshot.pending_mailbox_events.as_slice(),
         std::slice::from_ref(&event)
     );
 
-    let (text, count, lease_id) = drain_post_tool_batch(&mut relay);
+    relay.set_mailbox_delivery_mode(MailboxDeliveryMode::ToolBoundary);
+    assert_eq!(
+        relay.operational_state().mailbox_delivery,
+        Some(MailboxDeliveryMode::ToolBoundary)
+    );
+    let (text, count, lease_id) = post_tool_use_drain(&mut relay);
     assert_eq!(count, 1);
     assert_eq!(
         text.as_deref(),
         Some(mj_core::mailbox::render_mailbox_events(std::slice::from_ref(&event)).as_str())
     );
-    let lease_id = lease_id.expect("turn-boundary drain creates a lease");
-    acknowledge_mailbox_for_test(&mut relay, "post-tool-batch-ack", &lease_id);
+    let lease_id = lease_id.expect("tool-boundary drain creates a lease");
+    acknowledge_mailbox_for_test(&mut relay, "post-tool-use-ack", &lease_id);
+    assert!(relay.snapshot.pending_mailbox_events.is_empty());
 }
 
 #[test]

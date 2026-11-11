@@ -2126,19 +2126,22 @@ impl DurableRelay {
     /// Atomically lease pending mailbox events and eligible Claude steers to
     /// one harness hook.
     ///
-    /// `PostToolUse` drains never carry a payload: Codex records a PostToolUse
-    /// hook's `additionalContext` as a developer message between the tool call
-    /// and its output, and strict providers such as DeepSeek then reject every
-    /// later request ("No tool output found for tool call"), permanently
-    /// poisoning the session history. The hook stays installed as a probe, but
-    /// mailbox payloads only ride turn-boundary delivery (wake turns, prompt
-    /// context, and Claude's `PostToolBatch`).
+    /// A `PostToolUse` drain (Codex) carries a payload only when the worker
+    /// resolved the session's provider as accepting tool-boundary delivery;
+    /// see `MailboxDeliveryMode::for_codex_provider`. Otherwise it answers
+    /// empty and leaves events for turn-boundary delivery (wake turns and
+    /// prompt context), so an unresolved or unsafe provider never receives a
+    /// developer message between a tool call and its output (#1277).
+    /// `PostToolBatch` drains are unaffected.
     pub fn drain_mailbox(&mut self, hook_event: &str) -> Result<RelayResponsePayload> {
         anyhow::ensure!(
             matches!(hook_event, "PostToolUse" | "PostToolBatch"),
             "unsupported mailbox hook event"
         );
-        if hook_event == "PostToolUse" {
+        if hook_event == "PostToolUse"
+            && self.mailbox_delivery_mode
+                != Some(mj_core::mailbox::MailboxDeliveryMode::ToolBoundary)
+        {
             return Ok(RelayResponsePayload::MailboxDrained {
                 lease_id: None,
                 text: None,

@@ -3680,6 +3680,7 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
         agent_info: None,
         runtime: None,
         steering_supported: None,
+        mailbox_delivery: None,
         turn_controls: None,
         config_options: Vec::new(),
         modes: None,

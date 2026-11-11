@@ -724,6 +724,12 @@ pub struct RelayOperationalState {
     /// Older workers do not report the optional ACP steering extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steering_supported: Option<bool>,
+    /// When a message to this working session is delivered, as the worker
+    /// enforces it. Absent from older workers and from harnesses whose
+    /// delivery the worker has not classified; absence never means tool
+    /// boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox_delivery: Option<crate::mailbox::MailboxDeliveryMode>,
     /// Actions decided by the worker against its ordered command queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_controls: Option<TurnControls>,
@@ -1739,6 +1745,7 @@ impl RelaySnapshot {
             runtime: self.runtime.clone(),
             // Steering support belongs to the connected harness, like readiness.
             steering_supported: None,
+            mailbox_delivery: None,
             turn_controls: None,
             config_options: self.config_options.clone(),
             modes: self.modes.clone(),

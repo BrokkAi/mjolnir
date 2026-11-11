@@ -1263,12 +1263,27 @@ impl ApiBackend {
                     .deliver_subagent_input(child_session_id, message, request)
                     .await?;
                 let via = delivery.via();
+                let mailbox_delivery = if via == "mailbox" {
+                    self.published_mailbox_delivery(child_session_id).await
+                } else {
+                    None
+                };
+                let note = subagent_input::mailbox_delivery_note(mailbox_delivery.as_ref());
                 match delivery {
-                    subagent_input::SubagentInputDelivery::Mailbox => Ok(serde_json::json!({
-                        "child_session_id":child_session_id,
-                        "status":"queued",
-                        "via":via
-                    })),
+                    subagent_input::SubagentInputDelivery::Mailbox => {
+                        let mut result = serde_json::json!({
+                            "child_session_id":child_session_id,
+                            "status":"queued",
+                            "via":via
+                        });
+                        if let Some(mode) = mailbox_delivery {
+                            result["mailbox_delivery"] = serde_json::to_value(mode)?;
+                        }
+                        if let Some(note) = note {
+                            result["note"] = note.into();
+                        }
+                        Ok(result)
+                    }
                     subagent_input::SubagentInputDelivery::Turn { ordinal } => {
                         blocking("record sub-agent prompt", {
                             let child_id = child_session_id.clone();
@@ -1308,17 +1323,30 @@ impl ApiBackend {
                         "status": status,
                         "via": delivery.via,
                     });
+                    if let Some(mode) = delivery.mailbox_delivery {
+                        result["mailbox_delivery"] = serde_json::to_value(mode)?;
+                    }
+                    if let Some(note) = delivery.note {
+                        result["note"] = note.into();
+                    }
                     if let Some(turn_id) = delivery.turn_id {
                         result["turn_id"] = turn_id.into();
                     }
                     Ok(result)
                 } else {
-                    Ok(serde_json::json!({
+                    let mut result = serde_json::json!({
                         "session_id": delivery.session_id,
                         "status": status,
                         "via": delivery.via,
                         "turn_id": delivery.turn_id,
-                    }))
+                    });
+                    if let Some(mode) = delivery.mailbox_delivery {
+                        result["mailbox_delivery"] = serde_json::to_value(mode)?;
+                    }
+                    if let Some(note) = delivery.note {
+                        result["note"] = note.into();
+                    }
+                    Ok(result)
                 }
             }
             SubagentToolAction::LegacyWaitAgents | SubagentToolAction::LegacyAwaitChildren => {
