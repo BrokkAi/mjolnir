@@ -20,7 +20,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use super::protocol::{
     Accepted, CHUNK_SIZE, ExecRequest, ExitInfo, FrameKind, FrameReader, FrameSender, Hello,
@@ -732,6 +732,10 @@ impl Agent {
         let user = resolve_user_in_guest(&defaults.user)?;
         // SAFETY: geteuid has no preconditions.
         let owner = (unsafe { libc::geteuid() } == 0).then_some((user.uid, user.gid));
+        // A copy is writing to the guest's disks from a thread of this process,
+        // which the shutdown kill sweep does not reach. Hold the admission lock
+        // for its whole run: shutdown waits for it, and later copies are refused.
+        let _admitted = self.admit_work()?;
         let mut reader = TarFrameReader::new(frames);
         tarcopy::unpack(&mut reader, Path::new(destination), owner)?;
         reader.finish()?;
@@ -743,6 +747,17 @@ impl Agent {
             },
         )?;
         Ok(())
+    }
+
+    /// Admit work that runs in this process rather than as a child. The guard
+    /// keeps shutdown from starting until the work is done.
+    fn admit_work(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>> {
+        let admission = self
+            .shutting_down
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ensure!(!*admission, "the VM is shutting down");
+        Ok(admission)
     }
 
     fn handle_copy_out<T: Transport>(&self, sender: &FrameSender<T>, source: &str) -> Result<()> {
