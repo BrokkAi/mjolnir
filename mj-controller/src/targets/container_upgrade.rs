@@ -1761,7 +1761,6 @@ mod tests {
         log: std::cell::RefCell<Vec<String>>,
         /// Fail the next command whose verb starts with this text.
         fail: std::cell::RefCell<Option<&'static str>>,
-        control_state_probes: std::cell::Cell<usize>,
     }
 
     #[derive(Default)]
@@ -1773,7 +1772,6 @@ mod tests {
         applied: bool,
         has_previous_root: bool,
         pinned_image: Option<String>,
-        max_running: usize,
     }
 
     impl FakeNitroEngine {
@@ -1830,12 +1828,7 @@ mod tests {
             // ssh sends the remote command as one quoted line.
             let remote = command.args.last().cloned().unwrap_or_default();
             let Some(position) = remote.find("mj-microvm") else {
-                // Guest commands through the sandbox: the tar probe, capture, restore.
-                self.control_state_probes
-                    .set(self.control_state_probes.get() + 1);
-                return ok(
-                    "--one-file-system --unlink-first --strip-components --no-recursion --occurrence",
-                );
+                bail!("unexpected command that does not go through the engine: {remote}");
             };
             let words: Vec<String> = remote[position + "mj-microvm".len()..]
                 .split_whitespace()
@@ -1860,11 +1853,9 @@ mod tests {
                 }
                 "image" => ok("sha256:target-image\n"),
                 // Guest commands: the tar probe, capture and restore.
-                "exec" => {
-                    self.control_state_probes
-                        .set(self.control_state_probes.get() + 1);
-                    ok("--one-file-system --unlink-first --strip-components --no-recursion --occurrence")
-                }
+                "exec" => ok(
+                    "--one-file-system --unlink-first --strip-components --no-recursion --occurrence",
+                ),
                 "container" if words[1] == "replace-root" => {
                     let operation =
                         words[words.iter().position(|w| w == "--operation").unwrap() + 1].clone();
@@ -1898,10 +1889,7 @@ mod tests {
                     ok("")
                 }
                 "start" => {
-                    // A VM's memory is charged while it runs; the replacement
-                    // must never run beside the source.
                     vm.running = true;
-                    vm.max_running = vm.max_running.max(1);
                     ok("")
                 }
                 other => bail!("unexpected engine verb {other}"),
@@ -1961,7 +1949,7 @@ mod tests {
                 .iter()
                 .filter(|v| v.starts_with("container replace-root apply"))
                 .count();
-            assert!(applied >= 1 && applied <= 2, "{failing:?}: {verbs:?}");
+            assert!((1..=2).contains(&applied), "{failing:?}: {verbs:?}");
             // The source stops before the swap and the VM starts only after it.
             let position =
                 |prefix: &str| verbs.iter().rposition(|v| v.starts_with(prefix)).unwrap();
