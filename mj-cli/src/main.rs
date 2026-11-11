@@ -2329,6 +2329,7 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
             let mut daemon = match daemon::connect_management().await {
                 Ok(daemon) => daemon,
                 Err(error) if daemon::daemon_not_running(&error).is_some() => {
+                    node::withdraw_endpoint();
                     println!("Mjolnir daemon is already stopped.");
                     return Ok(());
                 }
