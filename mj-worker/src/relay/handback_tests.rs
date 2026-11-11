@@ -165,4 +165,124 @@ fn handback_attempt_survives_restart_and_reminders_but_new_assignment_gets_a_che
             .unwrap()
             .is_some()
     );
+    finish_prompt(&mut relay, "person-after-assignment");
+
+    // Hard-won: 9130f139e: parent follow-ups delivered through the mailbox bypassed the handback check
+    for hook in [true, false] {
+        use mj_core::mailbox::{MailboxDeliveryPath, MailboxEvent, MailboxEventBody};
+        let event = MailboxEvent {
+            key: format!("parent-followup-{hook}"),
+            source: "parent".into(),
+            wake: true,
+            created_at_ms: 1,
+            body: MailboxEventBody::ParentMessage {
+                text: format!("Validate mailbox delivery {hook}"),
+            },
+        };
+        let stale_snapshot = std::fs::read(root.path().join(RELAY_STATE_FILE)).unwrap();
+        relay
+            .record_observation(RelayObservation::CommandQueued {
+                command_id: format!("deliver-{hook}"),
+                command: RelayCommand::DeliverMailboxEvent {
+                    event: event.clone(),
+                },
+                created_at_ms: 1,
+            })
+            .unwrap();
+        // Queuing alone must not create an assignment.
+        assert_ne!(
+            relay.snapshot.handback_checks.assignment_id.as_deref(),
+            Some(event.handback_assignment().unwrap().0.as_str())
+        );
+        if hook {
+            relay
+                .record_observation(RelayObservation::MailboxEventsDelivered {
+                    event_keys: vec![event.key.clone()],
+                    path: MailboxDeliveryPath::ToolHook,
+                    prompt_command_id: None,
+                    hook_event: Some("PostToolUse".into()),
+                    events: vec![event.clone()],
+                    lease_id: None,
+                    steering: None,
+                })
+                .unwrap();
+        } else {
+            relay
+                .record_observation(RelayObservation::CommandQueued {
+                    command_id: "mailbox-wake-followup".into(),
+                    command: RelayCommand::MailboxWake {
+                        events: vec![event.clone()],
+                    },
+                    created_at_ms: 1,
+                })
+                .unwrap();
+            relay.claim_pending_commands(true).unwrap();
+            finish_prompt(&mut relay, "mailbox-wake-followup");
+        }
+        let expected_id = event.handback_assignment().unwrap().0;
+        assert_eq!(
+            relay.snapshot.handback_checks.assignment_id.as_ref(),
+            Some(&expected_id)
+        );
+        let (_, _, evidence) = relay
+            .prepare_handback_check("Mailbox report")
+            .unwrap()
+            .unwrap();
+        assert!(
+            serde_json::to_string(&evidence)
+                .unwrap()
+                .contains(&format!("Validate mailbox delivery {hook}"))
+        );
+        assert!(relay.prepare_handback_check("Duplicate").unwrap().is_none());
+        drop(relay);
+        std::fs::write(root.path().join(RELAY_STATE_FILE), stale_snapshot).unwrap();
+        relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+        relay.set_turn_verdict_harness(HarnessKind::Codex);
+        assert_eq!(
+            relay.snapshot.handback_checks.assignment_id.as_ref(),
+            Some(&expected_id)
+        );
+        assert!(relay.prepare_handback_check("Restart").unwrap().is_none());
+        let peer = MailboxEvent {
+            key: format!("peer-{hook}"),
+            body: MailboxEventBody::PlainText {
+                text: "Peer instructions are not an assignment".into(),
+            },
+            wake: false,
+            ..event
+        };
+        submit_relay(
+            &mut relay,
+            &format!("peer-delivery-{hook}"),
+            RelayCommand::DeliverMailboxEvent {
+                event: peer.clone(),
+            },
+        );
+        relay
+            .record_observation(RelayObservation::MailboxEventsDelivered {
+                event_keys: vec![peer.key.clone()],
+                path: MailboxDeliveryPath::ToolHook,
+                prompt_command_id: None,
+                hook_event: Some("PostToolUse".into()),
+                events: vec![peer],
+                lease_id: None,
+                steering: None,
+            })
+            .unwrap();
+        assert_eq!(
+            relay.snapshot.handback_checks.assignment_id.as_ref(),
+            Some(&expected_id)
+        );
+        assert!(
+            !serde_json::to_string(&relay.snapshot.handback_checks.context)
+                .unwrap()
+                .contains("Peer instructions")
+        );
+        assert!(
+            relay
+                .prepare_handback_check("Peer report")
+                .unwrap()
+                .is_none()
+        );
+    }
 }

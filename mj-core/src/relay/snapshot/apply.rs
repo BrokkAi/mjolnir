@@ -1691,6 +1691,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if lease_id.is_some() && events != &claimed {
                 bail!("leased hook delivery is missing its event details");
             }
+            record_handback_mailbox_assignments(snapshot, &claimed);
             if path == &MailboxDeliveryPath::ToolHook && lease_id.is_some() {
                 snapshot.mailbox_hook_lease = None;
             } else {
@@ -1859,6 +1860,27 @@ fn cancels_capacity_retry(command: &RelayCommand) -> bool {
     )
 }
 
+fn record_handback_mailbox_assignments(
+    snapshot: &mut RelaySnapshot,
+    events: &[crate::mailbox::MailboxEvent],
+) {
+    for event in events {
+        if let Some((id, text)) = event.handback_assignment() {
+            snapshot.handback_checks.assignment_id = Some(id.clone());
+            snapshot
+                .handback_checks
+                .context
+                .get_or_insert_default()
+                .handback_user(
+                    &id,
+                    &[ContentBlock::Text(
+                        agent_client_protocol::v1::schema::TextContent::new(text),
+                    )],
+                );
+        }
+    }
+}
+
 /// Classification boundaries and action invalidation share the journal owner.
 fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
     use crate::activity::verdict::CompletionEvidence;
@@ -1875,6 +1897,13 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             ..
         } => delivered = Some(&steering.queued_prompt_id),
         _ => {}
+    }
+    if let Some(id) = delivered
+        && let Some(RelayCommand::MailboxWake { events }) =
+            snapshot.dispatches.get(id).map(|d| &d.command)
+    {
+        let events = events.clone();
+        record_handback_mailbox_assignments(snapshot, &events);
     }
     if let Some(id) = delivered
         && let Some(prompt) = snapshot
