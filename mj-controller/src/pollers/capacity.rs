@@ -212,6 +212,7 @@ pub fn aggregate_aws_capacity(
     usages: &[DeploymentCapacityUsage],
 ) -> Result<DeploymentCapacityUsage> {
     let mut total = DeploymentCapacityUsage {
+        memory_pool: false,
         cpu_percent: None,
         memory_used_bytes: 0,
         memory_total_bytes: 0,
@@ -248,6 +249,7 @@ pub(super) fn collect_local_capacity() -> Result<DeploymentCapacityUsage> {
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     system.refresh_cpu_usage();
     Ok(DeploymentCapacityUsage {
+        memory_pool: false,
         cpu_percent: Some(system.global_cpu_usage().round().clamp(0.0, 100.0) as u8),
         memory_used_bytes: system
             .total_memory()

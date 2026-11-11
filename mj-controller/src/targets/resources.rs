@@ -219,10 +219,12 @@ pub fn parse_host_capacity(output: &[u8], host: &str) -> Result<DeploymentCapaci
     let values = parse_key_values(output);
     let mut total = parse_required_u64(&values, "memory.max")?;
     let mut used = parse_required_u64(&values, "memory.current")?;
+    let memory_pool = values.contains_key("microvm.info");
     if let Some(info) = values.get("microvm.info") {
         (used, total) = nitro_pool_memory(info)?;
     }
     Ok(DeploymentCapacityUsage {
+        memory_pool,
         cpu_percent: Some(parse_percent(required_value(&values, "cpu.percent")?)?),
         memory_used_bytes: used,
         memory_total_bytes: total,
@@ -236,6 +238,7 @@ pub fn parse_aws_allocated_capacity(output: &[u8], host: &str) -> Result<Deploym
     let values = parse_key_values(output);
     let memory_total_bytes = parse_required_u64(&values, "memory.total")?;
     Ok(DeploymentCapacityUsage {
+        memory_pool: false,
         cpu_percent: None,
         memory_used_bytes: 0,
         memory_total_bytes,

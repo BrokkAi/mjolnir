@@ -742,6 +742,11 @@ pub struct DeploymentCapacityTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentCapacityUsage {
+    /// Whether `memory_total_bytes` is a pool set aside for sessions at boot
+    /// (a Nitro host's sandbox memory) rather than the host's RAM. A pool is
+    /// already net of the host's own needs, so admission applies no reserve
+    /// to it.
+    pub memory_pool: bool,
     pub cpu_percent: Option<u8>,
     pub memory_used_bytes: u64,
     pub memory_total_bytes: u64,

@@ -3252,6 +3252,7 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
             memory_total_bytes: 48 * gib,
@@ -3393,6 +3394,7 @@ fn new_container_size_checkbox_is_explicit_and_reaches_the_create_action() {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
             memory_total_bytes: 64 << 30,
@@ -3468,6 +3470,7 @@ fn unknown_live_container_capacity_warns_instead_of_blocking_non_apple_targets()
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
             memory_total_bytes: 64 << 30,
@@ -3515,6 +3518,7 @@ fn terminal_headroom_comes_from_the_daemons_reservation_adjusted_capacity() {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(20),
             memory_used_bytes: 16 << 30,
             memory_total_bytes: 64 << 30,
@@ -5183,6 +5187,7 @@ fn container_memory_errors_keep_the_draft_and_refuse_submission_above_host_limit
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
             memory_total_bytes: 16 << 30,
@@ -5278,6 +5283,7 @@ fn late_host_limits_preserve_typed_values_and_block_an_oversized_draft() {
     dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
     let sample = |cpus| {
         Ok(Some(mj_core::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
             memory_total_bytes: 64 << 30,

@@ -1748,10 +1748,19 @@ pub fn session_owns_container(session: &SessionRecord) -> bool {
 /// the parent's allocation.
 pub fn host_container_capacity<'a>(
     total: HostContainerSize,
+    memory_is_pool: bool,
     target_ids: &[String],
     sessions: impl IntoIterator<Item = &'a SessionRecord>,
 ) -> HostContainerCapacity {
-    let reserved = reserved_container_capacity(total);
+    // A pool set aside at boot is already net of the host's own needs.
+    let reserved = if memory_is_pool {
+        HostContainerSize {
+            cpus: 0,
+            memory_bytes: 0,
+        }
+    } else {
+        reserved_container_capacity(total)
+    };
     let usable = HostContainerSize {
         cpus: total.cpus.saturating_sub(reserved.cpus),
         memory_bytes: total.memory_bytes.saturating_sub(reserved.memory_bytes),
