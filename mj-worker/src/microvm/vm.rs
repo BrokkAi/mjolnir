@@ -832,7 +832,6 @@ pub fn inspect(layout: &Layout, name: &str) -> Result<Value> {
             "Status": status,
             "Running": activity == Activity::Running,
             "Paused": false,
-            "ExitCode": 0,
         },
         "Config": {
             "Image": state.image_reference,
@@ -909,7 +908,8 @@ pub fn info(layout: &Layout) -> Result<Value> {
         "notes": [
             "--cap-add, --cap-drop and --security-opt are accepted and have no effect: the VM is the isolation boundary",
             "--user sets the default user of the container command and of exec",
-            "volume option U changes only the owner of the volume's root directory",
+            "volume option U changes the owner of everything in the volume, as Podman does",
+            "inspect has no State.ExitCode: the guest powers off when the command exits and the status is not kept",
         ],
     }))
 }

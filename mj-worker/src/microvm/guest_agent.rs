@@ -387,12 +387,18 @@ impl Agent {
         if started.is_err() {
             self.started.store(false, Ordering::SeqCst);
         }
-        let pid = started?;
-        sender.send_json(FrameKind::Accepted, &Accepted { pid })?;
-        Ok(())
+        let (pid, powered_off_after) = started?;
+        let answered = sender.send_json(FrameKind::Accepted, &Accepted { pid });
+        // A command that has already exited may power the VM off now, and not
+        // before the host has its answer. Dropping the sender releases the
+        // monitor whether or not the answer was delivered.
+        drop(powered_off_after);
+        answered
     }
 
-    fn start_main(self: &Arc<Self>, start: &StartRequest) -> Result<u32> {
+    /// Start the main process. The returned sender holds the process monitor
+    /// back from powering the machine off until it is dropped.
+    fn start_main(self: &Arc<Self>, start: &StartRequest) -> Result<(u32, mpsc::Sender<()>)> {
         let user = resolve_user_in_guest(&start.user)?;
         for volume in start.volumes.iter().filter(|volume| volume.chown) {
             chown_tree(Path::new(&volume.destination), user.uid, user.gid)
@@ -412,6 +418,7 @@ impl Agent {
             .map_err(|failure| anyhow!("start the container command: {}", failure.message))?;
         let pid = spawned.pid;
         let agent = Arc::clone(self);
+        let (hold, released) = mpsc::channel::<()>();
         std::thread::Builder::new()
             .name("main-process".to_owned())
             .spawn(move || {
@@ -422,11 +429,13 @@ impl Agent {
                     )),
                     Err(_) => klog("the container command's exit was lost"),
                 }
+                // Returns when `hold` is dropped; nothing is ever sent.
+                let _ = released.recv();
                 agent.system.quiesce();
                 agent.system.power_off();
             })
             .context("start main-process monitor")?;
-        Ok(pid)
+        Ok((pid, hold))
     }
 
     fn handle_stop<T: Transport>(&self, sender: &FrameSender<T>) -> Result<()> {
