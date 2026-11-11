@@ -661,7 +661,7 @@ fn scan_target_workers(
         }
         TargetTemplate::SshNitro { ssh, .. } => {
             // The engine lists sandboxes as Podman lists containers: `ps`
-            // with a label filter, one JSON object per line.
+            // with a label filter, a JSON array with a `Labels` object.
             let remote = targets::with_engine_argv(vec![
                 targets::MICROVM_ENGINE.into(),
                 "ps".into(),

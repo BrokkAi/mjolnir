@@ -85,6 +85,8 @@ pub fn ssh_host_capacity_command(ssh: &SshTarget, storage_paths: &[String]) -> C
 /// optional here: before the first session installs it, this reports the
 /// host's own totals, and the next sample after that corrects them. A probe
 /// that required the engine would refuse the very launch that installs it.
+/// Only an absent engine is optional: an installed engine that cannot report
+/// fails the sample, rather than passing physical memory off as the pool.
 pub fn ssh_nitro_host_capacity_command(ssh: &SshTarget, storage_paths: &[String]) -> CommandSpec {
     let mut command = ssh_host_capacity_command(ssh, storage_paths);
     let engine = engine_shell_words(MICROVM_ENGINE);
@@ -93,7 +95,7 @@ pub fn ssh_nitro_host_capacity_command(ssh: &SshTarget, storage_paths: &[String]
         .last_mut()
         .expect("an SSH command ends with the remote command line");
     *remote = format!(
-        "{remote}; if info=$({engine} info --format json 2>/dev/null); then printf 'microvm.info=%s\n' \"$(printf '%s' \"$info\" | tr -d '\\n')\"; fi"
+        "{remote} && if [ -e \"$HOME/{MICROVM_ENGINE_WORKER}\" ]; then info=$({engine} info --format json) || exit 1; printf 'microvm.info=%s\\n' \"$(printf '%s' \"$info\" | tr -d '\\n')\"; fi"
     );
     command
 }

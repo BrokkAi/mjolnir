@@ -682,6 +682,66 @@ fn deployment_capacity_groups_local_and_same_host_targets() {
             .any(|target| target.id == "ssh:builder-alias")
     );
 }
+
+// Hard-won: #1494: the disabled bare sibling `mj ec2 create` registers made a Nitro host admit against physical RAM less the reserve.
+#[test]
+fn nitro_host_with_only_a_disabled_sibling_samples_its_sandbox_pool() {
+    let ssh = SshConnection {
+        host: "nitro".into(),
+        user: Some("ec2-user".into()),
+        identity_file: None,
+        extra_args: Vec::new(),
+    };
+    let mut config = Config {
+        targets: BTreeMap::from([
+            (
+                "nitro".into(),
+                TargetTemplate::SshNitro {
+                    ssh: ssh.clone(),
+                    container: ConfigContainer {
+                        build_cache: None,
+                        image: "dev:1".into(),
+                        pull_policy: Default::default(),
+                        platform: None,
+                        cpus: None,
+                        memory: None,
+                        environment: Default::default(),
+                        workspace_storage: Default::default(),
+                    },
+                },
+            ),
+            (
+                "nitro-raw".into(),
+                TargetTemplate::SshBare {
+                    ssh,
+                    permissions: mj_core::config::PermissionMode::Guardian,
+                    workspace_prefix: ".local/share/mjolnir/workspaces".into(),
+                },
+            ),
+        ]),
+        disabled_targets: ["nitro-raw".to_owned()].into(),
+        ..Config::default()
+    };
+    let samples_pool = |config: &Config| {
+        let controller = Controller {
+            config: config.clone(),
+            state: State::default(),
+        };
+        let targets = controller.deployment_capacity_targets();
+        let [host] = targets.as_slice() else {
+            panic!("one host expected: {targets:?}");
+        };
+        assert_eq!(host.target_ids, ["nitro", "nitro-raw"]);
+        let [probe] = host.probes.as_slice() else {
+            panic!("one probe expected: {:?}", host.probes);
+        };
+        probe.args.last().unwrap().contains("microvm.info=")
+    };
+    assert!(samples_pool(&config));
+    // An enabled bare sibling runs sessions on the host's own memory.
+    config.disabled_targets.clear();
+    assert!(!samples_pool(&config));
+}
 struct PreflightExecutor {
     outputs: RefCell<Vec<CommandOutput>>,
     notices: RefCell<Vec<String>>,

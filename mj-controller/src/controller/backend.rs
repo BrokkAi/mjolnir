@@ -210,7 +210,17 @@ impl Controller {
                             entry.1.len() - 1
                         }
                     };
-                    entry.1[position].2 &= nitro;
+                    // A disabled target with no live session draws on no
+                    // memory. `mj ec2 create` registers a Nitro host with a
+                    // disabled bare sibling, which must not turn the pool
+                    // back into physical memory less the host reserve.
+                    let draws_memory = !self.config.disabled_targets.contains(target_id)
+                        || self.state.sessions.values().any(|session| {
+                            session.target_template_id == *target_id && session.state.is_active()
+                        });
+                    if draws_memory {
+                        entry.1[position].2 &= nitro;
+                    }
                     let paths = &mut entry.1[position].1;
                     push_unique(paths, ssh_storage_paths(template));
                     // Each live session's own directories: a project or
