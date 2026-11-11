@@ -3836,3 +3836,33 @@ async fn an_accepted_prompt_lists_the_sessions_prompts_again_for_up() {
     chat.handle_event_result(Event::Key(key(KeyCode::Up)));
     assert_eq!(chat.state.input, "sent from the web");
 }
+
+// Hard-won: #1480: transferred submissions miss an already applied delivery snapshot.
+#[tokio::test]
+async fn delivered_submission_disappears_when_composer_arrives_after_snapshot() {
+    let mut source = clipboard_test_chat();
+    source.state.begin_submission(
+        "delivered-before-attach".into(),
+        super::super::SubmissionKind::Prompt,
+        PromptPayload::text("already delivered"),
+        "Sending",
+    );
+    source.apply_remote_result(ChatRemoteResult::Prompt {
+        command_id: "delivered-before-attach".into(),
+        text: "already delivered".into(),
+        images: Vec::new(),
+        result: Ok(1),
+    });
+    let mut destination = clipboard_test_chat();
+    let mut session = MaterializedSession::empty("clipboard-admission");
+    session.applied_event_ordinal = 2;
+    let mut item = agent_message_item("user:delivered-before-attach", 2, "already delivered");
+    Arc::make_mut(&mut item).body = mj_core::transcript::TranscriptBody::User {
+        content: vec![serde_json::json!({"type":"text", "text":"already delivered"})],
+    };
+    session.transcript.push(item);
+    destination.apply_session_view(Ok(managed_view(session)));
+    destination.adopt_live_composer(source.take_live_composer().unwrap());
+    let screen = crate::chat::test_support::transcript_text(&mut destination.state, 100).join("\n");
+    assert!(!screen.contains("Queued"), "{screen}");
+}

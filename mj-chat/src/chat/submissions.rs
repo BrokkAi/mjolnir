@@ -47,6 +47,31 @@ fn represents_submission(stable_id: &str, id: &str) -> bool {
     })
 }
 
+/// Delivery evidence from the destination's latest authoritative projection.
+/// It stays with the chat when a composer moves between owners.
+#[derive(Default)]
+pub(super) struct SubmissionProjection {
+    queued: BTreeSet<String>,
+    transcript: Vec<String>,
+}
+
+impl From<&MaterializedSession> for SubmissionProjection {
+    fn from(session: &MaterializedSession) -> Self {
+        Self {
+            queued: session
+                .queued_prompts
+                .iter()
+                .map(|queued| queued.command_id.clone())
+                .collect(),
+            transcript: session
+                .transcript
+                .iter()
+                .map(|item| item.stable_id.clone())
+                .collect(),
+        }
+    }
+}
+
 impl PendingSubmission {
     /// A `/clear` the relay runs as a context reset, not as a prompt.
     fn is_context_clear(&self) -> bool {
@@ -152,16 +177,14 @@ impl ChatState {
         self.invalidate_render_cache();
     }
 
-    pub(super) fn reconcile_submissions(&mut self, session: &MaterializedSession) {
+    pub(super) fn reconcile_submissions(&mut self) {
         for pending in &mut self.pending_submissions {
-            if session
-                .queued_prompts
-                .iter()
-                .any(|queued| queued.command_id == pending.id)
-                || session
+            if self.submission_projection.queued.contains(&pending.id)
+                || self
+                    .submission_projection
                     .transcript
                     .iter()
-                    .any(|item| represents_submission(&item.stable_id, &pending.id))
+                    .any(|stable_id| represents_submission(stable_id, &pending.id))
             {
                 if let Some(started) = pending.started_at.take() {
                     self.submission_renders.push((pending.id.clone(), started));

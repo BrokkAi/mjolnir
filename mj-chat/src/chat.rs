@@ -541,6 +541,7 @@ pub struct ChatState {
     pending_abandoned_prompt: Option<ChatDaemonRequest>,
     queued_prompts: VecDeque<QueuedPrompt>,
     pending_submissions: Vec<submissions::PendingSubmission>,
+    submission_projection: submissions::SubmissionProjection,
     submission_renders: Vec<(String, std::time::Instant)>,
     /// Queue entries optimistically moved back into the composer. A relay
     /// snapshot can still contain one until its removal command is projected,
@@ -747,6 +748,7 @@ impl ChatState {
             pending_abandoned_prompt: None,
             queued_prompts: VecDeque::new(),
             pending_submissions: Vec::new(),
+            submission_projection: Default::default(),
             submission_renders: Vec::new(),
             pending_queue_removals: BTreeSet::new(),
             pending_queue_images: BTreeMap::new(),
@@ -1028,7 +1030,8 @@ impl ChatState {
     ) {
         self.goal_state.clone_from(goal);
         let started = std::time::Instant::now();
-        self.reconcile_submissions(session);
+        self.submission_projection = session.into();
+        self.reconcile_submissions();
         self.reconcile_notices(session);
         let rebuild_projection = session.applied_event_ordinal != self.latest_seq;
         let phase = match session.execution {

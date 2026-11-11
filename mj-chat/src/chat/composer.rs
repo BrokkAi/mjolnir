@@ -339,6 +339,9 @@ impl ChatState {
         self.conversation_notices = composer.conversation_notices;
         self.composer_runtime = composer.composer_runtime;
 
+        // The destination may already have observed delivery while this
+        // composer was parked or its attachment was being prepared.
+        self.reconcile_submissions();
         self.update_autocomplete();
     }
     /// `Some(None)` means Move preparation has not supplied its stable identity yet.
