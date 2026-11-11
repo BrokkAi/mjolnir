@@ -1039,6 +1039,26 @@ pub struct RestartedDaemon {
 /// keep running.
 const RESTART_ATTEMPTS: usize = 2;
 
+/// Stop this instance and withdraw its node endpoint, including when the
+/// daemon is already absent. The startup lock owns the decision and the
+/// withdrawal together, so a concurrent launcher cannot lose its endpoint.
+/// Returns whether a running daemon was stopped.
+pub(crate) async fn stop_instance() -> Result<bool> {
+    mj_core::config::ensure_may_control_store(&data_dir(), "stop the Mjolnir daemon")?;
+    let _startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
+    let mut daemon = match connect_management().await {
+        Ok(daemon) => daemon,
+        Err(error) if daemon_not_running(&error).is_some() => {
+            crate::node::withdraw_endpoint();
+            return Ok(false);
+        }
+        Err(error) => return Err(error.context("Mjolnir daemon is not answering")),
+    };
+    stop_and_wait(&mut daemon).await?;
+    crate::node::withdraw_endpoint();
+    Ok(true)
+}
+
 /// Stop the running Mjolnir daemon and start one from this client's executable.
 ///
 /// The startup lock is held from before the stop until the replacement has
@@ -2199,6 +2219,41 @@ mod tests {
             .expect("a shared hold waited after the replacement ended")
             .unwrap();
     }
+    // Hard-won: cb94086a3: stop removed an endpoint while its launcher still held the startup lock.
+    #[tokio::test]
+    async fn stopping_an_absent_daemon_waits_for_its_launch_before_withdrawing_the_endpoint() {
+        const CHILD: &str = "MJ_TEST_STOP_WAITS_FOR_DAEMON_LAUNCH";
+        const TEST: &str = "daemon::tests::stopping_an_absent_daemon_waits_for_its_launch_before_withdrawing_the_endpoint";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+            .await
+            .unwrap();
+        let endpoint = crate::node::NodeEndpoint {
+            address: "127.0.0.1:1".parse().unwrap(),
+            token: "isolated-launch".to_owned(),
+            build_version: this_build().published(),
+        };
+        crate::node::write_endpoint(&endpoint).unwrap();
+        assert!(!metadata_path().exists());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), stop_instance())
+                .await
+                .is_err(),
+            "stop must wait until the launcher finishes before deciding whether the daemon is absent"
+        );
+        let bytes = fs::read(crate::node::endpoint_path()).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<crate::node::NodeEndpoint>(&bytes).unwrap(),
+            endpoint,
+            "the starting daemon must retain its endpoint"
+        );
+        drop(startup);
+        assert!(!stop_instance().await.unwrap());
+        assert!(!crate::node::endpoint_path().exists());
+    }
+
     /// The restart holds one guard across its stop and its start. That is only
     /// safe because the lock is not reentrant: a second acquisition inside the
     /// same process blocks exactly as another process would, so a restart that

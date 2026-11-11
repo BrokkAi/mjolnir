@@ -428,6 +428,8 @@ fn run_microvm() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // First, before any thread or child: the harness and its tools inherit it.
+    mj_core::subprocess::raise_open_file_limit();
     std::hint::black_box(mj_core::worker_build::WORKER_BUILD_STAMP);
     if std::env::args_os()
         .nth(1)
