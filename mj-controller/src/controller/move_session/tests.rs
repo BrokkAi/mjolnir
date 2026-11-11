@@ -186,7 +186,7 @@ fn move_queue_relay_child() {
                 relay.record_observation(mj_core::relay::RelayObservation::SessionConfigured { config_options: vec![] }).unwrap();
                 // Hard-won: #1498: quota-stopped active goals blocked automatic in-place Move.
                 let operational = relay.operational_state();
-                assert!(!operational.safe_to_move(HarnessKind::Codex, mj_core::activity::MovePurpose::Manual));
+                assert!(operational.safe_to_move(HarnessKind::Codex, mj_core::activity::MovePurpose::Manual));
                 assert!(operational.safe_to_move(HarnessKind::Codex, mj_core::activity::MovePurpose::QuotaRetry), "{:?}", operational.facts());
             }
             relay
@@ -3036,7 +3036,10 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
         crate::database::save_move_operation(&failed).unwrap();
         let selection = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE).selection;
         let manual = state.prepare_move_session(selection).await.unwrap();
-        assert!(manual.active);
+        assert!(
+            !manual.active,
+            "an idle goal alone does not require interruption"
+        );
         assert!(manual.in_place);
         assert!(manual.workspace.is_none());
         assert!(!manual.stops_subagents);

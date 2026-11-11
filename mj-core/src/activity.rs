@@ -221,7 +221,7 @@ pub enum ActivityState {
     Expecting {
         since_ms: i64,
     },
-    /// A native goal owns the session.
+    /// A native goal is active; durable intent alone is not work in flight.
     Goal,
     /// The daemon is checking whether already-authorized work should continue.
     CheckingContinuation,
@@ -286,7 +286,7 @@ impl ActivityState {
     pub fn has_work_in_flight(&self) -> bool {
         !matches!(
             self,
-            Self::Expecting { .. } | Self::Idle { .. } | Self::Closed
+            Self::Expecting { .. } | Self::Idle { .. } | Self::Goal | Self::Closed
         )
     }
 
@@ -442,7 +442,7 @@ pub fn classify(facts: &ActivityFacts) -> ActivityState {
             last_activity_at_ms: facts.last_acp_activity_at_ms,
         };
     }
-    if running_is_corroborated {
+    if facts.goal_running || running_is_corroborated {
         return ActivityState::Turn {
             started_at_ms: turn_started_at_ms,
             last_activity_at_ms: facts.last_acp_activity_at_ms,
@@ -469,7 +469,7 @@ pub fn classify(facts: &ActivityFacts) -> ActivityState {
     if let Some(since_ms) = facts.expected_continuation {
         return ActivityState::Expecting { since_ms };
     }
-    if facts.goal_active || facts.goal_running {
+    if facts.goal_active {
         return ActivityState::Goal;
     }
     if facts.capacity_retry_armed {
@@ -559,7 +559,7 @@ pub fn quiet_at(facts: &ActivityFacts, now_ms: i64) -> Quiet {
     if facts.queued_commands > 0 {
         return Quiet::No("queued command");
     }
-    if facts.goal_pending_resume || facts.goal_decision || matches!(state, ActivityState::Goal) {
+    if facts.goal_running || facts.goal_pending_resume || facts.goal_decision {
         return Quiet::No("goal owns the session");
     }
     if facts.acp_ready == Some(false) {
@@ -642,7 +642,10 @@ pub fn submit_blockers(facts: &ActivityFacts) -> Vec<&'static str> {
 /// [`has_work_in_flight`], which asks whether killing the worker loses work.
 #[must_use]
 pub fn driver_present(facts: &ActivityFacts) -> bool {
-    classify(facts).has_work_in_flight() || turn_imminent(facts, crate::clock::epoch_millis())
+    let state = classify(facts);
+    matches!(state, ActivityState::Goal)
+        || state.has_work_in_flight()
+        || turn_imminent(facts, crate::clock::epoch_millis())
 }
 
 /// Whether nothing at all is happening, including no checkpoint barrier.
@@ -666,8 +669,8 @@ pub fn safe_to_replace(facts: &ActivityFacts, harness: HarnessKind) -> bool {
         && (harness != HarnessKind::Kimi || facts.background_work_known == Some(true))
 }
 
-/// Why a Move is being admitted. Quota retries preserve the durable goal in
-/// the same native conversation; ordinary Moves still warn about active goals.
+/// Why a Move is being admitted. Checkpoint callers use this to select
+/// noninterrupting quota recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MovePurpose {
     Manual,
@@ -676,12 +679,8 @@ pub enum MovePurpose {
 
 /// Shared interruption decision for Move preparation and source-lease validation.
 #[must_use]
-pub fn safe_to_move(facts: &ActivityFacts, harness: HarnessKind, purpose: MovePurpose) -> bool {
-    let mut preserved = facts.clone();
-    if purpose == MovePurpose::QuotaRetry {
-        preserved.goal_active = false;
-    }
-    safe_to_replace(&preserved, harness)
+pub fn safe_to_move(facts: &ActivityFacts, harness: HarnessKind, _purpose: MovePurpose) -> bool {
+    safe_to_replace(facts, harness)
 }
 
 /// What keeps [`safe_to_replace`] false, one name per cause, so a caller that
@@ -738,8 +737,8 @@ pub fn checkpoint_blocker(facts: &ActivityFacts, harness: HarnessKind) -> Option
         None
     } else if harness == HarnessKind::Codex && !facts.goal_synchronized {
         Some("Codex goal and execution state is not synchronized; checkpoint deferred")
-    } else if facts.goal_active || facts.goal_running || facts.goal_decision {
-        Some("an active goal owns this session; pause the goal before checkpointing")
+    } else if facts.goal_running || facts.goal_pending_resume || facts.goal_decision {
+        Some("goal work is pending or running; checkpoint deferred")
     } else if harness != HarnessKind::Kimi {
         None
     } else if facts.background_work_known.is_none() {

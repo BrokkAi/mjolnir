@@ -1,10 +1,10 @@
-# Preserve an active goal during automatic quota Move
+# Preserve idle goals during lifecycle operations and worker upgrades
 
 This ExecPlan is maintained according to `.agents/PLANS.md`. Its progress and decisions describe issue #1498.
 
 ## Purpose / Big Picture
 
-A session whose turn stopped at a provider quota limit should be able to switch to another profile of the same harness on the same target, preserving its conversation, durable goal, and managed children. An active goal alone must not look like work that this Move interrupts. A turn that starts after preparation must still prevent an automatic Move. Worker connection handshakes must stop waiting after the user-requested 60 seconds, instead of 300 seconds.
+A session whose turn stopped at a provider quota limit should be able to switch to another profile of the same harness on the same target, preserving its conversation, durable goal, and managed children. An idle durable goal alone must never count as work in flight, including for worker upgrades, manual Move, and checkpointing. A running turn, a goal actually executing, or a pending goal decision must still prevent an automatic interruption. Already-running old workers must be able to receive this correction without hitting the oversized legacy memory export. Worker connection handshakes stop waiting after the user-requested 60 seconds, instead of 300 seconds.
 
 ## Progress
 
@@ -21,12 +21,28 @@ A session whose turn stopped at a provider quota limit should be able to switch 
 - [x] (2026-11-11) Reviewed the integrated changes; completed full core/controller suites with the sole older-fixture failure repaired and rerun, workspace clippy, formatting and diff checks.
 - [x] (2026-11-11 16:16Z) Committed the validated changes, completed push review, merged upstream, and pushed d73304e73; issues #1498 and #1499 closed.
 - [x] (2026-11-11 16:27Z) Completed the explicitly requested installation with source and Git HEAD frozen throughout all builds. Ordinary installed CLI invocation handed off the live daemon, which reports build 2.70.0+d73304e7.
+- [x] (2026-11-11 19:06Z) Installed the subsequent project-memory transport fix from 1fab3c8d2. The separate local node-capacity stopgap was installed and then stashed at the user's request; it must not be reapplied or shipped.
+- [x] (2026-11-11 19:20Z) Confirmed session 9b3f22a6 still uses an older worker, whose project-memory response exceeded the frame limit. Its idle active goal prevents automatic upgrade. The suspected queued quota-Move defect was investigated below; #1498 remains open.
+- [x] (2026-11-11 19:25Z) User authorized fixing the reported failures with idle-goal activity corrected globally, followed by push and installation. Fetched upstream; origin/master still matches 1fab3c8d2. Delegated core activity semantics and disjoint controller regression/Move changes.
+- [x] (2026-11-11 19:28Z) Disproved the proposed queued quota-Move state: SetQuotaRecovery requires an empty accepted prompt queue, and accepting Prompt/SetConfig clears existing quota recovery. No supported frozen checkpoint writer produces both. Corrected the claim to the user and dropped the proposed queue exception and fabricated fixture.
+- [x] (2026-11-11 19:40Z) Removed idle-goal ownership from the shared work predicate while preserving autonomous-driver intent and actual running/pending work. Activity regressions passed, including corrected running-goal classification and closed-session precedence.
+- [x] (2026-11-11 19:40Z) The existing worker-upgrade lease regression passed for protocol 58/59/60 with exact goal preservation, accepted review refusal and cleanup, a completed autonomous turn after readiness, and ordered queued submissions. Existing quota Move/refusal/replay and busy steering tests also passed.
+- [x] (2026-11-11 19:40Z) Implemented the old-worker goal admission bootstrap without canceling the goal or exporting memory. The protocol-peer regression passed; delivery to the actual historical worker remains to be verified after installation.
+- [x] (2026-11-11 19:50Z) Reviewed the integrated fixes, completed the full development tests plus targeted environment repair (4040 passed, 34 ignored), and passed workspace clippy, formatting and diff checks.
+- [ ] Merge upstream (including node removal when landed), commit, request push review, and push.
+- [ ] Install from frozen source and verify daemon activation and affected worker upgrade without interrupting actual work.
 
 ## Surprises & Discoveries
 
 The failed automatic Move was not blocked by its 13 managed children. The broad `safe_to_replace` activity check rejects a session whenever a durable active goal owns it, even though the quota failure has already stopped the turn. The live session's goal is active, rather than limited with a usage reason. Adapter-reported goal status must not be rewritten just to pass Move admission.
 
 The existing same-environment Move preserves managed children by closing and draining worker child-mutation admission before replacing the parent. That behavior must remain intact. Manual Move still uses its existing interruption warning.
+
+The latest manual Move for session 9b3f22a6 passed admission at 19:12 UTC but its old worker logged `relay response frame is too large` during project_memory_snapshot. The new daemon correctly used the old protocol with that retained worker. Automatic worker replacement had refused because an idle active goal maps to work in the common activity rules. This is a global semantic defect, not a reason to add another Move exception.
+
+The suspected queued-follow-up defect is not reachable through the supported worker owner. In mj-worker/src/relay/commands.rs, quota_recovery_admissible requires queued_prompts.is_empty(). In mj-core/src/relay/snapshot/apply.rs, accepting a new Prompt or SetConfig clears quota recovery, and a user prompt replaces continuation identity immediately. Restore formats can syntactically represent both fields, but the actual checkpoint writer captures one coherent frozen state. Do not weaken the predicate or invent a restored state merely to test the original mistaken hypothesis.
+
+Old workers independently apply their compiled safe_to_replace predicate inside ReserveIdle. The daemon-side global correction cannot alone upgrade such a worker; investigate the existing checkpoint/reservation primitives and preserve atomic admission and native goal state when resolving this bootstrap.
 
 A second observed defect explains the user's transfer chooser: an old failed pre-stop Move to one profile plus an unrelated historical source checkpoint causes a new profile choice to be classified as a restore retry. The old operation owns no checkpoint or handoff, and its source is still running. The generic historical checkpoint is not evidence that the old Move needs recovery.
 
@@ -35,6 +51,12 @@ The user expanded scope to stalls while publishing recovery and worker-upgrade r
 The user also reported a Move error for `d1af5b48898e8d2a9f970b26631bb81a`: an established relay disconnected during `project_memory_snapshot` at 15:38:25 UTC. Its source remained running. This is distinct from the handshake timeout, and its worker-side cause is under investigation.
 
 ## Decision Log
+
+Decision: An idle goal is durable intent, not work in flight, for every consumer of shared activity facts and states. Keep active goals as autonomous drivers so continuation scheduling does not submit duplicate work; retain actual goal execution, pending resume and pending decision as blockers. Remove the old quota-only goal exception. Rationale: the user explicitly broadened the rule after the old worker could neither upgrade nor Move. Date: 2026-11-11 19:25Z.
+
+Decision: Do not add a quota queued-command exception. Rationale: the actual worker serializes quota admission and command acceptance, so the alleged queued-prompt recovery state has no supported writer. Retain all existing user/turn identity protections and correct the earlier issue comment instead of creating impossible regression input. Date: 2026-11-11 19:28Z.
+
+Decision: Mark corrected idle-goal admission with relay protocol 60. New workers and old workers without an active idle goal keep ReserveIdle. Goal-bearing older workers use the existing BeginCheckpoint upgrade bootstrap, selected before any request, with live activity rechecks and original-ready-cursor validation. Do not fall back after a ReserveIdle refusal. Confirm the already-accepted barrier with ReserveIdle using the identical command ID before retaining a legacy lease: its existing idempotence bypasses the obsolete goal predicate while its separate reviewer-admission check still refuses accepted work. Rationale: an old binary applies its old goal predicate inside initial ReserveIdle and cannot receive the fix through that request. BeginCheckpoint does not clear the goal, cancel a turn, export memory, or call the provider; it freezes relay dispatch and blocks new reviewer admissions. Historical workers only provide an observed-idle bootstrap, as allowed by AGENTS.md, and must not be described as having the new admission guarantee. Date: 2026-11-11 19:32Z.
 
 Decision: Treat the durable active goal as preserved for automatic same-harness, same-environment quota Move, keeping interruption acknowledgement false and keeping the remaining activity blockers. Use one shared decision at preparation and again while the source connection is leased. Rationale: quota recovery already established a stopped turn; the durable goal is the work to continue, while newly started execution must not be interrupted. Date: 2026-11-11.
 
@@ -50,7 +72,13 @@ Decision: Bind the automatic preparation's opaque fingerprint to its original us
 
 ## Outcomes & Retrospective
 
-Implementation, validation, push, and the subsequently authorized installation are complete. The live disk expansion was also completed. The remaining memory-size defect is tracked separately in #1500; the user requested its implementation and a second installation after this one.
+The initial implementation, validation, push, and installation are complete, as is the live disk expansion. Project-memory paging from #1500 was subsequently pushed and installed, but old workers can remain in use until replacement admission succeeds. The newly authorized global idle-goal correction and old-worker upgrade follow-up below are in progress; this plan is not complete until they are pushed and installed.
+
+Follow-up focused validation passed: 19 shared activity tests are accounted for by the final run and the single corrected old assertion rerun. Four controller filters passed in 3.24 seconds, including the existing genuine quota Move four-mode regression and the upgrade protocol matrix. A first doctest invocation failed because its referenced mj_core rlib was absent while source was changing; all library tests from that invocation passed. The final stable three-crate run owns remaining full tests, documentation tests and workspace clippy. Protocol-peer tests emulate legacy goal admission and private reviewer refusal; they do not claim to execute a historical full worker swap or a real review capture process. Logs are in the activity and Move child report directories.
+
+The follow-up full three-crate development run completed with 4039 passed and one settings golden failure. The inherited validation instance name deterministically changed the default viewer port; the golden fixture owns private data/configuration roots and expects the default port. Rerunning only that failed filter without MJ_INSTANCE and with explicit private outer data/configuration roots passed, accounting for 4040 passing tests and 34 ignored across the full run and repair. Controller is 2546 passed/19 ignored, core 645 passed/3 ignored plus 3 integration scenarios, worker 817 library and 5 binary tests passed/11 ignored plus 24 integration tests. Documentation tests passed with one ignored core example. Initial workspace clippy found two mechanical style lints; range containment and a nested if were corrected without changing behavior, and the clippy retry owns final acceptance. No full suite was repeated for these repairs. Evidence is integrated-tests.log, settings-env-corrected.log, clippy.log and clippy-final.log under .mj/agents/daefe5367af1d2ac98cedda8a4bd9ef2/.
+
+Final workspace clippy exited successfully in 1m04s after the two style repairs. Parent applied rustfmt's requested wrapping to the range expression, then cargo fmt --all -- --check and git diff --check both passed. The only upstream changes available at that point were the documentation-domain change through 71a2cea74; node removal had not yet landed.
 
 The result-publication change now keeps configuration-lock waits out of the serving loop. Upgrade failure settlement retains the existing per-session attempt and a named daemon admission through the durable write. Four focused tests passed, including actual Ping/Stop traffic while the configuration lock remains held and a real SQLite write-lock wait while another session proceeds. Log: `.mj/agents/4a58f6d94bc675fcf4acd5f24798cfc1/publication-tests-retry.log`.
 
@@ -70,7 +98,9 @@ The daemon is the control service owning session lifecycle operations. `mj-contr
 
 ## Plan of Work
 
-Provide a shared Move activity decision that distinguishes quota recovery from ordinary replacement without duplicating the activity rules. For automatic quota Move, exclude only the durable active-goal ownership fact. Use that decision in daemon preparation and in the controller's source-lease revalidation. Keep non-preserved work, source unavailability, and child-mutation safety checks. Keep existing goal continuation behavior unless the regression proves it creates duplicate continuations.
+The first stage introduced a shared Move activity decision and a quota-specific idle-goal exception. The follow-up replaces that exception with the global rule in mj-core/src/activity.rs: an active goal alone is not owned running work. Update both state-only and fact-based work decisions, retaining the separate autonomous-driver meaning and actual goal execution/resume/decision blockers. Both Move purposes use the global decision, while quota-specific checkpoint control still prevents interrupting a newly started turn. Keep queued-command rejection and all existing user/completed-turn identity checks. Keep source unavailability and child-mutation safety checks. Inspect old-worker idle reservation and existing checkpoint primitives before selecting the upgrade bootstrap correction.
+
+In mj-core/src/relay.rs, advance the protocol to 60 and name its corrected idle-goal ReserveIdle semantics. In mj-controller/src/controller/checkpoint/workspace_lease.rs, select the existing BeginCheckpoint bootstrap for goal-bearing workers older than that boundary, retaining the single IdleWorkspaceLease owner and worker lifecycle permit. Retain initial ReserveIdle for corrected workers and ordinary old idle workers. Once the legacy barrier is ready and activity remains idle, confirm ReserveIdle with the same accepted barrier command ID. Existing pending or active barriers block new reviewer admissions, while this idempotent confirmation checks that no earlier reviewer admission remains. A refusal drops the lease and leaves the worker alive. Store the barrier's initial ready cursor and reuse validate_checkpoint_barrier_snapshot before final replacement so an autonomous turn that begins and finishes after readiness still invalidates the reservation. Never use interruption, archive export, memory synchronization, or a refused-request fallback to make legacy upgrade succeed. Extend the existing upgrade regression with old 58/59 peers that reject initial goal-only ReserveIdle but allow accepted-ID confirmation, current 60 admission, exact goal preservation, admitted reviewer refusal, and a completed autonomous turn after the ready cursor.
 
 Use the existing fingerprint to carry the quota-stopped turn identity from preparation to the leased source recheck. In `controller/checkpoint/lease.rs`, add an internal quota-close mode that defers when new work is observed instead of cancelling the turn. Thread it through `controller/lifecycle.rs`, `checkpoint/latched.rs`, and `checkpoint/barrier.rs`; share the same preserved-goal activity decision. Validate the original pending quota recovery against the ready barrier before Close. No new serialized Move field is needed.
 
@@ -93,11 +123,11 @@ Use the regression fixtures' existing private configuration/data directories. An
 
 ## Validation and Acceptance
 
-The quota Move regression must demonstrate successful same-environment automatic profile switching with an idle turn and active goal while preserving child behavior. The execution-time regression must show that newly started work refuses the Move without invoking an interrupting stop path. Ordinary/manual replacement must retain its existing warning behavior. A different profile choice after a failed pre-stop Move must prepare and execute in place, with no workspace transfer; genuine interrupted Moves must still retain their recovery path. Existing handshake timeout transport coverage must still pass. Final tests and clippy must run in the development profile. Record failures and rerun only failures after repairs; full touched-crate validation runs once after the implementation stabilizes.
+The quota Move regression must demonstrate successful same-environment automatic profile switching with an idle turn and active goal while preserving child behavior. Its running, newer-completed-user and autonomous-turn modes must still refuse or defer without CancelTurn. An idle goal must not produce an interruption warning for ordinary/manual replacement or block the existing atomic worker-upgrade lease; a running goal and pending goal operations must remain blockers. Upgrade proof must distinguish a new-core fake speaking an old protocol from an actual old binary with the defective admission predicate. A different profile choice after a failed pre-stop Move must prepare and execute in place, with no workspace transfer; genuine interrupted Moves must retain their recovery path. Existing handshake timeout transport coverage must still pass. Final tests and clippy run in the development profile with consistent core/controller/worker package selection. Record failures and rerun only failures after repairs; full touched-crate validation runs once after the implementation stabilizes.
 
 ## Idempotence and Recovery
 
-No database migration or protocol change was required for this stage. Regression fixtures own their private state. Source changes are reversible through version control. A failed validation leaves the checkout available for targeted repairs. The user explicitly requested installation after push, then a second installation after fixing memory transport; the first installation is complete. Keep source and Git HEAD unchanged during each installer build so controller and worker identities agree.
+The initial stage required no database migration or protocol change. This follow-up advances the relay protocol to 60 to distinguish corrected worker-owned idle-goal admission, with no new wire request or persisted format. Regression fixtures own their private state. Source changes are reversible through version control. A failed validation leaves the checkout available for targeted repairs. The user explicitly requested each installation, including this global correction. Keep source and Git HEAD unchanged during each installer build so controller and worker identities agree.
 
 ## Artifacts and Notes
 
@@ -107,6 +137,8 @@ The original session is `85e2d8a9f8798bc50e1b00b854c7301c`. The decisive log is 
 
 Reuse the existing activity facts, Move preparation, source connection lease, and goal restore formats. No new dependency or persisted field is required. The timeout remains the existing `RELAY_HANDSHAKE_TIMEOUT` constant, shared by initial connection and reconnect.
 
+The follow-up adds RELAY_IDLE_GOAL_INTENT_PROTOCOL = 60 as a semantic boundary, not a new wire shape. IdleWorkspaceLease owns its original RelayCursor and validates the existing checkpoint barrier against it. Existing protocol-58 and protocol-59 goal-bearing workers can bootstrap with BeginCheckpoint and same-ID ReserveIdle confirmation; new workers continue to use initial ReserveIdle. The strict worker rule rejecting envelopes below its current protocol remains unchanged.
+
 Revision note (2026-11-11): Initial plan records the confirmed cause, authorized changes, ownership, and acceptance conditions.
 
 Revision note (2026-11-11): Added the transfer-chooser defect and recovery ownership fix, and recorded explicit advance-merge authorization and completed fast-forward.
@@ -114,3 +146,9 @@ Revision note (2026-11-11): Added the transfer-chooser defect and recovery owner
 Revision note (2026-11-11): Recorded the user's expanded recovery/upgrade publication scope and additional relay disconnect report, with confirmed evidence and the selected ownership fix.
 
 Revision note (2026-11-11): Recorded completed validation, push review, upstream merge, push, explicit installation authorization, successful daemon handoff, and the separate follow-up memory transport plan.
+
+Revision note (2026-11-11 19:25Z): Reopened execution for the user's global idle-goal rule and the explicitly requested follow-up installation. The user owns the separate node-removal work; merge its landed upstream result before installing rather than restoring the stashed capacity patch.
+
+Revision note (2026-11-11 19:28Z): Worker ownership disproved the queued quota-Move hypothesis. Removed its proposed exception and acceptance condition; added actual old-worker admission as required delivery work, because changing the daemon does not replace the old worker's compiled predicate.
+
+Revision note (2026-11-11 19:32Z): Selected a protocol-marked use of the existing historical-worker upgrade bootstrap and original barrier-cursor validation, preserving the old path's observed-idle limitation rather than claiming atomic admission from a binary that cannot provide it.

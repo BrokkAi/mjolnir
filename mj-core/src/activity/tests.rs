@@ -284,7 +284,6 @@ fn every_way_of_being_busy_is_work_in_flight() {
             facts.background_commands = 1
         }),
         ("a user shell is open", |facts| facts.active_user_shells = 1),
-        ("a goal is active", |facts| facts.goal_active = true),
         ("a goal is running", |facts| facts.goal_running = true),
     ];
     // Rows where the session holds work without doing anything right now. Its
@@ -682,12 +681,12 @@ fn jev_may_discharge_leftover_processes_but_never_a_turn_or_a_shell() {
     assert_eq!(
         quiet_at(
             &ActivityFacts {
-                goal_active: true,
+                goal_running: true,
                 ..unneeded.clone()
             },
             now
         ),
-        Quiet::No("goal owns the session")
+        Quiet::No("turn in flight")
     );
     // A held barrier is not work, but it is not "quiet" either.
     assert_eq!(
@@ -704,4 +703,87 @@ fn jev_may_discharge_leftover_processes_but_never_a_turn_or_a_shell() {
         checkpoint_barrier: true,
         ..ActivityFacts::default()
     }));
+}
+
+// Hard-won: #1498: idle goal intent blocked worker replacement and Move.
+#[test]
+fn durable_goal_intent_allows_replacement_without_discarding_actual_work() {
+    let goal = ActivityFacts {
+        goal_active: true,
+        goal_synchronized: true,
+        background_work_known: Some(true),
+        ..ActivityFacts::default()
+    };
+    assert_eq!(classify(&goal), ActivityState::Goal);
+    assert!(!classify(&goal).has_work_in_flight());
+    assert!(driver_present(&goal));
+    assert!(!has_work_in_flight(&goal));
+    assert!(is_quiet(&goal));
+    for harness in [HarnessKind::Claude, HarnessKind::Codex, HarnessKind::Kimi] {
+        assert!(safe_to_replace(&goal, harness));
+        assert!(safe_to_move(&goal, harness, MovePurpose::Manual));
+        assert_eq!(routine_checkpoint_wait(&goal, harness), None);
+        assert!(replacement_blockers(&goal, harness).is_empty());
+    }
+    type AddWork = fn(&mut ActivityFacts);
+    let work: &[AddWork] = &[
+        |f| f.goal_running = true,
+        |f| f.goal_pending_resume = true,
+        |f| f.goal_decision = true,
+        |f| f.prompt_started_at_ms = Some(NOW),
+        |f| f.tools_in_flight = vec![tool("bash", NOW)],
+        |f| f.background_commands = 1,
+        |f| f.acp_ready = Some(false),
+        |f| f.background_work_known = Some(false),
+        |f| f.capacity_retry_armed = true,
+    ];
+    for add_work in work {
+        let mut busy = goal.clone();
+        add_work(&mut busy);
+        assert!(has_work_in_flight(&busy), "{busy:?}");
+        assert!(!safe_to_replace(&busy, HarnessKind::Codex), "{busy:?}");
+        assert!(
+            !safe_to_move(&busy, HarnessKind::Codex, MovePurpose::QuotaRetry),
+            "{busy:?}"
+        );
+        assert!(
+            routine_checkpoint_wait(&busy, HarnessKind::Codex).is_some(),
+            "{busy:?}"
+        );
+    }
+    let running = ActivityFacts {
+        goal_running: true,
+        ..goal.clone()
+    };
+    assert!(matches!(classify(&running), ActivityState::Turn { .. }));
+    assert!(classify(&running).has_work_in_flight());
+    let queued = ActivityFacts {
+        queued_commands: 1,
+        ..goal.clone()
+    };
+    assert!(has_work_in_flight(&queued));
+    assert!(!safe_to_replace(&queued, HarnessKind::Codex));
+    assert!(!safe_to_move(
+        &queued,
+        HarnessKind::Codex,
+        MovePurpose::Manual
+    ));
+    assert!(routine_checkpoint_wait(&queued, HarnessKind::Codex).is_some());
+    assert!(!safe_to_move(
+        &queued,
+        HarnessKind::Codex,
+        MovePurpose::QuotaRetry
+    ));
+    let closed = ActivityFacts {
+        execution: RelayExecutionState::Closed,
+        goal_running: true,
+        ..goal.clone()
+    };
+    assert!(!driver_present(&closed));
+    let unknown = ActivityFacts {
+        goal_synchronized: false,
+        ..goal
+    };
+    assert!(!safe_to_replace(&unknown, HarnessKind::Codex));
+    assert!(routine_checkpoint_wait(&unknown, HarnessKind::Codex).is_some());
 }
