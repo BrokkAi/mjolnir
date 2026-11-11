@@ -1255,14 +1255,13 @@ mod tests {
     }
 
     // The descriptor listing is the cloexec path on a kernel without
-    // close_range, and on macOS. It takes no limit, so a descriptor far above
-    // 1024 (reachable only once `raise_open_file_limit` has run) is marked
-    // without scanning up to it. Run in the pre-exec child, as it is for
-    // `spawn_detached`.
+    // close_range, and on macOS. Exercise a descriptor far above 1024 when
+    // the hard limit permits it, and an ordinary descriptor otherwise. Run
+    // in the pre-exec child, as it is for `spawn_detached`.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn descriptor_listing_marks_a_descriptor_far_above_the_old_limit_cloexec() {
-        use std::os::fd::AsRawFd;
+    fn descriptor_listing_marks_an_inherited_descriptor_cloexec() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
         use std::os::unix::process::CommandExt as _;
 
         raise_open_file_limit();
@@ -1275,17 +1274,16 @@ mod tests {
             unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
             0
         );
-        let high = (limit.rlim_cur.saturating_sub(1)).min(5000) as libc::c_int;
-        assert!(
-            high > 1024,
-            "the open file limit stayed at {}; the test needs a descriptor above 1024",
-            limit.rlim_cur
-        );
+        let minimum = if limit.rlim_cur > 5000 { 5000 } else { 3 };
 
         let file = std::fs::File::open("/dev/null").expect("open /dev/null");
-        // SAFETY: duplicates a descriptor this test owns onto an unused
-        // number; dup2 clears FD_CLOEXEC on the copy, so exec would keep it.
-        assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), high) }, high);
+        // SAFETY: F_DUPFD chooses an unused descriptor without FD_CLOEXEC,
+        // so exec would keep it. It cannot overwrite another test's fd.
+        let inherited = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, minimum) };
+        assert!(inherited >= minimum, "{}", std::io::Error::last_os_error());
+        // SAFETY: this test owns the new descriptor returned above.
+        let inherited = unsafe { OwnedFd::from_raw_fd(inherited) };
+        let high = inherited.as_raw_fd();
         let mut command = Command::new("sh");
         command.arg("-c").arg(format!("! [ -e /dev/fd/{high} ]"));
         // SAFETY: the closure only calls async-signal-safe functions.
@@ -1299,10 +1297,6 @@ mod tests {
             });
         }
         let status = command.status();
-        // SAFETY: closes the duplicate made above.
-        unsafe {
-            libc::close(high);
-        }
         assert!(
             status.expect("spawn sh").success(),
             "descriptor {high} leaked into the child"
