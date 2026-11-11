@@ -16,7 +16,7 @@ use super::protocol::{
     Accepted, CHUNK_SIZE, ExecRequest, ExitInfo, FrameKind, FrameReader, FrameSender, Hello,
     Request, StartRequest, TarFrameReader, TarFrameWriter, Transport, negotiate,
 };
-use super::tarcopy;
+use super::tarcopy::{self, CopyMode};
 
 /// How long one connection attempt may wait for the guest's answers. The
 /// readiness loop that calls this keeps trying while the VM is running.
@@ -199,12 +199,13 @@ impl<T: Transport> Client<T> {
     }
 
     /// Copy a host file or directory into the guest at `destination`.
-    pub fn copy_in(mut self, source: &Path, destination: &str) -> Result<()> {
+    pub fn copy_in(mut self, source: &Path, destination: &str, mode: CopyMode) -> Result<()> {
         self.request(&Request::CopyIn {
             destination: destination.to_owned(),
+            contents: mode == CopyMode::Contents,
         })?;
         let writer = TarFrameWriter::new(self.sender.clone());
-        let packed = tarcopy::pack(source, writer)
+        let packed = tarcopy::pack(source, writer, mode)
             .and_then(|writer| writer.finish().context("finish tar stream"));
         match packed {
             Ok(()) => self.expect_exit(),
@@ -236,12 +237,14 @@ impl<T: Transport> Client<T> {
         source: &str,
         destination: &Path,
         owner: Option<(u32, u32)>,
+        mode: CopyMode,
     ) -> Result<()> {
         self.request(&Request::CopyOut {
             source: source.to_owned(),
+            contents: mode == CopyMode::Contents,
         })?;
         let mut reader = TarFrameReader::new(&mut self.frames);
-        tarcopy::unpack(&mut reader, destination, owner)?;
+        tarcopy::unpack(&mut reader, destination, owner, mode)?;
         reader.finish()?;
         self.expect_exit()
     }

@@ -366,10 +366,13 @@ impl Agent {
         let result = match request {
             Request::Start(start) => self.handle_start(&sender, start),
             Request::Exec(exec) => self.handle_exec(&sender, frames, exec),
-            Request::CopyIn { destination } => {
-                self.handle_copy_in(&sender, &mut frames, &destination)
+            Request::CopyIn {
+                destination,
+                contents,
+            } => self.handle_copy_in(&sender, &mut frames, &destination, copy_mode(contents)),
+            Request::CopyOut { source, contents } => {
+                self.handle_copy_out(&sender, &source, copy_mode(contents))
             }
-            Request::CopyOut { source } => self.handle_copy_out(&sender, &source),
             Request::Stop => self.handle_stop(&sender),
         };
         if let Err(error) = &result {
@@ -723,6 +726,7 @@ impl Agent {
         sender: &FrameSender<T>,
         frames: &mut FrameReader<T>,
         destination: &str,
+        mode: tarcopy::CopyMode,
     ) -> Result<()> {
         let defaults = self
             .defaults
@@ -737,7 +741,7 @@ impl Agent {
         // for its whole run: shutdown waits for it, and later copies are refused.
         let _admitted = self.admit_work()?;
         let mut reader = TarFrameReader::new(frames);
-        tarcopy::unpack(&mut reader, Path::new(destination), owner)?;
+        tarcopy::unpack(&mut reader, Path::new(destination), owner, mode)?;
         reader.finish()?;
         sender.send_json(
             FrameKind::Exit,
@@ -760,9 +764,14 @@ impl Agent {
         Ok(admission)
     }
 
-    fn handle_copy_out<T: Transport>(&self, sender: &FrameSender<T>, source: &str) -> Result<()> {
+    fn handle_copy_out<T: Transport>(
+        &self,
+        sender: &FrameSender<T>,
+        source: &str,
+        mode: tarcopy::CopyMode,
+    ) -> Result<()> {
         let writer = TarFrameWriter::new(sender.clone());
-        let writer = tarcopy::pack(Path::new(source), writer)?;
+        let writer = tarcopy::pack(Path::new(source), writer, mode)?;
         writer.finish().context("finish tar stream")?;
         sender.send_json(
             FrameKind::Exit,
@@ -772,6 +781,14 @@ impl Agent {
             },
         )?;
         Ok(())
+    }
+}
+
+fn copy_mode(contents: bool) -> tarcopy::CopyMode {
+    if contents {
+        tarcopy::CopyMode::Contents
+    } else {
+        tarcopy::CopyMode::Item
     }
 }
 

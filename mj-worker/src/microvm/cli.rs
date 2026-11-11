@@ -18,7 +18,7 @@ use super::image::{self, PullPolicy};
 use super::protocol::ExecRequest;
 use super::state::{ImageConfig, Layout, VolumeMetadata, validate_label, validate_name};
 use super::vm::{self, RunSpec, VolumeArg};
-use super::{net, sys, template, volume};
+use super::{net, sys, tarcopy, template, volume};
 
 /// The exit status of an engine failure, as Podman uses.
 const ENGINE_FAILURE: i32 = 125;
@@ -653,12 +653,20 @@ fn copy(layout: &Layout, args: CpArgs) -> Result<i32> {
         split_container_operand(&args.destination),
     ) {
         (None, Some((name, destination))) => {
+            // `SRC/.` copies the directory's contents, as in Podman.
+            let (source, mode) = tarcopy::split_contents_operand(&args.source);
             let (_state, client) = vm::agent_for(layout, name)?;
-            client.copy_in(&PathBuf::from(&args.source), destination)?;
+            client.copy_in(&PathBuf::from(source), destination, mode)?;
         }
         (Some((name, source)), None) => {
+            let (source, mode) = tarcopy::split_contents_operand(source);
             let (_state, client) = vm::agent_for(layout, name)?;
-            client.copy_out(source, &PathBuf::from(&args.destination), sys::sudo_owner())?;
+            client.copy_out(
+                source,
+                &PathBuf::from(&args.destination),
+                sys::sudo_owner(),
+                mode,
+            )?;
         }
         (Some(_), Some(_)) => bail!("copying between two containers is not supported"),
         (None, None) => bail!("one of the cp operands must be name:path inside a container"),

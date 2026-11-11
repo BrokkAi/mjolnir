@@ -17,6 +17,7 @@ use super::protocol::{
     ExecRequest, ExitInfo, FrameKind, FrameReader, FrameSender, Hello, MIN_PROTOCOL_VERSION,
     PROTOCOL_VERSION, Request,
 };
+use super::tarcopy::CopyMode;
 
 struct Harness {
     agent: Arc<Agent>,
@@ -303,7 +304,7 @@ fn copy_moves_a_directory_in_and_out_with_podman_naming() {
     std::fs::create_dir(&inbox).unwrap();
     harness
         .client()
-        .copy_in(&source, inbox.to_str().unwrap())
+        .copy_in(&source, inbox.to_str().unwrap(), CopyMode::Item)
         .unwrap();
     assert_eq!(
         std::fs::read(inbox.join("tree/big.bin")).unwrap(),
@@ -324,7 +325,12 @@ fn copy_moves_a_directory_in_and_out_with_podman_naming() {
     let back = work.path().join("back");
     harness
         .client()
-        .copy_out(inbox.join("tree").to_str().unwrap(), &back, None)
+        .copy_out(
+            inbox.join("tree").to_str().unwrap(),
+            &back,
+            None,
+            CopyMode::Item,
+        )
         .unwrap();
     assert_eq!(
         std::fs::read(back.join("big.bin")).unwrap(),
@@ -338,9 +344,122 @@ fn copy_moves_a_directory_in_and_out_with_podman_naming() {
     // A missing destination parent is the agent's refusal, relayed to the client.
     let error = harness
         .client()
-        .copy_in(&source, "/no/such/parent/tree")
+        .copy_in(&source, "/no/such/parent/tree", CopyMode::Item)
         .unwrap_err();
     assert!(format!("{error:#}").contains("does not exist"), "{error:#}");
+}
+
+#[test]
+fn copy_contents_merges_into_an_existing_directory_and_creates_a_missing_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let harness = Harness::new();
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("profile");
+    std::fs::create_dir_all(source.join("nested/deeper")).unwrap();
+    std::fs::write(source.join(".dotfile"), "dot").unwrap();
+    std::fs::write(source.join("nested/deeper/a.txt"), "alpha").unwrap();
+    std::os::unix::fs::symlink("nested/deeper/a.txt", source.join("link")).unwrap();
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+    // An existing destination keeps its own mode and what it already holds.
+    let existing = work.path().join("existing");
+    std::fs::create_dir(&existing).unwrap();
+    std::fs::write(existing.join("kept"), "kept").unwrap();
+    std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o711)).unwrap();
+    harness
+        .client()
+        .copy_in(&source, existing.to_str().unwrap(), CopyMode::Contents)
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(existing.join(".dotfile")).unwrap(),
+        "dot"
+    );
+    assert_eq!(
+        std::fs::read_to_string(existing.join("nested/deeper/a.txt")).unwrap(),
+        "alpha"
+    );
+    assert_eq!(
+        std::fs::read_link(existing.join("link")).unwrap().to_str(),
+        Some("nested/deeper/a.txt")
+    );
+    assert_eq!(
+        std::fs::read_to_string(existing.join("kept")).unwrap(),
+        "kept"
+    );
+    assert!(
+        !existing.join("profile").exists(),
+        "the directory itself must not be nested"
+    );
+    assert_eq!(
+        std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+        0o711
+    );
+
+    // A missing destination is created, with the source directory's mode.
+    let created = work.path().join("created");
+    harness
+        .client()
+        .copy_in(&source, created.to_str().unwrap(), CopyMode::Contents)
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(created.join(".dotfile")).unwrap(),
+        "dot"
+    );
+    assert_eq!(
+        std::fs::metadata(&created).unwrap().permissions().mode() & 0o777,
+        0o750
+    );
+
+    // Its parent must exist, and a file in its place is refused.
+    let error = harness
+        .client()
+        .copy_in(&source, "/no/such/parent/dest", CopyMode::Contents)
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("does not exist"), "{error:#}");
+    let file = work.path().join("file");
+    std::fs::write(&file, "x").unwrap();
+    let error = harness
+        .client()
+        .copy_in(&source, file.to_str().unwrap(), CopyMode::Contents)
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("not a directory"),
+        "{error:#}"
+    );
+
+    // Out of the guest: the same form, into a new host directory.
+    let back = work.path().join("back");
+    harness
+        .client()
+        .copy_out(source.to_str().unwrap(), &back, None, CopyMode::Contents)
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(back.join("nested/deeper/a.txt")).unwrap(),
+        "alpha"
+    );
+
+    // The contents form keeps the safety rules: no writing through a symlink.
+    let outside = work.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let target = work.path().join("target");
+    std::fs::create_dir(&target).unwrap();
+    std::os::unix::fs::symlink(&outside, target.join("out")).unwrap();
+    // `target/out` is a symlink to a directory; the incoming `out/file` must not go through it.
+    let incoming = work.path().join("incoming");
+    std::fs::create_dir_all(incoming.join("out")).unwrap();
+    std::fs::write(incoming.join("out/file"), "escape").unwrap();
+    harness
+        .client()
+        .copy_in(&incoming, target.to_str().unwrap(), CopyMode::Contents)
+        .unwrap();
+    assert!(
+        !outside.join("file").exists(),
+        "wrote through a destination symlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target.join("out/file")).unwrap(),
+        "escape"
+    );
 }
 
 #[test]
@@ -388,7 +507,8 @@ fn unpacking_never_leaves_the_destination_or_writes_through_a_symlink() {
     };
 
     let traversal = tar_with(&[("top/../../escaped", tar::EntryType::Regular, "")]);
-    let error = super::tarcopy::unpack(&traversal[..], &destination, None).unwrap_err();
+    let error =
+        super::tarcopy::unpack(&traversal[..], &destination, None, CopyMode::Item).unwrap_err();
     assert!(
         format!("{error:#}").contains("leaves its destination"),
         "{error:#}"
@@ -404,7 +524,8 @@ fn unpacking_never_leaves_the_destination_or_writes_through_a_symlink() {
         ),
         ("top/out/file", tar::EntryType::Regular, ""),
     ]);
-    let error = super::tarcopy::unpack(&through_link[..], &destination, None).unwrap_err();
+    let error =
+        super::tarcopy::unpack(&through_link[..], &destination, None, CopyMode::Item).unwrap_err();
     assert!(
         format!("{error:#}").contains("not a directory"),
         "{error:#}"
@@ -412,7 +533,7 @@ fn unpacking_never_leaves_the_destination_or_writes_through_a_symlink() {
     assert!(!outside.join("file").exists());
 
     let device = tar_with(&[("top", tar::EntryType::Char, "")]);
-    assert!(super::tarcopy::unpack(&device[..], &destination, None).is_err());
+    assert!(super::tarcopy::unpack(&device[..], &destination, None, CopyMode::Item).is_err());
 }
 
 #[test]

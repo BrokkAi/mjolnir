@@ -170,10 +170,16 @@ pub enum Request {
     /// Receive a tar stream and unpack it at `destination`.
     CopyIn {
         destination: String,
+        /// The tar holds a directory's contents, not the directory itself.
+        #[serde(default)]
+        contents: bool,
     },
     /// Send `source` as a tar stream.
     CopyOut {
         source: String,
+        /// Send the directory's contents, not the directory itself.
+        #[serde(default)]
+        contents: bool,
     },
     /// Flush every filesystem, answer, and power the VM off.
     Stop,
