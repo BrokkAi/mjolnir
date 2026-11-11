@@ -3393,11 +3393,14 @@ mod executor_tests {
     /// A stand-in for `ssh` that is refused by the server on its first call and
     /// connects on the next, the way a host at its `MaxStartups` ceiling
     /// behaves once the daemon's burst drains.
+    ///
+    /// The count is written to a scratch file and renamed into place, so a
+    /// deadline that kills the script mid-write never leaves an empty counter.
     fn flaky_ssh_script(directory: &Path, refusals: u32) -> CommandSpec {
         let counter = directory.join("attempts");
         let script = format!(
             "count=$(cat {counter} 2>/dev/null || echo 0)\n\
-             echo $((count + 1)) > {counter}\n\
+             echo $((count + 1)) > {counter}.tmp && mv {counter}.tmp {counter}\n\
              if [ \"$count\" -lt {refusals} ]; then\n\
              echo 'kex_exchange_identification: Connection closed by 10.0.0.1 port 22' >&2\n\
              exit 255\n\
