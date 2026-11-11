@@ -790,7 +790,7 @@ pub(super) fn backend_target(
         },
         TargetTemplate::SshNitro { ssh, container } => targets::TargetTemplate::SshNitro {
             ssh: SshTarget::from(ssh),
-            container: backend_container(container, allocation, overrides),
+            container: backend_container_with(container, allocation, overrides, true),
         },
     })
 }
@@ -979,6 +979,52 @@ fn backend_container(
     allocation: Option<&SessionResourceAllocation>,
     overrides: ContainerOverrides<'_>,
 ) -> ContainerTemplate {
+    backend_container_with(container, allocation, overrides, false)
+}
+
+/// A container environment as the engine receives it: the `--env` arguments,
+/// and the values those arguments leave out.
+///
+/// An entry whose value comes from a reference (`from_env`, `from_secret`) or
+/// from the controller's own environment is a secret. When the engine runs
+/// under `sudo`, which logs every command line, a secret is named by a
+/// valueless `--env NAME` and its value travels in the ssh command's
+/// environment instead (see `CommandPlan::provide_target_environment_secrets`).
+/// One function builds both lists, so an argument and its value cannot
+/// disagree. Everything else stays `--env NAME=value`.
+pub(super) struct ContainerEnvironment {
+    pub args: Vec<String>,
+    pub secrets: Vec<(String, String)>,
+}
+
+pub(super) fn container_environment(
+    container: &mj_core::config::ContainerTemplate,
+    overrides: ContainerOverrides<'_>,
+    secrets_out_of_band: bool,
+) -> ContainerEnvironment {
+    let mut environment = container.environment.resolved().clone();
+    if overrides.no_github_credentials {
+        mj_core::credentials::remove_github_authentication_environment(&mut environment);
+    }
+    let mut args = Vec::new();
+    let mut secrets = Vec::new();
+    for (key, value) in environment {
+        if secrets_out_of_band && container.environment.is_secret_sourced(&key) {
+            args.extend(["--env".to_owned(), key.clone()]);
+            secrets.push((key, value));
+        } else {
+            args.extend(["--env".to_owned(), format!("{key}={value}")]);
+        }
+    }
+    ContainerEnvironment { args, secrets }
+}
+
+fn backend_container_with(
+    container: &mj_core::config::ContainerTemplate,
+    allocation: Option<&SessionResourceAllocation>,
+    overrides: ContainerOverrides<'_>,
+    secrets_out_of_band: bool,
+) -> ContainerTemplate {
     let mut extra_run_args = Vec::new();
     if let Some(platform) = &container.platform {
         extra_run_args.push(format!("--platform={platform}"));
@@ -998,13 +1044,7 @@ fn backend_container(
     if let Some(memory) = memory {
         extra_run_args.push(format!("--memory={memory}"));
     }
-    let mut environment = container.environment.resolved().clone();
-    if overrides.no_github_credentials {
-        mj_core::credentials::remove_github_authentication_environment(&mut environment);
-    }
-    for (key, value) in &environment {
-        extra_run_args.extend(["--env".to_string(), format!("{key}={value}")]);
-    }
+    extra_run_args.extend(container_environment(container, overrides, secrets_out_of_band).args);
     ContainerTemplate {
         image: container.image.clone(),
         pull_policy: container.pull_policy,

@@ -251,20 +251,23 @@ pub(super) fn nitro_container_run(
     ssh: &SshTarget,
     workspace_root: &str,
 ) -> Result<Vec<CommandSpec>> {
-    let run = ssh_engine_command(
-        ssh,
-        MICROVM_ENGINE,
-        nitro_run_args(
-            template,
-            name,
-            session_id,
-            additional_mounts,
-            workspace_root,
-        )?,
-    )
-    .purpose("start remote Nitro sandbox")
-    .stage(ProvisionStage::Provisioning)
-    .creates_target();
+    let mut arguments = nitro_run_args(
+        template,
+        name,
+        session_id,
+        additional_mounts,
+        workspace_root,
+    )?;
+    // A valueless `--env NAME` inherits NAME from the engine's environment,
+    // which `sudo` would otherwise reset. Preserve exactly those names; the
+    // arguments are the one list, so the two cannot disagree.
+    let inherited = inherited_environment_names(&arguments);
+    let mut command = engine_argv_with_env(MICROVM_ENGINE, &inherited);
+    command.append(&mut arguments);
+    let run = ssh_command_owned(ssh, command)
+        .purpose("start remote Nitro sandbox")
+        .stage(ProvisionStage::Provisioning)
+        .creates_target();
     let tmp = ssh_engine_command(
         ssh,
         MICROVM_ENGINE,
@@ -279,6 +282,15 @@ pub(super) fn nitro_container_run(
     .purpose("prepare the Nitro sandbox's /tmp")
     .stage(ProvisionStage::Provisioning);
     Ok(vec![run, tmp])
+}
+
+/// The names of the `--env NAME` arguments that carry no value.
+fn inherited_environment_names(arguments: &[String]) -> Vec<String> {
+    arguments
+        .windows(2)
+        .filter(|pair| pair[0] == "--env" && !pair[1].contains('='))
+        .map(|pair| pair[1].clone())
+        .collect()
 }
 
 /// A script that runs the engine as `mj_microvm`. It is the same command as

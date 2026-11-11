@@ -1934,25 +1934,50 @@ pub fn validate_inherited_environment_name(name: &str) -> Result<()> {
 
 impl CommandPlan {
     /// Supply one container environment value without placing it in the
-    /// Podman/SSH argument vector. The target launcher reads the value from
-    /// stdin, exports it, and asks the container engine to inherit it by name.
+    /// Podman/SSH argument vector. See [`Self::provide_target_environment_secrets`].
     pub fn provide_target_environment_secret(
         &mut self,
         target: &TargetTemplate,
         name: &str,
         value: &str,
     ) -> Result<()> {
-        validate_inherited_environment_name(name)?;
+        self.provide_target_environment_secrets(target, &[(name.to_owned(), value.to_owned())])
+    }
+
+    /// Supply container environment values without placing them in the
+    /// Podman/SSH argument vector. The target launcher reads one value per
+    /// line from stdin, exports each, and the container engine is asked to
+    /// inherit it by name (`--env NAME`).
+    pub fn provide_target_environment_secrets(
+        &mut self,
+        target: &TargetTemplate,
+        secrets: &[(String, String)],
+    ) -> Result<()> {
         ensure!(
-            !value.as_bytes().contains(&b'\n') && !value.as_bytes().contains(&b'\r'),
-            "secret environment value cannot contain a newline"
+            !secrets.is_empty(),
+            "no secret environment values to supply"
         );
+        let mut read_and_export = String::new();
+        let mut input = Vec::new();
+        for (index, (name, value)) in secrets.iter().enumerate() {
+            validate_inherited_environment_name(name)?;
+            ensure!(
+                secrets[..index].iter().all(|(earlier, _)| earlier != name),
+                "secret environment variable {name} is supplied twice"
+            );
+            ensure!(
+                !value.as_bytes().contains(&b'\n') && !value.as_bytes().contains(&b'\r'),
+                "secret environment value cannot contain a newline"
+            );
+            read_and_export.push_str(&format!("IFS= read -r {name} || exit 1; export {name}; "));
+            input.extend_from_slice(value.as_bytes());
+            input.push(b'\n');
+        }
         let command = self
             .commands
             .iter_mut()
             .find(|command| command.creates_target)
             .context("provisioning plan has no target creation command")?;
-        let read_and_export = format!("IFS= read -r {name} || exit 1; export {name};");
         match target {
             TargetTemplate::LocalPodman(_)
             | TargetTemplate::LocalDocker(_)
@@ -1961,7 +1986,7 @@ impl CommandPlan {
                 let args = std::mem::take(&mut command.args);
                 command.args = vec![
                     "-c".to_owned(),
-                    format!("{read_and_export} exec \"$@\""),
+                    format!("{read_and_export}exec \"$@\""),
                     "mj-secret-env".to_owned(),
                     program,
                 ];
@@ -1975,14 +2000,12 @@ impl CommandPlan {
                     .args
                     .last_mut()
                     .context("remote container command has no SSH command argument")?;
-                *remote = format!("{read_and_export} exec {remote}");
+                *remote = format!("{read_and_export}exec {remote}");
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
                 bail!("target does not support inherited container environment")
             }
         }
-        let mut input = value.as_bytes().to_vec();
-        input.push(b'\n');
         command.sensitive_stdin = Some(SensitiveCommandInput(Arc::new(input)));
         Ok(())
     }
@@ -2344,11 +2367,23 @@ pub const MICROVM_ENGINE_WORKER: &str = ".local/share/hel/microvm/hel";
 /// inner `sh` does it before `sudo` starts. Everything after this prefix
 /// reaches the engine unchanged, including stdin, stdout and the exit status.
 pub fn engine_argv(engine: &str) -> Vec<String> {
+    engine_argv_with_env(engine, &[])
+}
+
+/// [`engine_argv`] for a command whose engine must inherit the environment
+/// variables `names` from the ssh command's environment. `sudo` resets the
+/// environment, so the microVM engine's prefix preserves exactly these; a
+/// value on the command line would be logged by `sudo` and visible in `ps`.
+/// Other engines inherit the whole environment and ignore `names`.
+pub fn engine_argv_with_env(engine: &str, names: &[String]) -> Vec<String> {
     if engine == MICROVM_ENGINE {
         vec![
             "sh".to_owned(),
             "-c".to_owned(),
-            format!(r#"exec {} "$@""#, engine_shell_words(engine)),
+            format!(
+                r#"exec {} "$@""#,
+                engine_shell_words_with_env(engine, names)
+            ),
             "mj-microvm".to_owned(),
         ]
     } else {
@@ -2360,16 +2395,20 @@ pub fn engine_argv(engine: &str) -> Vec<String> {
 /// `exec $(engine_shell_words) volume rm "$volume"`. The words contain `$HOME`
 /// for the microVM engine, so they belong inside a script that does not quote
 /// them away, never in an argument that ssh quotes.
-///
-/// `sudo` resets the environment, which would drop the `GH_TOKEN` that
-/// provisioning feeds a launch through the command's environment (a value on
-/// the command line would be logged by `sudo` and visible in `ps`), so that one
-/// name is preserved.
 pub fn engine_shell_words(engine: &str) -> String {
+    engine_shell_words_with_env(engine, &[])
+}
+
+/// [`engine_shell_words`] preserving the environment variables `names`
+/// through `sudo`; see [`engine_argv_with_env`].
+pub fn engine_shell_words_with_env(engine: &str, names: &[String]) -> String {
     if engine == MICROVM_ENGINE {
-        format!(
-            r#"sudo -n --preserve-env=GH_TOKEN "$HOME/{MICROVM_ENGINE_WORKER}" {MICROVM_ENGINE}"#
-        )
+        let preserve = if names.is_empty() {
+            String::new()
+        } else {
+            format!("--preserve-env={} ", names.join(","))
+        };
+        format!(r#"sudo -n {preserve}"$HOME/{MICROVM_ENGINE_WORKER}" {MICROVM_ENGINE}"#)
     } else {
         engine.to_owned()
     }

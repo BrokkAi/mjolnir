@@ -141,9 +141,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         (&nitro_commands[2], "'image' 'inspect' '--format' '{{.Id}}'"),
     ] {
         let remote = command.args.last().unwrap();
-        assert!(remote.contains(
-            "exec sudo -n --preserve-env=GH_TOKEN \"$HOME/.local/share/hel/microvm/hel\" microvm"
-        ));
+        assert!(remote.contains("exec sudo -n \"$HOME/.local/share/hel/microvm/hel\" microvm"));
         assert!(
             remote.ends_with(verbs) || remote.contains(verbs),
             "{remote}"

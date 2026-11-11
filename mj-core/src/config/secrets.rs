@@ -234,6 +234,17 @@ impl Environment {
         &self.sources
     }
 
+    /// Whether `key`'s value came from somewhere other than the file itself:
+    /// a `from_env` or `from_secret` reference, or a variable
+    /// [`Self::inherit`] supplied. Such a value must not appear on a command
+    /// line.
+    pub fn is_secret_sourced(&self, key: &str) -> bool {
+        match self.sources.get(key) {
+            Some(value) => value.is_reference(),
+            None => self.resolved.contains_key(key),
+        }
+    }
+
     /// The names of the variables [`Self::inherit`] supplied, which no entry
     /// spells.
     pub fn inherited_names(&self) -> impl Iterator<Item = &str> {

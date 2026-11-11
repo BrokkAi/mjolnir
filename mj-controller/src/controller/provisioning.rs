@@ -808,9 +808,26 @@ impl Controller {
                     return Err(error);
                 }
             };
-            if let Some(token) = container_github_token
-                && let Err(error) =
-                    provision.provide_target_environment_secret(&target, "GH_TOKEN", token)
+            // Values that must stay off the command line: the GitHub token,
+            // and, for a sandbox whose engine runs under `sudo`, every
+            // environment value that came from a reference.
+            let mut secrets = match template {
+                TargetTemplate::SshNitro { container, .. } => {
+                    super::backend::container_environment(
+                        container,
+                        ContainerOverrides::for_session(&session),
+                        true,
+                    )
+                    .secrets
+                }
+                _ => Vec::new(),
+            };
+            if let Some(token) = container_github_token {
+                secrets.retain(|(name, _)| name != "GH_TOKEN");
+                secrets.push(("GH_TOKEN".to_owned(), token.to_owned()));
+            }
+            if !secrets.is_empty()
+                && let Err(error) = provision.provide_target_environment_secrets(&target, &secrets)
             {
                 if let Some(cache) = &prepared_cache {
                     let _ = cache.cleanup(executor);
