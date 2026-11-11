@@ -244,15 +244,20 @@ fn flatten_into(
     let bytes =
         first_number(&sys::run_checked(&du, &["-sb", "--apparent-size", rootfs_arg])?.stdout)
             .context("read the size of the extracted image")?;
-    let inodes = first_number(&sys::run_checked(&du, &["--inodes", "-s", rootfs_arg])?.stdout)
-        .context("read the file count of the extracted image")?;
-    // Room for the guest to install packages and write outside its volumes.
-    let size = ((bytes + bytes / 4 + (4 << 30)) >> 20 << 20).max(64 << 20);
+    // The root disk is sparse, so it is sized like the volumes: to the
+    // filesystem that holds it. Its real limit is the host's free space, and a
+    // size chosen here would be baked into every VM cloned from the image.
+    let size = sys::filesystem_bytes(scratch)? >> 20 << 20;
+    ensure!(
+        size > bytes + (1 << 30),
+        "the image filesystem ({} MiB) is too small for this image ({} MiB)",
+        size >> 20,
+        bytes >> 20
+    );
     let root_image = scratch.join("root.ext4");
     let file = fs::File::create(&root_image)?;
     file.set_len(size)?;
     drop(file);
-    let inode_count = (inodes + inodes / 4 + 16384).to_string();
     sys::run_tool(
         "mkfs.ext4",
         &[
@@ -260,8 +265,6 @@ fn flatten_into(
             "-F",
             "-m",
             "0",
-            "-N",
-            inode_count.as_str(),
             "-L",
             "rootfs",
             "-E",

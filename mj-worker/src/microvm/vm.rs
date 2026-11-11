@@ -460,8 +460,29 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
     }
 }
 
+/// The name of the VM an operand refers to. Podman accepts the container id
+/// that `run` printed (or an unambiguous prefix of at least 12 characters) as
+/// well as the name; a name wins over an id, and an operand that matches
+/// nothing is returned as it is, for the caller to report.
+pub fn resolve(layout: &Layout, operand: &str) -> Result<String> {
+    if validate_name("container", operand).is_ok() && VmState::path(layout, operand).is_file() {
+        return Ok(operand.to_owned());
+    }
+    if operand.len() >= 12 && operand.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let wanted = operand.to_ascii_lowercase();
+        let mut matches = VmState::list(layout)?
+            .into_iter()
+            .filter(|vm| vm.id.starts_with(&wanted));
+        if let (Some(vm), None) = (matches.next(), matches.next()) {
+            return Ok(vm.name);
+        }
+    }
+    Ok(operand.to_owned())
+}
+
 /// Start an existing VM from its retained disks.
 pub fn start(layout: &Layout, name: &str) -> Result<()> {
+    let name = &resolve(layout, name)?;
     validate_name("container", name)?;
     ensure!(
         sys::is_root(),
@@ -642,7 +663,8 @@ fn launch(layout: &Layout, state: &VmState) -> Result<()> {
         })
         .context("start the container command")?;
     // The volumes were filled from the image if they were new; never again.
-    for mounted in &state.volumes {
+    // A volume attached read-only could not be filled, so it stays new.
+    for mounted in state.volumes.iter().filter(|mounted| mounted.read_write) {
         let marker = layout.volume(&mounted.name).join("initialized");
         fs::write(&marker, b"").with_context(|| format!("record {}", marker.display()))?;
     }
@@ -695,6 +717,7 @@ pub fn open_agent(name: &str) -> Result<Client<UnixStream>> {
 
 /// The connected agent of a running VM, or the Podman-style reason there is none.
 pub fn agent_for(layout: &Layout, name: &str) -> Result<(VmState, Client<UnixStream>)> {
+    let name = &resolve(layout, name)?;
     validate_name("container", name)?;
     let state = VmState::read(layout, name)?
         .ok_or_else(|| anyhow!("no container with name or ID {name:?} found: no such container"))?;
@@ -715,6 +738,7 @@ pub fn agent_for(layout: &Layout, name: &str) -> Result<(VmState, Client<UnixStr
 /// would lose whatever the guest had not yet written. Stopping an absent or
 /// stopped VM succeeds only with `ignore_missing` for the absent case.
 pub fn stop(layout: &Layout, name: &str, grace: Duration, ignore_missing: bool) -> Result<()> {
+    let name = &resolve(layout, name)?;
     validate_name("container", name)?;
     let _vm_lock = layout.lock_vm(name)?;
     match VmState::read(layout, name)? {
@@ -784,6 +808,7 @@ pub fn remove(
     ignore_missing: bool,
     volumes: bool,
 ) -> Result<()> {
+    let name = &resolve(layout, name)?;
     validate_name("container", name)?;
     ensure!(
         sys::is_root(),
@@ -818,6 +843,7 @@ pub fn remove(
 
 /// The Podman-shaped description of a VM.
 pub fn inspect(layout: &Layout, name: &str) -> Result<Value> {
+    let name = &resolve(layout, name)?;
     validate_name("container", name)?;
     let state = VmState::read(layout, name)?
         .ok_or_else(|| anyhow!("no container with name or ID {name:?} found: no such container"))?;
@@ -875,6 +901,7 @@ pub fn inspect(layout: &Layout, name: &str) -> Result<Value> {
 
 /// The state for `container exists`.
 pub fn exists(layout: &Layout, name: &str) -> Result<bool> {
+    let name = &resolve(layout, name)?;
     validate_name("container", name)?;
     Ok(VmState::read(layout, name)?.is_some())
 }

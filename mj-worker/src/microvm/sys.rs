@@ -136,3 +136,17 @@ pub fn check_interrupted() -> Result<()> {
     }
     Ok(())
 }
+
+/// Total bytes of the filesystem that holds `path`.
+pub fn filesystem_bytes(path: &std::path::Path) -> Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: statvfs is plain old data and is filled by the call below.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c_path` is NUL-terminated and `stat` is a valid statvfs.
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("statvfs {}", path.display()));
+    }
+    Ok(stat.f_blocks as u64 * stat.f_frsize as u64)
+}

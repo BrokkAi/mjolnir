@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -23,18 +22,6 @@ pub const SESSION_LABEL: &str = "dev.mj.session";
 
 pub fn disk_path(layout: &Layout, name: &str) -> PathBuf {
     layout.volume(name).join("disk.ext4")
-}
-
-/// Bytes on the filesystem that holds the volumes.
-fn filesystem_bytes(layout: &Layout) -> Result<u64> {
-    let path = std::ffi::CString::new(layout.volumes().as_os_str().as_bytes())?;
-    // SAFETY: statvfs is plain old data and is filled by the call below.
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    // SAFETY: `path` is NUL-terminated and `stat` is a valid statvfs.
-    if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
-        return Err(std::io::Error::last_os_error()).context("statvfs the volume directory");
-    }
-    Ok(stat.f_blocks as u64 * stat.f_frsize as u64)
 }
 
 /// Create a volume. Fails if the name is taken.
@@ -69,7 +56,7 @@ fn create_locked(
     let built = (|| -> Result<()> {
         let disk = scratch.join("disk.ext4");
         let file = fs::File::create(&disk)?;
-        file.set_len(filesystem_bytes(layout)?)?;
+        file.set_len(sys::filesystem_bytes(&layout.volumes())?)?;
         drop(file);
         sys::run_tool(
             "mkfs.ext4",
