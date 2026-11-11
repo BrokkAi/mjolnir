@@ -81,6 +81,9 @@ ip addr add "$sbx_ip" dev "$IF"; ip link set "$IF" up
 ip route add default via "$sbx_gw"
 log "net up on $IF"
 
+# An image may ship these as symlinks (systemd-resolved, /proc/sys): replace them with regular files.
+mkdir -p /newroot/etc
+rm -f /newroot/etc/hostname /newroot/etc/hosts /newroot/etc/resolv.conf
 echo "$sbx_name" > /newroot/etc/hostname; hostname "$sbx_name"
 printf '127.0.0.1 localhost\n%s %s\n::1 localhost\n' "${sbx_ip%/*}" "$sbx_name" > /newroot/etc/hosts
 printf 'nameserver %s\n' "${sbx_dns:-169.254.169.253}" > /newroot/etc/resolv.conf
