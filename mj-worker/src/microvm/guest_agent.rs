@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -90,83 +90,121 @@ impl ProcessSpawner for DirectSpawner {
     }
 }
 
-/// The PID 1 reaper: one thread calls `waitpid(-1)` and routes statuses by pid.
+/// The PID 1 reaper: one thread owns `waitpid` and routes statuses by pid.
+///
+/// It never depends on SIGCHLD delivery: it blocks in `waitid(WNOWAIT)`, which
+/// reports that a child can be reaped without reaping it, and then reaps under
+/// the lock that spawns hold. std panics if a spawn whose exec failed finds its
+/// half-started child already collected, so the reaper must not collect
+/// anything while a spawn is in progress.
 pub struct Reaper {
-    waiters: Mutex<HashMap<i32, mpsc::Sender<WaitResult>>>,
+    state: Mutex<ReaperState>,
+    spawned: Condvar,
+}
+
+#[derive(Default)]
+struct ReaperState {
+    waiters: HashMap<i32, mpsc::Sender<WaitResult>>,
+    /// Counts spawns, so the reaper can tell "a child appeared" from "nothing changed".
+    spawns: u64,
 }
 
 impl Reaper {
-    /// Block SIGCHLD in the calling thread (and so in every thread it spawns
-    /// afterwards), then start the reaper thread. Call before any other thread exists.
+    /// Start the reaper thread.
     pub fn start() -> Result<Arc<Self>> {
-        let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
-        // SAFETY: `set` is a valid sigset_t for the sigemptyset/sigaddset/pthread_sigmask calls.
-        unsafe {
-            libc::sigemptyset(&mut set);
-            libc::sigaddset(&mut set, libc::SIGCHLD);
-            let result = libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-            if result != 0 {
-                return Err(io::Error::from_raw_os_error(result)).context("block SIGCHLD");
-            }
-        }
         let reaper = Arc::new(Self {
-            waiters: Mutex::new(HashMap::new()),
+            state: Mutex::new(ReaperState::default()),
+            spawned: Condvar::new(),
         });
         let thread_reaper = Arc::clone(&reaper);
         std::thread::Builder::new()
             .name("reaper".to_owned())
-            .spawn(move || thread_reaper.run(set))
+            .spawn(move || thread_reaper.run())
             .context("start reaper thread")?;
         Ok(reaper)
     }
 
-    fn run(&self, set: libc::sigset_t) {
+    fn run(&self) {
         loop {
-            let mut signal = 0;
-            // SAFETY: `set` is initialized and `signal` is a valid out pointer.
-            let result = unsafe { libc::sigwait(&set, &mut signal) };
-            if result != 0 {
-                klog(&format!("reaper: sigwait failed: errno {result}"));
-                continue;
-            }
-            // Reap under the spawn lock. A spawn that fails to exec waits for
-            // its own half-started child, and std panics if this thread has
-            // already collected it.
-            let mut waiters = self.lock();
-            loop {
-                let mut status = 0;
-                // SAFETY: `status` is a valid out pointer.
-                let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-                if pid <= 0 {
-                    break;
+            let seen = self.lock().spawns;
+            match wait_for_exited_child() {
+                Ok(true) => {
+                    let mut state = self.lock();
+                    loop {
+                        let mut status = 0;
+                        // SAFETY: `status` is a valid out pointer.
+                        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+                        if pid <= 0 {
+                            break;
+                        }
+                        if let Some(waiter) = state.waiters.remove(&pid) {
+                            // The starter may have stopped listening (a detached exec).
+                            let _ = waiter.send(Ok(ExitStatus::from_raw(status)));
+                        }
+                    }
                 }
-                if let Some(waiter) = waiters.remove(&pid) {
-                    // The starter may have stopped listening (a detached exec).
-                    let _ = waiter.send(Ok(ExitStatus::from_raw(status)));
+                // No children at all: sleep until a spawn creates one. Orphans
+                // only exist while some descendant does.
+                Ok(false) => {
+                    let mut state = self.lock();
+                    while state.spawns == seen {
+                        state = self
+                            .spawned
+                            .wait(state)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    }
+                }
+                Err(error) => {
+                    klog(&format!("reaper: waitid failed: {error}"));
+                    std::thread::sleep(std::time::Duration::from_secs(1));
                 }
             }
         }
     }
 
     /// The table is a plain map, so a panic elsewhere cannot leave it inconsistent.
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<i32, mpsc::Sender<WaitResult>>> {
-        self.waiters
+    fn lock(&self) -> std::sync::MutexGuard<'_, ReaperState> {
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
+/// Block until some child has exited (without collecting it); `false` means
+/// the process has no children.
+fn wait_for_exited_child() -> io::Result<bool> {
+    loop {
+        // SAFETY: siginfo_t is plain old data that waitid fills in.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a valid siginfo_t for the call.
+        let result =
+            unsafe { libc::waitid(libc::P_ALL, 0, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        if result == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ECHILD) => return Ok(false),
+            Some(libc::EINTR) => {}
+            _ => return Err(error),
+        }
+    }
+}
+
 impl ProcessSpawner for Reaper {
     fn spawn(&self, command: &mut Command) -> io::Result<Spawned> {
-        // Holding the lock across the spawn means the reaper cannot see the
-        // child's exit before its waiter is registered.
-        let mut waiters = self.lock();
+        // Holding the lock across the spawn means the reaper cannot collect the
+        // child before its waiter is registered, or a failed exec's child
+        // before std has.
+        let mut state = self.lock();
         let mut child: Child = command.spawn()?;
         let pid = child.id();
         let (stdin, stdout, stderr) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take());
         let (sender, exit) = mpsc::channel();
-        waiters.insert(pid as i32, sender);
+        state.waiters.insert(pid as i32, sender);
+        state.spawns += 1;
+        self.spawned.notify_all();
         Ok(Spawned {
             pid,
             stdin,
