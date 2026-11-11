@@ -52,6 +52,8 @@ enum Command {
     /// Container (VM) commands.
     #[command(subcommand)]
     Container(ContainerCommand),
+    /// List VMs.
+    Ps(PsArgs),
     /// Start stopped VMs from their retained disks.
     Start(NamesArgs),
     /// Stop VMs.
@@ -184,6 +186,19 @@ enum ContainerCommand {
 }
 
 #[derive(Debug, Args)]
+struct PsArgs {
+    /// Include VMs that are not running.
+    #[arg(short, long)]
+    all: bool,
+    /// `label=KEY` or `label=KEY=VALUE`; repeated filters must all match.
+    #[arg(long = "filter")]
+    filters: Vec<String>,
+    /// `json`, or a template applied to each VM.
+    #[arg(long)]
+    format: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct NamesArgs {
     #[arg(required = true)]
     names: Vec<String>,
@@ -299,6 +314,7 @@ fn dispatch(layout: &Layout, command: Command) -> Result<i32> {
             print_described(&description, format.as_deref())?;
             Ok(0)
         }
+        Command::Ps(args) => list(layout, args),
         Command::Start(args) => {
             for name in &args.names {
                 vm::start(layout, name)?;
@@ -463,6 +479,84 @@ fn parse_labels(labels: &[String]) -> Result<BTreeMap<String, String>> {
     Ok(parsed)
 }
 
+/// `--env KEY` without a value takes the engine's own value, as Podman does,
+/// so a caller can pass a secret through `sudo --preserve-env` instead of the
+/// command line. An unset variable is omitted.
+fn resolve_env(entries: Vec<String>) -> Vec<String> {
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            if entry.contains('=') {
+                Some(entry)
+            } else {
+                std::env::var(&entry)
+                    .ok()
+                    .map(|value| format!("{entry}={value}"))
+            }
+        })
+        .collect()
+}
+
+fn list(layout: &Layout, args: PsArgs) -> Result<i32> {
+    let mut wanted: Vec<(String, Option<String>)> = Vec::new();
+    for filter in &args.filters {
+        let label = filter.strip_prefix("label=").ok_or_else(|| {
+            anyhow!("unsupported --filter {filter:?}: use label=KEY or label=KEY=VALUE")
+        })?;
+        wanted.push(match label.split_once('=') {
+            Some((key, value)) => (key.to_owned(), Some(value.to_owned())),
+            None => (label.to_owned(), None),
+        });
+    }
+    layout.ensure()?;
+    let mut items = Vec::new();
+    for state in super::state::VmState::list(layout)? {
+        let running = vm::activity(&state.name)? == vm::Activity::Running;
+        let matches = wanted
+            .iter()
+            .all(|(key, value)| match (state.labels.get(key), value) {
+                (Some(actual), Some(expected)) => actual == expected,
+                (Some(_), None) => true,
+                (None, _) => false,
+            });
+        if !matches || !(args.all || running) {
+            continue;
+        }
+        items.push(serde_json::json!({
+            "Id": state.id,
+            "Names": [state.name],
+            "Image": state.image_reference,
+            "ImageID": state.image_id,
+            "Labels": state.labels,
+            "State": if running { "running" } else { "exited" },
+            "Created": state.created,
+            "Mounts": state.volumes.iter().map(|v| v.destination.clone()).collect::<Vec<_>>(),
+        }));
+    }
+    match args.format.as_deref() {
+        Some("json") => println!("{}", serde_json::to_string_pretty(&items)?),
+        Some(format) => {
+            // Go templates print a single name for `{{.Names}}`; give each item a scalar view.
+            for item in &items {
+                let mut scalar = item.clone();
+                scalar["Names"] = item["Names"][0].clone();
+                print!("{}", template::render(format, &scalar)?);
+            }
+        }
+        None => {
+            for item in &items {
+                println!(
+                    "{}  {}  {}",
+                    &item["Id"].as_str().unwrap_or_default()[..12],
+                    item["State"].as_str().unwrap_or_default(),
+                    item["Names"][0].as_str().unwrap_or_default()
+                );
+            }
+        }
+    }
+    Ok(0)
+}
+
 fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
     ensure!(
         args.detach,
@@ -498,7 +592,7 @@ fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
         labels: parse_labels(&args.labels)?,
         cpus: args.cpus,
         memory_bytes: memory,
-        env: args.env,
+        env: resolve_env(args.env),
         user: args.user,
         workdir: args.workdir,
         volumes: args
@@ -516,7 +610,7 @@ fn exec(layout: &Layout, args: ExecArgs) -> Result<i32> {
     let (_state, client) = vm::agent_for(layout, &args.container)?;
     let request = ExecRequest {
         argv: args.command,
-        env: args.env,
+        env: resolve_env(args.env),
         cwd: args.workdir,
         user: args.user,
         stdin: args.interactive,
